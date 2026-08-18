@@ -42,6 +42,42 @@ export type WeeklyReportWeekState = (typeof WEEKLY_REPORT_WEEK_STATES)[number];
 /** How many days of photos the picker offers, ending on `week_of` inclusive. */
 export const WEEKLY_REPORT_PHOTO_WINDOW_DAYS = 14;
 
+/**
+ * Longest one narrative section may be — the API's validation limit AND the ceiling both renderers honour.
+ *
+ * Shared because the PDF and the public web page are the SAME document seen two ways, and a client compares
+ * them side by side. A renderer with a tighter cap of its own silently prints less than the page does, on
+ * the surface the client is most likely to forward.
+ */
+export const WEEKLY_REPORT_SECTION_MAX_CHARS = 20_000;
+
+/**
+ * Longest one photo caption may be — the API's validation limit AND the ceiling both renderers honour.
+ *
+ * Shared for the same reason as the section limit, and it was missed the first time round: the API accepted
+ * 500 characters and the picker pre-fills a caption from the file's description, while the PDF drew the
+ * caption into a fixed two-line box with `ellipsis: true`. A 250-character caption therefore printed in
+ * full on the client's web page and as two lines and an ellipsis in the PDF attached to the same email.
+ *
+ * 250 rather than 500 because the caption shares its cell with the photograph it describes. Measured
+ * against the shipped 8pt Geist in the 218.67pt photo cell: 250 characters of ordinary prose is ~5 lines
+ * (57pt), 250 of the widest glyph in the font is 9 lines (103pt), and the true worst case — 250 characters
+ * of 15-wide words, every line breaking early — is 171pt, which the renderer prints by stepping the caption
+ * down a size or two rather than truncating it (see photoCaptionLayout). At 500 characters that worst case
+ * is ~340pt, more than the whole cell, and no font step recovers it.
+ */
+export const WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS = 250;
+
+/**
+ * Most photos one report may carry — the API's validation limit AND the ceiling the render budget is sized
+ * from.
+ *
+ * Shared because those two must move together: the render is all-or-nothing and its deadline is
+ * `base + per-photo × count`, so a cap raised here without the budget following makes a full report
+ * PERMANENTLY undownloadable rather than merely slow. See weeklyReportRenderTimeoutMs.
+ */
+export const WEEKLY_REPORT_MAX_PHOTOS = 60;
+
 /** Days before the due date that each reminder fires. `due_digest` fires ON the due date. */
 export const WEEKLY_REPORT_REMINDER_OFFSET_DAYS: Record<WeeklyReportReminderKind, number> = {
   t_minus_2: 2,

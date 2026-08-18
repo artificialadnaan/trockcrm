@@ -1,4 +1,7 @@
 import {
+  WEEKLY_REPORT_MAX_PHOTOS,
+  WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
+  WEEKLY_REPORT_SECTION_MAX_CHARS,
   canTransitionWeeklyReport,
   isIsoDateString,
   isWeeklyReportStatus,
@@ -192,6 +195,22 @@ function isAssignedPm(projectRow: Record<string, any>, actor: WeeklyReportActor)
 
 function isElevated(actor: WeeklyReportActor): boolean {
   return ELEVATED_ROLES.has(actor.role);
+}
+
+/**
+ * May put this project's reports in front of a client: the assigned PM, or an admin/director.
+ *
+ * The same set `canTransitionAs` requires for `approved` and `sent`, factored out because minting the
+ * 180-day public link IS the act of publication — the link is what the client actually opens — and gating
+ * it any lower than the send it accompanies would route around the PM gate rather than enforce it. Not
+ * expressed through canTransitionAs itself because that also consults the status ladder, and `sent` has no
+ * onward transition: re-issuing a link for an already-sent report is legitimate and must not be refused.
+ */
+export function canPublishWeeklyReport(
+  projectRow: Record<string, any>,
+  actor: WeeklyReportActor,
+): boolean {
+  return isAssignedPm(projectRow, actor) || isElevated(actor);
 }
 
 /** Whoever created the row. Survives a reassignment, which is the whole point of consulting it. */
@@ -540,8 +559,9 @@ function has<T extends object>(obj: T, key: keyof T): boolean {
 }
 
 // 20k characters is roughly 8x the longest section on the reference report. It exists to stop a runaway
-// dictation loop writing an unbounded row, not to constrain anyone writing prose.
-const MAX_SECTION_CHARS = 20_000;
+// dictation loop writing an unbounded row, not to constrain anyone writing prose. Shared with both
+// renderers, so what the API accepts is exactly what the PDF and the client's page print.
+const MAX_SECTION_CHARS = WEEKLY_REPORT_SECTION_MAX_CHARS;
 
 function normalizeBody(value: unknown): string | null {
   if (value == null) return null;
@@ -687,8 +707,20 @@ export async function replaceWeeklyReportPhotos(
   return updated;
 }
 
-const MAX_REPORT_PHOTOS = 60;
-const MAX_CAPTION_CHARS = 500;
+/**
+ * The SHARED ceiling, for the same reason the caption limit is shared: the render budget is sized from it
+ * (`base + per-photo × count`), and a report the API accepts but the renderer cannot finish inside its
+ * deadline has no downloadable PDF at all. See WEEKLY_REPORT_MAX_PHOTOS.
+ */
+const MAX_REPORT_PHOTOS = WEEKLY_REPORT_MAX_PHOTOS;
+/**
+ * The SHARED ceiling, not one of this module's own.
+ *
+ * It was 500 here while the PDF drew the caption into a fixed two-line box and ellipsised the rest, so the
+ * API accepted captions neither renderer could print — and the client's web page showed them in full while
+ * the attached PDF did not. See WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS for how the number was chosen.
+ */
+const MAX_CAPTION_CHARS = WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS;
 /**
  * Cap on the picker's candidate set, newest first.
  *
@@ -713,6 +745,20 @@ function normalizeCaption(value: unknown): string | null {
     throw new AppError(400, `Photo captions are limited to ${MAX_CAPTION_CHARS} characters`);
   }
   return trimmed;
+}
+
+/**
+ * A caption the picker offers as a DEFAULT, cut to what the API will accept back.
+ *
+ * The default comes from `files.description`, which has no such limit — so a photo captured with a long
+ * description used to pre-fill the form with a value that 400s the moment the superintendent pressed save,
+ * with nothing on screen explaining why.
+ */
+function boundedDefaultCaption(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length <= MAX_CAPTION_CHARS ? trimmed : trimmed.slice(0, MAX_CAPTION_CHARS).trimEnd();
 }
 
 /**
@@ -798,7 +844,7 @@ export async function listWeeklyReportPhotoCandidates(
     // deliberately cleared caption as absent and restored the capture description, so the user could
     // not blank a caption and have it stay blank. The description is only a default for photos the
     // user has not selected yet.
-    caption: row.selected ? (row.selected_caption ?? null) : (row.original_description ?? null),
+    caption: row.selected ? (row.selected_caption ?? null) : boundedDefaultCaption(row.original_description),
     originalDescription: row.original_description ?? null,
     sortOrder: Number(row.selected_sort_order ?? 0),
     takenAt: toIsoTimestamp(row.taken_at ?? row.created_at),
@@ -926,6 +972,13 @@ export async function transitionWeeklyReport(
   return updated;
 }
 
+/** Trimmed, or null when there is nothing there — the same "blank is absent" rule both renderers apply. */
+function nonBlank(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 /**
  * The header block as it stood at send time.
  *
@@ -940,13 +993,18 @@ export async function buildWeeklyReportSnapshot(
   const names = await client.query(
     `SELECT
        (SELECT display_name FROM public.users WHERE id = $1::uuid) AS pm_name,
-       (SELECT display_name FROM public.users WHERE id = $2::uuid) AS super_name`,
-    [projectRow.trock_pm_user_id, projectRow.trock_super_user_id],
+       (SELECT display_name FROM public.users WHERE id = $2::uuid) AS super_name,
+       (SELECT name FROM deals WHERE id = $3::uuid) AS deal_name`,
+    [projectRow.trock_pm_user_id, projectRow.trock_super_user_id, projectRow.deal_id],
   );
   const row = names.rows[0] ?? {};
 
   return {
-    propertyDisplayName: projectRow.property_display_name ?? null,
+    // RESOLVED, not copied. `property_display_name` is nullable and a user can clear it, and both renderers
+    // then fall back to the deal's name — which is live. Freezing what will actually be printed is what
+    // makes "sent" mean the header can no longer change: without it, renaming the deal in October rewrote
+    // the header of a report delivered in August, on the client's page, while the PDF stayed as delivered.
+    propertyDisplayName: nonBlank(projectRow.property_display_name) ?? nonBlank(row.deal_name),
     clientName: projectRow.client_name ?? null,
     clientTeam: {
       doc: { name: projectRow.client_doc_name ?? null, email: projectRow.client_doc_email ?? null },

@@ -121,7 +121,13 @@ const FINDINGS_BULLET_SPACING = 9; // vertical gap between consecutive bullets
 const FINDINGS_BULLET_INDENT = 18; // text inset from the margin; the glyph sits in the gutter
 const FINDINGS_BULLET_TEXT_WIDTH = CONTENT_WIDTH - FINDINGS_BULLET_INDENT;
 
-type ReportFontSet = {
+/**
+ * The two font names a renderer draws with, already registered on the document — the embedded Geist pair,
+ * or the Helvetica fallback when the OTF assets are missing. Exported (with registerReportFonts below) so a
+ * SECOND branded renderer does not re-derive the asset paths: they are resolved relative to THIS file, and a
+ * copy in another module would silently fall back to Helvetica the moment the two directories diverged.
+ */
+export type ReportFontSet = {
   regular: string;
   bold: string;
 };
@@ -383,7 +389,29 @@ export function untranscodedFallback(buffer: Buffer, mime: string | null): Buffe
   return native && buffer.byteLength <= MAX_UNTRANSCODED_EMBED_BYTES ? buffer : null;
 }
 
-async function loadPhotoBuffer(
+/**
+ * How a photo whose bytes cannot be turned into something embeddable is handled.
+ *
+ * Two independent failures sit inside `loadPhotoBuffer` — the object READ and the TRANSCODE — and the three
+ * renderers that call it want genuinely different answers, so the choice is named rather than boolean.
+ *
+ *  • `"degrade"` — every failure becomes the "Image unavailable" tile and the render succeeds. The human
+ *    field scorecard's long-standing behaviour: a report is better than no report.
+ *  • `"storage-only"` — a transient STORAGE failure fails the render; a transcode that cannot produce
+ *    embeddable bytes still degrades to the tile. The AI report, and it matches what its own vision pass
+ *    already decided: `prepareImages` fails the run on a transient R2 error but SKIPS a photo whose decode
+ *    is refused, then prints it with the crew's caption.
+ *  • `"storage-and-transcode"` — either one fails the render. The weekly report, whose artifact is
+ *    content-addressed and, once sent, frozen: a hole in it is the client's permanent record of the week.
+ *
+ * The transcode half is the one that has to be chosen deliberately, because nothing inside the catch can
+ * tell a transient decode failure from a permanent one. Under `"storage-and-transcode"` an original that no
+ * retry will ever decode therefore fails FOREVER rather than degrading — the deliberate trade for a
+ * document that must never be published with a hole in it, and the reason the AI report does not take it.
+ */
+export type PhotoLoadStrictness = "degrade" | "storage-only" | "storage-and-transcode";
+
+export async function loadPhotoBuffer(
   photo: ReportRenderablePhoto,
   /**
    * Bounds the object read AND the transcode below. Phase D of the AI report re-reads and re-decodes every
@@ -391,13 +419,8 @@ async function loadPhotoBuffer(
    * outlive one run's lease, it wedges every subsequent report with nothing able to free it.
    */
   signal: AbortSignal | undefined,
-  /**
-   * When true, a TRANSIENT storage failure is re-thrown instead of degrading to a placeholder. The AI
-   * report uses this: silently emitting an "Image unavailable" panel — potentially beside findings derived
-   * from that very photograph — and then marking the run succeeded is worse than failing and retrying.
-   * The human path leaves it false to keep its long-standing degrade-gracefully behaviour.
-   */
-  strictStorage = false,
+  /** See PhotoLoadStrictness. Defaults to the degrade-gracefully behaviour the scorecard has always had. */
+  strictness: PhotoLoadStrictness = "degrade",
 ): Promise<Buffer | null> {
   if (photo.r2Key && isR2Configured()) {
     let buffer: Buffer;
@@ -408,10 +431,11 @@ async function loadPhotoBuffer(
         signal,
       }));
     } catch (error) {
-      // Permanent, photo-specific failures still degrade to a placeholder in BOTH modes — the photo is
-      // genuinely unusable and no retry changes that.
+      // Permanent, photo-specific failures still degrade to a placeholder in EVERY mode — the photo is
+      // genuinely unusable and no retry changes that. A transient one (an R2 timeout, an auth blip) is a
+      // property of the storage layer, so both strict callers refuse to publish a document around it.
       const permanent = error instanceof ObjectTooLargeError || isR2ObjectNotFoundError(error);
-      if (strictStorage && !permanent) throw error;
+      if (strictness !== "degrade" && !permanent) throw error;
       return null;
     }
 
@@ -437,7 +461,15 @@ async function loadPhotoBuffer(
       // an un-transcoded original and carry on rendering a report nobody is waiting for any more.
       if (signal?.aborted) throw error;
       // sharp cannot read it — most often a native JPEG whose decoded raster is over its pixel limit.
-      return untranscodedFallback(buffer, mime);
+      const fallback = untranscodedFallback(buffer, mime);
+      // A non-null fallback is a REAL PHOTOGRAPH, just not a re-encoded one, so it is a fine outcome in
+      // every mode. Null is the placeholder — a HEIC/WebP/TIFF original has no fallback at all, so every
+      // decode failure on one lands here — and only the weekly report refuses to publish around it. That
+      // refusal is unconditional BECAUSE nothing here can tell "the WASM decoder ran out of memory" from
+      // "these bytes are not an image", so a permanently undecodable original makes that report's PDF
+      // permanently unobtainable. See PhotoLoadStrictness for why the AI report must not take that trade.
+      if (fallback == null && strictness === "storage-and-transcode") throw error;
+      return fallback;
     }
   }
   // No R2 copy — an external-only import (CompanyCam and similar keep a plain CDN URL with no stored
@@ -577,12 +609,12 @@ function drawExecutiveSummaryPages(
   });
 }
 
-type OpenedImage = { width: number; height: number; orientation?: number };
+export type OpenedImage = { width: number; height: number; orientation?: number };
 
 // pdfkit's openImage isn't in @types/pdfkit. Decode once to get intrinsic dimensions (so we can tight-frame
 // the exact rendered rectangle) and reuse the opened image for the actual draw (no second decode). Returns
 // the EXIF-orientation-adjusted display size — pdfkit swaps w/h for orientations > 4 when it draws.
-function openImageForLayout(
+export function openImageForLayout(
   doc: PDFKit.PDFDocument,
   buffer: Buffer,
   photo: Pick<ReportRenderablePhoto, "id" | "displayName">,
@@ -835,9 +867,21 @@ async function drawFindingsPhotoPages(
   startPage();
 
   // --- Photo, fit to the full content width and centred -------------------------------------------
-  // strictStorage: this is the AI report. A placeholder panel sitting beside findings written about that
-  // very photograph, in a document then marked succeeded, is a worse outcome than failing the run.
-  const imageBuffer = await loadPhotoBuffer(photo, signal, true);
+  // STORAGE-ONLY strictness: this is the AI report, and the split is deliberate.
+  //
+  // The storage half earns its place — a placeholder panel sitting beside findings written about that very
+  // photograph, in a document then marked succeeded, is a worse outcome than failing the run, and an R2
+  // blip is exactly what a retry repairs.
+  //
+  // The transcode half must NOT be taken here, and it does not hold that the vision pass has already
+  // decoded everything the render sees: `prepareImages` SKIPS a photo whose decode is refused and carries
+  // on, by explicit design ("one of them must not cost the user a report over the other 59 photographs"),
+  // while Phase D is handed `run.photoIds` — every selected photo, the skipped ones included. Refusing a
+  // placeholder here would therefore fail a run the vision pass had already decided to complete, after
+  // billing for the whole assessment, and every retry would re-pay for the model and die on the same
+  // photograph. That photo prints as an "Image unavailable" panel keeping the crew's caption, exactly as
+  // it did before, and exactly as a photo the model passed over does.
+  const imageBuffer = await loadPhotoBuffer(photo, signal, "storage-only");
   // Pass the photo through so a decode failure names itself in the log. It matters MORE on this layout than
   // on the grid: a placeholder here sits directly under findings written about that photograph.
   const opened = imageBuffer ? openImageForLayout(doc, imageBuffer, photo) : null;
@@ -951,7 +995,7 @@ function resolveBrandFontPaths(): { regular: string; bold: string } | null {
   };
 }
 
-function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
+export function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
   const fontPaths = resolveBrandFontPaths();
   if (!fontPaths) return fallbackReportFonts();
 

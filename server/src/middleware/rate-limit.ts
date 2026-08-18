@@ -76,3 +76,24 @@ export const correctiveActionPublicLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: { message: "Too many requests, please try again later" } },
 });
+
+// The public weekly-report viewer (/wr/:token), which is unauthenticated and mounted outside apiLimiter.
+// Every request reaches the database, and the photo route additionally buffers an original from R2 and
+// re-encodes it with sharp — the expensive part, and the reason a cap belongs in front of it.
+//
+// Keyed by IP, reusing correctiveActionIpKey for the same reason it exists: keying by IP+token would hand a
+// scanner a fresh bucket per guessed token, since a forged token only has to pass a 43-character shape gate
+// to reach the lookup at all.
+//
+// Sizing: ONE page load is 1 HTML + up to 60 photos + 1 PDF ≈ 62 requests. A client refreshing, or several
+// people behind one corporate NAT reading the same report, must not trip it — 300/min clears roughly four
+// full page loads a minute while a scanning flood still stops.
+const WEEKLY_REPORT_PUBLIC_LIMIT = 300;
+export const weeklyReportPublicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: WEEKLY_REPORT_PUBLIC_LIMIT,
+  keyGenerator: correctiveActionIpKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Too many requests, please try again later",
+});
