@@ -90,6 +90,8 @@ beforeAll(async () => {
     `CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`,
   );
   await pg.exec(migrationSql("0222_weekly_reports"));
+  // 0223 adds weekly_report_pauses, which the cadence generator reads to skip paused stretches.
+  await pg.exec(migrationSql("0223_weekly_report_pauses"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
