@@ -217,15 +217,18 @@ function waitingOnFor(row: {
  * untouched week has no row, so the projects nobody has filed for would be exactly the ones that never
  * appear.
  *
- * Five queries total regardless of project count: projects, their live reports, their UNDELIVERED sends,
- * their dismissals, their pauses. The join happens in memory because the expected-week set is generated
- * in TypeScript (shared with the CRM, the app and the reminder worker) rather than in SQL, and duplicating
- * that generator as a recursive CTE would be a second definition of the cadence.
+ * Six queries total regardless of project count: projects, their live reports, the versions the client
+ * has ACTUALLY RECEIVED, their UNDELIVERED sends, their dismissals, their pauses. The join happens in
+ * memory because the expected-week set is generated in TypeScript (shared with the CRM, the app and the
+ * reminder worker) rather than in SQL, and duplicating that generator as a recursive CTE would be a
+ * second definition of the cadence.
  *
- * The undelivered sends are a SEPARATE query rather than a column on the reports one, because the two ask
- * different questions of different rows: "what is the live version of this week" and "does this week have
- * an email that never got out". They stop being the same row the moment a PM issues a correction over a
- * failed send, which is exactly when the failure used to disappear.
+ * The delivered versions and the undelivered sends are SEPARATE queries rather than columns on the
+ * reports one, because the three ask different questions of different rows: "what is the live version of
+ * this week", "has the client got this week at all", and "does this week have an email that never got
+ * out". They stop being the same row the moment a PM issues a correction — the clone is a higher, unsent
+ * version and `version DESC` picks it — which is exactly when a failure used to disappear off the board
+ * and a week the client already had used to reappear on it.
  */
 export async function getWeeklyReportDashboard(
   client: QueryExecutor,
@@ -313,6 +316,37 @@ export async function getWeeklyReportDashboard(
       ORDER BY weekly_report_project_id, week_of, version DESC`,
     [projectIds],
   );
+  // THE VERSION OF EACH WEEK THE CLIENT ACTUALLY HAS — which is not always the live one, and while a
+  // correction is being drafted is never the live one.
+  //
+  // `createWeeklyReportCorrection` clones a SENT report to `version + 1` in `approved`, and superseding
+  // happens at SEND, so between drafting a correction and sending it the week's live row is an UNSENT
+  // higher version sitting over a delivered predecessor. Read off the live row alone the week reports
+  // `approved` with no `sent_at`, the settled-week skip below stops firing, and `daysLate` is computed
+  // from the week's own age: a report the client received on time comes back as "Approved, not sent ·
+  // 7 days late", indistinguishable from one nobody ever filed. The error also SCALES with age, because
+  // the board sorts on `daysLate` first — a typo fix on a report delivered six months ago lands at
+  // `daysLate ≈ 180` and pins itself above every genuinely missing current report.
+  //
+  // Deliberately NOT filtered on `superseded_by_id IS NULL`, unlike the two queries above: a delivered
+  // version is stamped superseded the moment its replacement is sent, and the delivered predecessor is
+  // exactly what this has to find. Highest version wins, so a week corrected twice reports the newest
+  // copy the client holds rather than the oldest.
+  //
+  // Same predicate as `priorVersionReachedClient` in send-service, which decides whether the email calls
+  // itself a correction — one definition of "the client has this week", shared by the mail and the board.
+  // Rides weekly_reports_project_week_version_uidx, as the live-version query does.
+  const deliveredResult = await client.query(
+    `SELECT DISTINCT ON (weekly_report_project_id, week_of)
+            id, weekly_report_project_id, week_of, version, sent_at, send_delivered_at
+       FROM weekly_reports
+      WHERE weekly_report_project_id = ANY($1::uuid[])
+        AND is_active
+        AND status = 'sent'
+        AND send_delivered_at IS NOT NULL
+      ORDER BY weekly_report_project_id, week_of, version DESC`,
+    [projectIds],
+  );
   const dismissalsResult = await client.query(
     `SELECT weekly_report_project_id, week_of, reason
        FROM weekly_report_dismissals
@@ -340,6 +374,10 @@ export async function getWeeklyReportDashboard(
   const undeliveredByKey = new Map<string, Record<string, any>>();
   for (const row of undeliveredResult.rows) {
     undeliveredByKey.set(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`, row);
+  }
+  const deliveredByKey = new Map<string, Record<string, any>>();
+  for (const row of deliveredResult.rows) {
+    deliveredByKey.set(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`, row);
   }
   const dismissalByKey = new Map<string, Record<string, any>>();
   for (const row of dismissalsResult.rows) {
@@ -391,12 +429,27 @@ export async function getWeeklyReportDashboard(
     // surface "and N older" rather than implying the backlog stops at the window edge.
     for (let i = 0; i < cutoffIndex; i += 1) {
       const key = `${project.id}|${expected[i]}`;
-      const report = reportByKey.get(key);
-      // A `sent` week only counts as settled if the email actually got out. Testing the status alone was
-      // the second place a lost send vanished: past the lookback window it was not even in the "and N
-      // older" tally, so the page could not so much as hint that something was missing.
+      // SETTLED MEANS THE EMAIL GOT OUT, OR NOBODY IS OWED ONE — and an undelivered send disqualifies
+      // BOTH readings, which is why the delivery test is the outer conjunct rather than a rider on one
+      // arm of the disjunction.
+      //
+      // Written the other way round, `dismissalByKey.has(key)` short-circuited a week that was dismissed
+      // and then filed anyway: `dismissWeeklyReportWeek` refuses only a week that ALREADY has a live
+      // report, and nothing stops one being created afterwards — reports-service never so much as reads
+      // `weekly_report_dismissals`. PM dismisses a missed week, the super files it late, the PM approves
+      // and sends, delivery fails. That week is in `expected`, so it is in `cadenceDecidedKeys` and the
+      // second pass skips it too: no row, no tally entry, nothing — opposite a Projects tab showing a
+      // permanent red "1 not delivered". Inside the lookback window the same state renders correctly,
+      // which is what made it a tally-only bug.
+      //
+      // DELIVERY, not `status = 'sent'`, is also what settles the week. Testing the live row's status
+      // was the second place a lost send vanished — past the window it was not even in the "and N older"
+      // tally — and it is now also the place a DELIVERED week could be resurrected: a correction drafted
+      // over it makes the live row unsent, which read as "never sent" and quietly raised the banner by
+      // one for a report the client has had for months. `deliveredByKey` subsumes the old status test,
+      // since a live `sent` row with no undelivered entry is by definition one that was delivered.
       const settled =
-        dismissalByKey.has(key) || (report?.status === "sent" && !undeliveredByKey.has(key));
+        !undeliveredByKey.has(key) && (dismissalByKey.has(key) || deliveredByKey.has(key));
       if (!settled) olderOutstanding += 1;
     }
     if (olderOutstanding > 0) olderOutstandingCounts[project.id] = olderOutstanding;
@@ -422,6 +475,9 @@ export async function getWeeklyReportDashboard(
       // Read off the UNDELIVERED set rather than off the live report, so a correction drafted over a
       // failed send cannot take the failure off the board with it.
       const undelivered = undeliveredByKey.get(key) ?? null;
+      // The newest version of this week the client HAS, read off its own query for the same reason the
+      // undelivered send is: after a correction is drafted neither fact lives on the live row any more.
+      const delivered = deliveredByKey.get(key) ?? null;
       const sendFailed = undelivered != null && undelivered.send_error != null;
       // `send_error == null` is not redundant with the CRM checking `sendFailed` first. This is a
       // PUBLISHED field the deferred T-Rock Cam surface reads directly, and the whole reason the three
@@ -436,9 +492,15 @@ export async function getWeeklyReportDashboard(
       // A settled week that is not the current one carries no signal — drop it so the page shows what
       // needs attention rather than an ever-growing archive. History lives on the History tab. An
       // undelivered send in ANY of its three shapes is not settled.
+      //
+      // `delivered != null` and not `state === "sent"` alone: the live row's status stops describing the
+      // week the moment a correction is cloned over it, and a week the client received on time must not
+      // be resurrected as outstanding — with a fabricated `daysLate`, sorted to the top of the board —
+      // because a PM started fixing a typo in it. The correction is reachable from History, where an
+      // unsent draft belongs; the board's question is who has not sent theirs.
       if (
         !isCurrentWeek &&
-        (state === "sent" || state === "dismissed") &&
+        (state === "sent" || state === "dismissed" || delivered != null) &&
         undelivered == null
       ) {
         continue;
@@ -460,14 +522,25 @@ export async function getWeeklyReportDashboard(
         weekOf,
         isCurrentWeek,
         state,
-        daysLate: state === "sent" || state === "dismissed" ? 0 : weeklyReportDaysLate(weekOf, asOf),
+        // Lateness measures a report the client is still waiting for, so a week they already have is
+        // never late however long ago the live row's unsent correction was cloned. The second pass says
+        // the same thing in its own words ("Never late"), and the two passes describing one board must
+        // not disagree about what `daysLate` counts.
+        daysLate:
+          state === "sent" || state === "dismissed" || delivered != null
+            ? 0
+            : weeklyReportDaysLate(weekOf, asOf),
         reportId: report?.id ?? null,
         reportVersion: report ? Number(report.version) : null,
-        sentAt: toIsoTimestamp(report?.sent_at),
+        // WHAT THE CLIENT HAS, when the live row is an unsent correction over a version they received:
+        // the clone's own stamps are null, and publishing those says the week was never sent. The `??`
+        // only reaches the predecessor when the live row has nothing to say — a `sent` row always
+        // carries `sent_at` — so a week whose live version IS the delivered one is unaffected.
+        sentAt: toIsoTimestamp(report?.sent_at ?? delivered?.sent_at),
         // The outstanding delivery's facts when there is one, so a week whose live row is a freshly
         // cloned correction still reports what went wrong on the version that was actually sent.
         sendError: undelivered?.send_error ?? report?.send_error ?? null,
-        sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
+        sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at ?? delivered?.send_delivered_at),
         sendAttempts: Number((undelivered ?? report)?.send_attempts ?? 0),
         sendFailed,
         sendStalled,
@@ -527,6 +600,10 @@ export async function getWeeklyReportDashboard(
     // The LIVE version of the week, exactly as the loop above reads it — so a correction drafted over
     // this failed send still shows as the week's current state while the failure keeps its own facts.
     const report = reportByKey.get(`${project.id}|${weekOf}`);
+    // Read the same way the cadence loop reads it, so one week cannot describe itself differently
+    // depending on which pass happens to render it. A week reached here can perfectly well have a
+    // delivered v1 under a failed v2 under a drafted v3.
+    const delivered = deliveredByKey.get(`${project.id}|${weekOf}`) ?? null;
     const sendFailed = undelivered.send_error != null;
     // The `send_error == null` conjunct is load-bearing HERE IN PARTICULAR, and for the same reason it is
     // in the cadence loop: `sendStalled` is a PUBLISHED field the deferred T-Rock Cam surface reads
@@ -554,9 +631,9 @@ export async function getWeeklyReportDashboard(
       daysLate: 0,
       reportId: report?.id ?? null,
       reportVersion: report ? Number(report.version) : null,
-      sentAt: toIsoTimestamp(report?.sent_at),
+      sentAt: toIsoTimestamp(report?.sent_at ?? delivered?.sent_at),
       sendError: undelivered.send_error ?? null,
-      sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
+      sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at ?? delivered?.send_delivered_at),
       sendAttempts: Number(undelivered.send_attempts ?? 0),
       sendFailed,
       sendStalled,
