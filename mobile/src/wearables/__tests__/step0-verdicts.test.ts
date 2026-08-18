@@ -1,9 +1,11 @@
 import {
   describeHfpStreamCheck,
   describePhoneCameraCheck,
+  describeStreamEndurance,
   type HfpStreamCheck,
   type PhoneCameraCheck,
   type RouteSnapshot,
+  type StreamEnduranceCheck,
 } from "../step0-verdicts";
 
 const hfp: RouteSnapshot = {
@@ -514,6 +516,133 @@ describe("describePhoneCameraCheck — state-space enumeration", () => {
           }
         }
       }
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Rung 11 — endurance WITHOUT audio
+//
+// The premise is the measurement: "no audio session was anywhere". Native used to assert that with
+// a hard-coded `false` — a statement about its own source, not about the run — while the dev screen
+// leaves every other RUN button live throughout the 60-second window, so another rung activating
+// HFP was one tap away the whole time. Now it reports what it observed, and the two conclusions
+// this rung can otherwise reach point in OPPOSITE directions ("HFP is the difference" /
+// "HFP is not the cause"), so a run with audio in force must reach neither.
+// ---------------------------------------------------------------------------------------------
+
+const sustainedRun: StreamEnduranceCheck = {
+  secondsObserved: 60,
+  totalFrames: 1_780,
+  secondsToLastFrame: 59.4,
+  audioSessionUsed: false,
+};
+
+const diedRun: StreamEnduranceCheck = {
+  secondsObserved: 60,
+  totalFrames: 152,
+  secondsToLastFrame: 5.2,
+  audioSessionUsed: false,
+};
+
+const noFramesRun: StreamEnduranceCheck = {
+  secondsObserved: 60,
+  totalFrames: 0,
+  secondsToLastFrame: -1,
+  audioSessionUsed: false,
+};
+
+describe("describeStreamEndurance", () => {
+  it("reports SUSTAINED when frames ran to the end of a genuinely audio-free window", () => {
+    const result = describeStreamEndurance(sustainedRun);
+    expect(result).toContain("SUSTAINED for the full 60s");
+    expect(result).toContain("HFP is the difference");
+  });
+
+  it("reports STOPPED, with the second it died, when delivery ended early", () => {
+    const result = describeStreamEndurance(diedRun);
+    expect(result).toContain("STOPPED at 5.2s of 60s");
+    expect(result).toContain("HFP is not the cause");
+  });
+
+  it("says nothing about endurance when the stream never delivered a frame", () => {
+    expect(describeStreamEndurance(noFramesRun)).toContain("NO FRAMES AT ALL");
+  });
+
+  // The one this module was changed for. A 60s run that sustained is the result that concludes
+  // "HFP is the difference, capture becomes audio + stills" — the sentence the capture design is
+  // built on. If HFP was actually up for that run, it is not evidence of anything.
+  it("refuses to conclude anything when an audio session was in force, however the frames went", () => {
+    const sustained = describeStreamEndurance({ ...sustainedRun, audioSessionUsed: true });
+    expect(sustained).toContain("INCONCLUSIVE");
+    expect(sustained).not.toContain("SUSTAINED");
+    expect(sustained).not.toContain("HFP is the difference");
+
+    const died = describeStreamEndurance({ ...diedRun, audioSessionUsed: true });
+    expect(died).toContain("INCONCLUSIVE");
+    expect(died).not.toContain("STOPPED");
+    expect(died).not.toContain("HFP is not the cause");
+
+    const noFrames = describeStreamEndurance({ ...noFramesRun, audioSessionUsed: true });
+    expect(noFrames).toContain("INCONCLUSIVE");
+    expect(noFrames).not.toContain("NO FRAMES AT ALL");
+  });
+
+  // A dev client built before native measured this reports every other field and not that one.
+  // Absent is "not observed", which must not manufacture an inconclusive any more than the old
+  // hard-coded `false` should have manufactured a pass.
+  it("reads an absent audio reading as unobserved rather than as a session being in force", () => {
+    const { audioSessionUsed: _omitted, ...withoutReading } = sustainedRun;
+    expect(describeStreamEndurance(withoutReading)).toContain("SUSTAINED for the full 60s");
+  });
+
+  it("does not treat a false audio reading as an audio session", () => {
+    expect(describeStreamEndurance({ ...diedRun, audioSessionUsed: false })).toContain("STOPPED");
+  });
+});
+
+describe("describeStreamEndurance — state-space enumeration", () => {
+  // `expected` is WRITTEN DOWN per shape, not recomputed from `secondsObserved - 3`. Deriving it
+  // from the same expression the function uses would make every row agree with whatever the
+  // function does — widening the tolerance to 30s passed a first draft of this table unchanged.
+  // The two rows either side of 57.0 are here for exactly that: they pin the boundary itself.
+  const FRAME_SHAPES: Array<{ label: string; frames: number; last: number; expected: string }> = [
+    { label: "sustained", frames: 1_780, last: 59.4, expected: "HFP is the difference" },
+    { label: "died-early", frames: 152, last: 5.2, expected: "HFP is not the cause" },
+    { label: "last-frame-exactly-at-3s-short", frames: 900, last: 57, expected: "HFP is the difference" },
+    { label: "last-frame-a-tenth-past-3s-short", frames: 890, last: 56.9, expected: "HFP is not the cause" },
+    { label: "no-frames", frames: 0, last: -1, expected: "NO FRAMES AT ALL" },
+  ];
+  const AUDIO_READINGS: Array<{ label: string; value: boolean | undefined }> = [
+    { label: "audio-in-force", value: true },
+    { label: "audio-clear", value: false },
+    { label: "audio-unobserved", value: undefined },
+  ];
+
+  for (const shape of FRAME_SHAPES) {
+    for (const audio of AUDIO_READINGS) {
+      it(`never claims an HFP conclusion it cannot support — ${shape.label} ${audio.label}`, () => {
+        const check: StreamEnduranceCheck = {
+          secondsObserved: 60,
+          totalFrames: shape.frames,
+          secondsToLastFrame: shape.last,
+          ...(audio.value === undefined ? {} : { audioSessionUsed: audio.value }),
+        };
+        const result = describeStreamEndurance(check);
+
+        // Both HFP conclusions are claims about a window with no audio session in it. Neither may
+        // be reached from a run that had one — and this is the assertion, not the INCONCLUSIVE
+        // string, because the string is cosmetic and these two sentences are what get acted on.
+        if (audio.value === true) {
+          expect(result).not.toContain("HFP is the difference");
+          expect(result).not.toContain("HFP is not the cause");
+          expect(result).toContain("INCONCLUSIVE");
+        } else {
+          expect(result).not.toContain("INCONCLUSIVE");
+          // Frame counts still decide, unchanged by this gate.
+          expect(result).toContain(shape.expected);
+        }
+      });
     }
   }
 });

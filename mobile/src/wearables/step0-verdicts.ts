@@ -102,6 +102,67 @@ export function describeHfpStreamCheck(check: HfpStreamCheck): Verdict {
   };
 }
 
+/**
+ * The fields of rung 11's payload that its verdict actually turns on. Structural rather than an
+ * import of `StreamEnduranceMeasurement`, so judgement keeps living in this module and the
+ * dependency keeps pointing this way — native.ts imports the check shapes from here, not the
+ * reverse.
+ */
+export type StreamEnduranceCheck = {
+  secondsObserved: number;
+  totalFrames: number;
+  /** How far into the run the LAST frame landed, or -1 if none ever did. */
+  secondsToLastFrame: number;
+  /**
+   * Whether any rung held the shared `AVAudioSession` at the end of the window. Optional so a
+   * payload from a native build that hard-coded it reads as "not observed" rather than as a
+   * measurement — the old build sent a literal `false` that could not fail.
+   */
+  audioSessionUsed?: boolean;
+};
+
+/**
+ * Rung 11: does glasses video sustain with NO audio session anywhere?
+ *
+ * Returns the sentence the dev screen displays rather than a `Verdict`, because that is the shape
+ * the screen already renders for this rung; it lives here for the same reason the other two do,
+ * which is that the judgement is the part worth unit-testing.
+ */
+export function describeStreamEndurance(check: StreamEnduranceCheck): string {
+  // FIRST, because an audio session in force does not shade the two readings below — it voids
+  // them, and they point in opposite directions. This rung's whole premise is that nothing held
+  // the audio session, and the dev screen disables its buttons PER RUNG, so a second rung
+  // activating HFP is one tap away for the entire 60-second window. "SUSTAINED — HFP is the
+  // difference" read off a run that had HFP up is not a weaker version of the answer, it is the
+  // opposite one.
+  //
+  // `=== true` rather than truthiness: absent means a native build that never measured this, and
+  // an unmeasured field must not manufacture an inconclusive any more than it should manufacture
+  // a pass.
+  if (check.audioSessionUsed === true) {
+    return (
+      `INCONCLUSIVE — an audio session was in force at the end of the window, so this was not the `
+      + `no-audio measurement it claims to be. Another rung took the audio session while this ran; `
+      + `whichever way the frames went, HFP cannot be ruled in or out from it. Re-run it alone.`
+    );
+  }
+  if (check.totalFrames === 0) {
+    return "NO FRAMES AT ALL — the stream never delivered; this says nothing about endurance";
+  }
+  // A walk needs minutes; anything under ~30s is not a walkthrough camera.
+  if (check.secondsToLastFrame >= check.secondsObserved - 3) {
+    return (
+      `SUSTAINED for the full ${check.secondsObserved}s — HFP is the difference, so glasses `
+      + `audio and video cannot run together. Capture becomes audio + stills.`
+    );
+  }
+  return (
+    `STOPPED at ${check.secondsToLastFrame.toFixed(1)}s of ${check.secondsObserved}s — video `
+    + `dies WITHOUT audio too, so HFP is not the cause and glasses video is not `
+    + `viable for a walkthrough at all.`
+  );
+}
+
 export type PhoneCameraCheck = {
   before: RouteSnapshot;
   /** Route sampled ~2s into the preview, before the shutter fires. */
