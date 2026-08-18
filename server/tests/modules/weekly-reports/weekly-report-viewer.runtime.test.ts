@@ -744,6 +744,143 @@ describe("GET /wr/:token/pdf", () => {
     expect(harness.puts).toBe(1);
   });
 
+  it("remembers ONLY a deadline, so one transient blip does not become a minute-long outage", async () => {
+    // The backoff exists for a render that ran out of time: that one stores nothing and would pay the whole
+    // budget again on every retry. Every OTHER failure either fails fast or is expected to succeed on the
+    // very next attempt — an R2 read that reset, a report that moved while it rendered — and remembering
+    // those turns a self-healing hiccup into sixty seconds of a client's link answering 503.
+    const { reportId } = await seedSharedReport({ send: false });
+    harness.duringPhotoRead = async () => {
+      throw new Error("R2: connection reset by peer");
+    };
+    const source = (await loadWeeklyReportPdfSource(db, reportId))!;
+
+    // Not a deadline: the render's own budget is untouched and generous.
+    await expect(publishWeeklyReportPdf("dallas", source)).rejects.toThrow(/connection reset/);
+    expect(harness.puts).toBe(0);
+
+    // The very next attempt must RENDER, not be refused — asserted on the work done, so a 503 with the
+    // timeout code would fail here even though it is also "not a 200".
+    harness.duringPhotoRead = null;
+    harness.trace.length = 0;
+    await expect(publishWeeklyReportPdf("dallas", source)).resolves.toContain("weekly-reports/");
+    expect(harness.trace).toContain("read-original");
+    expect(harness.puts).toBe(1);
+  });
+
+  it("does not let a remembered deadline refuse the report after its CONTENT changed", async () => {
+    // The backoff and the coalescer share one key, and the key carries the CONTENT GENERATION. Without it
+    // a report that timed out at 11:00 is refused until 11:01 — including the corrected version the PM
+    // published at 11:00:30 to fix exactly the problem — and a request arriving after an edit would join
+    // the in-flight render of the document that preceded it and be handed its key.
+    const { reportId } = await seedSharedReport({ send: false });
+    harness.duringPhotoRead = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    };
+    const stale = (await loadWeeklyReportPdfSource(db, reportId))!;
+    await expect(publishWeeklyReportPdf("dallas", stale, { renderTimeoutMs: 5 })).rejects.toMatchObject({
+      code: "WEEKLY_REPORT_PDF_RENDER_TIMED_OUT",
+    });
+
+    harness.duringPhotoRead = null;
+    await transitionWeeklyReport(db, reportId, "pending_review", PM_ACTOR);
+    await updateWeeklyReportContent(db, reportId, { workCompleted: "- Rewritten after the timeout" }, SUPER_ACTOR);
+    await transitionWeeklyReport(db, reportId, "approved", PM_ACTOR);
+
+    const edited = (await loadWeeklyReportPdfSource(db, reportId))!;
+    await expect(publishWeeklyReportPdf("dallas", edited)).resolves.toContain("weekly-reports/");
+    expect(harness.puts).toBe(1);
+  });
+
+  it("does not let a remembered deadline refuse the SUPERSEDED rendering of the same content", async () => {
+    // The other half of the key. Being superseded moves no timestamp on this row — the correction is a
+    // different row — so the two renderings share a content generation and are told apart only by the
+    // `superseded` marker. Without it in the key, a timeout on the unmarked document also refuses the
+    // marked one, which is the version a client on the old link most needs to be shown.
+    const { reportId } = await seedSharedReport({ send: false });
+    harness.duringPhotoRead = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    };
+    await expect(
+      publishWeeklyReportPdf("dallas", (await loadWeeklyReportPdfSource(db, reportId))!, { renderTimeoutMs: 5 }),
+    ).rejects.toMatchObject({ code: "WEEKLY_REPORT_PDF_RENDER_TIMED_OUT" });
+
+    harness.duringPhotoRead = null;
+    await harness.pg.query(`UPDATE office_dallas.weekly_reports SET superseded_by_id = id WHERE id = $1::uuid`, [
+      reportId,
+    ]);
+
+    const superseded = (await loadWeeklyReportPdfSource(db, reportId))!;
+    const key = await publishWeeklyReportPdf("dallas", superseded);
+    expect(key).toContain(".superseded.pdf");
+  });
+
+  it("re-renders when the DEAL is renamed and the header prints the deal's name", async () => {
+    // `property_display_name` is nullable and a user can clear it, and both renderers then fall back to
+    // `deals.name`. That fallback was a live render input covered by no generation at all: `deals` is
+    // joined for the name but `deals.updated_at` was not in the widening, so on an approved report — where
+    // a shared link sits indefinitely — a rename changed the client's page while the cached PDF kept the
+    // old name for good.
+    const { rawToken, projectId } = await seedSharedReport({ send: false });
+    await updateWeeklyReportProject(db, projectId, { propertyDisplayName: null }, OFFICE);
+
+    const before = await request(app).get(`/wr/${rawToken}`);
+    expect(before.text).toContain("4123 Cedar Springs");
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(1);
+
+    await harness.pg.query(
+      `UPDATE office_dallas.deals SET name = '4123 Cedar Springs — Phase II', updated_at = now() WHERE id = $1::uuid`,
+      [DEAL],
+    );
+
+    // The page reads live and has already changed…
+    expect((await request(app).get(`/wr/${rawToken}`)).text).toContain("Phase II");
+    // …so the artifact must not still be the one that says otherwise.
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(2);
+
+    // And it settles: the stored generation now covers the rename, so a further download streams it.
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(2);
+
+    await harness.pg.query(`UPDATE office_dallas.deals SET name = '4123 Cedar Springs' WHERE id = $1::uuid`, [DEAL]);
+  });
+
+  it("but does NOT re-render for a deal edit when the header names the property", async () => {
+    // The other half, and why this is its own generation input rather than another entry in the widening:
+    // `deals.updated_at` moves on any edit to the job, and a report that never reads the deal's name must
+    // not re-render — orphaning another content-addressed object — every time somebody touches the deal.
+    const { rawToken } = await seedSharedReport({ send: false });
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(1);
+
+    await harness.pg.query(`UPDATE office_dallas.deals SET updated_at = now() WHERE id = $1::uuid`, [DEAL]);
+
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(1);
+  });
+
+  it("freezes the deal-name fallback into the snapshot when the report is SENT", async () => {
+    // A sent report's artifact never re-renders, so anything it still reads live diverges from the page
+    // behind the same link permanently. The snapshot therefore records the name that will be PRINTED —
+    // resolved, not copied — rather than a null the renderers then fill in from the live deal.
+    const { rawToken, reportId, projectId } = await seedSharedReport({ send: false });
+    await updateWeeklyReportProject(db, projectId, { propertyDisplayName: null }, OFFICE);
+    await transitionWeeklyReport(db, reportId, "sent", PM_ACTOR);
+
+    await harness.pg.query(
+      `UPDATE office_dallas.deals SET name = 'Renamed After Delivery', updated_at = now() WHERE id = $1::uuid`,
+      [DEAL],
+    );
+
+    const page = await request(app).get(`/wr/${rawToken}`);
+    expect(page.text).toContain("4123 Cedar Springs");
+    expect(page.text).not.toContain("Renamed After Delivery");
+
+    await harness.pg.query(`UPDATE office_dallas.deals SET name = '4123 Cedar Springs' WHERE id = $1::uuid`, [DEAL]);
+  });
+
   it("refuses the PDF of a report pulled back for rework", async () => {
     const { rawToken, reportId } = await seedSharedReport({ send: false });
     await transitionWeeklyReport(db, reportId, "pending_review", PM_ACTOR);

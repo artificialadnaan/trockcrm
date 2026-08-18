@@ -60,12 +60,23 @@ export const WEEKLY_REPORT_SECTION_MAX_CHARS = 20_000;
  * full on the client's web page and as two lines and an ellipsis in the PDF attached to the same email.
  *
  * 250 rather than 500 because the caption shares its cell with the photograph it describes. Measured
- * against the shipped 8pt Geist in the 218pt photo cell: 250 characters of ordinary prose is ~5 lines
- * (57pt) and 250 of the widest glyph in the font is 9 lines (103pt), which is what the renderer's caption
- * band is sized to hold. 500 characters of that same worst case is 205pt — most of the cell — and would
- * leave no photograph to caption.
+ * against the shipped 8pt Geist in the 218.67pt photo cell: 250 characters of ordinary prose is ~5 lines
+ * (57pt), 250 of the widest glyph in the font is 9 lines (103pt), and the true worst case — 250 characters
+ * of 15-wide words, every line breaking early — is 171pt, which the renderer prints by stepping the caption
+ * down a size or two rather than truncating it (see photoCaptionLayout). At 500 characters that worst case
+ * is ~340pt, more than the whole cell, and no font step recovers it.
  */
 export const WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS = 250;
+
+/**
+ * Most photos one report may carry — the API's validation limit AND the ceiling the render budget is sized
+ * from.
+ *
+ * Shared because those two must move together: the render is all-or-nothing and its deadline is
+ * `base + per-photo × count`, so a cap raised here without the budget following makes a full report
+ * PERMANENTLY undownloadable rather than merely slow. See weeklyReportRenderTimeoutMs.
+ */
+export const WEEKLY_REPORT_MAX_PHOTOS = 60;
 
 /** Days before the due date that each reminder fires. `due_digest` fires ON the due date. */
 export const WEEKLY_REPORT_REMINDER_OFFSET_DAYS: Record<WeeklyReportReminderKind, number> = {

@@ -99,6 +99,10 @@ export async function loadWeeklyReportPdfSource(
             proj.trock_pm_user_id, proj.trock_super_user_id,
             -- The generations of everything the render reads that is NOT the report row. None of these
             -- touches weekly_reports.updated_at when it changes; see liveInputGeneration.
+            -- deals is joined for the NAME, which the header falls back to when nothing else supplies a
+            -- property name, so its generation has to be available too; see dealNameGeneration for why it
+            -- is conditional and why it counts even for a frozen report.
+            d.updated_at     AS deal_updated_at,
             proj.updated_at  AS project_updated_at,
             pm.updated_at    AS trock_pm_updated_at,
             sup.updated_at   AS trock_super_updated_at,
@@ -149,6 +153,10 @@ export async function loadWeeklyReportPdfSource(
       row.trock_super_updated_at,
       row.photo_updated_at,
     ]),
+    // Asked of the VIEW rather than re-deriving "is the property name blank?" here. Two opinions about the
+    // same fallback is how an input slips out of a generation: the view decides what is printed, so it is
+    // the only thing that can say whether `deals.name` was one of the inputs.
+    dealNameGeneration: view.propertyNameFromDeal ? (row.deal_updated_at ?? null) : null,
     // Only a sent report has every input frozen — see WeeklyReportPdfArtifactState.contentFrozen.
     contentFrozen: row.status === "sent",
     superseded: row.superseded_by_id != null,
@@ -385,12 +393,12 @@ export async function publishWeeklyReportPdf(
       // charged for a render that legitimately took most of its allowance, and — the reason it matters
       // here — so the catch below can ask whether it was the RENDER that ran out.
       //
-      // The render's is sized from the photo count, because a render is all-or-nothing and a report can
-      // carry sixty originals; see weeklyReportRenderTimeoutMs. When it DOES fire the failure is
-      // remembered, so the next anonymous request is refused in microseconds instead of paying the whole
-      // budget again.
-      const photoCount = source.view.pdf.photos.length;
-      const renderTimeoutMs = options.renderTimeoutMs ?? weeklyReportRenderTimeoutMs(photoCount);
+      // The render's is sized from the photos THEMSELVES — how many, and how many of them carry a mime
+      // type whose decode the whole process takes in turn — because a render is all-or-nothing and a
+      // report can carry sixty originals; see weeklyReportRenderTimeoutMs. When it DOES fire the failure
+      // is remembered, so the next anonymous request is refused in microseconds instead of paying the
+      // whole budget again.
+      const renderTimeoutMs = options.renderTimeoutMs ?? weeklyReportRenderTimeoutMs(source.view.pdf.photos);
       const renderDeadline = AbortSignal.timeout(renderTimeoutMs);
       let pdf: Buffer;
       try {

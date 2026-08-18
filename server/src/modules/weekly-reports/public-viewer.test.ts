@@ -58,6 +58,7 @@ function view(overrides: Partial<WeeklyReportView["pdf"]> = {}, top: Partial<Wee
     status: "sent",
     trockPm: { userId: "pm-1", name: "Adam Sherwood" },
     fromSnapshot: true,
+    propertyNameFromDeal: false,
     ...top,
   };
 }

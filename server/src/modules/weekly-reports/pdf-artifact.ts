@@ -34,8 +34,16 @@ import { createHash } from "node:crypto";
  * report prints its notice.
  * v3: a photo's caption band is MEASURED rather than fixed at two lines, so the PDF prints the same caption
  * the web page does; the photograph takes whatever the caption leaves.
+ * v4: a caption's whitespace is collapsed the way the client's page already displays it, and a caption too
+ * tall for its band is set a size smaller rather than ellipsised — so a line-broken or long-worded caption
+ * prints in full on both surfaces instead of losing its tail in the PDF alone.
+ *
+ * The number is asserted LITERALLY in pdf-artifact.test.ts, deliberately. Every other test binds this
+ * constant, so nothing else can notice it disagreeing with the renderer — and a layout change that forgets
+ * to bump it leaves every artifact rendered before the deploy being served forever, which is invisible
+ * until a client asks why their PDF does not match their page.
  */
-export const CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION = 3;
+export const CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION = 4;
 
 /** The key segment that records a render made while the report was already superseded. */
 const SUPERSEDED_KEY_MARKER = ".superseded";
@@ -119,6 +127,17 @@ export interface WeeklyReportPdfArtifactState {
    */
   liveInputGeneration: Date | string | null;
   /**
+   * `deals.updated_at`, and ONLY when the render's property name falls through to `deals.name` — i.e.
+   * neither the snapshot nor the setup row names the property. Null otherwise, which is the ordinary case.
+   *
+   * Kept apart from liveInputGeneration because it counts even while the report is FROZEN. The fallback is
+   * the one input a sent report still reads live (see WeeklyReportViewInput.dealName), so a rename would
+   * otherwise change the client's page while the frozen PDF behind the same link kept the old name — for
+   * good, since nothing re-renders a sent report. Null in every other case, so an ordinary deal edit does
+   * not invalidate a cached PDF that does not depend on the deal at all.
+   */
+  dealNameGeneration: Date | string | null;
+  /**
    * True only for a `sent` report — the one state in which EVERY input to the render is frozen.
    *
    * The snapshot freezes the header and the report itself is immutable, so the live rows above stop
@@ -189,10 +208,13 @@ export function classifyWeeklyReportArtifact(
  */
 export function weeklyReportContentGeneration(state: WeeklyReportPdfArtifactState): Date | string | null {
   if (state.updatedAt == null) return null;
-  if (state.contentFrozen || state.liveInputGeneration == null) return state.updatedAt;
-  return toEpochMillis(state.liveInputGeneration) > toEpochMillis(state.updatedAt)
-    ? state.liveInputGeneration
-    : state.updatedAt;
+  let newest = state.updatedAt;
+  // Frozen or not — see dealNameGeneration. It is null unless the render actually reads `deals.name`.
+  if (state.dealNameGeneration != null && toEpochMillis(state.dealNameGeneration) > toEpochMillis(newest)) {
+    newest = state.dealNameGeneration;
+  }
+  if (state.contentFrozen || state.liveInputGeneration == null) return newest;
+  return toEpochMillis(state.liveInputGeneration) > toEpochMillis(newest) ? state.liveInputGeneration : newest;
 }
 
 /**

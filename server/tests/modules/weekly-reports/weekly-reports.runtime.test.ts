@@ -269,9 +269,15 @@ describe("migration 0224", () => {
   });
 
   it("adds pdf_content_generation, which the artifact classifier reads on every download", async () => {
-    // Not decoration: staleness is decided by comparing this against the report's live content generation.
-    // A schema without it makes every PDF read fail on a missing column, and a schema where only ONE of the
-    // DO-loop and the TENANT_SCHEMA block carries it gives new offices a different answer than Dallas.
+    // Not decoration: staleness is decided by comparing this against the report's live content generation,
+    // and a schema without the column makes every PDF read fail on a missing column instead.
+    //
+    // This suite can only say the column is HERE. It cannot say which half of the migration put it here:
+    // 0222's own TENANT block created office_dallas before 0224 ran, so the DO-loop and the
+    // TENANT_SCHEMA block would each satisfy this assertion alone — and a missing tenant block is exactly
+    // what leaves the NEXT office without the column. Told apart in
+    // tests/migrations/0224-weekly-reports-pdf-content-generation.runtime.test.ts, which runs the two
+    // halves separately against schemas of its own.
     const result = await pg.query<{ data_type: string }>(
       `SELECT data_type FROM information_schema.columns
         WHERE table_schema = 'office_dallas'

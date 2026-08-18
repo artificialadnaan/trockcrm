@@ -52,7 +52,12 @@ export interface WeeklyReportViewInput {
    *
    * This is the ONE value a sent report can still read live, and only because a snapshot that recorded no
    * property name has nothing frozen to fall back to — a blank header is worse than a deal name that could
-   * later be edited. The delivered PDF is immutable in storage either way; only the web page could drift.
+   * later be edited. Snapshots written since this revision resolve the deal name AT SEND TIME (see
+   * buildWeeklyReportSnapshot), so for them the fallback is dead; it survives for rows sent before it.
+   *
+   * When it IS used the value is a LIVE render input, on both surfaces, and `propertyNameFromDeal` below
+   * says so — `deals.updated_at` then has to count towards the artifact's content generation, or a rename
+   * changes the page while the stored PDF keeps the old name for good.
    */
   dealName?: string | null;
   photos: WeeklyReportPdfPhoto[];
@@ -71,6 +76,14 @@ export interface WeeklyReportView {
   trockPm: { userId: string | null; name: string | null };
   /** True when the header came from the report's own frozen copy rather than from the live setup row. */
   fromSnapshot: boolean;
+  /**
+   * True when the printed property name came from `deals.name` — i.e. neither the snapshot nor the setup
+   * row supplied one.
+   *
+   * Read by the artifact loader: it is the ONE render input that lives outside every generation the
+   * staleness check knows about, and it is live for a sent report as well as an approved one.
+   */
+  propertyNameFromDeal: boolean;
 }
 
 function text(value: unknown): string | null {
@@ -186,12 +199,14 @@ export function buildWeeklyReportView(input: WeeklyReportViewInput): WeeklyRepor
       ? integerOrNull(snapshot?.schedule?.projectedDurationWeeks)
       : integerOrNull(project.projected_duration_weeks));
 
+  // Resolved ONCE, so what is printed and what the caller is told about where it came from cannot drift.
+  const namedProperty = fromSnapshot ? text(snapshot?.propertyDisplayName) : text(project.property_display_name);
+  const dealName = text(input.dealName);
+  const propertyNameFromDeal = namedProperty == null && dealName != null;
+
   return {
     pdf: {
-      propertyName:
-        (fromSnapshot ? text(snapshot?.propertyDisplayName) : text(project.property_display_name)) ??
-        text(input.dealName) ??
-        "—",
+      propertyName: namedProperty ?? dealName ?? "—",
       weekOfLabel: formatWeeklyReportDate(weekOf) ?? "—",
       clientName: fromSnapshot ? text(snapshot?.clientName) : text(project.client_name),
       clientTeam,
@@ -228,5 +243,6 @@ export function buildWeeklyReportView(input: WeeklyReportViewInput): WeeklyRepor
     status: String(report.status ?? "draft"),
     trockPm: { userId: trockPmUserId, name: trockPmName },
     fromSnapshot,
+    propertyNameFromDeal,
   };
 }

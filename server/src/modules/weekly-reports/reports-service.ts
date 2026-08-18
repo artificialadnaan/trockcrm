@@ -1,4 +1,5 @@
 import {
+  WEEKLY_REPORT_MAX_PHOTOS,
   WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
   WEEKLY_REPORT_SECTION_MAX_CHARS,
   canTransitionWeeklyReport,
@@ -580,7 +581,12 @@ export async function replaceWeeklyReportPhotos(
   return updated;
 }
 
-const MAX_REPORT_PHOTOS = 60;
+/**
+ * The SHARED ceiling, for the same reason the caption limit is shared: the render budget is sized from it
+ * (`base + per-photo × count`), and a report the API accepts but the renderer cannot finish inside its
+ * deadline has no downloadable PDF at all. See WEEKLY_REPORT_MAX_PHOTOS.
+ */
+const MAX_REPORT_PHOTOS = WEEKLY_REPORT_MAX_PHOTOS;
 /**
  * The SHARED ceiling, not one of this module's own.
  *
@@ -781,6 +787,13 @@ export async function transitionWeeklyReport(
   return updated;
 }
 
+/** Trimmed, or null when there is nothing there — the same "blank is absent" rule both renderers apply. */
+function nonBlank(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 /**
  * The header block as it stood at send time.
  *
@@ -795,13 +808,18 @@ export async function buildWeeklyReportSnapshot(
   const names = await client.query(
     `SELECT
        (SELECT display_name FROM public.users WHERE id = $1::uuid) AS pm_name,
-       (SELECT display_name FROM public.users WHERE id = $2::uuid) AS super_name`,
-    [projectRow.trock_pm_user_id, projectRow.trock_super_user_id],
+       (SELECT display_name FROM public.users WHERE id = $2::uuid) AS super_name,
+       (SELECT name FROM deals WHERE id = $3::uuid) AS deal_name`,
+    [projectRow.trock_pm_user_id, projectRow.trock_super_user_id, projectRow.deal_id],
   );
   const row = names.rows[0] ?? {};
 
   return {
-    propertyDisplayName: projectRow.property_display_name ?? null,
+    // RESOLVED, not copied. `property_display_name` is nullable and a user can clear it, and both renderers
+    // then fall back to the deal's name — which is live. Freezing what will actually be printed is what
+    // makes "sent" mean the header can no longer change: without it, renaming the deal in October rewrote
+    // the header of a report delivered in August, on the client's page, while the PDF stayed as delivered.
+    propertyDisplayName: nonBlank(projectRow.property_display_name) ?? nonBlank(row.deal_name),
     clientName: projectRow.client_name ?? null,
     clientTeam: {
       doc: { name: projectRow.client_doc_name ?? null, email: projectRow.client_doc_email ?? null },

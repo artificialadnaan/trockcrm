@@ -9,12 +9,14 @@ import {
 import { registerReportFonts } from "../field/pdf-layout.js";
 import {
   PHOTO_CAPTION_MAX_HEIGHT,
+  PHOTO_CAPTION_TEXT_WIDTH,
   WEEKLY_REPORT_PHOTOS_PER_PAGE,
+  WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS,
   WEEKLY_REPORT_SUPERSEDED_NOTICE,
   boundWeeklyReportPhotoCaption,
   boundWeeklyReportSectionText,
   formatWeeklyReportDate,
-  photoCaptionBandHeight,
+  photoCaptionLayout,
   renderWeeklyReportPdf,
   splitTextAtHeight,
   weeklyReportPhotoPageCount,
@@ -331,6 +333,63 @@ describe("photo captions", () => {
     return { doc, fonts: registerReportFonts(doc) };
   }
 
+  /**
+   * The height the caption WILL actually occupy when drawn, measured independently of the layout helper.
+   *
+   * Re-derived here rather than read off `layout.height`, because the two things this has to catch are a
+   * measurement taken at the wrong WIDTH and a band that binds against its ceiling — and a check written in
+   * terms of the helper's own answer cannot see either. The options mirror drawPhotoCell's exactly.
+   */
+  function drawnHeight(
+    doc: PDFKit.PDFDocument,
+    fonts: ReturnType<typeof registerReportFonts>,
+    caption: string,
+    fontSize: number,
+  ): number {
+    doc.save();
+    doc.font(fonts.regular).fontSize(fontSize);
+    const height = doc.heightOfString(caption, { width: PHOTO_CAPTION_TEXT_WIDTH, lineGap: 1, align: "center" });
+    doc.restore();
+    return height;
+  }
+
+  /**
+   * Adversarial 250-character captions — the API's own limit — with no line breaks left in them.
+   *
+   * Uniform word walls, because THOSE are the worst case for wrapping: a word one character too wide to
+   * share a line leaves half the line empty, every line. Plus deterministic prose, which is what caught the
+   * width bug — over random 250-character prose captions, measuring at the full cell width instead of the
+   * text width is one line short about a third of the time, while a caption of solid "W" gives the same
+   * line count at both widths and hides it completely.
+   */
+  function adversarialCaptions(): string[] {
+    const captions: string[] = [];
+    for (const glyph of ["W", "M", "m", "@", "w", "0"]) {
+      for (let wordLength = 1; wordLength <= 40; wordLength += 1) {
+        let caption = "";
+        while (caption.length < WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS) caption += `${glyph.repeat(wordLength)} `;
+        captions.push(caption.slice(0, WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS).trimEnd());
+      }
+    }
+    // A cheap deterministic PRNG so the prose set is the same on every run and on every machine.
+    let seed = 20260818;
+    const next = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (let sample = 0; sample < 400; sample += 1) {
+      let caption = "";
+      while (caption.length < WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS) {
+        const wordLength = 2 + Math.floor(next() * 12);
+        for (let i = 0; i < wordLength; i += 1) caption += alphabet[Math.floor(next() * alphabet.length)];
+        caption += " ";
+      }
+      captions.push(caption.slice(0, WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS).trimEnd());
+    }
+    return captions;
+  }
+
   it("bounds both surfaces at exactly the limit the API enforces", () => {
     // The section helper's twin, and the gap this closes: the API accepted 500 characters while the PDF
     // drew the caption into a fixed two-line box with `ellipsis: true`, so a long caption printed in full
@@ -348,28 +407,62 @@ describe("photo captions", () => {
     expect(boundWeeklyReportPhotoCaption(null)).toBeNull();
   });
 
-  it("gives every bounded caption room to print IN FULL, worst case included", () => {
-    // THE property that makes the two surfaces agree, measured against the shipped font rather than
-    // assumed. The band is min(measured, PHOTO_CAPTION_MAX_HEIGHT); if the measurement could exceed the
-    // ceiling the clamp would bind, `ellipsis: true` would fire, and the PDF would once again say less
-    // than the page. "W" is the widest glyph Geist has at this size, so this is the true upper bound —
-    // it fails if the character limit is raised or the band is shrunk without the other moving.
+  it("collapses the line breaks the client's page already collapses", () => {
+    // `.photo figcaption` has no `white-space: pre-wrap`, so the browser renders a caption as one wrapped
+    // paragraph however it was typed — and the caption comes from a MULTILINE field the API only trims and
+    // length-checks. pdfkit honours every newline instead, so "a\n" 125 times measured 1,427pt against a
+    // 108pt band: the page printed 125 lines and the attachment printed nine of them.
+    expect(boundWeeklyReportPhotoCaption("Balcony mock-up\ncomplete")).toBe("Balcony mock-up complete");
+    expect(boundWeeklyReportPhotoCaption("north  elevation\r\n\ttile")).toBe("north elevation tile");
+    const lineBroken = boundWeeklyReportPhotoCaption("a\n".repeat(125))!;
+    expect(lineBroken).not.toContain("\n");
+
     const { doc, fonts } = measuringDoc();
-    const worstCase = boundWeeklyReportPhotoCaption("W".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS))!;
-    expect(photoCaptionBandHeight(doc, fonts, worstCase)).toBeLessThan(PHOTO_CAPTION_MAX_HEIGHT);
+    expect(photoCaptionLayout(doc, fonts, lineBroken).height).toBeLessThan(PHOTO_CAPTION_MAX_HEIGHT);
     doc.end();
   });
 
-  it("takes only the room the caption needs, so a short one leaves the photograph the cell", () => {
-    // The band used to be a flat 24pt whatever the caption said. Adapting it is what buys the space a
-    // long caption needs without charging every other photo for it.
+  it("gives every bounded caption room to print IN FULL, worst case included", () => {
+    // THE property that makes the two surfaces agree, measured against the shipped font rather than
+    // assumed, over captions chosen to break it rather than one that cannot.
+    //
+    // Two ways it used to fail, both silent. The band was measured at the full CELL width while the text is
+    // drawn at the cell minus its padding, which is one line short for about a third of ordinary prose
+    // captions; and a caption too tall for the band was clamped to PHOTO_CAPTION_MAX_HEIGHT with
+    // `ellipsis: true`, which 250 characters of eight-wide words reach at 8pt. Either one prints less than
+    // the client's web page does, on the one surface a client compares side by side.
     const { doc, fonts } = measuringDoc();
-    const none = photoCaptionBandHeight(doc, fonts, null);
-    const short = photoCaptionBandHeight(doc, fonts, "Balcony mock-up complete");
-    const long = photoCaptionBandHeight(doc, fonts, "W".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS));
-    expect(none).toBe(0);
-    expect(short).toBeLessThan(24);
-    expect(long).toBeGreaterThan(short);
+    for (const caption of adversarialCaptions()) {
+      const bounded = boundWeeklyReportPhotoCaption(caption)!;
+      const layout = photoCaptionLayout(doc, fonts, bounded);
+      const needed = drawnHeight(doc, fonts, bounded, layout.fontSize);
+      // Inside the band it was given — so `ellipsis: true` never fires…
+      expect(needed, `${bounded.slice(0, 24)}… at ${layout.fontSize}pt`).toBeLessThanOrEqual(layout.height);
+      // …and inside the ceiling, so the photograph keeps at least half its cell.
+      expect(layout.height, bounded.slice(0, 24)).toBeLessThanOrEqual(PHOTO_CAPTION_MAX_HEIGHT);
+    }
+    doc.end();
+  });
+
+  it("takes only the room the caption needs, at full size, for anything ordinary", () => {
+    // The band used to be a flat 24pt whatever the caption said. Adapting it is what buys the space a
+    // long caption needs without charging every other photo for it — and the font step is a last resort,
+    // not something a normal caption should ever see.
+    const { doc, fonts } = measuringDoc();
+    const none = photoCaptionLayout(doc, fonts, null);
+    const short = photoCaptionLayout(doc, fonts, "Balcony mock-up complete");
+    const prose = photoCaptionLayout(
+      doc,
+      fonts,
+      boundWeeklyReportPhotoCaption(
+        "Balcony mock-up complete on the north elevation, waterproofing membrane inspected and signed off by the third-party consultant ahead of tile, with the remaining two stacks scheduled for next week.",
+      )!,
+    );
+    expect(none.height).toBe(0);
+    expect(short.height).toBeLessThan(24);
+    expect(short.fontSize).toBe(8);
+    expect(prose.height).toBeGreaterThan(short.height);
+    expect(prose.fontSize).toBe(8);
     doc.end();
   });
 
@@ -389,17 +482,46 @@ describe("photo captions", () => {
 });
 
 describe("the render budget", () => {
+  const kind = (mimeType: string | null, count: number) => Array.from({ length: count }, () => ({ mimeType }));
+
   it("scales with the photo count instead of giving sixty photos what one gets", () => {
     // A render is all-or-nothing: the deadline firing on photo 50 throws away the 49 already fetched and
     // transcoded and stores nothing, so a flat budget does not degrade a big report, it makes it
     // permanently undownloadable. Measured at ~370ms of transcode per 12MP original before any network.
-    expect(weeklyReportRenderTimeoutMs(60)).toBeGreaterThan(weeklyReportRenderTimeoutMs(1));
-    expect(weeklyReportRenderTimeoutMs(60)).toBeGreaterThan(60_000);
-    // …and is still bounded, because the socket on the other end is anonymous.
-    expect(weeklyReportRenderTimeoutMs(10_000)).toBe(weeklyReportRenderTimeoutMs(60_000));
+    expect(weeklyReportRenderTimeoutMs(kind("image/jpeg", 60))).toBeGreaterThan(
+      weeklyReportRenderTimeoutMs(kind("image/jpeg", 1)),
+    );
+    expect(weeklyReportRenderTimeoutMs(kind("image/jpeg", 60))).toBeGreaterThan(60_000);
     // Degenerate inputs cannot produce a zero or negative deadline, which would abort instantly.
-    expect(weeklyReportRenderTimeoutMs(0)).toBeGreaterThan(0);
-    expect(weeklyReportRenderTimeoutMs(-5)).toBeGreaterThan(0);
-    expect(weeklyReportRenderTimeoutMs(Number.NaN)).toBeGreaterThan(0);
+    expect(weeklyReportRenderTimeoutMs([])).toBeGreaterThan(0);
+  });
+
+  it("pays for the WASM decode a HEIC original needs, and only for that one", () => {
+    // The measured gap this closes. A detailed 5.5MB HEIC costs 2.8–4.3s through this render's settings on
+    // idle Apple silicon — decode alone is 2.4–3.7s of it — and every one of those decodes serialises on a
+    // single process-wide permit shared with the field-scorecard and AI-report renders, so prefetch
+    // concurrency buys nothing. Sixty of them against the old flat 3s/photo was a ~1:1 fit to the worst
+    // case measured on hardware faster than the API container: exceeding it stores NOTHING and the report's
+    // PDF becomes permanently unobtainable, by the client link and the CRM download alike.
+    const heic = weeklyReportRenderTimeoutMs(kind("image/heic", 60));
+    const jpeg = weeklyReportRenderTimeoutMs(kind("image/jpeg", 60));
+    expect(heic).toBeGreaterThan(jpeg);
+    // Enough for sixty of the worst measured case (4.3s each = 258s) with room for a slower, shared box.
+    expect(heic).toBeGreaterThan(60 * 4_300);
+    // HEIF too — the permit gates on both — while a JPEG report keeps the modest budget it always had.
+    expect(weeklyReportRenderTimeoutMs(kind("image/heif", 60))).toBe(heic);
+    expect(weeklyReportRenderTimeoutMs(kind(null, 60))).toBe(jpeg);
+    // Mixed, which is what a real week looks like: one dear photo, fifty-nine cheap ones.
+    expect(weeklyReportRenderTimeoutMs([...kind("image/heic", 1), ...kind("image/jpeg", 59)])).toBeGreaterThan(jpeg);
+  });
+
+  it("has a ceiling that can actually bind, because the socket on the other end is anonymous", () => {
+    // The previous ceiling was dead code: a flat 240s first bit at 74 photos while the API accepts 60, so
+    // the real bound was whatever base + 60 x per-photo happened to be. Derived from the same photo cap the
+    // API enforces, it now bounds exactly the case it is for — a caller handing over more photos than the
+    // API would ever have accepted.
+    expect(weeklyReportRenderTimeoutMs(kind("image/heic", 60))).toBe(WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS);
+    expect(weeklyReportRenderTimeoutMs(kind("image/heic", 500))).toBe(WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS);
+    expect(weeklyReportRenderTimeoutMs(kind("image/jpeg", 5_000))).toBe(WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS);
   });
 });

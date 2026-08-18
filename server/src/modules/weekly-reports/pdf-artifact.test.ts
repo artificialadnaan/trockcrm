@@ -23,6 +23,8 @@ function state(overrides: Partial<WeeklyReportPdfArtifactState> = {}): WeeklyRep
     pdfContentGeneration: RENDERED_AT,
     updatedAt: RENDERED_AT,
     liveInputGeneration: new Date(RENDERED_AT.getTime() - 60_000),
+    // Null is the ordinary case: the property is named, so `deals.name` is not a render input at all.
+    dealNameGeneration: null,
     // The default is a SENT report.
     contentFrozen: true,
     superseded: false,
@@ -154,6 +156,42 @@ describe("needsWeeklyReportPdfRegeneration", () => {
         state({ contentFrozen: true, liveInputGeneration: new Date(RENDERED_AT.getTime() + 5_000) }),
       ),
     ).toBe(false);
+  });
+
+  it("regenerates when the DEAL was renamed and the header prints the deal's name", () => {
+    // The input that was outside every generation: `property_display_name` is nullable and clearable, and
+    // both renderers then fall back to `deals.name` — which `deals.updated_at` tracks and nothing else
+    // does. On an approved report, where a shared link sits indefinitely, a rename changed the live web
+    // page while the cached PDF behind the same link kept the old name for good.
+    const renamed = { dealNameGeneration: new Date(RENDERED_AT.getTime() + 1) };
+    expect(needsWeeklyReportPdfRegeneration(state({ contentFrozen: false, ...renamed }))).toBe(true);
+
+    // AND once the report is sent, unlike every other live input: the snapshot has no property name to
+    // freeze in that case, so this fallback is the one thing a frozen report still reads live. Leaving it
+    // out would let the page and the delivered PDF disagree permanently.
+    expect(needsWeeklyReportPdfRegeneration(state({ contentFrozen: true, ...renamed }))).toBe(true);
+  });
+
+  it("but a deal edit does NOT invalidate a report whose header names the property", () => {
+    // The other half, and the reason this is a separate field from liveInputGeneration: `deals.updated_at`
+    // moves on any edit to the job, and a report that never reads the deal's name must not re-render — and
+    // orphan another content-addressed object — every time somebody touches the deal.
+    expect(
+      needsWeeklyReportPdfRegeneration(
+        state({ contentFrozen: false, dealNameGeneration: null, liveInputGeneration: RENDERED_AT }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION", () => {
+  it("is 4 — and this assertion is the tripwire, not a tautology", () => {
+    // Every other test in this file binds the constant, so none of them can notice it disagreeing with the
+    // renderer. The version is a PROMISE about the bytes: it is in the object key and in the publication
+    // CAS, so a layout change that forgets to bump it leaves every artifact rendered before the deploy
+    // being served forever, and nothing fails — until a client asks why their PDF and their page differ.
+    // Changing the renderer therefore means changing this line, deliberately, in the same commit.
+    expect(CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION).toBe(4);
   });
 });
 
