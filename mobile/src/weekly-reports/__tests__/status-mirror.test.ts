@@ -6,6 +6,7 @@ import {
   weeklyReportDueLabel,
   weeklyReportFinalAction,
   weeklyReportProjectAction,
+  weeklyReportQueueTruncationNote,
   weeklyReportWeekStateLabel,
 } from "../status";
 import { weeklyReportEditorBusyMessage, weeklyReportStepLabel, weeklyReportSubmitErrorMessage } from "../editor-state";
@@ -178,6 +179,30 @@ describe("date formatting", () => {
     expect(weeklyReportDueLabel("2026-08-13", 0)).toMatch(/^Due /);
     expect(weeklyReportDueLabel("2026-08-13", 1)).toBe("1 day late");
     expect(weeklyReportDueLabel("2026-08-13", 3)).toBe("3 days late");
+  });
+});
+
+describe("the review queue's truncation note", () => {
+  it("says nothing when the payload carried the whole queue", () => {
+    expect(weeklyReportQueueTruncationNote(4, 4)).toBeNull();
+  });
+
+  it("names both the count shown and the count missing when the server capped it", () => {
+    // The standing rule: never truncate silently. Without this the PM reads a hundred rows as their whole
+    // workload, and — because an approved report stays in the queue until it is SENT from the CRM —
+    // anything past the cap would never appear no matter how much they worked through.
+    const note = weeklyReportQueueTruncationNote(100, 137)!;
+    expect(note).toContain("100 most recent of 137");
+    expect(note).toContain("37 older reports");
+  });
+
+  it("reads correctly when exactly one report is hidden", () => {
+    expect(weeklyReportQueueTruncationNote(100, 101)).toContain("1 older report is");
+  });
+
+  it("stays silent when an older API build sends no total", () => {
+    // Absent is not "everything is hidden" — the field did not exist before this change.
+    expect(weeklyReportQueueTruncationNote(3, undefined)).toBeNull();
   });
 });
 

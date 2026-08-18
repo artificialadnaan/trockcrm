@@ -194,7 +194,15 @@ function isElevated(actor: WeeklyReportActor): boolean {
   return ELEVATED_ROLES.has(actor.role);
 }
 
-/** May write the report's content: the assigned super, the assigned PM, or an admin/director. */
+/** Whoever created the row. Survives a reassignment, which is the whole point of consulting it. */
+function isAuthor(reportRow: Record<string, any>, actor: WeeklyReportActor): boolean {
+  return Boolean(reportRow.authored_by) && reportRow.authored_by === actor.id;
+}
+
+/**
+ * May write the report's content: the assigned super, the assigned PM, an admin/director — or the person
+ * who started it, while it is still a draft.
+ */
 export function canEditWeeklyReport(
   projectRow: Record<string, any>,
   reportRow: Record<string, any>,
@@ -211,6 +219,17 @@ export function canEditWeeklyReport(
   // PM never saw, while the status still reads "approved" — which defeats the review gate entirely
   // rather than merely bending it.
   if (reportRow.status === "approved") return pmPowers;
+
+  // THE AUTHOR, WHILE IT IS STILL A DRAFT. `canViewWeeklyReport` already lets them open what they wrote
+  // after a reassignment and `canTransitionAs` already lets them submit it, so without the matching write
+  // right the payload advertised `canSubmit: true` on a report the same person could not save — and the
+  // app's submit is a PATCH and a photo PUT *before* the transition, so both 403'd and the work they were
+  // still holding on the phone could never be filed at all.
+  //
+  // DRAFT ONLY. Past submission the report is the PM's, and a former assignee has no more claim on it than
+  // any other ex-assignee; extending this to `pending_review` would let somebody who is no longer on the
+  // project rewrite what the PM is in the middle of reviewing.
+  if (reportRow.status === "draft" && isAuthor(reportRow, actor)) return true;
 
   return isAssignedSuper(projectRow, actor) || pmPowers;
 }
@@ -236,7 +255,7 @@ export function canViewWeeklyReport(
     isAssignedSuper(projectRow, actor) ||
     isAssignedPm(projectRow, actor) ||
     isElevated(actor) ||
-    reportRow.authored_by === actor.id
+    isAuthor(reportRow, actor)
   );
 }
 
@@ -264,7 +283,10 @@ export function canTransitionAs(
       // Collapsing them let a superintendent revoke the PM's approval and then edit the reopened
       // report — the review gate unlocked from the inside.
       if (reportRow.status === "approved") return pmPowers;
-      return isAssignedSuper(projectRow, actor) || pmPowers || reportRow.authored_by === actor.id;
+      // Kept in step with `canEditWeeklyReport`'s draft-author clause: the app PATCHes the content and
+      // PUTs the photos before asking for this transition, so a submit right the edit rules do not also
+      // grant is a promise the write path cannot keep.
+      return isAssignedSuper(projectRow, actor) || pmPowers || isAuthor(reportRow, actor);
     case "draft":
       return pmPowers;
     case "approved":

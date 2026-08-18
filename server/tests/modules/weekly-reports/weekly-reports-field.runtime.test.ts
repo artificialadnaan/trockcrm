@@ -23,11 +23,13 @@ import {
 import {
   createWeeklyReportDraft,
   getWeeklyReportForActor,
+  replaceWeeklyReportPhotos,
   transitionWeeklyReport,
   updateWeeklyReportContent,
 } from "../../../src/modules/weekly-reports/reports-service.js";
 import {
   APP_OUTSTANDING_WEEK_LIMIT,
+  APP_REVIEW_QUEUE_LIMIT,
   listWeeklyReportAssignments,
 } from "../../../src/modules/weekly-reports/assignments-service.js";
 
@@ -149,6 +151,29 @@ async function seedDraft(projectId: string, weekOf: string, actor = SUPER_ACTOR)
     actor,
   );
   return report.id;
+}
+
+/** UTC throughout, matching the date-only columns these tests compare against. */
+const addDays = (isoDate: string, days: number): string =>
+  new Date(new Date(`${isoDate}T00:00:00Z`).getTime() + days * 86_400_000).toISOString().slice(0, 10);
+
+/**
+ * Weekly consecutive submitted reports, inserted directly.
+ *
+ * The queue cap needs more than a hundred rows to be reachable at all, and driving them through
+ * create/update/transition would be several hundred statements for a test about ONE query's ORDER BY and
+ * LIMIT. The columns written here are exactly the ones that query reads.
+ */
+async function seedReviewRows(projectId: string, count: number, firstWeekOf: string): Promise<void> {
+  await pg.query(
+    `INSERT INTO office_dallas.weekly_reports
+       (client_submission_id, weekly_report_project_id, deal_id, week_of, status,
+        work_completed, authored_by, authored_at, submitted_by, submitted_at)
+     SELECT gen_random_uuid(), $1::uuid, $2::uuid, $3::date + (n::int * 7), 'pending_review',
+            '- Framing', $4::uuid, now(), $4::uuid, now()
+       FROM generate_series(0, $5::int - 1) AS n`,
+    [projectId, DEAL, firstWeekOf, SUPER, count],
+  );
 }
 
 describe("hub assignments", () => {
@@ -397,6 +422,50 @@ describe("the PM review queue", () => {
     const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
     expect(pmView.pendingReview).toEqual([]);
   });
+
+  it("still holds a submitted report after the project is paused", async () => {
+    // The projects query is scoped to `status = 'active'` and the queue is not. An early return on "no
+    // active projects" therefore hid a real submission the moment somebody paused the job it belongs to.
+    const project = await seedProject();
+    const id = await seedDraft(project.id, WEEK_OF);
+    await updateWeeklyReportContent(db, id, { workCompleted: "- Framing complete" }, SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await updateWeeklyReportProject(db, project.id, { status: "paused" }, OFFICE);
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.projects).toEqual([]);
+    expect(pmView.pendingReview.map((row) => row.reportId)).toEqual([id]);
+    expect(pmView.pendingReviewTotal).toBe(1);
+  });
+
+  it("reports the queue's true depth when nothing was dropped", async () => {
+    const project = await seedProject();
+    await seedReviewRows(project.id, 3, "2026-06-04");
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.pendingReview).toHaveLength(3);
+    expect(pmView.pendingReviewTotal).toBe(3);
+  });
+
+  it("caps a deep queue, says how deep it is, and keeps the NEWEST work reachable", async () => {
+    // The cap was silent AND anchored at the oldest end. Because approving does not remove a row — an
+    // approved-but-unsent report deliberately stays here — the first hundred could never be cleared from
+    // the phone, so a report submitted this morning was permanently invisible to the PM who had to
+    // review it, with nothing on screen admitting anything was missing.
+    const project = await seedProject();
+    const overflow = 4;
+    const first = "2026-01-01";
+    await seedReviewRows(project.id, APP_REVIEW_QUEUE_LIMIT + overflow, first);
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.pendingReview).toHaveLength(APP_REVIEW_QUEUE_LIMIT);
+    expect(pmView.pendingReviewTotal).toBe(APP_REVIEW_QUEUE_LIMIT + overflow);
+
+    const weeks = pmView.pendingReview.map((row) => row.weekOf);
+    // Newest first, and what fell off the end is the ancient tail rather than this week's submission.
+    expect([...weeks].sort().reverse()).toEqual(weeks);
+    expect(weeks[0]).toBe(addDays(first, 7 * (APP_REVIEW_QUEUE_LIMIT + overflow - 1)));
+    expect(weeks).not.toContain(first);
+  });
 });
 
 describe("who may open a report by id", () => {
@@ -484,5 +553,70 @@ describe("who may open a report by id", () => {
     expect(project.clientTeam.doc).toEqual({ name: "Jay Stauble", email: "jay@example.com" });
     expect(toFieldWeeklyReportProject(project)).not.toHaveProperty("clientTeam");
     expect(JSON.stringify(toFieldWeeklyReportProject(project))).not.toContain("jay@example.com");
+  });
+});
+
+describe("an author reassigned off the project mid-draft", () => {
+  async function seedReassignedDraft() {
+    const project = await seedProject();
+    const id = await seedDraft(project.id, WEEK_OF);
+    await updateWeeklyReportContent(db, id, { workCompleted: "- Framing complete" }, SUPER_ACTOR);
+    // Somebody else is the superintendent now; SUPER holds nothing but `authored_by`.
+    await updateWeeklyReportProject(db, project.id, { trockSuperUserId: OTHER_SUPER }, OFFICE);
+    return { project, id };
+  }
+
+  it("can finish the submit the payload promises them", async () => {
+    // THE BUG. canViewWeeklyReport and canTransitionAs both honour `authored_by`, so the app showed this
+    // person their draft with `canSubmit: true` — but canEditWeeklyReport recognised only the current
+    // assignments, and a submit is a content PATCH and a whole-set photo PUT BEFORE the transition. Both
+    // 403'd, the transition was never reached, and the work sitting on their phone could never be filed
+    // by anyone: the new superintendent cannot see the local draft, and there is no other copy of it.
+    const { id } = await seedReassignedDraft();
+
+    const before = await getWeeklyReportForActor(db, id, SUPER_ACTOR);
+    expect(before.permissions).toMatchObject({ canEdit: true, canSubmit: true });
+
+    await expect(
+      updateWeeklyReportContent(db, id, { workCompleted: "- Roof dried in" }, SUPER_ACTOR),
+    ).resolves.toMatchObject({ workCompleted: "- Roof dried in" });
+    await expect(replaceWeeklyReportPhotos(db, id, [], SUPER_ACTOR)).resolves.toMatchObject({ id });
+    await expect(transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR)).resolves.toMatchObject({
+      status: "pending_review",
+    });
+  });
+
+  it("loses the edit the moment the report leaves draft", async () => {
+    // Draft-only. Once it is with the PM, a former assignee has no more claim on it than any other, and
+    // letting them rewrite what is under review would be a bigger hole than the one this closes.
+    const { id } = await seedReassignedDraft();
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+
+    const after = await getWeeklyReportForActor(db, id, SUPER_ACTOR);
+    expect(after.permissions).toMatchObject({ canEdit: false, canSubmit: false });
+    await expectAppError(
+      updateWeeklyReportContent(db, id, { workCompleted: "- Rewritten" }, SUPER_ACTOR),
+      403,
+      /permission/i,
+    );
+  });
+
+  it("never becomes an editor of an approved report", async () => {
+    const { id } = await seedReassignedDraft();
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+    await expectAppError(replaceWeeklyReportPhotos(db, id, [], SUPER_ACTOR), 403, /permission/i);
+  });
+
+  it("leaves a report the author never wrote alone", async () => {
+    // The clause keys on `authored_by`, not on "was ever on this project" — an unrelated field user with
+    // a valid session still gets nothing.
+    const project = await seedProject();
+    const id = await seedDraft(project.id, WEEK_OF);
+    await expectAppError(
+      updateWeeklyReportContent(db, id, { workCompleted: "- Not mine" }, OTHER_SUPER_ACTOR),
+      403,
+      /permission/i,
+    );
   });
 });

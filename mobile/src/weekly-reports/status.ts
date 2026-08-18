@@ -108,6 +108,21 @@ export function weeklyReportProjectAction(project: {
   }
 }
 
+/**
+ * What to say when the review queue came back capped, or null when the list is complete.
+ *
+ * The server sends the newest rows and the true depth. Saying nothing would present somebody's partial
+ * workload as all of it, and this queue does not drain by being worked: an approved report stays on it
+ * until it is SENT, which is a CRM action. So the note names the count AND where the rest live, rather
+ * than implying a pull-to-refresh will surface them.
+ */
+export function weeklyReportQueueTruncationNote(shown: number, total: number | undefined): string | null {
+  if (typeof total !== "number" || !Number.isFinite(total)) return null;
+  const hidden = Math.max(0, Math.trunc(total) - shown);
+  if (hidden <= 0) return null;
+  return `Showing the ${shown} most recent of ${Math.trunc(total)}. The ${hidden} older report${hidden === 1 ? "" : "s"} ${hidden === 1 ? "is" : "are"} on the weekly report board in the CRM.`;
+}
+
 /** yyyy-mm-dd → "Aug 13". Parsed at LOCAL midnight so a date-only string never shifts a day westward. */
 export function formatWeekOf(isoDate: string): string {
   const parsed = new Date(`${isoDate}T00:00:00`);

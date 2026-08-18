@@ -30,6 +30,17 @@ const ELEVATED_ROLES = new Set(["admin", "director"]);
  */
 export const APP_OUTSTANDING_WEEK_LIMIT = 5;
 
+/**
+ * How many review rows one payload carries.
+ *
+ * Unlike the backlog limit above this is a TRANSPORT cap rather than a product decision — every row in
+ * this queue is somebody's actual move — so it is always reported alongside `pendingReviewTotal`. A silent
+ * cap here is worse than it looks: approving does NOT clear a row (an approved-but-unsent report stays,
+ * deliberately), so a queue that only drains when a report is sent would have hidden everything past the
+ * limit for as long as the backlog stood.
+ */
+export const APP_REVIEW_QUEUE_LIMIT = 100;
+
 /** The last filed week before a given week, and the cumulative figures it carried. */
 export interface WeeklyReportPredecessor {
   weekOf: string;
@@ -89,8 +100,14 @@ export interface WeeklyReportReviewItem {
 export interface WeeklyReportAssignments {
   asOf: string;
   projects: WeeklyReportAssignment[];
-  /** Reports sitting in this PM's queue. Empty for a user who is nobody's PM. */
+  /** Reports sitting in this PM's queue, newest first. Empty for a user who is nobody's PM. */
   pendingReview: WeeklyReportReviewItem[];
+  /**
+   * How many rows the queue actually holds. Greater than `pendingReview.length` ⇒ the payload was capped
+   * at `APP_REVIEW_QUEUE_LIMIT` and the app must say so rather than present a truncated list as the whole
+   * of somebody's workload.
+   */
+  pendingReviewTotal: number;
 }
 
 function toIsoDate(value: unknown): string | null {
@@ -146,7 +163,11 @@ export async function listWeeklyReportAssignments(
     [input.userId, elevated],
   );
   if (projectsResult.rows.length === 0) {
-    return { asOf: input.asOf, projects: [], pendingReview: [] };
+    // Still ask for the review queue. The projects query is scoped to `status = 'active'`, the queue is
+    // not — a PM whose only project has since been paused or completed can still be holding a submitted
+    // report on it, and returning an empty queue here would hide it with nobody responsible for it.
+    const queue = await listWeeklyReportsAwaitingReview(client, input);
+    return { asOf: input.asOf, projects: [], pendingReview: queue.items, pendingReviewTotal: queue.total };
   }
 
   const projectIds = projectsResult.rows.map((row) => row.id);
@@ -291,10 +312,12 @@ export async function listWeeklyReportAssignments(
     });
   }
 
+  const queue = await listWeeklyReportsAwaitingReview(client, input);
   return {
     asOf: input.asOf,
     projects,
-    pendingReview: await listWeeklyReportsAwaitingReview(client, input),
+    pendingReview: queue.items,
+    pendingReviewTotal: queue.total,
   };
 }
 
@@ -304,16 +327,28 @@ export async function listWeeklyReportAssignments(
  * `approved` is included alongside `pending_review` because an approved-but-unsent report is still the
  * PM's move — PR5 adds the send step, and until then leaving it off the queue would make an approval look
  * like the end of the line.
+ *
+ * NEWEST FIRST, and counted.
+ *
+ * Oldest-first is the intuitive order for a work queue, and it was wrong here for one reason: an approved
+ * row does not leave this queue, only a SENT one does. Combined with the cap that meant the oldest hundred
+ * held the list permanently — a report submitted this morning was invisible to its PM until somebody
+ * cleared an unrelated backlog through the CRM, and nothing on the phone said so. Ordering by the most
+ * recent week keeps the work that is actually in flight on screen and pushes the stale tail out of the
+ * window instead, and `total` lets the caller name what it is not showing.
  */
 async function listWeeklyReportsAwaitingReview(
   client: QueryExecutor,
   input: { userId: string; role: string },
-): Promise<WeeklyReportReviewItem[]> {
+): Promise<{ items: WeeklyReportReviewItem[]; total: number }> {
   const elevated = ELEVATED_ROLES.has(input.role);
   const result = await client.query(
     `SELECT wr.id, wr.weekly_report_project_id, wr.deal_id, wr.week_of, wr.status, wr.submitted_at,
             wrp.property_display_name, d.name AS deal_name,
-            u.display_name AS authored_by_name
+            u.display_name AS authored_by_name,
+            -- Counted over the WHOLE matching set: a window function is evaluated before LIMIT, so this
+            -- is the true queue depth on every returned row and costs no second round trip.
+            COUNT(*) OVER () AS total_count
        FROM weekly_reports wr
        JOIN weekly_report_projects wrp ON wrp.id = wr.weekly_report_project_id
        JOIN deals d ON d.id = wrp.deal_id
@@ -323,12 +358,14 @@ async function listWeeklyReportsAwaitingReview(
         AND wr.status IN ('pending_review', 'approved')
         AND wrp.is_active
         AND ($2::boolean OR wrp.trock_pm_user_id = $1::uuid)
-      ORDER BY wr.week_of ASC
-      LIMIT 100`,
+      -- id last so the page is stable across refetches when two projects share a week.
+      ORDER BY wr.week_of DESC, wr.submitted_at DESC NULLS LAST, wr.id
+      LIMIT ${APP_REVIEW_QUEUE_LIMIT}`,
     [input.userId, elevated],
   );
 
-  return result.rows.map((row) => ({
+  const total = Number(result.rows[0]?.total_count ?? 0);
+  const items = result.rows.map((row) => ({
     reportId: row.id,
     weeklyReportProjectId: row.weekly_report_project_id,
     dealId: row.deal_id,
@@ -338,4 +375,5 @@ async function listWeeklyReportsAwaitingReview(
     authoredByName: row.authored_by_name ?? null,
     submittedAt: toIsoTimestamp(row.submitted_at),
   }));
+  return { items, total };
 }

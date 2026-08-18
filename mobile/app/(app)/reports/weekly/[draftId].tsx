@@ -31,12 +31,7 @@ import type { WeeklyReportPhotoCandidate } from "../../../../src/api/types";
 import { qk } from "../../../../src/query/keys";
 import { newClientUploadId, uploadOwnerKey } from "../../../../src/capture/upload-queue";
 import { uploadCapture } from "../../../../src/capture/upload";
-import {
-  extractExifMetadata,
-  getLiveGps,
-  hasPhotoCoords,
-  mergeLiveGpsIntoExif,
-} from "../../../../src/capture/metadata";
+import { getLiveGps } from "../../../../src/capture/metadata";
 import { formatDictationAsBullets } from "../../../../src/dictation/bullets";
 import {
   MAX_WEEKLY_REPORT_CAPTION_CHARS,
@@ -63,6 +58,10 @@ import {
   loadWeeklyReportDraft,
   saveWeeklyReportDraft,
 } from "../../../../src/weekly-reports/draft-store";
+import {
+  importWeeklyReportPhotoBatch,
+  weeklyReportImportNotice,
+} from "../../../../src/weekly-reports/photo-import";
 import {
   weeklyReportEditorBusyMessage,
   weeklyReportStepLabel,
@@ -324,6 +323,9 @@ function Wizard({
    * exactly as it links to a photo taken on site. Done synchronously rather than through the durable
    * upload queue because the report needs the resulting fileId NOW to attach it; the durable local copy
    * taken first is what protects the pick if the upload fails or the app is killed.
+   *
+   * The sequencing lives in `importWeeklyReportPhotoBatch`, which persists the WHOLE selection before it
+   * awaits GPS or any upload. This function only supplies the effects and reports the outcome.
    */
   async function importPhotos() {
     if (importInFlight.current || submitting) return;
@@ -357,72 +359,38 @@ function Wizard({
       const assets = result.assets.slice(0, remaining);
       if (assets.length === 0) return;
 
-      // Fetch live GPS ONCE for the whole batch and reuse it (mirrors the Capture screen). Per asset it
-      // would serialise an up-to-8s lookup for every coordless photo and freeze a large indoor import.
-      const exifs = assets.map((asset) => extractExifMetadata(asset.exif as Record<string, unknown>));
-      const needsLive = exifs.some((e) => !hasPhotoCoords(e));
-      const live = needsLive ? await getLiveGps().catch(() => null) : null;
-
-      let failures = 0;
-      for (let i = 0; i < assets.length; i += 1) {
-        const asset = assets[i];
-        const clientUploadId = newClientUploadId();
-        // Location only — never the live fix's `takenAt`, which would restamp the photo to now and drop
-        // it out of the very window this report's picker filters on.
-        const metadata = mergeLiveGpsIntoExif(exifs[i], live);
-        try {
-          // Durable-copy BEFORE the upload: a library uri expires, and the copy is what a resumed draft
-          // renders (and what draft-store rebases after an iOS container rotation).
-          const localUri = await copyPhotoIntoWeeklyDraft(ownerKey, draftId, clientUploadId, asset.uri);
-          dispatch({
-            type: "addPhoto",
-            photo: {
-              key: clientUploadId,
-              fileId: null,
-              caption: "",
-              originalDescription: null,
-              remoteUrl: null,
-              localUri,
-              clientUploadId,
-              takenAt: metadata.takenAt ?? null,
-              width: asset.width,
-              height: asset.height,
-              latitude: metadata.latitude,
-              longitude: metadata.longitude,
-              addressSource: metadata.addressSource,
-            },
-          });
+      const outcome = await importWeeklyReportPhotoBatch(assets, {
+        newClientUploadId,
+        // Durable-copy BEFORE anything else: a library uri expires, and the copy is what a resumed draft
+        // renders (and what draft-store rebases after an iOS container rotation).
+        copyIntoDraft: (clientUploadId, srcUri) =>
+          copyPhotoIntoWeeklyDraft(ownerKey, draftId, clientUploadId, srcUri),
+        addPhoto: (photo) => dispatch({ type: "addPhoto", photo }),
+        // A location failure must not fail the import — the photo simply uploads without coordinates.
+        getLiveGps: () => getLiveGps().catch(() => null),
+        upload: async (input) => {
           const photo = await uploadCapture(fetcher, {
-            uri: localUri,
-            width: asset.width,
-            height: asset.height,
+            uri: input.uri,
+            width: input.width,
+            height: input.height,
             target: { dealId: draft.dealId },
             category: null,
             caption: null,
             // Tagged so the gallery shows where an imported photo came from; the report's own caption is
             // a separate column and is never written to the file.
             tags: ["weekly-report"],
-            metadata,
-            clientUploadId,
+            metadata: input.metadata,
+            clientUploadId: input.clientUploadId,
           });
-          dispatch({
-            type: "resolvePhotoUpload",
-            key: clientUploadId,
-            fileId: photo.id,
-            remoteUrl: photo.imageUrl,
-          });
-        } catch {
-          failures += 1;
-          // Leave the photo on the draft with no fileId: `weeklyReportDraftBlocker` reports it as still
-          // uploading and blocks submit, which is honest — removing it silently would drop a photo the
-          // user chose without ever telling them.
-        }
-      }
-      if (failures > 0) {
-        setNotice({
-          tone: "error",
-          text: `${failures} photo${failures === 1 ? "" : "s"} couldn’t upload. Remove ${failures === 1 ? "it" : "them"} or try again with a better signal.`,
-        });
+          return { fileId: photo.id, remoteUrl: photo.imageUrl };
+        },
+        resolveUpload: (key, fileId, remoteUrl) =>
+          dispatch({ type: "resolvePhotoUpload", key, fileId, remoteUrl }),
+      });
+
+      const failureNotice = weeklyReportImportNotice(outcome);
+      if (failureNotice) {
+        setNotice({ tone: "error", text: failureNotice });
       } else if (draft.reportId || reportId) {
         void qc.invalidateQueries({ queryKey: ["weekly-report-candidates", reportId] });
         if (user) void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, draft.dealId) });
@@ -494,6 +462,14 @@ function Wizard({
       // Content, then photos, then the transition — in that order so the PM's queue never receives a
       // report whose text or photo set is only half-written. Every step is retryable: the local draft is
       // untouched until the transition succeeds.
+      //
+      // This sequence RELIES on the server granting edit rights to everyone it grants the submit to. It
+      // did not: `canEditWeeklyReport` recognised only the current assignments while `canTransitionAs`
+      // honoured `authored_by`, so a superintendent reassigned off the project mid-draft was shown
+      // `canSubmit: true` and then 403'd on this PATCH — with the transition they were entitled to make
+      // never reached, and their locally persisted work permanently unsubmitable. The alignment lives in
+      // reports-service.ts (the author may edit while the report is a DRAFT); if that clause is ever
+      // narrowed, this order has to be revisited with it.
       await updateWeeklyReport(fetcher, reportId, patch);
       await replaceWeeklyReportPhotos(fetcher, reportId, weeklyReportDraftToPhotoPayload(draft));
       // `transitionTo` is null when the report is ALREADY in the state this button would ask for — a PM

@@ -25,6 +25,7 @@ import {
   formatWeekOf,
   weeklyReportDueLabel,
   weeklyReportProjectAction,
+  weeklyReportQueueTruncationNote,
   weeklyReportWeekStateLabel,
   weeklyReportWeekStateTone,
 } from "../../../src/weekly-reports/status";
@@ -280,6 +281,12 @@ export default function ReportsHubScreen() {
 
   const projects = assignments.data?.projects ?? [];
   const pendingReview = assignments.data?.pendingReview ?? [];
+  // The queue is capped server-side. Never render the page as if the cap were the whole of somebody's
+  // workload — approving does not clear a row, so an unreported cap hides new submissions indefinitely.
+  const queueNote = weeklyReportQueueTruncationNote(
+    pendingReview.length,
+    assignments.data?.pendingReviewTotal,
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -320,6 +327,7 @@ export default function ReportsHubScreen() {
         {pendingReview.length > 0 ? (
           <View style={{ gap: theme.space.sm }}>
             <SectionLabel>Waiting on your review</SectionLabel>
+            {queueNote ? <Text style={styles.queueNote}>{queueNote}</Text> : null}
             {pendingReview.map((item) => (
               <Pressable
                 key={item.reportId}
@@ -560,6 +568,8 @@ const styles = StyleSheet.create({
   cardTitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   cardSub: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
   resume: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  // Muted, not danger: a capped queue is information about this list, not a fault the PM has to fix.
+  queueNote: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   discardButton: { minWidth: 76 },
   outstandingLabel: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.danger },
   outstandingRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },

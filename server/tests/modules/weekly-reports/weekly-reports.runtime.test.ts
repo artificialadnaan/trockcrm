@@ -26,6 +26,7 @@ import {
   updateWeeklyReportSettings,
 } from "../../../src/modules/weekly-reports/projects-service.js";
 import {
+  canEditWeeklyReport,
   canTransitionAs,
   createWeeklyReportDraft,
   getWeeklyReportDetail,
@@ -1414,5 +1415,42 @@ describe("transition authorisation helper", () => {
     expect(canTransitionAs(reassigned, { status: "draft", authored_by: SUPER }, "pending_review", SUPER_ACTOR)).toBe(
       true,
     );
+  });
+});
+
+describe("edit authorisation helper", () => {
+  // The matrix that has to agree with the transition matrix above: every actor granted a submit must also
+  // be granted the write, because the clients PATCH the content and PUT the photos before transitioning.
+  const project = { trock_pm_user_id: PM, trock_super_user_id: SUPER };
+  const reassigned = { trock_pm_user_id: PM, trock_super_user_id: DIRECTOR };
+
+  it("lets the author edit their own DRAFT after the assignment moves on", () => {
+    const row = { status: "draft", authored_by: SUPER };
+    expect(canEditWeeklyReport(reassigned, row, SUPER_ACTOR)).toBe(true);
+    // Exactly the pairing that was broken: a submit right with no write right behind it.
+    expect(canTransitionAs(reassigned, row, "pending_review", SUPER_ACTOR)).toBe(true);
+  });
+
+  it("takes it away again once the report has been submitted or approved", () => {
+    for (const status of ["pending_review", "approved"] as const) {
+      expect(canEditWeeklyReport(reassigned, { status, authored_by: SUPER }, SUPER_ACTOR)).toBe(false);
+    }
+  });
+
+  it("keeps a sent report immutable for its author, its PM and a director alike", () => {
+    const row = { status: "sent", authored_by: SUPER };
+    for (const actor of [SUPER_ACTOR, PM_ACTOR, DIRECTOR_ACTOR]) {
+      expect(canEditWeeklyReport(project, row, actor)).toBe(false);
+    }
+  });
+
+  it("keeps an approved report the PM's alone, even for the super who wrote it", () => {
+    expect(canEditWeeklyReport(project, { status: "approved", authored_by: SUPER }, SUPER_ACTOR)).toBe(false);
+    expect(canEditWeeklyReport(project, { status: "approved", authored_by: SUPER }, PM_ACTOR)).toBe(true);
+  });
+
+  it("grants nothing on the strength of an absent author", () => {
+    // `authored_by` is nullable (ON DELETE SET NULL). A null must never match an actor id.
+    expect(canEditWeeklyReport(reassigned, { status: "draft", authored_by: null }, SUPER_ACTOR)).toBe(false);
   });
 });

@@ -346,7 +346,14 @@ export type WeeklyReportReviewItem = {
 export type WeeklyReportAssignmentsResponse = {
   asOf: string;
   projects: WeeklyReportAssignment[];
+  /** Newest week first — the queue only empties when a report is SENT, so the tail is the stale end. */
   pendingReview: WeeklyReportReviewItem[];
+  /**
+   * The true depth of the queue, which the payload caps. Greater than `pendingReview.length` ⇒ rows were
+   * left out and the hub must say so. Optional because an older API build does not send it; absent is
+   * read as "not truncated", which is what the app assumed before the field existed.
+   */
+  pendingReviewTotal?: number;
 };
 
 /**
