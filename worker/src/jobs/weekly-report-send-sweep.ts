@@ -80,6 +80,15 @@ export const WEEKLY_REPORT_SEND_SWEEP_LOCK_KEY = 0x57_52_53_57;
  * A week rather than a day, so a worker that was down over a long weekend still reports what it missed
  * when it comes back. The cost is the one case this deliberately gives up on: a send that stalls while the
  * worker is down for longer than a week is never alerted, only drawn on the board.
+ *
+ * KNOWN GAP, LEFT AS A NOTE RATHER THAN A BOUND. This window ages on ACTIVITY and puts no bound on
+ * `week_of`, while the board bounds the other way: `dashboard-service.ts` drops an undelivered send whose
+ * week is older than `lookbackWeeks` (default 26) into `olderOutstandingCounts` — a number with no row and
+ * therefore no Retry button. A very old week whose delivery was last touched in the last seven days — a
+ * retry from History, a backfilled send — is therefore alertable and unrenderable, and the email tells its
+ * reader to "Open the weekly reports board to retry the send". Bounding `week_of` here would trade that
+ * for a stalled send nobody is told about at all, which is the failure this whole job exists to catch, so
+ * the board's rendering is the half that should move.
  */
 export const WEEKLY_REPORT_SEND_ALERT_MAX_AGE_HOURS = 24 * 7;
 
@@ -256,6 +265,41 @@ function dedupeEmails(emails: string[]): string[] {
 /** Stable short digest of the report set an email covers, so the idempotency key tracks the payload. */
 function alertCohortKey(reportIds: string[]): string {
   return createHash("sha256").update([...reportIds].sort().join(",")).digest("hex").slice(0, 16);
+}
+
+/**
+ * WHICH ANNOUNCEMENT this is — the second half of the idempotency key, and the half without which the
+ * alert can be silently defeated.
+ *
+ * The cohort digest alone is a pure function of the report set and the schema, so for the single-report
+ * case — which is nearly every case — it is byte-identical forever. That is not a dedupe, it is a mute:
+ *
+ *   09:35  report R stalls, is claimed and announced under key K.
+ *   09:45  a director presses Retry. `retryWeeklyReportSend` clears `send_stall_alerted_at`, which is the
+ *          entire point of 0227's re-arm — a retry that ALSO goes quiet is a new incident and the person
+ *          who acted is the person who needs telling. That retry dead-letters too.
+ *   10:20  the sweep re-claims R. Cohort {R}. Key K again — but the payload has moved on ("Silent for"
+ *          and "Last attempt" both changed). Resend answers `invalid_idempotent_request`, which
+ *          `sendSystemEmailWithMetadata` deliberately maps to `{success:true, outcome:"delivered"}` (see
+ *          system-email.ts). The sweep takes the delivered branch, KEEPS the claim and logs a send.
+ *
+ * No email exists, the row reads as announced, and no tick will ever retry it. A client failing twice is
+ * reported to nobody. The same trap defeats the `unknown` rollback below, because that retry's payload has
+ * also moved on by the time the next tick makes it.
+ *
+ * THE CLAIM STAMP IS THE ANNOUNCEMENT'S IDENTITY. It is what this run wrote to `send_stall_alerted_at`,
+ * what `releaseAlertClaims` conditions its rollback on, and it is minted afresh exactly when a NEW claim is
+ * taken — which is exactly when the alert is genuinely new (a human re-armed it, or a previous attempt gave
+ * its claim back). Two sends carrying the same claim stamp are the same announcement of the same rows and
+ * still dedupe; two carrying different stamps are different announcements and must both go out.
+ *
+ * This is `field-scorecard-email.ts`'s `deliveryNonce` and `weekly-report-reminders.ts`'s `${today}` in the
+ * form this job has available: rotate the key when the message is genuinely new, keep it when it is not.
+ *
+ * `2026-08-18T18:00:00.000Z` -> `20260818T180000000Z`, so the key stays readable in a provider log.
+ */
+function alertCycleToken(claimStamp: string): string {
+  return claimStamp.replace(/[^0-9A-Za-z]/g, "");
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -467,8 +511,13 @@ export async function runWeeklyReportSendSweep(
           now,
         });
       } catch (err) {
-        // One broken office must not cost the others their alert. Nothing is claimed on a throw, so the
-        // next tick — fifteen minutes away — retries this office from scratch.
+        // One broken office must not cost the others their alert. Everything downstream of the claim runs
+        // inside `sweepOffice`'s own guard and gives its claims back, so a throw that reaches here either
+        // happened before anything was claimed or has already been rolled back — the next tick, fifteen
+        // minutes away, retries this office from scratch. The one residue this cannot promise away is a
+        // claim UPDATE that committed and then lost its connection before returning its RETURNING rows —
+        // nothing can tell that apart from an UPDATE that never ran, so those reports are stamped and
+        // unannounced, and this log line is the only record of it.
         logger.error(`${LOG} Office sweep failed`, { tenantSchema, err });
         summary.failed += 1;
       }
@@ -632,9 +681,11 @@ async function sweepOffice(args: OfficeSweepArgs): Promise<void> {
   // every fifteen minutes; the reverse ordering means a crash after the email re-announces the same sends
   // on the next tick, forever.
   //
-  // The claim re-checks every predicate the SELECT used, so a delivery, a correction or a retry that
-  // landed in the milliseconds since cancels the alert rather than stamping a row that has moved on. It is
-  // also what makes two replicas safe if the advisory lock is ever lost: only one UPDATE can win a row.
+  // The claim re-checks every predicate the SELECT used PLUS the activity clock, so a delivery, a
+  // correction or a retry that landed in the milliseconds since cancels the alert rather than stamping a
+  // row that has moved on — the retry being the case none of the other conjuncts can see, see
+  // `claimAlerts`. It is also what makes two replicas safe if the advisory lock is ever lost: only one
+  // UPDATE can win a row.
   const claimStamp = now.toISOString();
   const claimed = await claimAlerts(
     query,
@@ -645,29 +696,43 @@ async function sweepOffice(args: OfficeSweepArgs): Promise<void> {
   if (claimed.size === 0) return;
   const announced = stalled.filter((report) => claimed.has(report.id));
 
-  const email = buildWeeklyReportSendAlertEmail({
-    officeName: args.officeName,
-    reports: announced,
-    dashboardUrl: weeklyReportDashboardUrl(args.frontendUrl, args.officeId),
-    now,
-  });
-
   let outcome: SendSystemEmailOutcome;
   let sendError: unknown = null;
   try {
+    // COMPOSED INSIDE THE GUARD, not before it. The claim is already written by the time this runs, so a
+    // throw in here used to escape to the per-office catch and leave those reports stamped as announced
+    // forever — the one state this job must never reach, because `send_stall_alerted_at` is the memory
+    // that stops the next tick retrying. The throw paths are all currently guarded (every value reaching
+    // `escapeHtml` is a non-null string, every Date reaching `Intl` is valid, and the empty-cohort throw
+    // is unreachable from here), so this is latent rather than live — but the shell and the detail table
+    // are rendered by `weekly-report-reminders.ts`, which is a different module with its own reasons to
+    // change, and "the composition currently cannot throw" is not a guarantee this file can make.
+    //
+    // Classifying a composition failure as `unknown` is the honest reading: nothing was learned about
+    // delivery because nothing was ever sent. `rejected` would be more precise and is not worth a second
+    // branch — both release the claims, which is the behaviour that matters.
+    const email = buildWeeklyReportSendAlertEmail({
+      officeName: args.officeName,
+      reports: announced,
+      dashboardUrl: weeklyReportDashboardUrl(args.frontendUrl, args.officeId),
+      now,
+    });
+
     const result = await args.sendEmail(recipients, email.subject, email.html, {
       text: email.text,
-      // Keyed on the COHORT, so a re-send after an ambiguous outcome presents the same key with the same
-      // payload and the provider dedupes it. A cohort that has grown by the next tick is a genuinely
-      // different email and gets a different key.
-      idempotencyKey: `weekly-report-stall-${tenantSchema}-${alertCohortKey([...claimed])}`,
+      // The COHORT says which reports this email is about; the CYCLE says which announcement it is. Both
+      // are needed and the cohort alone is a trap — see `alertCycleToken` for the worked example, but in
+      // one line: a single-report cohort digest never changes, so the second alert about the same report
+      // presents a used key with a moved-on payload, Resend refuses it as `invalid_idempotent_request`,
+      // and this job reads that refusal as a delivery.
+      idempotencyKey: `weekly-report-stall-${tenantSchema}-${alertCycleToken(claimStamp)}-${alertCohortKey([...claimed])}`,
     });
     outcome = result.outcome ?? (result.success ? "delivered" : "unknown");
   } catch (err) {
     // NOT the transport's failure path — `sendSystemEmailWithMetadata` returns rather than throwing for
     // every provider and network failure, because resend@6 catches its own fetch. What can still reach
-    // here is an injected transport in a test or a bug in the send path. Either way nothing was learned
-    // about delivery, so it classifies with the ambiguous cases.
+    // here is a composition failure, an injected transport in a test, or a bug in the send path. Either
+    // way nothing was learned about delivery, so it classifies with the ambiguous cases.
     sendError = err;
     outcome = "unknown";
   }
@@ -683,12 +748,18 @@ async function sweepOffice(args: OfficeSweepArgs): Promise<void> {
   }
 
   // NEITHER remaining outcome keeps its claims. `rejected` is provably undelivered. `unknown` may have
-  // gone out and is released anyway, for the reason the reminder cron gives for the same decision: the
-  // idempotency key is fixed by the cohort, so if the first request did reach the provider the retry
-  // presents the same key and the same payload and is deduped — there is no third answer, and a retry
-  // therefore cannot produce a second copy. Against that, keeping the claim on the most common transport
-  // failure there is (a 5xx, a gateway 502, a pool blip — all `unknown`) would silently and permanently
-  // suppress the only alert these sends will ever get.
+  // gone out and is released anyway, ACCEPTING A POSSIBLE DUPLICATE — which is a change of reasoning, not
+  // just of wording. This used to argue that a retry was free because it presented the same key and the
+  // same payload and would be deduped. The payload is not the same: it embeds "Silent for" and "Last
+  // attempt", both of which move between ticks. Same key with a moved payload is the one combination the
+  // provider refuses, and that refusal reads back here as a DELIVERY — so the old reasoning did not buy a
+  // safe retry, it bought a stamped row and no email at all. The key now carries the claim stamp, so the
+  // next tick's announcement is a genuinely new request that actually goes out.
+  //
+  // The cost is real and it is the right way round: an `unknown` that did reach the provider puts a second
+  // copy of one alert in a director's inbox. Keeping the claim instead would silently and permanently
+  // suppress the only alert these sends will ever get, on the most common transport failure there is (a
+  // 5xx, a gateway 502, a pool blip — all `unknown`). A duplicate is noticed; silence is not.
   let released = true;
   let rollbackError: unknown = null;
   try {
@@ -731,6 +802,24 @@ async function leadershipRecipients(query: PgQuery, tenantSchema: string): Promi
  * means only one run can claim a row, and the rest of it means a row that was delivered, superseded or
  * retried between the SELECT and here is silently dropped instead of being announced as stuck.
  *
+ * A RETRY IS THE ONE OF THOSE THREE THE OTHER CONJUNCTS CANNOT SEE, which is why the clock bound is here.
+ * `retryWeeklyReportSend` writes `send_error = NULL, send_last_attempt_at = now(), send_stall_alerted_at =
+ * NULL` — and since the alert stamp was ALREADY null, not one of the other conjuncts changes value. A
+ * director who pressed Retry in the seconds between the SELECT and this UPDATE therefore got their report
+ * claimed and announced as having stopped moving while the board, reading the same shared predicate off
+ * the clock the retry just moved, drew it as "Sending…". Two surfaces disagreeing about one send is
+ * precisely what `weeklyReportSendStall` exists to prevent.
+ *
+ * The bound is `<= claimStamp` — the run's own reference instant, the same value stamped into the row —
+ * and NOT a second copy of the stall threshold, which lives in the shared predicate and must keep exactly
+ * one implementation. It cannot drop a row this run legitimately selected: every one of those passed
+ * `weeklyReportSendHasStalled`, so its activity clock is at least WEEKLY_REPORT_SEND_STALL_MINUTES older
+ * than `claimStamp` already. It drops exactly the rows whose clock moved AFTER this run measured them.
+ *
+ * GREATEST is NULL only when both stamps are, and `NULL <= x` is NULL, so a clockless row is not claimed —
+ * which matches `weeklyReportLastSendActivityAt`'s rule that a row with neither stamp cannot be aged, and
+ * costs nothing because such a row is already dropped by the SELECT's own GREATEST bound.
+ *
  * `updated_at` is deliberately NOT touched. It is the report's PDF generation marker (see pdf-artifact.ts)
  * — moving it would invalidate a published client artifact and force a full re-render, for a write that
  * records who we emailed and changes nothing a reader of the report can see.
@@ -750,6 +839,7 @@ async function claimAlerts(
         AND send_delivered_at IS NULL
         AND send_stall_alerted_at IS NULL
         AND superseded_by_id IS NULL
+        AND GREATEST(sent_at, send_last_attempt_at) <= $2::timestamptz
       RETURNING id`,
     [reportIds, claimStamp],
   );

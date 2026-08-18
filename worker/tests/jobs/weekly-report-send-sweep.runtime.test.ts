@@ -12,7 +12,7 @@
 // thresholds are pinned to an interval by a row on each side of the boundary.
 
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { deals, files, offices, users } from "@trock-crm/shared/schema";
 import { WEEKLY_REPORT_SEND_STALL_MINUTES } from "@trock-crm/shared/lib/weeklyReportSendStall";
 import { migrationSql } from "../../../server/tests/helpers/migration-sql.js";
@@ -68,6 +68,28 @@ const COMMITTED_AT = "2026-08-18T16:00:00.000Z";
 const RETRIED_A_MINUTE_AGO = "2026-08-18T17:59:00.000Z";
 const RETRIED_AN_HOUR_AGO = "2026-08-18T17:00:00.000Z";
 
+/**
+ * THE SECOND TICK, for every case that spans two sweeps — which is every case about the idempotency key,
+ * because the defect it guards against is invisible inside a single run.
+ *
+ * The cron runs every fifteen minutes, so two ticks NEVER share a reference instant in production. A test
+ * that re-runs at the same `now` is modelling something that cannot happen, and the alert's payload — which
+ * carries "Silent for" — is different at each of these instants by construction.
+ */
+const NEXT_TICK = new Date("2026-08-18T18:15:00.000Z");
+/** A director sees the 18:00 alert and presses Retry two minutes later. */
+const HUMAN_RETRIED_AT = "2026-08-18T18:02:00.000Z";
+/** The first tick at which THAT retry has itself been silent past the threshold — 43 minutes. */
+const TICK_AFTER_RETRY = new Date("2026-08-18T18:45:00.000Z");
+/**
+ * A retry landing in the window between the sweep's SELECT and its claim: half a minute AFTER the instant
+ * this run measured every row against, which is what makes it invisible to a claim that only re-checks the
+ * SELECT's own conjuncts.
+ */
+const RACED_RETRY_AT = "2026-08-18T18:00:30.000Z";
+/** The other side of that bound: a clock landing exactly ON the run's reference instant is still claimable. */
+const RACED_AT_REFERENCE_INSTANT = "2026-08-18T18:00:00.000Z";
+
 let pg: PGlite;
 
 const query = async (text: string, params?: unknown[]) => {
@@ -89,6 +111,70 @@ interface SentEmail {
   idempotencyKey: string;
 }
 
+interface SendBehaviour {
+  outcome?: SendSystemEmailOutcome;
+  throws?: boolean;
+}
+
+/**
+ * THE MAIL PROVIDER, WITH THE IDEMPOTENCY BEHAVIOUR THE REAL ONE HAS.
+ *
+ * A spy that only records calls cannot see the defect this suite exists to pin. Resend remembers an
+ * idempotency key for 24 hours, and what it does on a repeat depends on the PAYLOAD:
+ *
+ *   same key, same payload       the original response is replayed. Nothing new is sent, and that is
+ *                                correct — the first message went out.
+ *   same key, DIFFERENT payload  409 `invalid_idempotent_request`, and NOTHING IS SENT.
+ *                                `sendSystemEmailWithMetadata` deliberately maps that to
+ *                                `{success:true, outcome:"delivered"}` (system-email.ts:201-203), because
+ *                                for its original caller it does mean the first payload was delivered.
+ *
+ * That second row is the trap. A caller whose payload moves between attempts — and this alert's does, it
+ * carries "Silent for" and "Last attempt" — reads a refusal to send as a delivery, stamps its row, and
+ * never tries again. A stub returning `{success:true}` unconditionally reports that as a pass, which is
+ * exactly why the bug it models survived a suite of forty tests.
+ *
+ * `requests` is every call the sweep made; `delivered` is the ones that actually put a NEW email in an
+ * inbox; `swallowed` is the ones the provider refused. Assertions belong on the last two — `requests`
+ * cannot distinguish an email that was sent from one that was not.
+ *
+ * ONE PROVIDER PER TEST, NOT PER RUN, because the 24-hour key memory is the whole point: every defect here
+ * lives BETWEEN ticks.
+ */
+function mailProvider() {
+  const requests: SentEmail[] = [];
+  const delivered: SentEmail[] = [];
+  const swallowed: SentEmail[] = [];
+  const payloadByKey = new Map<string, string>();
+
+  const fingerprint = (email: SentEmail) =>
+    [email.to.join(","), email.subject, email.text, email.html].join("\u0000");
+
+  const send = (email: SentEmail, behaviour: SendBehaviour): SendSystemEmailResult => {
+    requests.push(email);
+    const held = payloadByKey.get(email.idempotencyKey);
+    if (held !== undefined && held !== fingerprint(email)) {
+      swallowed.push(email);
+      return { success: true, messageId: null, outcome: "delivered" };
+    }
+    // A `rejected` outcome is "the request was refused before an email existed" (see classifySendFailure),
+    // so it must not leave a key behind — re-sending it has to be free.
+    if (behaviour.outcome === "rejected") return { success: false, messageId: null, outcome: "rejected" };
+    // Everything that REACHES the provider registers its key, delivered or not. That is the adversarial
+    // half of `unknown` and the one the release-on-unknown rationale has to survive: a 5xx after the
+    // request was accepted leaves the key held with no email sent.
+    if (held === undefined) payloadByKey.set(email.idempotencyKey, fingerprint(email));
+    if (behaviour.outcome === "unknown") return { success: false, messageId: null, outcome: "unknown" };
+    if (held !== undefined) return { success: true, messageId: "duplicate", outcome: "delivered" };
+    delivered.push(email);
+    return { success: true, messageId: `msg-${delivered.length}`, outcome: "delivered" };
+  };
+
+  return { requests, delivered, swallowed, send };
+}
+
+type MailProvider = ReturnType<typeof mailProvider>;
+
 /**
  * `rejected` and `unknown` are DIFFERENT failures and BOTH are `{success:false}`, which is why the stub
  * carries `outcome`. It is the full `SendSystemEmailResult` for the reason the reminder suite's sibling
@@ -98,7 +184,7 @@ interface SentEmail {
  * `throws` models a bug in the send path, NOT a transport failure — `sendSystemEmailWithMetadata` returns
  * rather than throwing for every provider and network failure, because resend@6 catches its own fetch.
  */
-function emailSpy(behaviour: { outcome?: SendSystemEmailOutcome; throws?: boolean } = {}) {
+function emailSpy(behaviour: SendBehaviour = {}, provider: MailProvider = mailProvider()) {
   const sent: SentEmail[] = [];
   const sendEmail = async (
     to: string | string[],
@@ -106,19 +192,18 @@ function emailSpy(behaviour: { outcome?: SendSystemEmailOutcome; throws?: boolea
     html: string,
     options: { text: string; idempotencyKey: string },
   ): Promise<SendSystemEmailResult> => {
-    sent.push({
+    const email: SentEmail = {
       to: Array.isArray(to) ? to : [to],
       subject,
       html,
       text: options.text,
       idempotencyKey: options.idempotencyKey,
-    });
+    };
+    sent.push(email);
     if (behaviour.throws) throw new Error("send path blew up");
-    const outcome = behaviour.outcome ?? "delivered";
-    if (outcome === "delivered") return { success: true, messageId: `msg-${sent.length}`, outcome };
-    return { success: false, messageId: null, outcome };
+    return provider.send(email, behaviour);
   };
-  return { sent, sendEmail };
+  return { sent, sendEmail, provider };
 }
 
 function loggerSpy() {
@@ -129,13 +214,20 @@ function loggerSpy() {
   return { logs, logger: { log: record(logs.log), warn: record(logs.warn), error: record(logs.error) } };
 }
 
+/** Every run in a test shares `provider`, so the provider's key memory spans ticks as the real one does. */
+let provider: MailProvider;
+
 async function run(
-  behaviour: { outcome?: SendSystemEmailOutcome; throws?: boolean; now?: Date } = {},
+  behaviour: SendBehaviour & {
+    now?: Date;
+    /** Wrapped to interleave a write between the sweep's SELECT and its claim. */
+    query?: typeof query;
+  } = {},
 ) {
-  const spy = emailSpy(behaviour);
+  const spy = emailSpy(behaviour, provider);
   const { logs, logger } = loggerSpy();
   const summary = await runWeeklyReportSendSweep({
-    query,
+    query: behaviour.query ?? query,
     sendEmail: spy.sendEmail,
     env: { FRONTEND_URL: "https://trockcrm.com" },
     now: behaviour.now ?? NOW,
@@ -241,6 +333,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  provider = mailProvider();
   await pg.exec(`
     DELETE FROM office_dallas.weekly_reports;
     DELETE FROM office_dallas.weekly_report_projects;
@@ -455,24 +548,39 @@ describe("alerting once", () => {
     expect((await reportRow()).send_stall_alerted_at).toEqual(stampedAt);
   });
 
-  it("announces a report again once a human retry has re-armed it", async () => {
+  it("announces a report again once a human retry has re-armed it — and actually SENDS that second email", async () => {
     // THE CONTROL for the suppression, and the reason `retryWeeklyReportSend` clears the stamp: somebody
     // saw the alert and acted, so a retry that also goes quiet is a NEW incident. Without this, a report
     // retried three times and stalled three times is announced once and then never again.
+    //
+    // AND IT ASSERTS ON `provider.delivered`, NOT ON THE CALL. This test used to assert that a second call
+    // was MADE, which the sweep did — under an idempotency key identical to the first, because the cohort
+    // digest is a pure function of the report set. Resend holds that key for 24 hours, the payload has
+    // moved on ("Silent for", "Last attempt"), so the second call was refused as
+    // `invalid_idempotent_request` and mapped straight back to "delivered". The claim was kept, the row
+    // read as announced, no tick would ever retry it, and no email existed. The re-arm the whole of 0227
+    // was built for was defeated by its own alert, and a call-counting spy called that a pass.
     await seedSend({ sentAt: STALLED_AT });
     expect((await run()).sent).toHaveLength(1);
+    expect(provider.delivered).toHaveLength(1);
 
     // What the retry route writes: the error cleared, the clock moved, the alert re-armed.
     await pg.query(
       `UPDATE office_dallas.weekly_reports
           SET send_error = NULL, send_last_attempt_at = $2::timestamptz, send_stall_alerted_at = NULL
         WHERE id = $1::uuid`,
-      [REPORT, RETRIED_AN_HOUR_AGO],
+      [REPORT, HUMAN_RETRIED_AT],
     );
 
-    const again = await run();
+    // The first tick at which the retry has itself been silent past the threshold.
+    const again = await run({ now: TICK_AFTER_RETRY });
     expect(again.sent).toHaveLength(1);
     expect(again.summary.alerted).toBe(1);
+    expect(provider.swallowed).toEqual([]);
+    expect(provider.delivered).toHaveLength(2);
+    // The two announcements are different messages and must carry different keys.
+    expect(again.sent[0]!.idempotencyKey).not.toBe(provider.delivered[0]!.idempotencyKey);
+    expect(provider.delivered[1]!.text).toContain("Silent for: 43 min");
   });
 
   it("does not re-announce a retry that is still in flight", async () => {
@@ -489,6 +597,86 @@ describe("alerting once", () => {
     );
 
     expect((await run()).sent).toHaveLength(0);
+  });
+});
+
+describe("the window between the read and the claim", () => {
+  /**
+   * Land a write in the gap the claim exists to survive: after the candidate SELECT has returned, before
+   * the claim UPDATE runs. Dallas only, once — the sweep shares one `query` across every office.
+   */
+  function raceIntoTheClaim(write: () => Promise<void>) {
+    let raced = false;
+    return async (text: string, params?: unknown[]) => {
+      const result = await query(text, params);
+      if (!raced && text.includes("FROM office_dallas.weekly_reports wr")) {
+        raced = true;
+        await write();
+      }
+      return result;
+    };
+  }
+
+  /** Exactly what `retryWeeklyReportSend` writes, at `at`. */
+  const humanRetry = (at: string) => () =>
+    pg
+      .query(
+        `UPDATE office_dallas.weekly_reports
+            SET send_error = NULL, send_last_attempt_at = $2::timestamptz, send_stall_alerted_at = NULL
+          WHERE id = $1::uuid`,
+        [REPORT, at],
+      )
+      .then(() => undefined);
+
+  it("does NOT announce a report a human retried between the read and the claim", async () => {
+    // The claim re-checks the SELECT's conjuncts, and for a retry not one of them changes value: the error
+    // is cleared (not read), the clock moves (not read), and `send_stall_alerted_at` is set to NULL when it
+    // was ALREADY NULL. So the report a director had just re-queued was claimed and announced as having
+    // stopped moving, while the board — reading the shared predicate off the clock that retry moved — drew
+    // it as "Sending…". An alert whose first instruction is "open the board" must not point at a row the
+    // board says is fine.
+    await seedSend({ sentAt: STALLED_AT });
+
+    const { sent, summary } = await run({ query: raceIntoTheClaim(humanRetry(RACED_RETRY_AT)) });
+
+    // It WAS read as stalled — the row reached the claim, and the claim is what dropped it.
+    expect(summary.stalled).toBe(1);
+    expect(summary.alerted).toBe(0);
+    expect(sent).toEqual([]);
+    expect(provider.delivered).toEqual([]);
+    expect((await reportRow()).send_stall_alerted_at).toBeNull();
+  });
+
+  it("still announces when the racing write does not move the delivery clock", async () => {
+    // THE CONTROL. The new conjunct is a bound on the ACTIVITY CLOCK, not a blanket "something changed"
+    // check: a worker recording an error against the attempt this sweep already measured is not a retry,
+    // and dropping it would silently un-alert the commonest stalled shape there is.
+    await seedSend({ sentAt: STALLED_AT });
+
+    const { sent, summary } = await run({
+      query: raceIntoTheClaim(() =>
+        pg
+          .query(`UPDATE office_dallas.weekly_reports SET send_error = 'Resend 502' WHERE id = $1::uuid`, [REPORT])
+          .then(() => undefined),
+      ),
+    });
+
+    expect(summary.alerted).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(provider.delivered).toHaveLength(1);
+    expect((await reportRow()).send_stall_alerted_at).not.toBeNull();
+  });
+
+  it("claims a clock landing exactly on the run's reference instant", async () => {
+    // The other side of the bound, pinning it to `<=` rather than `<`. A retry stamped at the very instant
+    // this run measures against did not happen after the measurement, and the run's own claim stamp is
+    // that same instant — a strict bound would make the sweep unable to claim a row it just stamped.
+    await seedSend({ sentAt: STALLED_AT });
+
+    const { summary } = await run({ query: raceIntoTheClaim(humanRetry(RACED_AT_REFERENCE_INSTANT)) });
+
+    expect(summary.alerted).toBe(1);
+    expect((await reportRow()).send_stall_alerted_at).not.toBeNull();
   });
 });
 
@@ -629,10 +817,8 @@ describe("when the alert cannot be sent", () => {
   });
 
   it("gives the claim back on an UNKNOWN outcome too", async () => {
-    // `unknown` may have been delivered. It is released anyway: the idempotency key is fixed by the cohort,
-    // so a re-send presents the same key with the same payload and the provider dedupes it — there is no
-    // third answer. Keeping the claim would permanently suppress the only alert these sends ever get, on
-    // the most common transport failure there is.
+    // `unknown` may have been delivered. It is released anyway, because keeping the claim would permanently
+    // suppress the only alert these sends ever get, on the most common transport failure there is.
     await seedSend({ sentAt: STALLED_AT });
 
     const unknown = await run({ outcome: "unknown" });
@@ -641,7 +827,47 @@ describe("when the alert cannot be sent", () => {
 
     const retried = await run();
     expect(retried.sent).toHaveLength(1);
-    expect(retried.sent[0]!.idempotencyKey).toBe(unknown.sent[0]!.idempotencyKey);
+  });
+
+  it("re-presents the SAME key when the retry is the same message in the same cycle", async () => {
+    // THE OTHER HALF of the key's job, and the control for the rotation cases below: a key that rotated on
+    // every request would be no key at all. Two announcements of the same cohort, claimed at the same
+    // instant, are the same message — same payload, same key — and the provider recognises it rather than
+    // putting a second copy of one alert in a director's inbox.
+    await seedSend({ sentAt: STALLED_AT });
+
+    const first = await run({ outcome: "unknown" });
+    const same = await run();
+
+    expect(same.sent[0]!.idempotencyKey).toBe(first.sent[0]!.idempotencyKey);
+    // Recognised, not refused: `swallowed` would mean `invalid_idempotent_request`, which is the failure
+    // shape, and `delivered` staying empty means no second copy was produced.
+    expect(provider.swallowed).toEqual([]);
+    expect(provider.delivered).toEqual([]);
+  });
+
+  it("SENDS the next tick's alert after an ambiguous outcome, instead of having it swallowed", async () => {
+    // THE ROLLBACK RATIONALE, EXECUTED. Releasing the claim on `unknown` is only worth anything if the
+    // next tick's send actually reaches somebody. It did not: the key was fixed by the cohort, the
+    // provider was still holding it from the ambiguous request, and the payload had moved on by fifteen
+    // minutes — so Resend answered `invalid_idempotent_request`, `sendSystemEmailWithMetadata` mapped that
+    // to "delivered", and the sweep stamped the row and logged an announcement for an email that was never
+    // sent. Released-then-re-suppressed is strictly worse than never releasing, because it also lies in
+    // the log.
+    await seedSend({ sentAt: STALLED_AT });
+
+    const ambiguous = await run({ outcome: "unknown" });
+    expect(ambiguous.summary.failed).toBe(1);
+    expect(provider.delivered).toEqual([]);
+    expect((await reportRow()).send_stall_alerted_at).toBeNull();
+
+    const next = await run({ now: NEXT_TICK });
+
+    expect(provider.swallowed).toEqual([]);
+    expect(provider.delivered).toHaveLength(1);
+    expect(provider.delivered[0]!.text).toContain("Silent for: 46 min");
+    expect(next.summary.alerted).toBe(1);
+    expect((await reportRow()).send_stall_alerted_at).not.toBeNull();
   });
 
   it("gives the claim back when the send path throws outright", async () => {
@@ -650,6 +876,62 @@ describe("when the alert cannot be sent", () => {
     const thrown = await run({ throws: true });
     expect(thrown.summary.failed).toBe(1);
     expect((await reportRow()).send_stall_alerted_at).toBeNull();
+  });
+
+  it("gives the claim back when COMPOSING the email throws, after the claim is already written", async () => {
+    // The claim is written BEFORE the email is composed, deliberately: a crash between the two costs one
+    // missed alert rather than an alert every fifteen minutes. Composition used to sit outside the send's
+    // guard, so a throw in it escaped to the per-office catch — whose comment promised "Nothing is claimed
+    // on a throw", which stops being true the instant the claim lands. Those reports would read as
+    // announced with no email ever sent, and `send_stall_alerted_at` is precisely the memory that stops any
+    // later tick retrying them.
+    //
+    // "alerts the other office even when one office's sweep throws" cannot see this: it renames `deals`,
+    // which breaks the candidate SELECT, so its throw happens BEFORE the claim and its "nothing was
+    // claimed" assertion passes either way.
+    //
+    // The throw is injected at the module boundary the sweep genuinely composes through — the branded
+    // shell and the detail table live in `weekly-report-reminders.ts`, a separate module with its own
+    // reasons to change. Every throw path in there is guarded today, which is what makes this latent
+    // rather than live; a guard has to hold before it is needed.
+    await seedSend({ sentAt: STALLED_AT });
+
+    vi.resetModules();
+    vi.doMock("../../src/jobs/weekly-report-reminders.js", async () => {
+      const actual = await vi.importActual<typeof import("../../src/jobs/weekly-report-reminders.js")>(
+        "../../src/jobs/weekly-report-reminders.js",
+      );
+      return {
+        ...actual,
+        renderDetailRows: () => {
+          throw new TypeError("renderDetailRows blew up");
+        },
+      };
+    });
+    try {
+      const fresh = await import("../../src/jobs/weekly-report-send-sweep.js");
+      const spy = emailSpy({}, provider);
+      const { logs, logger } = loggerSpy();
+
+      const summary = await fresh.runWeeklyReportSendSweep({
+        query,
+        sendEmail: spy.sendEmail,
+        env: { FRONTEND_URL: "https://trockcrm.com" },
+        now: NOW,
+        logger,
+        acquireLock: async () => async () => {},
+      });
+
+      expect(spy.sent).toEqual([]);
+      expect(provider.delivered).toEqual([]);
+      expect(summary.alerted).toBe(0);
+      // THE ASSERTION THAT MOVES: unguarded, the row stays stamped and no tick ever looks at it again.
+      expect((await reportRow()).send_stall_alerted_at).toBeNull();
+      expect(logs.error.some((line) => line.includes("claims released"))).toBe(true);
+    } finally {
+      vi.doUnmock("../../src/jobs/weekly-report-reminders.js");
+      vi.resetModules();
+    }
   });
 });
 
@@ -705,15 +987,30 @@ describe("the alert email", () => {
     expect(summary.alerted).toBe(2);
   });
 
-  it("keys the provider idempotency key on the cohort, not the clock", async () => {
+  it("rotates the idempotency key per ANNOUNCEMENT, and names both dimensions in it", async () => {
+    // This assertion used to read the other way round — same reports, same key, "so a re-send after an
+    // ambiguous outcome is deduped by the provider". It pinned the bug. A cohort digest is a pure function
+    // of the report set and the schema, so for a single report it is byte-identical forever, while the
+    // email's payload moves with the clock it prints. Same key, different payload is the one combination
+    // Resend refuses, and `sendSystemEmailWithMetadata` reads that refusal back as a delivery — so a key
+    // that never rotated meant a report could be claimed, logged as announced, and never emailed again.
+    //
+    // The claim stamp is what rotates it: it is this run's own record of THIS announcement, written to
+    // `send_stall_alerted_at` and minted afresh whenever a new claim is taken.
     await seedSend({ sentAt: STALLED_AT });
 
     const first = await run({ outcome: "unknown" });
-    const second = await run({ outcome: "unknown", now: new Date("2026-08-18T18:20:00.000Z") });
+    const second = await run({ outcome: "unknown", now: NEXT_TICK });
 
-    // Same reports, same key — so a re-send after an ambiguous outcome is deduped by the provider rather
-    // than putting a second copy of the same alert in a director's inbox.
-    expect(second.sent[0]!.idempotencyKey).toBe(first.sent[0]!.idempotencyKey);
+    expect(second.sent[0]!.idempotencyKey).not.toBe(first.sent[0]!.idempotencyKey);
+    // The cohort half is still there — two offices alerting in one tick must not collide, and neither must
+    // one office whose stalled set has grown.
+    expect(first.sent[0]!.idempotencyKey).toMatch(
+      /^weekly-report-stall-office_dallas-20260818T180000000Z-[0-9a-f]{16}$/,
+    );
+    expect(second.sent[0]!.idempotencyKey).toMatch(
+      /^weekly-report-stall-office_dallas-20260818T181500000Z-[0-9a-f]{16}$/,
+    );
   });
 
   it("names the stall threshold it actually used", async () => {
