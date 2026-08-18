@@ -886,7 +886,8 @@ describe("photos", () => {
     // And the DEFAULT the picker offers is cut to fit. files.description has no such limit, so a photo
     // captured with a long one used to pre-fill the form with a value that 400s the moment it is saved.
     const wordy = await seedPhoto({ takenAt: "2026-08-11", description: "z".repeat(600) });
-    const candidate = (await listWeeklyReportPhotoCandidates(db, id)).find((c) => c.fileId === wordy);
+    const { photos: wordyCandidates } = await listWeeklyReportPhotoCandidates(db, id);
+    const candidate = wordyCandidates.find((c) => c.fileId === wordy);
     expect(candidate!.caption!.length).toBe(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS);
     // The untouched capture description is still reported in full — only the suggested caption is cut.
     expect(candidate!.originalDescription).toHaveLength(600);
