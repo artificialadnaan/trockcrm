@@ -13,7 +13,6 @@ import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import {
-  WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
   WEEKLY_REPORT_SEND_REQUEST_KEYS,
   weeklyReportRetryIsProviderDeduped,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
@@ -22,9 +21,11 @@ import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../../src/middleware/error-handler.js";
 import {
+  ASSIGNABLE_ROLES,
   createWeeklyReportProject,
   updateWeeklyReportProject,
 } from "../../../src/modules/weekly-reports/projects-service.js";
+import { WEEKLY_REPORT_SENDER_ROLES } from "../../../src/modules/weekly-reports/routes.js";
 import {
   createWeeklyReportDraft,
   getWeeklyReportDetail,
@@ -98,11 +99,31 @@ const PRIOR_WEEK = "2026-08-06";
  * test. They are numbers rather than an import ON PURPOSE — if the product decides 30 minutes is wrong,
  * these are supposed to break and be re-chosen, not silently follow.
  *
- * (The sibling `WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS` is pinned the same way, by the CRM
- * suite's hard-coded `sentAt: "2026-08-01T10:00:00.000Z"`.)
+ * The sibling `WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS` gets the same treatment below, and for
+ * the same reason. It used to be aged as `(WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS ± 1) * 60`,
+ * which is the exact defect this comment warns about one paragraph up: the fixture moved with the
+ * constant and nothing could fail. The CRM suite's hard-coded `sentAt: "2026-08-01T10:00:00.000Z"` was
+ * cited here as the pin, but it sits ~424 h in the past, so it only ever caught values above ~424 — and
+ * that bound grows by 24 every real day. Raising 24 to anything up to ~424 left the whole gate green.
+ *
+ * That is the worst mutation available in this feature. The constant is what makes `retryWeeklyReportSend`
+ * demand `acknowledgeDuplicateRisk` for a send whose provider key has expired; widen it and both the board
+ * and History stop asking, and a retry puts a SECOND COPY of the report in a client's inbox.
+ *
+ * `weeklyReportRetryIsProviderDeduped` is now pinned directly, with absolute dates, in
+ * `shared/src/lib/weeklyReportEmail.test.ts`.
  */
 const STALLED_MINUTES = 35;
 const IN_FLIGHT_MINUTES = 5;
+
+/**
+ * Either side of the 24-hour provider idempotency window, in minutes, as literals.
+ *
+ * Numbers rather than an import, exactly as STALLED_MINUTES above: if the product re-chooses the window
+ * these are supposed to BREAK and be re-picked, not silently follow the constant they are meant to test.
+ */
+const PROVIDER_WINDOW_CLOSED_MINUTES = 25 * 60;
+const PROVIDER_WINDOW_OPEN_MINUTES = 23 * 60;
 
 let pg: PGlite;
 
@@ -211,6 +232,13 @@ beforeAll(async () => {
   `);
   await pg.exec(migrationSql("0222_weekly_reports"));
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
+  // 0224 is not optional here even though nothing below asserts on `pdf_content_generation`. Every other
+  // weekly-report runtime suite loads all four, and the send path is one hop from that column:
+  // `pdf-service.ts` selects `wr.pdf_content_generation` on every read, and the worker's send job reaches
+  // it through `loadWeeklyReportPdfSource`. Omitting it left this suite exercising `sendWeeklyReport`,
+  // `retryWeeklyReportSend` and `getWeeklyReportDashboard` against a `weekly_reports` that is not the
+  // production shape.
+  await pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
 
   await pg.exec(`
@@ -1067,9 +1095,15 @@ describe("the assigned PM has no send route yet", () => {
     // `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not already leadership, and
     // this PR ships no send capability for a PM at all. The refusal itself is asserted end-to-end in
     // tests/weekly-report-send-route.test.ts; asserted here is that the two role sets genuinely disjoin.
-    const assignableButNotLeadership = ["field_contractor", "construction"];
-    const crmSenders = ["admin", "director"];
-    expect(assignableButNotLeadership.some((role) => crmSenders.includes(role))).toBe(false);
+    // Read from SOURCE, both sides. This previously compared two hand-typed literals, so it asserted a
+    // property of the test file rather than of the code — widening the send gate to admit `construction`
+    // left it green while its comment claimed to pin exactly that.
+    const leadership: readonly string[] = WEEKLY_REPORT_SENDER_ROLES;
+    const assignableButNotLeadership = ASSIGNABLE_ROLES.filter((role) => !leadership.includes(role));
+
+    // The control: the filter must actually leave something, or the disjointness below is vacuous.
+    expect(assignableButNotLeadership).toEqual(["field_contractor", "construction"]);
+    expect(assignableButNotLeadership.some((role) => leadership.includes(role))).toBe(false);
   });
 });
 
@@ -1145,7 +1179,7 @@ describe("retrying a failed send", () => {
     // lookback. A PM clicking Retry the following Monday is far outside the window, the key no longer
     // dedupes, and the "no-op" is a second copy of the report in a client's inbox.
     const reportId = await failedSend();
-    await ageSend(reportId, (WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS + 1) * 60);
+    await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
 
     await expectAppError(
       retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT),
@@ -1159,7 +1193,7 @@ describe("retrying a failed send", () => {
     // Not blocked outright: an undelivered client report has to have a way forward. It is made a
     // deliberate act rather than a silent one.
     const reportId = await failedSend();
-    await ageSend(reportId, (WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS + 1) * 60);
+    await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
     await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT, {
       acknowledgeDuplicateRisk: true,
     });
@@ -1168,7 +1202,7 @@ describe("retrying a failed send", () => {
 
   it("needs no acknowledgement inside the window, where the key really does dedupe", async () => {
     const reportId = await failedSend();
-    await ageSend(reportId, (WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS - 1) * 60);
+    await ageSend(reportId, PROVIDER_WINDOW_OPEN_MINUTES);
     await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
     expect(await sendJobs()).toHaveLength(1);
   });

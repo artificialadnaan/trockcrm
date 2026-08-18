@@ -420,24 +420,40 @@ function ThisWeekTable({
                   {latenessLabel(row)}
                 </td>
                 <td className="px-3.5 py-3 text-right">
-                  {(row.sendFailed || row.sendStalled) && row.sendRetryReportId ? (
-                    // `sendRetryReportId`, not `reportId`: once a PM has drafted a correction over a
-                    // failed send the live row is the unsent clone, and retrying THAT would replay a
-                    // report nobody sent. `sendRetrySentAt` for the same reason — the clone has no
-                    // `sent_at`, so measuring the provider's dedupe window off `row.sentAt` would warn
-                    // about a duplicate for a send committed minutes ago.
-                    <RetryButton
-                      reportId={row.sendRetryReportId}
-                      sentAt={row.sendRetrySentAt}
-                      onRetried={onRetried}
-                    />
-                  ) : row.state === "approved" && row.reportId ? (
-                    <Button size="sm" onClick={() => onSend(row.reportId!)}>
-                      <Send className="mr-1.5 h-3.5 w-3.5" /> Send
-                    </Button>
-                  ) : row.state === "not_started" && row.daysLate > 0 ? (
-                    <DismissButton row={row} onDismissed={onDismissed} />
-                  ) : null}
+                  {/*
+                    Retry and Send are NOT alternatives once a correction exists over a failed send, which
+                    is why this is a list rather than the if/else chain it used to be. In that state the
+                    row is `approved` AND carries a "Send failed" chip, and the chain offered Retry alone —
+                    so the only button replayed the OLD content, and the correction the PM had just
+                    written had no path off This Week at all. They had to find it in History.
+
+                    The two do different jobs and a PM may want either: Retry replays the send that
+                    failed, for a transport problem; Send delivers the correction, for a content one.
+                  */}
+                  <div className="flex items-center justify-end gap-2">
+                    {(row.sendFailed || row.sendStalled) && row.sendRetryReportId && (
+                      // `sendRetryReportId`, not `reportId`: once a PM has drafted a correction over a
+                      // failed send the live row is the unsent clone, and retrying THAT would replay a
+                      // report nobody sent. `sendRetrySentAt` for the same reason — the clone has no
+                      // `sent_at`, so measuring the provider's dedupe window off `row.sentAt` would warn
+                      // about a duplicate for a send committed minutes ago.
+                      <RetryButton
+                        reportId={row.sendRetryReportId}
+                        sentAt={row.sendRetrySentAt}
+                        onRetried={onRetried}
+                      />
+                    )}
+                    {row.state === "approved" && row.reportId && (
+                      <Button size="sm" onClick={() => onSend(row.reportId!)}>
+                        <Send className="mr-1.5 h-3.5 w-3.5" /> Send
+                      </Button>
+                    )}
+                    {row.state === "not_started" &&
+                      row.daysLate > 0 &&
+                      !((row.sendFailed || row.sendStalled) && row.sendRetryReportId) && (
+                        <DismissButton row={row} onDismissed={onDismissed} />
+                      )}
+                  </div>
                 </td>
               </tr>
             ))}
