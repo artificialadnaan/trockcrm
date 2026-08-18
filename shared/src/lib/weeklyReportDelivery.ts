@@ -34,17 +34,25 @@ export const WEEKLY_REPORT_DELIVERY_STATUSES = [
 export type WeeklyReportDeliveryStatus = (typeof WEEKLY_REPORT_DELIVERY_STATUSES)[number];
 
 /**
- * ONLY a tie-break, and it is worth being precise about that.
+ * THE PRECEDENCE. Which of two verdicts about the same message is the one worth keeping.
  *
- * Ordering is by the PROVIDER'S event timestamp; this rank decides nothing unless two events carry the
- * SAME timestamp to the millisecond, which is a shape the provider does not promise never to emit. When it
- * happens, the more conclusive statement that the client did not get their report wins — because the cost
- * of the two mistakes is not symmetric. Recording `bounced` on a report that was in fact delivered puts an
- * unnecessary chip in front of a PM; recording `delivered` on one that bounced is the exact silence this
- * whole feature exists to break.
+ * It decides ahead of the clock, and that ordering of the two rules is the whole point — see
+ * `weeklyReportDeliverySupersedes`. Read upwards it is "how much does this verdict oblige somebody to do
+ * something": `delayed` is the provider still trying, `delivered` is a recipient who has it, `complained`
+ * is a recipient who has it and does not want the next one, and `failed`/`bounced` are a recipient who
+ * does not have it at all.
  *
- * It is NOT a general precedence: a genuinely later `delivered` (a retry that got through) does supersede
- * an earlier `bounced`, and must, or a successful re-send could never clear the record.
+ * ONE COLUMN, MANY RECIPIENTS — which is what makes a precedence the right shape rather than a tie-break.
+ * A weekly report goes to up to four client contacts plus SYSTEM_EMAIL_BCC, the provider emits one event
+ * per RECIPIENT, and every one of them carries the same delivery-key tag with nothing in the payload
+ * saying which address it is about. The row therefore cannot mean "what happened to the message"; the
+ * only honest reading of a single column over a set of per-recipient outcomes is THE WORST ONE ANY
+ * RECIPIENT HAD, and that is exactly a running maximum over this rank.
+ *
+ * The costs are not symmetric either, which settles which direction to round in when the events disagree.
+ * Recording `bounced` on a message a second recipient did receive puts an extra chip in front of a PM;
+ * recording `delivered` on one whose only real recipient bounced is the exact silence this whole feature
+ * exists to break.
  */
 const DELIVERY_RANK: Record<WeeklyReportDeliveryStatus, number> = {
   delayed: 1,
@@ -167,10 +175,13 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * weekly report.
  *
  * THE TIMESTAMP HAS NO FALLBACK. An event whose `created_at` is missing or unparseable is dropped rather
- * than dated with the arrival time, because arrival order is exactly the thing that must not decide this:
- * a `delivered` retried out of a provider-side queue can reach us after the `bounced` that followed it,
- * and stamping both with "now" would resolve them backwards. A dropped event leaves the previous verdict
- * standing, which is wrong in the direction that stays visible.
+ * than dated with the arrival time. It is the ordering key BETWEEN TWO EVENTS THAT SAY THE SAME THING
+ * (see `weeklyReportDeliverySupersedes`), and arrival order is exactly what must not decide that: the
+ * soft bounce off one contact and the hard bounce off another arrive in whatever order the provider's
+ * queue hands them over, and stamping both with "now" would let the transient one land last and tell a PM
+ * to try again against an address that is permanently dead. It is also read verbatim by whoever answers
+ * the support question, and a fabricated instant is a fabricated fact. A dropped event leaves the
+ * previous verdict standing, which is wrong in the direction that stays visible.
  */
 export function parseWeeklyReportDeliveryEvent(payload: unknown): WeeklyReportDeliveryEvent | null {
   if (!payload || typeof payload !== "object") return null;
@@ -218,14 +229,37 @@ export function parseWeeklyReportDeliveryEvent(payload: unknown): WeeklyReportDe
 /**
  * Does an incoming verdict replace the one already on the row?
  *
- * The one rule the whole feature turns on. Webhooks arrive more than once and out of order — a provider
- * retrying a `delivered` it could not hand over can land it after the `bounced` that superseded it — so
- * "the last one we saw" is not the answer. The PROVIDER'S clock is.
+ * The one rule the whole feature turns on. VERDICT FIRST, CLOCK SECOND: a more conclusive verdict wins
+ * whatever it is dated, and the provider's timestamp only separates two events that say the SAME thing.
  *
- * Strictly greater, which is what makes a replay a no-op: the same event delivered five times computes the
- * same timestamp and the same rank, so only the first one writes. Nothing else is needed for idempotency
- * and nothing else is kept — an event ledger with a row per delivery attempt would grow without bound to
- * re-derive a fact these three columns already hold.
+ * WHY NOT PURE RECENCY, which is what this was. Recency is only sound if a message has one recipient, and
+ * a weekly report has up to five (four client contacts plus SYSTEM_EMAIL_BCC). The provider emits one
+ * event per recipient outcome, all tagged with the same delivery key, and `data.to` does not say which
+ * address an event is about — the delivery-service header states that limit outright. So the ordinary
+ * shape of a broken send is `bounced` for the client's real address at T+1s and `delivered` for the
+ * internal bcc copy at T+2min, and under recency the second one erased the first: the chip came off the
+ * board, the week dropped out of "Send failures", and the report was filed away as settled while the
+ * client had nothing. `complained` was the same erasure at its worst, because a spam complaint is a human
+ * pressing a button and is therefore ALWAYS later than any bounce.
+ *
+ * The scenario recency was justified by does not survive either. It was "a provider retry that finally
+ * gets through", but a bounce is emitted when the sending side has STOPPED trying — SES retries a
+ * transient failure internally and reports the bounce only once it gives up — so there is no later
+ * success on that recipient to wait for.
+ *
+ * A RATCHET NEEDS A RELEASE, and it has one that is not this function's business: a new send or a
+ * correction mints a NEW delivery key and NULLs all three verdict columns in the same statement (see
+ * `transitionWeeklyReport`). So a recorded failure is released by sending something, which is the only
+ * thing that could make it untrue, and no report can be wedged reading "bounced" forever.
+ *
+ * TWO PROPERTIES WORTH NAMING, both of which pure recency lacked:
+ *
+ *   • The stored verdict is a function of the SET of events received, not of the order they arrived in or
+ *     of how many times each was delivered. That is the only shape that makes sense for an at-least-once,
+ *     out-of-order feed, and it is why no ordering assumption has to hold for the row to be right.
+ *   • Replays stay no-ops by construction — same verdict, same instant, and `>` is strict — so nothing
+ *     else is needed for idempotency and no event ledger has to grow unbounded to re-derive a fact these
+ *     three columns already hold.
  */
 export function weeklyReportDeliverySupersedes(
   current: { status: unknown; occurredAt: unknown } | null,
@@ -246,9 +280,15 @@ export function weeklyReportDeliverySupersedes(
   const incomingAt = Date.parse(incoming.occurredAt);
   if (!Number.isFinite(incomingAt)) return false;
 
-  if (incomingAt > currentAt) return true;
-  if (incomingAt < currentAt) return false;
-  return DELIVERY_RANK[incoming.status] > DELIVERY_RANK[currentStatus];
+  const currentRank = DELIVERY_RANK[currentStatus];
+  const incomingRank = DELIVERY_RANK[incoming.status];
+  // A different verdict is settled by the precedence alone. Reaching for the clock here is what let one
+  // recipient's later `delivered` overwrite another's `bounced`.
+  if (incomingRank !== currentRank) return incomingRank > currentRank;
+  // The SAME verdict again: now the clock is the right question, and answering it keeps
+  // `send_delivery_status_at` and the stored detail on the most recent event of that kind — a second
+  // recipient's bounce, or the hard bounce that follows a soft one — instead of the first one seen.
+  return incomingAt > currentAt;
 }
 
 /**

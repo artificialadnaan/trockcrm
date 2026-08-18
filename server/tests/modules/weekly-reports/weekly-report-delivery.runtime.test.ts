@@ -31,7 +31,10 @@ import {
   retryWeeklyReportSend,
   sendWeeklyReport,
 } from "../../../src/modules/weekly-reports/send-service.js";
-import { getWeeklyReportDashboard } from "../../../src/modules/weekly-reports/dashboard-service.js";
+import {
+  getWeeklyReportDashboard,
+  listWeeklyReportProjectSummaries,
+} from "../../../src/modules/weekly-reports/dashboard-service.js";
 import { ingestWeeklyReportDeliveryEvent } from "../../../src/modules/weekly-reports/delivery-service.js";
 import type { withWeeklyReportOfficeClient } from "../../../src/modules/weekly-reports/office-connection.js";
 
@@ -347,6 +350,48 @@ describe("registering the delivery key", () => {
     const rows = await pg.query(`SELECT delivery_key FROM public.weekly_report_send_deliveries`);
     expect(rows.rows).toEqual([{ delivery_key: deliveryKey }]);
   });
+
+  it("REGISTERS a key that has no map row when the send is retried", async () => {
+    // The worker tags EVERY message it sends, replays included, but only `sendWeeklyReport` wrote the map
+    // row — so a retry put a delivery key on a real client email that nothing could resolve, and its
+    // bounce was dropped on the floor. That is precisely the silence this feature exists to end, on
+    // precisely the rows the board renders a Retry button beside.
+    //
+    // Two ways in, and neither is exotic. Every send committed before this deploy has no map row at all
+    // (the population the board offers Retry on is `status = 'sent' AND send_delivered_at IS NULL`, which
+    // is exactly those rows), and permanently: the API and the worker are separate Railway services, so a
+    // send committed by the old API while the new worker is live gets a tagged message and no map row.
+    //
+    // Deleting the row is how the first of those is modelled — a `sent` report whose key is on the
+    // message and in no map.
+    const { reportId, deliveryKey } = await sentWeek(WEEK_OF);
+    await pg.query(`DELETE FROM public.weekly_report_send_deliveries WHERE delivery_key = $1::uuid`, [deliveryKey]);
+    const dropped = await ingest(
+      providerEvent({ type: "email.bounced", createdAt: T_EARLY, deliveryKey, bounce: HARD_BOUNCE }),
+    );
+    expect(dropped.outcome).toBe("unknown_key");
+
+    await inTransaction(() => retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT));
+
+    const rows = await pg.query(
+      `SELECT weekly_report_id, tenant_id, office_slug
+         FROM public.weekly_report_send_deliveries WHERE delivery_key = $1::uuid`,
+      [deliveryKey],
+    );
+    expect(rows.rows[0]).toMatchObject({
+      weekly_report_id: reportId,
+      tenant_id: OFFICE,
+      office_slug: "dallas",
+    });
+
+    // Registering the row is only worth anything if the verdict then lands, so the assertion runs the
+    // whole ingest rather than stopping at the insert.
+    const applied = await ingest(
+      providerEvent({ type: "email.bounced", createdAt: T_LATE, deliveryKey, bounce: HARD_BOUNCE }),
+    );
+    expect(applied.outcome).toBe("applied");
+    expect((await reportRow(reportId)).send_delivery_status).toBe("bounced");
+  });
 });
 
 describe("recording what the provider said", () => {
@@ -411,17 +456,84 @@ describe("events that arrive out of order and more than once", () => {
     expect(new Date(row.send_delivery_status_at).toISOString()).toBe(T_LATE);
   });
 
-  it("DOES let a genuinely later `delivered` clear an earlier bounce", async () => {
-    // The control for the case above, and a real situation: a soft bounce followed by a retry the
-    // receiving server accepts. A rule that only ever ratcheted towards failure would strand that report
-    // reading "not delivered" forever, and would pass the previous test just as well.
+  it("does NOT let a later `delivered` for a SECOND RECIPIENT clear the bounce either", async () => {
+    // INVERTED. This used to read "DOES let a genuinely later `delivered` clear an earlier bounce",
+    // justified as a soft bounce followed by a provider retry the receiving server accepts.
+    //
+    // There is no such retry to wait for — a bounce is emitted once the sending side has GIVEN UP, after
+    // SES has done its own retrying — and, far more to the point, the two events here are not about the
+    // same mailbox. One send goes to up to four client contacts plus the live SYSTEM_EMAIL_BCC, the
+    // provider emits one event per RECIPIENT, and all of them carry this one delivery key with nothing in
+    // the payload naming the address. So the realistic sequence is exactly this one: the client's address
+    // is refused at RCPT TO, and two minutes later the Gmail bcc copy lands. Letting the second one win
+    // took the chip off the board, dropped the week out of "Send failures", and filed it away as settled
+    // while the client had no report.
+    //
+    // Ingested in DATED order here, which is the strongest version of the assertion: the row refuses the
+    // `delivered` even though it is the newest thing the platform knows.
     const { reportId, deliveryKey } = await sentWeek(WEEK_OF);
 
     await ingest(providerEvent({ type: "email.bounced", createdAt: T_EARLY, deliveryKey, bounce: HARD_BOUNCE }));
     const later = await ingest(providerEvent({ type: "email.delivered", createdAt: T_LATE, deliveryKey }));
 
-    expect(later.outcome).toBe("applied");
-    expect((await reportRow(reportId)).send_delivery_status).toBe("delivered");
+    expect(later.outcome).toBe("superseded");
+    const row = await reportRow(reportId);
+    expect(row.send_delivery_status).toBe("bounced");
+    // The bounce's OWN facts survive too — a verdict kept with somebody else's timestamp and detail would
+    // send whoever answers the support call to the wrong recipient.
+    expect(new Date(row.send_delivery_status_at).toISOString()).toBe(T_EARLY);
+    expect(row.send_delivery_detail).toMatchObject({ eventType: "email.bounced", bounceClass: "hard" });
+  });
+
+  it("does not let a later COMPLAINT clear a bounce, and still records one over a delivery", async () => {
+    // A spam complaint is a human pressing a button in a mail client, so it is ALWAYS dated after the
+    // bounce it would erase — the worst case for a rule that reads the clock first. It is not a delivery
+    // failure (`weeklyReportDeliveryFailed` is false for it), so under recency it took the chip off the
+    // board just as `delivered` did.
+    const bounceFirst = await sentWeek(WEEK_OF);
+    await ingest(
+      providerEvent({ type: "email.bounced", createdAt: T_EARLY, deliveryKey: bounceFirst.deliveryKey, bounce: HARD_BOUNCE }),
+    );
+    const complaint = await ingest(
+      providerEvent({ type: "email.complained", createdAt: T_LATE, deliveryKey: bounceFirst.deliveryKey }),
+    );
+    expect(complaint.outcome).toBe("superseded");
+    expect((await reportRow(bounceFirst.reportId)).send_delivery_status).toBe("bounced");
+
+    // THE CONTROL, and it is the reason this is not simply "failures win". A complaint can only follow a
+    // delivery, so over a `delivered` it strictly adds — the client has this report and does not want the
+    // next one — and it must still be recorded, or the History chip would never show a complaint at all.
+    const delivered = await sentWeek(PRIOR_WEEK, bounceFirst.projectId);
+    await ingest(providerEvent({ type: "email.delivered", createdAt: T_LATE, deliveryKey: delivered.deliveryKey }));
+    const recorded = await ingest(
+      providerEvent({ type: "email.complained", createdAt: T_EARLY, deliveryKey: delivered.deliveryKey }),
+    );
+    expect(recorded.outcome).toBe("applied");
+    expect((await reportRow(delivered.reportId)).send_delivery_status).toBe("complained");
+  });
+
+  it("keeps the latest bounce's own detail when a second recipient bounces too", async () => {
+    // The clock is still the rule INSIDE a verdict, and this is what it buys: two contacts on one message
+    // bounce for different reasons, and the row should describe the most recent one rather than whichever
+    // arrived first. Without it a ratchet that ignored the clock entirely would freeze the first bounce's
+    // hard/soft class in place, and hard versus full-mailbox call for opposite actions from the PM.
+    const { reportId, deliveryKey } = await sentWeek(WEEK_OF);
+    await ingest(
+      providerEvent({
+        type: "email.bounced",
+        createdAt: T_EARLY,
+        deliveryKey,
+        bounce: { type: "Transient", subType: "MailboxFull", message: "552 mailbox full" },
+      }),
+    );
+    const second = await ingest(
+      providerEvent({ type: "email.bounced", createdAt: T_LATE, deliveryKey, bounce: HARD_BOUNCE }),
+    );
+
+    expect(second.outcome).toBe("applied");
+    const row = await reportRow(reportId);
+    expect(row.send_delivery_detail).toMatchObject({ bounceClass: "hard", bounceSubType: "NoEmail" });
+    expect(new Date(row.send_delivery_status_at).toISOString()).toBe(T_LATE);
   });
 
   it("is idempotent — the same event five times writes once", async () => {
@@ -660,5 +772,147 @@ describe("what the rest of the platform then says", () => {
 
     const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     expect(board.rows.some((row) => row.weekOf === PRIOR_WEEK)).toBe(false);
+  });
+});
+
+/**
+ * "Two surfaces, one definition of 'still owed'" — now that a THIRD way to be still-owed exists.
+ *
+ * The Projects tab's four aggregates all key on `send_delivered_at`, which a bounced report HAS: the
+ * provider accepted the message and the receiving server refused it afterwards. So This Week showed a red
+ * "Not delivered" while the tab beside it counted the same report under "Reports sent" (whose own comment
+ * says "The count is DELIVERED reports"), showed no "N not delivered" badge, and printed "Last sent · wk
+ * …" for a week nothing was delivered in — a number a director reads aloud to the client.
+ */
+describe("the Projects tab counts the same sends the board does", () => {
+  it("stops counting a bounced report as one the client received", async () => {
+    const { reportId, deliveryKey } = await sentWeek(WEEK_OF);
+    await markAccepted(reportId);
+
+    // THE CONTROL, taken first: with nothing but acceptance on the row this IS a delivered report as far
+    // as anything can tell, and the tab must go on counting it. Without this the assertions below would
+    // be satisfied by a tab that counted nothing at all.
+    const accepted = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    expect(accepted.reportsSent).toBe(1);
+    expect(accepted.lastSentWeekOf).toBe(WEEK_OF);
+    expect(accepted.lastSentAt).not.toBeNull();
+    expect(accepted.undeliveredSends).toBe(0);
+
+    await ingest(providerEvent({ type: "email.bounced", createdAt: T_MID, deliveryKey, bounce: HARD_BOUNCE }));
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(board.rows.find((row) => row.weekOf === WEEK_OF)!.sendBounced).toBe(true);
+
+    const bounced = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    expect(bounced.reportsSent).toBe(0);
+    expect(bounced.undeliveredSends).toBe(1);
+    expect(bounced.lastSentAt).toBeNull();
+    expect(bounced.lastSentWeekOf).toBeNull();
+  });
+
+  it("goes on counting a COMPLAINT as delivered, because it was", async () => {
+    // The second control, and the one that keeps the predicate honest about which verdicts mean the
+    // client has nothing. A spam complaint can only follow a delivery; counting it as undelivered would
+    // put a permanent red badge on a report the client demonstrably read.
+    const { reportId, deliveryKey } = await sentWeek(WEEK_OF);
+    await markAccepted(reportId);
+    await ingest(providerEvent({ type: "email.complained", createdAt: T_MID, deliveryKey }));
+
+    const summary = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    expect(summary.reportsSent).toBe(1);
+    expect(summary.undeliveredSends).toBe(0);
+    expect(summary.lastSentWeekOf).toBe(WEEK_OF);
+  });
+
+  it("accounts on the BOARD for a bounced week the cadence no longer generates", async () => {
+    // The other half of the same invariant, and the reason the tab's predicate could not simply be
+    // widened on its own. This aggregate counts every send on every `wrp.is_active` setup; the board
+    // reaches most weeks through the cadence, which a completed setup generates nothing for. Counting the
+    // bounce here while the board had no row for it would be the exact drift PR5 removed for undelivered
+    // sends — a red number on one tab with no chip and no row on the other.
+    const { reportId, projectId, deliveryKey } = await sentWeek(PRIOR_WEEK);
+    await markAccepted(reportId);
+    await ingest(providerEvent({ type: "email.bounced", createdAt: T_MID, deliveryKey, bounce: HARD_BOUNCE }));
+    // The common end state: the last report of a job bounces and somebody marks the setup completed.
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET status = 'completed' WHERE id = $1::uuid`, [
+      projectId,
+    ]);
+
+    expect((await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!.undeliveredSends).toBe(1);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
+    expect(row).toBeDefined();
+    expect(row!.sendBounced).toBe(true);
+    expect(row!.sendDeliveryStatus).toBe("bounced");
+    // Not "Sending…" and not "Send stuck": the provider has spoken, and both of those chips would send a
+    // PM to wait for a delivery that is never coming.
+    expect(row!.sendPending).toBe(false);
+    expect(row!.sendStalled).toBe(false);
+    expect(row!.sendFailed).toBe(false);
+    // A retry cannot reach a refused address, and `retryWeeklyReportSend` refuses one — so the board must
+    // not offer the button.
+    expect(row!.sendRetryReportId).toBeNull();
+    expect(row!.waitingOn).toBe("Adam Sherwood");
+  });
+
+  it("leaves a delivered week off the board when its cadence has stopped", async () => {
+    // The control for the pass above: it must be driven by the FAILURE, not by "the cadence stopped".
+    const { reportId, projectId, deliveryKey } = await sentWeek(PRIOR_WEEK);
+    await markAccepted(reportId);
+    await ingest(providerEvent({ type: "email.delivered", createdAt: T_MID, deliveryKey }));
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET status = 'completed' WHERE id = $1::uuid`, [
+      projectId,
+    ]);
+
+    expect((await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!.undeliveredSends).toBe(0);
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(board.rows.some((entry) => entry.weekOf === PRIOR_WEEK)).toBe(false);
+  });
+});
+
+/**
+ * Drafting a correction over a bounced week must not take the bounce off the board.
+ *
+ * The same disappearance PR5 fixed for undelivered sends with a second query: `sendBounced` was read off
+ * the DISTINCT ON … version DESC live row, and a correction is a higher version that is not superseded
+ * until it is SENT — so it becomes live the moment the PM clicks the button the confirm copy tells them
+ * to click, carrying `send_delivery_status = NULL`. The red chip and the row's entry in the "Send
+ * failures" card both vanished on that click.
+ */
+describe("a correction drafted over a bounce", () => {
+  it("keeps the bounce on the board and in the tab's count until the correction is SENT", async () => {
+    const { reportId, deliveryKey } = await sentWeek(WEEK_OF);
+    await markAccepted(reportId);
+    await ingest(providerEvent({ type: "email.bounced", createdAt: T_MID, deliveryKey, bounce: HARD_BOUNCE }));
+
+    const before = (await getWeeklyReportDashboard(db, { asOf: WEEK_OF })).rows.find((r) => r.weekOf === WEEK_OF)!;
+    expect(before.sendBounced).toBe(true);
+    expect(before.sendDeliveryStatus).toBe("bounced");
+
+    const correction = await inTransaction(() => createWeeklyReportCorrection(db, reportId, SENDER));
+
+    const during = (await getWeeklyReportDashboard(db, { asOf: WEEK_OF })).rows.find((r) => r.weekOf === WEEK_OF)!;
+    // The week's LIVE state really is the unsent correction — that part was never wrong.
+    expect(during.state).toBe("approved");
+    expect(during.reportId).toBe(correction.id);
+    // What must not follow from it is the failure disappearing. The client still has no report.
+    expect(during.sendBounced).toBe(true);
+    expect(during.sendDeliveryStatus).toBe("bounced");
+    expect(during.waitingOn).toBe("Adam Sherwood");
+    expect((await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!.undeliveredSends).toBe(1);
+
+    // THE CONTROL. Once the correction has actually gone out and been accepted, the original is
+    // superseded and the bounce stops being outstanding — a chip that could never clear would be its own
+    // kind of lie, and the retry gate depends on this releasing.
+    await sendReport(correction.id);
+    await markAccepted(correction.id);
+
+    const after = (await getWeeklyReportDashboard(db, { asOf: WEEK_OF })).rows.find((r) => r.weekOf === WEEK_OF)!;
+    expect(after.sendBounced).toBe(false);
+    expect(after.state).toBe("sent");
+    const tab = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    expect(tab.undeliveredSends).toBe(0);
+    expect(tab.reportsSent).toBe(1);
   });
 });

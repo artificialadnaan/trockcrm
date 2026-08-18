@@ -632,6 +632,25 @@ export async function retryWeeklyReportSend(
       WHERE id = $1::uuid AND is_active AND status = 'sent' AND send_delivered_at IS NULL`,
     [reportId],
   );
+  // REGISTERED HERE TOO, and not only in `sendWeeklyReport`. The worker tags EVERY message it hands the
+  // provider with this key, replays included, so a retry that skipped this put a delivery key on a real
+  // client email that nothing could resolve — its bounce arrives, finds no office, and is dropped.
+  //
+  // Two ways to reach that, neither exotic. Every send committed before this feature deployed has no row
+  // in the map at all, and those are EXACTLY the rows the board draws a Retry button beside (the retry
+  // population is `status = 'sent' AND send_delivered_at IS NULL`), so on the first day the action the
+  // product recommends is the action that loses the verdict. And permanently, because the API and the
+  // worker are separate Railway services: a send committed by the old API while the new worker is live
+  // gets a tagged message and no map row.
+  //
+  // ON CONFLICT DO NOTHING makes the ordinary case — the row `sendWeeklyReport` already wrote — free, so
+  // this is a repair for the rows that need one rather than a second source of truth.
+  await registerWeeklyReportSendDelivery(client, {
+    deliveryKey,
+    weeklyReportId: reportId,
+    tenantId: office.tenantId,
+    officeSlug: office.slug,
+  });
   await enqueueWeeklyReportSendJob(client, { reportId, office, deliveryKey });
 
   const updated = await getWeeklyReportDetail(client, reportId);

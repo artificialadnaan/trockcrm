@@ -1,4 +1,4 @@
-import { weeklyReportDeliveryFailed } from "@trock-crm/shared/lib/weeklyReportDelivery";
+import { WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import {
   shiftIsoDate,
   weeklyReportDaysLate,
@@ -76,9 +76,13 @@ export interface WeeklyReportDashboardRow {
    */
   sendDeliveredAt: string | null;
   /**
-   * The provider's own verdict on the live version's send, once its delivery webhook has spoken:
+   * The provider's own verdict on this week's send, once its delivery webhook has spoken:
    * `delayed | delivered | complained | failed | bounced`. Null means nothing has, which is the state of
    * every send made before that webhook existed — "unknown", never "fine".
+   *
+   * THE OUTSTANDING VERSION'S verdict when there is one, the live version's otherwise — the same
+   * precedence `sendError` uses, and for the same reason: once a correction is drafted the live row is an
+   * unsent clone that carries no verdict at all.
    */
   sendDeliveryStatus: string | null;
   /**
@@ -89,6 +93,11 @@ export interface WeeklyReportDashboardRow {
    * provider accepted it and only later said the receiving server refused it, so it satisfies none of
    * `sendFailed`, `sendStalled` or `sendPending` — every one of which is keyed on an ABSENT delivery — and
    * without this flag it is the one delivery failure the board renders as an ordinary sent week.
+   *
+   * Read off its OWN query rather than off the live report, exactly as the other three are read off the
+   * undelivered query: a correction is a higher version and is not superseded until it is SENT, so from
+   * the moment a PM clicks "Send correction" the live row's verdict is NULL and a flag derived from it
+   * took the failure off the board on the very click the confirm copy asks for.
    */
   sendBounced: boolean;
   sendAttempts: number;
@@ -236,15 +245,22 @@ function waitingOnFor(row: {
  * untouched week has no row, so the projects nobody has filed for would be exactly the ones that never
  * appear.
  *
- * Five queries total regardless of project count: projects, their live reports, their UNDELIVERED sends,
- * their dismissals, their pauses. The join happens in memory because the expected-week set is generated
- * in TypeScript (shared with the CRM, the app and the reminder worker) rather than in SQL, and duplicating
- * that generator as a recursive CTE would be a second definition of the cadence.
+ * Six queries total regardless of project count: projects, their live reports, their UNDELIVERED sends,
+ * the sends the provider REPORTED AS NOT DELIVERED, their dismissals, their pauses. The join happens in
+ * memory because the expected-week set is generated in TypeScript (shared with the CRM, the app and the
+ * reminder worker) rather than in SQL, and duplicating that generator as a recursive CTE would be a
+ * second definition of the cadence.
  *
- * The undelivered sends are a SEPARATE query rather than a column on the reports one, because the two ask
- * different questions of different rows: "what is the live version of this week" and "does this week have
- * an email that never got out". They stop being the same row the moment a PM issues a correction over a
- * failed send, which is exactly when the failure used to disappear.
+ * THE THREE REPORT QUERIES ARE THREE QUESTIONS, not one query with filters, and collapsing any two of
+ * them is how a failure disappeared both times it did:
+ *
+ *   "what is the live version of this week"                 — the reports query
+ *   "does this week have an email that never got out"       — the undelivered query
+ *   "does this week have an email the provider refused"     — the delivery-failed query
+ *
+ * The first stops being the same row as the other two the moment a PM issues a correction over a failed
+ * send: the clone is a higher version, neither row is superseded until the correction is actually SENT,
+ * and the clone carries neither the error nor the verdict.
  */
 export async function getWeeklyReportDashboard(
   client: QueryExecutor,
@@ -332,6 +348,34 @@ export async function getWeeklyReportDashboard(
       ORDER BY weekly_report_project_id, week_of, version DESC`,
     [projectIds],
   );
+  // SENDS THE PROVIDER TOLD US DID NOT REACH THE CLIENT — the third way to be still owed a report, and
+  // the only one whose row carries a delivery stamp.
+  //
+  // A SEPARATE QUERY for the same two reasons the one above is. It cannot be a filter on the live-report
+  // query, because a correction drafted over a bounced week is a higher version and is not superseded
+  // until it is SENT: `version DESC` picks the unsent clone, whose `send_delivery_status` is NULL by
+  // construction (`transitionWeeklyReport` clears the verdict columns whenever it mints a delivery key),
+  // so the chip and the "Send failures" entry vanished the moment the PM clicked the button the confirm
+  // copy tells them to click. And it cannot be folded into the undelivered query, which is keyed on
+  // `send_delivered_at IS NULL` and by construction contains none of these.
+  //
+  // `superseded_by_id IS NULL` keeps it honest in the other direction, exactly as it does there: once the
+  // correction actually goes out it stamps the original and the week stops being outstanding.
+  //
+  // Matches weekly_reports_send_delivery_failed_idx (0227), which was built for exactly this sweep.
+  const deliveryFailedResult = await client.query(
+    `SELECT DISTINCT ON (weekly_report_project_id, week_of)
+            id, weekly_report_project_id, week_of, version, sent_at, send_attempts,
+            send_delivery_status
+       FROM weekly_reports
+      WHERE weekly_report_project_id = ANY($1::uuid[])
+        AND is_active
+        AND status = 'sent'
+        AND send_delivery_status = ANY($2::text[])
+        AND superseded_by_id IS NULL
+      ORDER BY weekly_report_project_id, week_of, version DESC`,
+    [projectIds, [...WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES]],
+  );
   const dismissalsResult = await client.query(
     `SELECT weekly_report_project_id, week_of, reason
        FROM weekly_report_dismissals
@@ -359,6 +403,10 @@ export async function getWeeklyReportDashboard(
   const undeliveredByKey = new Map<string, Record<string, any>>();
   for (const row of undeliveredResult.rows) {
     undeliveredByKey.set(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`, row);
+  }
+  const deliveryFailedByKey = new Map<string, Record<string, any>>();
+  for (const row of deliveryFailedResult.rows) {
+    deliveryFailedByKey.set(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`, row);
   }
   const dismissalByKey = new Map<string, Record<string, any>>();
   for (const row of dismissalsResult.rows) {
@@ -419,11 +467,15 @@ export async function getWeeklyReportDashboard(
       // `send_delivered_at IS NULL`, and a bounced report was ACCEPTED — it carries a delivery stamp — so
       // it is not in that set and the first two conditions call it settled. It is the opposite of settled:
       // the provider told us in so many words that the client does not have it.
+      //
+      // Tested against `deliveryFailedByKey` rather than against the live report's own verdict, for the
+      // same reason `undeliveredByKey` exists: a correction drafted over the bounce is the live row and
+      // carries no verdict at all, and reading it here dropped the week out of the "and N older" tally.
       const settled =
         dismissalByKey.has(key) ||
         (report?.status === "sent" &&
           !undeliveredByKey.has(key) &&
-          !weeklyReportDeliveryFailed(report?.send_delivery_status));
+          !deliveryFailedByKey.has(key));
       if (!settled) olderOutstanding += 1;
     }
     if (olderOutstanding > 0) olderOutstandingCounts[project.id] = olderOutstanding;
@@ -449,6 +501,21 @@ export async function getWeeklyReportDashboard(
       // Read off the UNDELIVERED set rather than off the live report, so a correction drafted over a
       // failed send cannot take the failure off the board with it.
       const undelivered = undeliveredByKey.get(key) ?? null;
+
+      // THE FOURTH SHAPE, and the only one whose delivery stamp is present. `sendFailed`, `sendStalled`
+      // and `sendPending` are all keyed on `undelivered`, i.e. on `send_delivered_at IS NULL`; a bounce
+      // says the provider ACCEPTED the message and the receiving server then refused it, so the stamp is
+      // usually there and all three are false. Without this the board renders a bounced week as an
+      // ordinary delivered one — which is exactly the silence the webhook was built to break,
+      // reintroduced one layer up.
+      //
+      // READ OFF ITS OWN SET, not off the live report. `sendBounced` is the last of the four verdicts to
+      // learn what the other three already knew: a correction drafted over the failure becomes the week's
+      // live row the moment it is cloned, carrying `send_delivery_status = NULL`, so a `report`-derived
+      // flag took the red chip and the "Send failures" entry off the board on the PM's own click.
+      const deliveryFailed = deliveryFailedByKey.get(key) ?? null;
+      const sendBounced = deliveryFailed != null;
+
       const sendFailed = undelivered != null && undelivered.send_error != null;
       // `send_error == null` is not redundant with the CRM checking `sendFailed` first. This is a
       // PUBLISHED field the deferred T-Rock Cam surface reads directly, and the whole reason the three
@@ -456,19 +523,18 @@ export async function getWeeklyReportDashboard(
       // disagree about what the chip means. Without it a failed send that is also old reports BOTH, and
       // the app would say "Send stuck" — no error to show, nobody to chase — for a delivery that recorded
       // exactly why it failed.
+      // `!sendBounced` on both, because the two sets are ALMOST disjoint and not quite. A bounced report
+      // normally carries a delivery stamp and so cannot be `undelivered` — but "the provider accepted it
+      // and the process died before the stamp" is an ordinary outcome for this worker (it is the reason
+      // the whole idempotency-key design exists), and such a row is in both sets. Neither "Sending…" nor
+      // "Send stuck" may appear on it: both tell a PM to wait for a delivery the provider has already
+      // reported did not happen.
       const sendStalled =
-        undelivered != null && undelivered.send_error == null && isStalledSend(undelivered, now);
-      const sendPending = undelivered != null && !sendFailed && !sendStalled;
-
-      // THE FOURTH SHAPE, and the only one whose delivery stamp is present. `sendFailed`, `sendStalled`
-      // and `sendPending` are all keyed on `undelivered`, i.e. on `send_delivered_at IS NULL`; a bounce
-      // says the provider ACCEPTED the message and the receiving server then refused it, so the stamp is
-      // there and all three are false. Without this the board renders a bounced week as an ordinary
-      // delivered one — which is exactly the silence the webhook was built to break, reintroduced one
-      // layer up.
-      //
-      // Read off the LIVE report rather than the undelivered set, because that set cannot contain it.
-      const sendBounced = weeklyReportDeliveryFailed(report?.send_delivery_status);
+        undelivered != null &&
+        !sendBounced &&
+        undelivered.send_error == null &&
+        isStalledSend(undelivered, now);
+      const sendPending = undelivered != null && !sendFailed && !sendStalled && !sendBounced;
 
       // A settled week that is not the current one carries no signal — drop it so the page shows what
       // needs attention rather than an ever-growing archive. History lives on the History tab. An
@@ -506,8 +572,12 @@ export async function getWeeklyReportDashboard(
         // cloned correction still reports what went wrong on the version that was actually sent.
         sendError: undelivered?.send_error ?? report?.send_error ?? null,
         sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
-        sendDeliveryStatus: report?.send_delivery_status ?? null,
-        sendAttempts: Number((undelivered ?? report)?.send_attempts ?? 0),
+        // THE FAILED VERSION'S verdict first, for the same reason `sendError` reads the outstanding
+        // delivery first: once a correction is drafted the live row's verdict is NULL, and publishing
+        // `sendBounced: true` beside `sendDeliveryStatus: null` would leave the History chip and the app
+        // unable to say what the provider actually reported.
+        sendDeliveryStatus: deliveryFailed?.send_delivery_status ?? report?.send_delivery_status ?? null,
+        sendAttempts: Number((undelivered ?? deliveryFailed ?? report)?.send_attempts ?? 0),
         sendFailed,
         sendStalled,
         sendPending,
@@ -541,14 +611,30 @@ export async function getWeeklyReportDashboard(
   // in exactly the same place with `status = 'active'` throughout, and both are reached through the
   // ordinary PATCH the product recommends.
   //
-  // These rows carry the same `sendRetryReportId` as any other, so the Retry that the Projects tab's
-  // "1 not delivered" counter implies actually exists on the board, rather than living only on History.
+  // A send that never got out carries the same `sendRetryReportId` here as anywhere else, so the Retry
+  // that the Projects tab's "1 not delivered" counter implies actually exists on the board rather than
+  // living only on History. A BOUNCED one deliberately does not — see the field below.
+  //
+  // DRIVEN BY BOTH OUTSTANDING SETS, not just the undelivered one. A bounced send is owed to the client
+  // exactly as much as a send that never got out, and it stops being generated by the cadence in the same
+  // ordinary ways — the last report of a job bounces and somebody marks the setup completed. Keying this
+  // pass on `send_delivered_at IS NULL` alone left that week on neither pass while the Projects tab
+  // counted it, which is the same "two surfaces, one definition" drift PR5 removed for the other shape.
+  //
+  // The two sets OVERLAP on exactly one row shape — accepted by the provider, the process died before the
+  // stamp, and the bounce arrived afterwards — so they are unioned by `project|week` rather than iterated
+  // one after the other. Two loops would emit that week twice, and the "Send failures" card counts rows.
   const projectById = new Map(projectsResult.rows.map((project) => [project.id, project]));
-  for (const undelivered of undeliveredResult.rows) {
-    const project = projectById.get(undelivered.weekly_report_project_id);
+  const outstandingKeys = new Set([...undeliveredByKey.keys(), ...deliveryFailedByKey.keys()]);
+  for (const outstandingKey of outstandingKeys) {
+    const undelivered = undeliveredByKey.get(outstandingKey) ?? null;
+    const deliveryFailed = deliveryFailedByKey.get(outstandingKey) ?? null;
+    // One of the two is always present — the key came from their union.
+    const outstanding = (undelivered ?? deliveryFailed)!;
+    const project = projectById.get(outstanding.weekly_report_project_id);
     if (!project) continue;
 
-    const weekOf = toIsoDate(undelivered.week_of)!;
+    const weekOf = toIsoDate(outstanding.week_of)!;
     // Weeks the cadence loop already decided are ITS business — rendered, tallied or settled. Emitting
     // one again here would double every failed send on the board, and the "Send failures" card counts
     // rows, so the number a director acts on would be exactly doubled.
@@ -568,14 +654,24 @@ export async function getWeeklyReportDashboard(
     // The LIVE version of the week, exactly as the loop above reads it — so a correction drafted over
     // this failed send still shows as the week's current state while the failure keeps its own facts.
     const report = reportByKey.get(`${project.id}|${weekOf}`);
-    const sendFailed = undelivered.send_error != null;
+    const sendBounced = deliveryFailed != null;
+    const sendFailed = undelivered != null && undelivered.send_error != null;
     // The `send_error == null` conjunct is load-bearing HERE IN PARTICULAR, and for the same reason it is
     // in the cadence loop: `sendStalled` is a PUBLISHED field the deferred T-Rock Cam surface reads
     // directly, so the two surfaces must not be able to disagree about what the chip means. On a week the
     // cadence has stopped generating an OLD FAILED send is the typical case rather than the exotic one,
     // so without it these rows routinely report both verdicts and the app says "Send stuck" — no error to
     // show, nobody to chase — for a delivery that recorded exactly why it failed.
-    const sendStalled = undelivered.send_error == null && isStalledSend(undelivered, now);
+    //
+    // A BOUNCE IS NEVER STALLED, and the guard matters more here than in the cadence loop: these weeks
+    // are old by definition, so a bounced send reaching this pass is always past the stall threshold and
+    // would otherwise report "Send stuck" — a chip that tells a PM to wait — for a message the provider
+    // has already said was refused.
+    const sendStalled =
+      undelivered != null &&
+      !sendBounced &&
+      undelivered.send_error == null &&
+      isStalledSend(undelivered, now);
 
     rows.push({
       weeklyReportProjectId: project.id,
@@ -596,22 +692,22 @@ export async function getWeeklyReportDashboard(
       reportId: report?.id ?? null,
       reportVersion: report ? Number(report.version) : null,
       sentAt: toIsoTimestamp(report?.sent_at),
-      sendError: undelivered.send_error ?? null,
+      sendError: undelivered?.send_error ?? null,
       sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
-      sendDeliveryStatus: report?.send_delivery_status ?? null,
-      sendAttempts: Number(undelivered.send_attempts ?? 0),
+      // The failed version's own verdict first, exactly as in the cadence loop: the live row may be a
+      // correction that carries none.
+      sendDeliveryStatus: deliveryFailed?.send_delivery_status ?? report?.send_delivery_status ?? null,
+      sendAttempts: Number(outstanding.send_attempts ?? 0),
       sendFailed,
       sendStalled,
-      sendPending: !sendFailed && !sendStalled,
-      // ALWAYS FALSE HERE, and structurally so rather than by choice: this pass is driven by the
-      // undelivered query (`send_delivered_at IS NULL`), and a bounced report carries a delivery stamp,
-      // so no row reaching this loop can be one. It is written out rather than left implicit because that
-      // leaves a real gap — a week the CADENCE no longer generates whose send bounced is on neither pass,
-      // and `weekly_reports_send_delivery_failed_idx` (0227) exists for the sweep that will claim it. It
-      // needs its own row-generation rule, not a flag flipped here.
-      sendBounced: false,
-      sendRetryReportId: undelivered.id,
-      sendRetrySentAt: toIsoTimestamp(undelivered.sent_at),
+      sendPending: undelivered != null && !sendFailed && !sendStalled && !sendBounced,
+      sendBounced,
+      // NULL FOR A PURE BOUNCE, and that is the honest answer rather than a missing feature.
+      // `retryWeeklyReportSend` refuses a send the provider reported as not delivered — replaying it puts
+      // the same message in front of the same refused address — so offering the button here would render
+      // a control whose only outcome is a 409. The way forward is a correction, from History.
+      sendRetryReportId: undelivered?.id ?? null,
+      sendRetrySentAt: toIsoTimestamp(undelivered?.sent_at),
       // Always the PM: the ONLY reason this row exists is a delivery that has to be dealt with, and the
       // superintendent owes nothing for a week the cadence has stopped asking for.
       waitingOn: project.trock_pm_name ?? "Unassigned PM",
@@ -634,15 +730,28 @@ export async function getWeeklyReportDashboard(
 
 export interface WeeklyReportProjectSummary {
   weeklyReportProjectId: string;
-  /** Reports whose email the mail provider ACCEPTED. A committed send that never got out is not one. */
+  /**
+   * Reports the client has, as far as anything here can tell.
+   *
+   * Provider ACCEPTANCE is the floor — a committed send that never got out is not one — and a recorded
+   * delivery FAILURE takes it back off, which is the half acceptance alone cannot express: a bounced
+   * report has `send_delivered_at` set, so it counted here while This Week showed a red "Not delivered"
+   * for the same week. A NULL verdict still counts, because "no webhook has spoken" is the permanent
+   * state of every send made before that webhook existed and reading it as a failure would zero this
+   * number for every project with any history.
+   */
   reportsSent: number;
   lastSentAt: string | null;
   lastSentWeekOf: string | null;
   /**
-   * Sends this project committed that have not been delivered — the counter's own contradiction, shown.
+   * Sends this project committed that have not reached the client — the counter's own contradiction, shown.
    *
    * Without it, narrowing `reportsSent` to delivered sends would make a lost report disappear from BOTH
    * numbers, which is a quieter version of the same lie.
+   *
+   * TWO WAYS TO BE ONE, and the second is not visible in the send columns at all. A send that never got
+   * out has no `send_delivered_at`; a send the provider ACCEPTED and then reported as bounced or failed
+   * has one. Counting only the first is what let a bounced week be counted as sent by this very tab.
    *
    * SUPERSEDED VERSIONS ARE EXCLUDED, exactly as the board excludes them. A v1 whose email failed and
    * whose correction then reached the client is not an outstanding delivery — the board stops naming it
@@ -676,11 +785,23 @@ export interface WeeklyReportProjectSummary {
  * a button. On its own that was a small overstatement; combined with a send whose outcome was never
  * recorded it stops being cosmetic, because for such a report this tab is the ONLY surface that mentions
  * it at all, and what it said was that the report went out on a day nothing was delivered.
+ *
+ * AND ON THE PROVIDER'S VERDICT, which is the same argument one step further along. Acceptance was the
+ * best evidence available when these four aggregates were written; since 0227 it is not. A bounced report
+ * satisfies every one of them — it is `sent`, it has a `send_delivered_at` — so This Week rendered a red
+ * "Not delivered" while the tab beside it counted the same week under "Reports sent", showed no badge,
+ * and printed "Last sent · wk 08-13" for a week the client received nothing. `getWeeklyReportDashboard`
+ * renders a row for every send this counter calls outstanding, whatever the setup's status and whatever
+ * the cadence currently says about the week; the predicates below are the other end of that promise.
  */
 export async function listWeeklyReportProjectSummaries(
   client: QueryExecutor,
   asOf: string,
 ): Promise<WeeklyReportProjectSummary[]> {
+  // The failure verdicts, bound rather than spelled out, so this predicate cannot drift from the one the
+  // board and the History chip read (`weeklyReportDeliveryFailed`). `complained` is deliberately not one
+  // of them: a spam complaint can only follow a delivery, so the client HAS that report.
+  const failureStatuses = [...WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES];
   const result = await client.query(
     `SELECT wrp.id,
             wrp.cadence_weekday,
@@ -688,20 +809,28 @@ export async function listWeeklyReportProjectSummaries(
             wrp.cadence_end_date,
             wrp.status,
             COUNT(wr.id) FILTER (
-              WHERE wr.status = 'sent' AND wr.send_delivered_at IS NOT NULL)::int AS reports_sent,
+              WHERE wr.status = 'sent' AND wr.send_delivered_at IS NOT NULL
+                AND (wr.send_delivery_status IS NULL
+                     OR NOT (wr.send_delivery_status = ANY($1::text[]))))::int      AS reports_sent,
             MAX(wr.sent_at) FILTER (
-              WHERE wr.status = 'sent' AND wr.send_delivered_at IS NOT NULL)       AS last_sent_at,
+              WHERE wr.status = 'sent' AND wr.send_delivered_at IS NOT NULL
+                AND (wr.send_delivery_status IS NULL
+                     OR NOT (wr.send_delivery_status = ANY($1::text[]))))           AS last_sent_at,
             MAX(wr.week_of) FILTER (
-              WHERE wr.status = 'sent' AND wr.send_delivered_at IS NOT NULL)       AS last_sent_week_of,
+              WHERE wr.status = 'sent' AND wr.send_delivered_at IS NOT NULL
+                AND (wr.send_delivery_status IS NULL
+                     OR NOT (wr.send_delivery_status = ANY($1::text[]))))           AS last_sent_week_of,
             COUNT(wr.id) FILTER (
               WHERE wr.status = 'sent'
-                AND wr.send_delivered_at IS NULL
-                AND wr.superseded_by_id IS NULL)::int                              AS undelivered_sends
+                AND wr.superseded_by_id IS NULL
+                AND (wr.send_delivered_at IS NULL
+                     OR wr.send_delivery_status = ANY($1::text[])))::int            AS undelivered_sends
        FROM weekly_report_projects wrp
        LEFT JOIN weekly_reports wr
               ON wr.weekly_report_project_id = wrp.id AND wr.is_active
       WHERE wrp.is_active
       GROUP BY wrp.id, wrp.cadence_weekday, wrp.cadence_start_date, wrp.cadence_end_date, wrp.status`,
+    [failureStatuses],
   );
 
   return result.rows.map((row) => {

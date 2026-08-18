@@ -160,26 +160,88 @@ describe("which verdict wins", () => {
     expect(weeklyReportDeliverySupersedes({ status: null, occurredAt: null }, delivered)).toBe(true);
   });
 
-  it("lets a LATER event replace an earlier one", () => {
+  it("lets a MORE conclusive verdict replace a weaker one, whenever it is dated", () => {
+    // The provider emits one event PER RECIPIENT and tags them all identically, so the two events below
+    // are two facts about ONE message and neither one's clock says anything about the other's outcome.
+    // Later than the row's verdict...
     expect(
       weeklyReportDeliverySupersedes({ status: "delivered", occurredAt: T1 }, { status: "bounced", occurredAt: T2 }),
     ).toBe(true);
+    // ...and EARLIER than it, which is the case pure recency got backwards: the bounce off the client's
+    // address at T1 and the delivery of the bcc copy at T3 are both true, and only one of them means
+    // somebody has to act.
+    expect(
+      weeklyReportDeliverySupersedes({ status: "delivered", occurredAt: T3 }, { status: "bounced", occurredAt: T1 }),
+    ).toBe(true);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "delayed", occurredAt: T3 }, { status: "delivered", occurredAt: T1 }),
+    ).toBe(true);
+  });
+
+  it("lets a later event of the SAME verdict refresh the row", () => {
+    // The clock still decides INSIDE a verdict, and has to: it is what keeps `send_delivery_status_at`
+    // and the stored detail describing the most recent event of that kind — a second recipient's bounce,
+    // or the hard bounce that follows a soft one off the same message — rather than the first one seen.
+    expect(
+      weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: T1 }, { status: "bounced", occurredAt: T3 }),
+    ).toBe(true);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: T3 }, { status: "bounced", occurredAt: T1 }),
+    ).toBe(false);
   });
 
   it("refuses an EARLIER event, even a `delivered` arriving after a bounce", () => {
-    // The out-of-order case, stated as a rule rather than as a scenario. A late `delivered` dated before
-    // the bounce it is trying to overwrite loses on the provider's clock.
+    // The out-of-order case, stated as a rule rather than as a scenario. A late `delivered` loses to a
+    // recorded bounce whatever it is dated — here, dated before it.
     expect(
       weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: T2 }, { status: "delivered", occurredAt: T1 }),
     ).toBe(false);
   });
 
-  it("still lets a genuinely later delivery clear a bounce", () => {
-    // The other direction has to work too, or a soft bounce followed by a successful retry would be stuck
-    // reading as a failure forever.
+  it("NEVER lets a later happier event clear a recorded delivery failure", () => {
+    // INVERTED, and this is the assertion the whole rule turns on. It used to read "still lets a
+    // genuinely later delivery clear a bounce", justified by a provider retry that finally gets through.
+    // That justification does not survive contact with the payload: one send goes to up to four client
+    // contacts PLUS the live SYSTEM_EMAIL_BCC, the provider emits one event per RECIPIENT and tags every
+    // one of them with the same delivery key, and `data.to` cannot tell us which address an event is
+    // about. So the later `delivered` is overwhelmingly the bcc copy or a second contact — not a retry —
+    // and letting it win took the bounce off the board, dropped the row out of "Send failures", and filed
+    // the week away as settled while the client had nothing.
+    //
+    // The retry story does not hold up on its own terms either. A `bounced` event is emitted when the
+    // sending side has STOPPED trying: SES retries a transient failure internally and only reports the
+    // bounce once it gives up, so there is no provider-side retry left to succeed afterwards.
+    //
+    // `complained` is the sharpest version of the same bug: a spam complaint is a human pressing a button
+    // in a mail client, so it is ALWAYS dated after the bounce it would have erased.
     expect(
       weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: T1 }, { status: "delivered", occurredAt: T3 }),
+    ).toBe(false);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: T1 }, { status: "delayed", occurredAt: T3 }),
+    ).toBe(false);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: T1 }, { status: "complained", occurredAt: T3 }),
+    ).toBe(false);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "failed", occurredAt: T1 }, { status: "delivered", occurredAt: T3 }),
+    ).toBe(false);
+  });
+
+  it("records a COMPLAINT over a delivery, and never a delivery over a complaint", () => {
+    // The direction question the ratchet has to answer for the non-failure verdicts too. A complaint can
+    // only follow a delivery, so it STRICTLY ADDS to what `delivered` already said — it is worth
+    // recording whichever instant it carries. The reverse would erase a signal about the NEXT report the
+    // moment another recipient's `delivered` landed.
+    expect(
+      weeklyReportDeliverySupersedes({ status: "delivered", occurredAt: T1 }, { status: "complained", occurredAt: T3 }),
     ).toBe(true);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "delivered", occurredAt: T3 }, { status: "complained", occurredAt: T1 }),
+    ).toBe(true);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "complained", occurredAt: T1 }, { status: "delivered", occurredAt: T3 }),
+    ).toBe(false);
   });
 
   it("is idempotent: replaying the winning event changes nothing", () => {
@@ -187,10 +249,12 @@ describe("which verdict wins", () => {
     expect(weeklyReportDeliverySupersedes({ status: "delivered", occurredAt: T2 }, delivered)).toBe(false);
   });
 
-  it("breaks an exact tie towards the more conclusive failure", () => {
-    // Only ever reached when two events carry the SAME instant. The costs are asymmetric: a wrong
-    // `bounced` is a chip somebody dismisses, a wrong `delivered` is the silence this feature exists to
-    // break.
+  it("settles two events on the SAME instant towards the more conclusive failure", () => {
+    // Two events carrying the same millisecond is a shape the provider does not promise never to emit,
+    // and there is no clock left to separate them. It needs no separate rule now — the precedence decides
+    // it, as it decides every other cross-verdict pair — but it is asserted because the costs are
+    // asymmetric and worth pinning: a wrong `bounced` is a chip somebody dismisses, a wrong `delivered`
+    // is the silence this feature exists to break.
     expect(weeklyReportDeliverySupersedes({ status: "delivered", occurredAt: T2 }, bounced)).toBe(true);
     expect(weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: T2 }, delivered)).toBe(false);
     expect(
@@ -199,6 +263,14 @@ describe("which verdict wins", () => {
   });
 
   it("accepts a Date on the row, which is what node-postgres returns", () => {
+    // The SAME-VERDICT pair is the one that proves the coercion: a cross-verdict pair is decided by the
+    // precedence and would pass with the timestamp never read at all.
+    expect(
+      weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: new Date(T1) }, bounced),
+    ).toBe(true);
+    expect(
+      weeklyReportDeliverySupersedes({ status: "bounced", occurredAt: new Date(T3) }, bounced),
+    ).toBe(false);
     expect(
       weeklyReportDeliverySupersedes({ status: "delivered", occurredAt: new Date(T1) }, bounced),
     ).toBe(true);

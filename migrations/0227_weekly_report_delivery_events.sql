@@ -20,11 +20,18 @@
 --     permanent state of every send made before this deploy (see the note on the tag below).
 --
 --   • `send_delivery_status_at` — THE PROVIDER'S OWN TIMESTAMP for the event that produced that verdict,
---     not the time we received it. This is the ordering key and it is the whole point of the column.
---     Webhooks arrive more than once and out of order: a provider retrying a `delivered` it could not hand
---     over lands it AFTER the `bounced` that superseded it, and a row ordered by arrival would resolve the
---     two backwards and go on claiming a bounced report reached the client. A verdict is replaced only by
---     one the provider dated later.
+--     not the time we received it. Webhooks arrive more than once and out of order, so arrival order
+--     decides nothing here.
+--
+--     WHICH OF TWO VERDICTS WINS IS NOT DECIDED BY THIS COLUMN, and the reason is the shape of the feed.
+--     One send goes to up to four client contacts plus SYSTEM_EMAIL_BCC; the provider emits one event per
+--     RECIPIENT, tags every one of them with the same delivery key, and says nothing about which address
+--     an event is about. So "most recent wins" let the bcc copy's `delivered` at T+2min erase the client
+--     address's `bounced` at T+1s, and a spam complaint — always later than any bounce, being a human
+--     action — erase it too. The rule is instead a PRECEDENCE over the verdicts themselves, with this
+--     column separating two events that say the SAME thing (a second recipient's bounce, the hard bounce
+--     after a soft one). See `weeklyReportDeliverySupersedes`. Recorded failures are released by SENDING
+--     something: a new send or a correction mints a new key and NULLs all three columns below.
 --
 --   • `send_delivery_detail` — the bounce class (hard/soft), the provider's own bounce type/subtype, its
 --     message and the provider's message id, kept verbatim. A hard bounce and a full mailbox call for

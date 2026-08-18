@@ -18,10 +18,13 @@ import type { QueryExecutor } from "./projects-service.js";
 //      `public.weekly_report_send_deliveries`, keyed on the delivery key the message was tagged with —
 //      one indexed lookup, not a scan across every schema.
 //
-//   2. NO ORDER. Webhooks are retried and can overtake one another, so "the last one we saw" is not the
-//      answer; the provider's own event timestamp is. The rule lives in `weeklyReportDeliverySupersedes`
-//      so it can be tested without a database, and it is applied under a row lock so two events racing
-//      through two connections cannot both read the old verdict and both write.
+//   2. NO ORDER, AND MORE THAN ONE ANSWER. Webhooks are retried and can overtake one another, so "the
+//      last one we saw" is not the answer — and neither is "the latest the provider dated", because the
+//      events are per RECIPIENT (see below) and the row holds one verdict. What wins is a PRECEDENCE over
+//      the verdicts, with the provider's timestamp separating two events that say the same thing. The
+//      rule lives in `weeklyReportDeliverySupersedes` so it can be tested without a database, and it is
+//      applied under a row lock so two events racing through two connections cannot both read the old
+//      verdict and both write.
 //
 //   3. NO CALLER. Nobody is watching the response. A failure here is not reported to a human by anything,
 //      which is why the correlation is on a key that cannot be reconstructed wrongly and why the write is
@@ -32,14 +35,25 @@ import type { QueryExecutor } from "./projects-service.js";
 // would invalidate the stored PDF of every report the moment its delivery receipt arrived and re-render
 // it — every photo downloaded and transcoded again — to record something that is not in the document.
 //
-// THE VERDICT IS PER MESSAGE, NOT PER RECIPIENT, and that is a real limit rather than a simplification.
-// One send goes to every client contact that has an address (DOC, PM, RM, CM) plus `SYSTEM_EMAIL_BCC`,
-// and the provider reports one event for the message — so `bounced` here means "at least one address on
-// this message was refused", not "the client got nothing", and a bounce of the internal monitoring bcc is
-// indistinguishable from a bounce of the client's own address. Both are recorded the same way ON PURPOSE:
-// the surfaces say the provider reported it as not delivered and point the PM at the addresses on the
-// project, which is the right action in every one of those cases. Reading the provider's per-recipient
-// detail would need `data.to` to carry which address failed, and it does not.
+// THE VERDICT IS PER MESSAGE AND THE EVENTS ARE PER RECIPIENT, which is a real limit rather than a
+// simplification, and it is the single most consequential fact in this module.
+//
+// One send goes to every client contact that has an address (DOC, PM, RM, CM) plus `SYSTEM_EMAIL_BCC`.
+// The provider reports one event PER RECIPIENT OUTCOME, all of them carrying the same delivery-key tag,
+// and nothing in the payload says which address a given event is about — reading that would need
+// `data.to` to carry the failing address, and it does not. So `bounced` here means "at least one address
+// on this message was refused", not "the client got nothing", and a bounce of the internal monitoring bcc
+// is indistinguishable from a bounce of the client's own address. Both are recorded the same way ON
+// PURPOSE: the surfaces say the provider reported it as not delivered and point the PM at the addresses
+// on the project, which is the right action in every one of those cases.
+//
+// WHAT IT MEANS FOR THE ORDERING RULE, and this cost a recorded bounce. The column holds one verdict over
+// a SET of per-recipient outcomes, so the only honest reading is the worst thing that happened to any of
+// them. A rule that took the most recent event instead let the delivery of the bcc copy — or of a second
+// contact behind greylisting — arrive two minutes after the client's address was refused at RCPT TO and
+// silently clear the bounce: `sendBounced` went false, the week was filed away as settled, and the client
+// never got their report. `weeklyReportDeliverySupersedes` is written the other way round for that
+// reason, and it is a shared function so this note and that rule cannot drift apart.
 
 /** Where a report lives, resolved from a delivery key alone. */
 export interface WeeklyReportDeliveryTarget {
@@ -56,6 +70,11 @@ export interface WeeklyReportDeliveryTarget {
  * report that is `sent` always has a row here. Getting this wrong in the other direction is the failure
  * that matters: a send whose key was never registered is a send whose bounce arrives, resolves to nothing,
  * and is dropped — the exact silence this feature exists to end.
+ *
+ * AND FROM `retryWeeklyReportSend`, which is not belt-and-braces. The worker tags every message it sends,
+ * replays included, so a retry of a send committed before this feature existed — or by an API instance
+ * older than the worker, which two separate Railway services make an ordinary deploy state — carried a
+ * key that resolved to nothing. Those are precisely the rows the board offers a Retry on.
  *
  * ON CONFLICT DO NOTHING because a retry replays the SAME key by design (that is what stops it becoming a
  * second email), so a second insert is the normal case and not an error.
