@@ -45,6 +45,8 @@ export interface WeeklyReportDashboardRow {
   sendPending: boolean;
   /** Which report a Retry addresses — NOT always `reportId`, once a correction has been drafted over it. */
   sendRetryReportId: string | null;
+  /** When THAT send was committed. `sentAt` is the live row's, which is null once a correction exists. */
+  sendRetrySentAt: string | null;
   waitingOn: string | null;
   dismissalReason: string | null;
 }

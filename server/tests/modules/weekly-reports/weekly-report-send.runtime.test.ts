@@ -15,6 +15,7 @@ import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/share
 import {
   WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
   WEEKLY_REPORT_SEND_REQUEST_KEYS,
+  weeklyReportRetryIsProviderDeduped,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
@@ -1315,6 +1316,13 @@ describe("the dashboard's view of a send", () => {
     expect(row!.sendAttempts).toBe(3);
     expect(row!.sendRetryReportId).toBe(reportId);
     expect(row!.waitingOn).toBe("Adam Sherwood");
+    // And the AGE of that send, not the clone's. The clone is `approved` and has no `sent_at` at all, so
+    // a caller measuring the provider's 24-hour idempotency window off `row.sentAt` reads null — "outside
+    // the window" — and warns the PM that retrying will put a second copy in the client's inbox, for a
+    // send committed seconds ago that the provider provably still dedupes.
+    expect(row!.sentAt).toBeNull();
+    expect(row!.sendRetrySentAt).not.toBeNull();
+    expect(weeklyReportRetryIsProviderDeduped(row!.sendRetrySentAt)).toBe(true);
   });
 
   it("stops nagging about the original once the correction has gone out", async () => {
@@ -1373,6 +1381,46 @@ describe("the per-project counters", () => {
     expect(delivered.lastSentAt).not.toBeNull();
     expect(delivered.lastSentWeekOf).toBe(WEEK_OF);
     expect(delivered.undeliveredSends).toBe(0);
+  });
+
+  it("stops counting a failed version once its correction has reached the client", async () => {
+    // The two surfaces have to mean the same thing by "still owed". The board drops the original the
+    // moment the correction is sent (see "stops nagging about the original once the correction has gone
+    // out"); without the same `superseded_by_id IS NULL` here this tab kept a permanent "1 not delivered"
+    // against a week the client has actually received — a number a director reads to that client.
+    const { reportId } = await seedApprovedReport();
+    await sendWeeklyReport(db, {
+      reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out' WHERE id = $1::uuid`,
+      [reportId],
+    );
+    expect((await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!.undeliveredSends).toBe(1);
+
+    const correction = await createWeeklyReportCorrection(db, reportId, SENDER);
+    // Still outstanding while the correction is only DRAFTED — nothing has reached the client yet.
+    expect((await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!.undeliveredSends).toBe(1);
+
+    await sendWeeklyReport(db, {
+      reportId: correction.id,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await markDelivered(correction.id);
+
+    const after = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    expect(after.undeliveredSends).toBe(0);
+    expect(after.reportsSent).toBe(1);
+    // And the board agrees — the whole point of matching the predicate.
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(board.rows.find((entry) => entry.weekOf === WEEK_OF)!.sendFailed).toBe(false);
   });
 });
 
