@@ -10,7 +10,7 @@
 // instead of being whatever the machine happens to say.
 
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { deals, files, offices, users } from "@trock-crm/shared/schema";
 import { weeklyReportExpectedWeeks } from "@trock-crm/shared/types";
 import { migrationSql } from "../../../server/tests/helpers/migration-sql.js";
@@ -18,6 +18,7 @@ import { tenantSchemaSql } from "../../../server/tests/helpers/tenant-schema-fro
 // Across the workspace boundary on purpose: the worker's lookback constant is a hand-copy of the CRM
 // board's, and an assertion is the only thing that can notice the two drifting apart.
 import { DEFAULT_OUTSTANDING_LOOKBACK_WEEKS } from "../../../server/src/modules/weekly-reports/dashboard-service.js";
+import type { SendSystemEmailOutcome, SendSystemEmailResult } from "../../src/lib/system-email.js";
 import {
   acquireReminderAdvisoryLock,
   buildBacklog,
@@ -81,20 +82,29 @@ interface SentEmail {
 }
 
 /**
- * `fail` and `throws` are DIFFERENT failures and the job must treat them differently.
+ * `rejected` and `unknown` are DIFFERENT failures and the job must treat them differently. BOTH are
+ * `{success:false}`, which is precisely why the stub has to carry `outcome`.
  *
- * `fail` is `{success:false}` — the provider answered, and the answer was "not sent". `throws` is the SDK
- * raising: `sendSystemEmailWithMetadata` awaits `resend.emails.send` without a try/catch, so a socket
- * timeout propagates, and the message may well have been accepted before the connection died.
+ * This stub used to offer `throws` for the ambiguous case, on the stated theory that
+ * `sendSystemEmailWithMetadata` "lets exceptions through" so a socket timeout propagates. It does not.
+ * `resend@6` wraps its entire `fetch` in `try { ... } catch { return { error: { name:
+ * "application_error", statusCode: null } } }`, so a socket hang-up, a DNS failure, a 504 and a 409
+ * "still in flight" ALL return `{success:false}` — the production stack cannot raise the exception the
+ * old stub raised. Every test that "proved" the double-digest protection rode on that, and the protection
+ * was in fact unreachable. `real-transport.test.ts` in this directory drives the actual sender with
+ * `fetch` stubbed and asserts these shapes, so this stub cannot drift back into fiction.
+ *
+ * `throws` is kept for the one thing a throw still models — a bug in the send path, not a transport
+ * failure — and is used by exactly one test that says so.
  */
-function emailSpy(behaviour: { fail?: boolean; throws?: boolean } = {}) {
+function emailSpy(behaviour: { outcome?: SendSystemEmailOutcome; throws?: boolean } = {}) {
   const sent: SentEmail[] = [];
   const sendEmail = async (
     to: string | string[],
     subject: string,
     html: string,
     options: { text: string; idempotencyKey: string },
-  ) => {
+  ): Promise<SendSystemEmailResult> => {
     sent.push({
       to: Array.isArray(to) ? to : [to],
       subject,
@@ -102,10 +112,10 @@ function emailSpy(behaviour: { fail?: boolean; throws?: boolean } = {}) {
       text: options.text,
       idempotencyKey: options.idempotencyKey,
     });
-    // Recorded first: the attempt reached the provider, which is exactly what makes the outcome unknown.
-    if (behaviour.throws) throw new Error("socket hang up");
-    if (behaviour.fail) return { success: false, messageId: null };
-    return { success: true, messageId: `msg-${sent.length}` };
+    if (behaviour.throws) throw new Error("send path blew up");
+    const outcome = behaviour.outcome ?? "delivered";
+    if (outcome === "delivered") return { success: true, messageId: `msg-${sent.length}`, outcome };
+    return { success: false, messageId: null, outcome };
   };
   return { sent, sendEmail };
 }
@@ -121,7 +131,7 @@ function loggerSpy() {
 
 async function run(
   onDate: string,
-  behaviour: { fail?: boolean; throws?: boolean; env?: NodeJS.ProcessEnv } = {},
+  behaviour: { outcome?: SendSystemEmailOutcome; throws?: boolean; env?: NodeJS.ProcessEnv } = {},
 ) {
   const spy = emailSpy(behaviour);
   const { logs, logger } = loggerSpy();
@@ -578,9 +588,10 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       "  - Cedar Springs (Not started) — Super: Steve Sanchez, PM: Adam Sherwood\n" +
         "      No reminder was sent for this week.",
     );
-    // The chased-then-departed project must NOT be told it was never emailed.
+    // The chased-then-departed project must NOT be told it was never emailed. "logged", not "sent": the
+    // row it comes from is a claim, taken BEFORE the send — see the claim-vs-delivery suite.
     expect(email.text).toContain(
-      "2 reminders were sent for this week, but there is no reachable super or PM email now.",
+      "2 reminders were logged for this week, but there is no reachable super or PM email now.",
     );
     expect(email.text.match(/No reminder was sent/g)).toHaveLength(1);
     // Singular reads correctly when only the t-2 landed.
@@ -593,8 +604,11 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       backlog: [],
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
-    expect(one.text).toContain("1 reminder was sent for this week, but there is no reachable super or PM email now.");
+    expect(one.text).toContain("1 reminder was logged for this week, but there is no reachable super or PM email now.");
     expect(one.html).not.toContain("never reminded");
+    // The zero case keeps the flat past-tense claim, and deliberately so: an ABSENT row proves nothing was
+    // attempted, while a PRESENT one proves only that the slot was taken. The asymmetry is the point.
+    expect(email.text).toContain("No reminder was sent for this week.");
   });
 
   it("counts dismissed weeks apart from filed ones in the subject and the preheader", () => {
@@ -855,7 +869,7 @@ describe("idempotency", () => {
   });
 
   it("releases the claim when the provider rejects the send, so the next tick retries", async () => {
-    const failed = await run(T_MINUS_2, { fail: true });
+    const failed = await run(T_MINUS_2, { outcome: "rejected" });
     expect(failed.sent).toHaveLength(1);
     expect(failed.summary.failed).toBe(1);
     expect(await reminderLedger()).toEqual([]);
@@ -1030,7 +1044,7 @@ describe("due-date leadership digest", () => {
     // accepted the message: the catch-up tick re-sends, and only a key that hashes the same cohort makes
     // the provider recognise it. A key that rotated per attempt — random bytes, a timestamp — would pass
     // every other test in this file and put two copies of the digest in front of leadership.
-    const failed = await run(DUE, { fail: true });
+    const failed = await run(DUE, { outcome: "rejected" });
     const retried = await run(DUE);
     expect(failed.sent).toHaveLength(1);
     expect(retried.sent).toHaveLength(1);
@@ -1108,9 +1122,10 @@ describe("due-date leadership digest", () => {
       expect(sent).toHaveLength(1);
       expect(sent[0]!.text).not.toContain("No reminder was sent");
       expect(sent[0]!.html).not.toContain("never reminded");
-      // Both facts, each said as itself: two reminders landed, and the next one cannot.
+      // Both facts, each said as itself: two reminders went out, and the next one cannot. "logged", not
+      // "sent", because the ledger row is a CLAIM — see the claim-vs-delivery tests below.
       expect(sent[0]!.text).toContain(
-        "2 reminders were sent for this week, but there is no reachable super or PM email now.",
+        "2 reminders were logged for this week, but there is no reachable super or PM email now.",
       );
       expect(sent[0]!.text).toContain("Super: Steve Sanchez (unreachable)");
     } finally {
@@ -1212,7 +1227,7 @@ describe("due-date leadership digest", () => {
       [OTHER_PROJECT, DUE],
     );
 
-    const failed = await run(DUE, { fail: true });
+    const failed = await run(DUE, { outcome: "rejected" });
     expect(failed.summary.failed).toBe(1);
     // Only PROJECT's freshly-claimed row is rolled back; OTHER_PROJECT's receipt survives.
     expect(await reminderLedger()).toEqual([
@@ -1250,11 +1265,16 @@ describe("due-date leadership digest", () => {
   });
 
   it("does not send a second, unlabelled digest after a send whose outcome is unknown", async () => {
-    // 07:00. The SDK THROWS — a socket timeout, which sendSystemEmailWithMetadata does not catch — so
-    // Resend may have accepted and delivered the digest before the connection died. Releasing the claims
-    // here (the old behaviour) is what turns one ambiguous send into two unlabelled digests: the rollback
-    // empties the very ledger `alreadyDigested` is read from.
-    const first = await run(DUE, { throws: true });
+    // 07:00. The send comes back `{success:false, outcome:"unknown"}` — the REAL shape of a socket
+    // hang-up, a 504 or a 409 "still in flight", every one of which resend@6 swallows into an ordinary
+    // error result rather than an exception (see real-transport.test.ts). Resend may have accepted and
+    // delivered the digest before the connection died. Releasing the claims here (the old behaviour) is
+    // what turns one ambiguous send into two unlabelled digests: the rollback empties the very ledger
+    // `alreadyDigested` is read from.
+    //
+    // This test previously drove a THROWN error, which the production transport cannot produce — so it
+    // passed against a guard no real failure could ever reach.
+    const first = await run(DUE, { outcome: "unknown" });
     expect(first.sent).toHaveLength(1);
     expect(first.summary.digestsSent).toBe(0);
     expect(first.summary.failed).toBe(1);
@@ -1288,7 +1308,7 @@ describe("due-date leadership digest", () => {
     // really was lost, the day's digest is lost with it. That is logged and counted (`summary.failed`),
     // and it is the trade the alternative cannot make — a blind retry cannot be labelled as a repeat,
     // because at 09:00 nothing distinguishes a lost send from a delivered one.
-    const first = await run(DUE, { throws: true });
+    const first = await run(DUE, { outcome: "unknown" });
     expect(first.summary.failed).toBe(1);
 
     const second = await run(DUE);
@@ -1308,6 +1328,365 @@ describe("due-date leadership digest", () => {
     // The t-1 chase goes to the super/PM; leadership is not on it.
     expect(sent.every((email) => !email.to.includes("takashi@example.com"))).toBe(true);
     expect((await reminderLedger()).every((row) => row.kind !== "due_digest")).toBe(true);
+  });
+
+  it("treats a REJECTED digest differently from an UNKNOWN one — one retries, the other does not", async () => {
+    // The whole point of widening the transport. Both are `{success:false}`; only the outcome separates
+    // "the address was malformed, nothing exists, re-send it" from "the socket died, leadership may
+    // already have this". Collapsing them means choosing which bug to ship.
+    const rejected = await run(DUE, { outcome: "rejected" });
+    expect(rejected.summary.failed).toBe(1);
+    expect(await reminderLedger()).toEqual([]); // rolled back — a catch-up tick will retry
+    expect(rejected.logs.error.some((line) => line.includes("REJECTED - claims released for retry"))).toBe(true);
+
+    const retry = await run(DUE, { outcome: "unknown" });
+    expect(retry.sent).toHaveLength(1); // the retry the rejected path exists to allow
+    expect(retry.summary.failed).toBe(1);
+    // ...and now the claims STAY, because this time we do not know what happened.
+    expect(await reminderLedger()).toEqual([
+      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
+    ]);
+    expect(retry.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
+  });
+
+  it("does not claim it released the digest claims when the rollback itself failed", async () => {
+    // The saturated pool this job already guards against elsewhere. A DELETE that never lands leaves the
+    // claims standing and no catch-up tick will retry — so the log must not say "released for retry",
+    // which is what an operator reads to decide whether to intervene.
+    const spy = emailSpy({ outcome: "rejected" });
+    const { logs, logger } = loggerSpy();
+    const summary = await runWeeklyReportReminders({
+      query: async (text: string, params?: unknown[]) => {
+        if (text.includes("DELETE FROM office_dallas.weekly_report_reminders_sent")) {
+          throw new Error("timeout exceeded when trying to connect");
+        }
+        return query(text, params);
+      },
+      sendEmail: spy.sendEmail,
+      env: { FRONTEND_URL: "https://trockcrm.com" },
+      now: atNoonUtc(DUE),
+      logger,
+      acquireLock: async () => async () => {},
+    });
+
+    expect(summary.failed).toBe(1);
+    // The row survived the failed rollback — that is the state the log has to describe.
+    expect(await reminderLedger()).toEqual([
+      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
+    ]);
+    expect(logs.error.some((line) => line.includes("claim rollback FAILED"))).toBe(true);
+    expect(logs.error.some((line) => line.includes("claims released for retry"))).toBe(false);
+  });
+
+  it("treats a THROWN send as unknown too — defence in depth, not the transport's failure path", async () => {
+    // Kept deliberately small and labelled for what it is. `sendSystemEmailWithMetadata` does not throw
+    // for ANY provider or network failure (real-transport suite), so nothing here models production; it
+    // models a bug in the send path. The previous round's protection was tested ONLY through this door,
+    // which is why it looked verified while the real failure walked straight past it.
+    const first = await run(DUE, { throws: true });
+    expect(first.summary.failed).toBe(1);
+    expect(await reminderLedger()).toEqual([
+      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
+    ]);
+    expect(first.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
+  });
+});
+
+// -----------------------------------------------------------------------------------------------------
+// The bug the previous round did not fix, driven through the code that actually ships.
+// -----------------------------------------------------------------------------------------------------
+
+describe("leadership digest — against the REAL email transport", () => {
+  const realFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    await setLeadershipRecipients(["takashi@example.com", "shaw@example.com"]);
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * The job wired to the real `sendSystemEmailWithMetadata`, with `fetch` stubbed underneath it — the same
+   * boundary the reviewer probed. No `sendEmail` injection, so the ONLY thing standing between this test
+   * and a second digest is the production code path.
+   */
+  async function runAgainstRealTransport(fetchBehaviour: () => Promise<Response>) {
+    const requests: Array<{ subject: string; idempotencyKey: string | null; html: string }> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const headers = new Headers(init?.headers);
+      requests.push({
+        subject: String(body.subject ?? ""),
+        idempotencyKey: headers.get("Idempotency-Key"),
+        html: String(body.html ?? ""),
+      });
+      return fetchBehaviour();
+    }) as typeof fetch;
+
+    const { logs, logger } = loggerSpy();
+    const summary = await runWeeklyReportReminders({
+      query,
+      // sendEmail deliberately NOT injected.
+      env: { FRONTEND_URL: "https://trockcrm.com" },
+      now: atNoonUtc(DUE),
+      logger,
+      acquireLock: async () => async () => {},
+    });
+    return { requests, summary, logs };
+  }
+
+  it("sends ONE digest when the socket hangs up mid-send, even after the cohort grows", async () => {
+    // Verbatim the reviewer's reproduction. 07:00: `fetch` rejects. resend@6 swallows it into
+    // `{success:false}` — no exception — so the previous round's protection, which hung off a `catch`,
+    // never ran: the claims were rolled back, `alreadyDigested` emptied, and when a project became due at
+    // 09:00 the cohort hash rotated (so Resend could not dedup) and the `Update — ` prefix vanished with
+    // the ledger it is gated on. Two full unlabelled digests.
+    vi.stubEnv("RESEND_API_KEY", "re_test_e2e_key");
+
+    const first = await runAgainstRealTransport(async () => {
+      throw new Error("socket hang up");
+    });
+    expect(first.requests).toHaveLength(1);
+    expect(first.summary.digestsSent).toBe(0);
+    expect(first.summary.failed).toBe(1);
+    // The claim SURVIVES an unknown outcome. This is the assertion the old test could not make, because
+    // its stub raised an exception the transport cannot raise.
+    expect(await reminderLedger()).toEqual([
+      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
+    ]);
+    expect(first.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
+
+    // 09:00: a second project becomes due, so the cohort — and the idempotency key — changes.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [OTHER_PROJECT, OTHER_DEAL, SUPER],
+    );
+    const second = await runAgainstRealTransport(
+      async () =>
+        new Response(JSON.stringify({ id: "msg-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    expect(second.requests).toHaveLength(1);
+    const digest = second.requests[0]!;
+    // The key DID rotate — Resend cannot dedup this — so the subject is the only thing that can stop
+    // leadership reading it as an independent second report. Before the fix it read "0 filed, 2
+    // outstanding" with no prefix at all.
+    expect(digest.idempotencyKey).not.toBe(first.requests[0]!.idempotencyKey);
+    expect(digest.subject).toContain("Update — Weekly reports due Thursday, Aug 13 — 0 filed, 2 outstanding");
+    expect(digest.html).toContain("This updates the digest sent earlier today");
+    expect(digest.html).toContain("Katy Freeway Shops became due after it went out");
+  });
+
+  it("sends ONE digest on a 409 concurrent_idempotent_requests — an in-flight original is not a rejection", async () => {
+    vi.stubEnv("RESEND_API_KEY", "re_test_e2e_key");
+
+    const first = await runAgainstRealTransport(
+      async () =>
+        new Response(
+          JSON.stringify({
+            name: "concurrent_idempotent_requests",
+            message: "Same idempotency key is being processed",
+            statusCode: 409,
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+    );
+    expect(first.summary.failed).toBe(1);
+    expect(await reminderLedger()).toEqual([
+      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
+    ]);
+
+    // Same cohort at 09:00: no second attempt at all.
+    const second = await runAgainstRealTransport(
+      async () =>
+        new Response(JSON.stringify({ id: "msg-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    expect(second.requests).toEqual([]);
+    expect(second.summary.digestsSent).toBe(0);
+  });
+
+  it("DOES retry a 422 validation error — the case that must not be stranded", async () => {
+    // The cost of the alternative fix (treating every `{success:false}` as unknown): a fixable rejection
+    // would never retry and leadership would silently get nothing, for the whole day, with no email ever
+    // attempted again.
+    vi.stubEnv("RESEND_API_KEY", "re_test_e2e_key");
+
+    const first = await runAgainstRealTransport(
+      async () =>
+        new Response(
+          JSON.stringify({ name: "validation_error", message: "Invalid `to` field", statusCode: 422 }),
+          { status: 422, headers: { "content-type": "application/json" } },
+        ),
+    );
+    expect(first.requests).toHaveLength(1);
+    expect(first.summary.failed).toBe(1);
+    expect(await reminderLedger()).toEqual([]); // released, because nothing exists to duplicate
+
+    const retry = await runAgainstRealTransport(
+      async () =>
+        new Response(JSON.stringify({ id: "msg-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    expect(retry.summary.digestsSent).toBe(1);
+    // Same cohort, so the SAME key — a true duplicate would still be deduped by the provider.
+    expect(retry.requests[0]!.idempotencyKey).toBe(first.requests[0]!.idempotencyKey);
+    // And it is the FIRST digest of the day, not an "Update".
+    expect(retry.requests[0]!.subject).toContain("Weekly reports due Thursday, Aug 13 — 0 filed, 1 outstanding");
+    expect(retry.requests[0]!.subject.startsWith("Update")).toBe(false);
+  });
+});
+
+// -----------------------------------------------------------------------------------------------------
+// The ledger is a CLAIM ledger. What the digest is allowed to say about it.
+// -----------------------------------------------------------------------------------------------------
+
+describe("digest: claims vs deliveries", () => {
+  beforeEach(async () => {
+    await setLeadershipRecipients(["takashi@example.com", "shaw@example.com"]);
+  });
+
+  it("does not tell leadership a reminder was SENT when only a claim survives", async () => {
+    // The reviewer's reproduction. The t-2 send is rejected and the compensating DELETE throws — the same
+    // saturated pool the probe guard cites — so the row outlives a nudge that provably never went out.
+    // The super is then deactivated overnight, which is what makes the digest print the note at all.
+    //
+    // Nothing can make that row mean "delivered", so the sentence must not say it does. Before this fix it
+    // read "1 reminder was sent for this week", i.e. leadership was told a superintendent had ignored an
+    // email he was never sent.
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET trock_pm_user_id = NULL`);
+
+    const spy = emailSpy({ outcome: "rejected" });
+    const { logs, logger } = loggerSpy();
+    await runWeeklyReportReminders({
+      query: async (text: string, params?: unknown[]) => {
+        if (text.includes("DELETE FROM office_dallas.weekly_report_reminders_sent")) {
+          throw new Error("timeout exceeded when trying to connect");
+        }
+        return query(text, params);
+      },
+      sendEmail: spy.sendEmail,
+      env: { FRONTEND_URL: "https://trockcrm.com" },
+      now: atNoonUtc(T_MINUS_2),
+      logger,
+      acquireLock: async () => async () => {},
+    });
+
+    // The slot is burned over a delivery that never happened, and the log says so.
+    expect(await reminderLedger()).toEqual([
+      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "t_minus_2" },
+    ]);
+    expect(logs.error.some((line) => line.includes("claim rollback FAILED"))).toBe(true);
+
+    await pg.query(`UPDATE public.users SET is_active = false WHERE id = $1::uuid`, [SUPER]);
+    try {
+      const { sent } = await run(DUE);
+      expect(sent).toHaveLength(1);
+      // The claim-supported sentence, in both renderings.
+      expect(sent[0]!.text).toContain(
+        "1 reminder was logged for this week, but there is no reachable super or PM email now.",
+      );
+      expect(sent[0]!.html).toContain(
+        "1 reminder was logged for this week, but there is no reachable super or PM email now.",
+      );
+      // The delivery assertion is gone from the email entirely.
+      expect(sent[0]!.text).not.toContain("reminder was sent for this week, but");
+      expect(sent[0]!.html).not.toContain("reminder was sent for this week, but");
+    } finally {
+      await pg.query(`UPDATE public.users SET is_active = true WHERE id = $1::uuid`, [SUPER]);
+    }
+  });
+});
+
+// -----------------------------------------------------------------------------------------------------
+// The two guards on the widened ledger read. Either mutation used to leave the whole suite green.
+// -----------------------------------------------------------------------------------------------------
+
+describe("digest: the ledger read's scoping guards", () => {
+  beforeEach(async () => {
+    await setLeadershipRecipients(["takashi@example.com", "shaw@example.com"]);
+  });
+
+  it("ignores LAST week's ledger rows entirely — week_of bounds the read", async () => {
+    // `due_digest` rows accumulate one per project per week and are never cleaned up. Drop the `week_of`
+    // bound (replace it with a tautology) and `alreadyDigested` holds every project ever digested:
+    // `newlyDue` empties and the leadership digest silently never sends again after its first week. No
+    // error, no log line — the feature just stops.
+    //
+    // The prior week's t_minus_2 row is seeded too, because the SAME bound is what stops it inflating
+    // `remindersSent` and silencing this week's "never reminded" heading.
+    const LAST_WEEK = "2026-08-06";
+    for (const kind of ["due_digest", "t_minus_2"]) {
+      await pg.query(
+        `INSERT INTO office_dallas.weekly_report_reminders_sent (weekly_report_project_id, week_of, kind)
+         VALUES ($1::uuid, $2::date, $3)`,
+        [PROJECT, LAST_WEEK, kind],
+      );
+    }
+
+    const { sent, summary } = await run(DUE);
+
+    // Consumer 1 — `alreadyDigested`: this week's digest still goes out, and as a FIRST digest.
+    expect(sent).toHaveLength(1);
+    expect(summary.digestsSent).toBe(1);
+    expect(sent[0]!.subject).toContain("Weekly reports due Thursday, Aug 13 — 0 filed, 1 outstanding");
+    expect(sent[0]!.subject.startsWith("Update")).toBe(false);
+    // Consumer 2 — `remindersSent`: last week's chase says nothing about this week.
+    expect(sent[0]!.html).toContain("Outstanding — 1 never reminded");
+    expect(sent[0]!.text).toContain("No reminder was sent for this week.");
+  });
+
+  it("does not let a project's OWN due_digest receipt count as having chased anybody", async () => {
+    // On a follow-up digest every project already covered carries a `due_digest` row. Count all kinds
+    // instead of the two CHASE kinds and that receipt reads as "somebody was chased" — which silences the
+    // `— N never reminded` heading and the `No reminder was sent for this week.` note for exactly the
+    // never-chased project the follow-up digest exists to re-surface.
+    const first = await run(DUE);
+    expect(first.sent).toHaveLength(1);
+    expect(first.sent[0]!.html).toContain("Outstanding — 1 never reminded");
+
+    // A second project becomes due mid-morning, triggering a follow-up digest. Neither project has ever
+    // been chased: no t-2 or t-1 ran on either.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [OTHER_PROJECT, OTHER_DEAL, SUPER],
+    );
+    // PROJECT now holds a due_digest row and OTHER_PROJECT holds none — so a mutation that counts all
+    // kinds shows up as a DIFFERENCE between the two, not as a uniform shift.
+    expect((await reminderLedger()).map((row) => row.kind)).toEqual(["due_digest"]);
+
+    const second = await run(DUE);
+    expect(second.sent).toHaveLength(1);
+    expect(second.sent[0]!.subject).toContain(
+      "Update — Weekly reports due Thursday, Aug 13 — 0 filed, 2 outstanding",
+    );
+    // BOTH are still never-reminded. Counting the due_digest receipt drops this to 1.
+    expect(second.sent[0]!.html).toContain("Outstanding — 2 never reminded");
+    // ...and the note survives on the project that carries its own receipt.
+    expect(second.sent[0]!.text).toContain(
+      "  - DFW-10432 — 4123 Cedar Springs (Not started) — Super: Steve Sanchez, PM: Adam Sherwood\n" +
+        "      No reminder was sent for this week.",
+    );
+    expect(second.sent[0]!.text).toContain(
+      "  - DFW-10433 — Katy Freeway Shops (Not started) — Super: Steve Sanchez, PM: unassigned\n" +
+        "      No reminder was sent for this week.",
+    );
+    // Both notes present — the mutation removes the one on the project holding the due_digest receipt.
+    expect(second.sent[0]!.text.match(/No reminder was sent for this week\./g)).toHaveLength(2);
   });
 });
 
