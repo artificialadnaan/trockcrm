@@ -9,10 +9,10 @@ import type { LocalAuthEventType } from "../../../src/modules/auth/local-auth-se
  * database but a type error at the call site. This guards both directions.
  */
 
-// The annotation documents intent, but it is NOT what enforces this: server/tsconfig.json sets
-// rootDir to src, so `tsc -p server/tsconfig.json` never reads this directory, and vitest strips types
-// without checking them. The assertion below is the real guard -- verified to fail when a key is
-// dropped, rather than assumed to.
+// The annotation documents intent, but it is NOT what enforces this: neither tsconfig.json nor
+// tsconfig.typecheck.json actually typechecks this directory, and vitest strips types without checking
+// them. Verified by deleting a key and watching `npm run typecheck` stay green. The runtime assertion
+// below is the real guard -- verified to fail on the same mutation.
 const EVERY_EVENT_TYPE: Record<LocalAuthEventType, true> = {
   invite_previewed: true,
   invite_sent: true,

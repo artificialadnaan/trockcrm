@@ -51,6 +51,16 @@ import {
   loginWithLocalPassword,
 } from "./local-auth-service.js";
 import { loginMobileUser } from "./mobile-auth-service.js";
+import {
+  applyPasswordReset,
+  consumeResetToken,
+  dbClient,
+  deliverResetEmail,
+  isResetTokenUsable,
+  issueResetToken,
+  lookupUserContact,
+  notifyPasswordChanged,
+} from "./password-reset-service.js";
 import { fieldUserAuthRouter } from "../field-users/routes.js";
 import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
 
@@ -723,6 +733,82 @@ router.post("/procore/disconnect", authMiddleware, requireAdmin, async (_req, re
   try {
     await clearStoredProcoreOauthTokens();
     res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Self-service password reset (unauthenticated) ---
+//
+// One message for every failure mode. "Expired", "already used", "never existed" and "invalidated" are
+// deliberately indistinguishable: a distinguishable response is an oracle, and none of the distinctions
+// help a legitimate user, who needs exactly one instruction either way.
+const GENERIC_RESET_FAILURE = "This reset link is no longer valid. Request a new one.";
+
+router.post("/password-reset/request", authLimiter, async (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+
+  let issued: Awaited<ReturnType<typeof issueResetToken>> = null;
+  try {
+    if (email) issued = await issueResetToken(dbClient, email, req.ip ?? null);
+  } catch (err) {
+    // Swallowed on purpose. Surfacing a 500 here would make a database blip -- or anything that only
+    // errors for rows that exist -- into an existence oracle.
+    console.error("[password-reset] issue failed", err);
+  }
+
+  // Respond BEFORE sending mail. SMTP latency is the one variable-cost step in this handler, so doing
+  // it after the response means response time cannot correlate with whether the account exists.
+  res.status(200).json({ ok: true });
+
+  if (issued) {
+    deliverResetEmail(dbClient, issued).catch((err) => {
+      console.error("[password-reset] delivery failed", err);
+    });
+  }
+});
+
+router.post("/password-reset/validate", authLimiter, async (req, res, next) => {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
+    // UX only -- it lets the page say "this link is dead" without burning the token. Carries no
+    // security weight; complete() re-checks every condition atomically.
+    const valid = token ? await isResetTokenUsable(dbClient, token) : false;
+    res.json({ valid });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/password-reset/complete", authLimiter, async (req, res, next) => {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!token || !password) {
+      res.status(400).json({ error: { message: GENERIC_RESET_FAILURE } });
+      return;
+    }
+
+    const userId = await consumeResetToken(dbClient, token);
+    if (!userId) {
+      res.status(400).json({ error: { message: GENERIC_RESET_FAILURE } });
+      return;
+    }
+
+    // Anything thrown from here on is a real error (most often the 12-character policy) and is passed
+    // to the error handler unchanged. Reporting a policy rejection as GENERIC_RESET_FAILURE would send
+    // the user back for another email when their link was fine and only their password was not.
+    await applyPasswordReset(userId, password);
+    res.json({ ok: true });
+
+    // Fired after the response and never awaited: this notice is what makes an unauthorized reset
+    // visible, but failing to send it must not fail a reset that already committed.
+    const account = await lookupUserContact(dbClient, userId);
+    if (account) {
+      notifyPasswordChanged(account.email, account.display_name).catch((err) => {
+        console.error("[password-reset] change notice failed", err);
+      });
+    }
   } catch (err) {
     next(err);
   }
