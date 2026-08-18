@@ -26,6 +26,7 @@ import {
  *
  * PARAM CONTRACT (consumed here; emitted by RED's FilterBar frontend):
  *   assignedRepId  string | "__unassigned__"   eq, or IS NULL for the sentinel
+ *   estimatorId    string                       eq on estimator_user_id (no sentinel — see the predicate)
  *   regionId       string | "__unassigned__"   eq, or IS NULL for the sentinel
  *   projectTypeId  string                       eq
  *   workflowRoute  "normal" | "service"         eq (stored verbatim — no mapping)
@@ -44,6 +45,11 @@ export type DealStatusFilter = "active" | "on_hold" | "inactive" | "any";
 
 export interface DealFilterBarInput {
   assignedRepId?: string;
+  /**
+   * "Estimating it": deals whose estimator_user_id is this person. A SEPARATE dimension from
+   * assignedRepId on purpose — see buildEstimatorPredicate.
+   */
+  estimatorId?: string;
   regionId?: string;
   projectTypeId?: string;
   // Loosely typed on purpose: the predicate is the single validation point. A
@@ -120,6 +126,42 @@ export function buildAssignedRepPredicate(input: DealFilterBarInput): SQL | unde
   return buildOwnedRepCondition(input.assignedRepId);
 }
 
+/** Same shape the leads module already uses to keep malformed filter ids out of uuid comparisons. */
+const ESTIMATOR_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * "Estimating it": the deal's estimator IS the filtered person (deals.estimator_user_id).
+ *
+ * A THIRD predicate rather than a tweak to either existing one, because it answers a third question.
+ * buildOwnedRepCondition explains why a REP filter must stay owner-only; that reasoning is untouched
+ * here. This is what the "Estimators" group of the dropdown selects, and it is deliberately NOT
+ * owner-OR-estimator: the question is "what is Sidney estimating", and OR-ing in ownership would fold
+ * her own book back in and stop the two groups meaning different things.
+ *
+ * No Unassigned sentinel. The FilterBar's "__unassigned__" belongs to the assigned-rep dimension and
+ * means "nobody owns this"; there is no "unestimated" bucket in the UI, and silently mapping the
+ * sentinel to `estimator_user_id IS NULL` would answer a question nobody asked — on this dataset that is
+ * most of the board.
+ *
+ * MALFORMED IDS ARE REJECTED IN SQL, NOT LEFT TO FALL THROUGH. An earlier version of this comment claimed
+ * an unrecognized value "falls through to a plain equality against a value that matches no row, which is
+ * the safe direction". That was WRONG, and Codex was right to call it: `estimator_user_id` is a uuid
+ * column, so Postgres casts the bound string and raises 22P02 `invalid input syntax for type uuid` on
+ * anything that is not a uuid — including "__unassigned__". A hand-edited or shared URL therefore turned
+ * both the board and the list into 500s rather than an empty result. Emitting `false` for a malformed
+ * value restores the intent the comment described: a no-match, never a widening, and never an error.
+ */
+export function buildEstimatorCondition(estimatorId: string): SQL {
+  if (!ESTIMATOR_ID_UUID_RE.test(estimatorId)) return sql`false`;
+  return eq(deals.estimatorUserId, estimatorId);
+}
+
+/** estimator — eq on deals.estimator_user_id; unset omits (no narrowing). */
+export function buildEstimatorPredicate(input: DealFilterBarInput): SQL | undefined {
+  if (!input.estimatorId) return undefined;
+  return buildEstimatorCondition(input.estimatorId);
+}
+
 /**
  * Raw-SQL variant of buildInvolvedRepCondition for queries that alias the deals table
  * (e.g. "d") and so can't use the unaliased Drizzle `deals` object — mirrors the
@@ -147,6 +189,25 @@ export function buildAliasedOwnedRepSql(alias: string, repId: string): SQL {
   const repCol = sql.raw(`${alias}.assigned_rep_id`);
   if (repId === UNASSIGNED_FILTER_SENTINEL) return sql`${repCol} is null`;
   return sql`${repCol} = ${repId}`;
+}
+
+/**
+ * Raw-SQL ESTIMATOR variant, the aliased twin of buildEstimatorCondition — for the stage-page query, which
+ * aliases deals as "d" and so cannot use the unaliased Drizzle object.
+ *
+ * NO Unassigned sentinel, for the reason buildEstimatorCondition gives: mapping it to
+ * `estimator_user_id IS NULL` would answer a question nobody asked, and on this dataset that is most of
+ * the board. `alias` is interpolated raw so it MUST be a trusted internal identifier (validated below);
+ * `estimatorId` is parameterized.
+ */
+export function buildAliasedEstimatorSql(alias: string, estimatorId: string): SQL {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`Invalid SQL alias for estimator predicate: ${alias}`);
+  }
+  // Same 22P02 exposure as the unaliased twin — the stage drill-down takes this id straight off the query
+  // string, so it must reject a malformed value rather than hand it to a uuid comparison.
+  if (!ESTIMATOR_ID_UUID_RE.test(estimatorId)) return sql`false`;
+  return sql`${sql.raw(`${alias}.estimator_user_id`)} = ${estimatorId}`;
 }
 
 /**
@@ -429,6 +490,7 @@ export type DealFilterPredicate = (
 /** The registry: one entry per FilterBar dimension, all AND-combinable. */
 export const DEAL_FILTER_PREDICATES: DealFilterPredicate[] = [
   (input) => buildAssignedRepPredicate(input),
+  (input) => buildEstimatorPredicate(input),
   (input) => buildRegionPredicate(input),
   (input) => buildProjectTypePredicate(input),
   (input) => buildWorkflowRoutePredicate(input),

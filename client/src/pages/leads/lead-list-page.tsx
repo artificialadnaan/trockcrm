@@ -287,7 +287,15 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   // nothing to render it in. The condition is written once here and reused for the bar's dimensions below
   // so the two cannot disagree about when a rep filter exists.
   const repFilterVisible = (role === "admin" || role === "director") && scope !== "mine";
-  const { reps: roster } = useRepRoster({ enabled: repFilterVisible });
+  const { reps: rosterAllGroups } = useRepRoster({ enabled: repFilterVisible });
+  // SALES ONLY here. A lead has an assigned rep and no estimator — leads.estimator_user_id does not
+  // exist — so this control can only ever filter by owner. Offering an estimator would reproduce exactly
+  // the bug the Estimators group was added to fix on the deals board: a name you can pick that always
+  // returns nothing. Undefined group counts as sales (see RepFilterOption.group).
+  const roster = useMemo(
+    () => rosterAllGroups.filter((rep) => rep.group !== "estimator"),
+    [rosterAllGroups]
+  );
   const { assignees } = useTaskAssignees();
   const { projectTypes } = useProjectTypes();
   const assigneeNameById = useMemo(

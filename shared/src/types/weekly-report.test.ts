@@ -4,6 +4,7 @@ import {
   canTransitionWeeklyReport,
   daysBetweenIsoDates,
   isIsoDateString,
+  isWeeklyReportWeekPaused,
   isoDateWeekday,
   shiftIsoDate,
   weeklyReportDaysLate,
@@ -149,6 +150,47 @@ describe("weeklyReportExpectedWeeks", () => {
     ).toEqual([]);
   });
 
+  it("skips the weeks reporting was paused for, and only those", () => {
+    // The bug this closes: status says only where the setup stands TODAY, so a project paused for three
+    // weeks and set back to Active came back owing all three as missed and late — while the CRM's own
+    // form promised that pausing stops weeks being generated.
+    expect(
+      weeklyReportExpectedWeeks({
+        cadenceWeekday: THURSDAY,
+        cadenceStartDate: "2026-07-27",
+        throughDate: "2026-08-27",
+        pausedIntervals: [{ from: "2026-08-03", to: "2026-08-24" }],
+      }),
+      // 07-30 was missed BEFORE the pause and stays owed; 08-06, 08-13 and 08-20 fell inside it.
+    ).toEqual(["2026-07-30", "2026-08-27"]);
+  });
+
+  it("keeps skipping while reporting is still stopped", () => {
+    expect(
+      weeklyReportExpectedWeeks({
+        cadenceWeekday: THURSDAY,
+        cadenceStartDate: "2026-07-27",
+        throughDate: "2026-09-30",
+        pausedIntervals: [{ from: "2026-08-03", to: null }],
+      }),
+    ).toEqual(["2026-07-30"]);
+  });
+
+  it("keeps each pause separate rather than merging them into one gap", () => {
+    expect(
+      weeklyReportExpectedWeeks({
+        cadenceWeekday: THURSDAY,
+        cadenceStartDate: "2026-07-27",
+        throughDate: "2026-08-27",
+        pausedIntervals: [
+          { from: "2026-08-03", to: "2026-08-10" },
+          { from: "2026-08-17", to: "2026-08-24" },
+        ],
+      }),
+      // The week between the two pauses was owed and is still owed.
+    ).toEqual(["2026-07-30", WEEK_OF, "2026-08-27"]);
+  });
+
   it("stays weekly across a DST boundary", () => {
     const weeks = weeklyReportExpectedWeeks({
       cadenceWeekday: THURSDAY,
@@ -159,6 +201,35 @@ describe("weeklyReportExpectedWeeks", () => {
     for (let i = 1; i < weeks.length; i += 1) {
       expect(daysBetweenIsoDates(weeks[i - 1]!, weeks[i]!)).toBe(7);
     }
+  });
+});
+
+describe("isWeeklyReportWeekPaused", () => {
+  const PAUSE = [{ from: WEEK_OF, to: "2026-08-27" }];
+
+  it("stops the week due on the day reporting was paused", () => {
+    // Pausing is a decision about the weeks still ahead, and the week due that same day is one of them.
+    expect(isWeeklyReportWeekPaused(WEEK_OF, PAUSE)).toBe(true);
+  });
+
+  it("owes the week due on the day reporting resumed", () => {
+    // Half-open at the top: coming back on a due date means that date is owed, not written off.
+    expect(isWeeklyReportWeekPaused("2026-08-27", PAUSE)).toBe(false);
+  });
+
+  it("leaves the weeks missed before the pause owed", () => {
+    // The failure mode a backdated pause would otherwise buy: quietly clearing a late week off the board
+    // without anybody dismissing it and saying why.
+    expect(isWeeklyReportWeekPaused("2026-08-06", PAUSE)).toBe(false);
+  });
+
+  it("treats an unfinished pause as running forever", () => {
+    expect(isWeeklyReportWeekPaused("2027-01-07", [{ from: WEEK_OF, to: null }])).toBe(true);
+  });
+
+  it("says no when there are no pauses at all", () => {
+    expect(isWeeklyReportWeekPaused(WEEK_OF, [])).toBe(false);
+    expect(isWeeklyReportWeekPaused(WEEK_OF, null)).toBe(false);
   });
 });
 

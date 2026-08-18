@@ -765,7 +765,14 @@ export function DealsListSection({
   //
   // `assignees` is NOT gated: its map resolves owner names for the rows and the CSV export, which every
   // mode renders.
-  const { reps: repOptions } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
+  const { reps: rosterAllGroups } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
+  // SALES ONLY: this control writes an OWNER filter (effectiveAssignedRepId → assignedRepId), so an
+  // estimator picked here would filter by deals they own — nothing, for a pure estimator. The estimator
+  // dimension lives on the deals dashboard header, which writes ?estimatorId instead.
+  const repOptions = useMemo(
+    () => rosterAllGroups.filter((rep) => rep.group !== "estimator"),
+    [rosterAllGroups]
+  );
   const { assignees } = useTaskAssignees();
 
   const stageFilterOptions = useMemo(() => {

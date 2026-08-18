@@ -1,6 +1,7 @@
 import { alias } from "drizzle-orm/pg-core";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { deals, users, pipelineStageConfig } from "@trock-crm/shared/schema";
+import { buildEstimatorCondition } from "./deal-filter-predicates.js";
 import {
   PENDING_RFP_STATUSES,
   PENDING_RFP_ATTENTION_STATUSES,
@@ -51,7 +52,10 @@ async function opportunityStageIds(tenantDb: any): Promise<string[]> {
 
 // Cross-rep, office-scoped (office isolation is enforced by the tenant schema → NO owner filter,
 // NO office WHERE). Returns the Pending-RFP bucket oldest-first.
-export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[]> {
+export async function getPendingRfpDeals(
+  tenantDb: any,
+  filters: { estimatorId?: string } = {},
+): Promise<PendingRfpDeal[]> {
   const oppStageIds = await opportunityStageIds(tenantDb);
   if (oppStageIds.length === 0) return [];
 
@@ -89,6 +93,14 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
         NOT_OVERRIDE_APPROVING,
         eq(deals.isActive, true),
         sql`coalesce(${deals.isTestData}, false) = false`,
+        // The board's Pending RFP column is narrowed by the estimator filter, and clicking it lands here.
+        // Without this the destination lists every pending RFP under a count scoped to one person.
+        // buildEstimatorCondition (not a bare eq) so a malformed id is a no-match rather than a 22P02.
+        //
+        // NOTE the asymmetry: assignedRepId is NOT applied here, and that gap PRE-DATES this change — the
+        // rep-filtered column has always opened an unfiltered queue. Left alone deliberately rather than
+        // silently altering behaviour outside this PR's scope; worth fixing separately.
+        ...(filters.estimatorId ? [buildEstimatorCondition(filters.estimatorId)] : []),
       ),
     )
     .orderBy(asc(deals.rfpApprovalRequestedAt));

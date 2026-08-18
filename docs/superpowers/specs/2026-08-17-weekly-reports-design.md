@@ -147,6 +147,20 @@ A missed week has **no** `weekly_reports` row — nobody started one — so the 
 report. Expected weeks are generated from the cadence and left-joined against both this table and
 `weekly_reports`; a week with neither is "Not started" and keeps aging.
 
+### `weekly_report_pauses`
+
+`weekly_report_project_id`, `paused_from date NOT NULL`, `resumed_on date NULL`, `paused_by`,
+`resumed_by`. One OPEN interval per project at most (`UNIQUE (weekly_report_project_id) WHERE resumed_on
+IS NULL`). Migration 0223.
+
+`status` answers only "is this project reporting today", and the expected weeks are regenerated from
+`cadence_start_date` on every read — so without this ledger a project paused for six weeks came back
+owing all six as missed and late, contradicting the form's own promise that pausing stops weeks being
+generated. The interval is half-open `[paused_from, resumed_on)`: the week due on the day reporting
+stopped is not owed, the week due on the day it resumed is, and the weeks missed **before** the pause
+stay outstanding. Recording the interval rather than advancing `cadence_start_date` is what keeps those
+earlier misses — and the answer to "when did we start reporting to this client".
+
 ### `weekly_report_reminders_sent`
 
 `(weekly_report_project_id, week_of, kind)` unique, where `kind` ∈ `t_minus_2` | `t_minus_1` |
