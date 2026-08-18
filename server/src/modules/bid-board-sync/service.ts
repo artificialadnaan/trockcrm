@@ -1429,6 +1429,14 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
   // project (Procore appends "(N)" to duplicated names), but when the repeats DISAGREE about the due date
   // there is no way to tell which one the board means — and without this the row loop would write both in
   // sequence, leaving EXPORT ORDER to decide which date lands on the deal. Silently.
+  //
+  // BUILT ONLY FROM ROWS THE LOOP WILL ACTUALLY PROCESS. A row the ingest discards contributes no opinion,
+  // so it must not be able to veto one: a `Status: Templates` row sharing a canonical Project # would
+  // otherwise refuse the real row's write AND (since the mirror now moves with it) withhold its mirror,
+  // leaving the signal false for as long as that row sits on the board — and naming a project with no
+  // genuine conflict in the warning. The row-level guards below are exactly the ones the loop applies
+  // before it reaches the write-through; the remaining ones (detached / no-match / multi-match) are
+  // per-DEAL and unknowable here, but they skip the row entirely rather than writing a second opinion.
   const dueDateDaysByProjectNumber = new Map<string, Set<string>>();
   for (const row of rows) {
     const projectNumber = normalizeBidBoardProjectNumber(row["Project #"]);
@@ -1436,12 +1444,22 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       metrics.nullProjectNumbers++;
       continue;
     }
+    // The duplicate-Project# WARNING is deliberately still counted across every row: two board rows
+    // sharing a number is a board-hygiene problem worth reporting whether or not the ingest processes
+    // both. Only the due-date CONFLICT set narrows below.
     if (seenProjectNumbers.has(projectNumber)) duplicateProjectNumbers.add(projectNumber);
     seenProjectNumbers.add(projectNumber);
+
+    // Normalized through the SAME function the row loop uses, rather than re-deriving the fields here —
+    // a second, similar-looking derivation is how the two drift apart.
+    const scanRow = normalizeBidBoardRow(row);
+    if (!scanRow.name) continue;
+    if (isTemplatesStatus(scanRow.bidBoardStatus)) continue;
+
     // Only PARSEABLE dates count toward a conflict: a blank cell never clears (see
     // writeBidDueDateIfNeeded), so "one row dated, one row blank" is not a disagreement — the dated row
     // is simply the only one with an opinion.
-    const parsedDay = parseBidBoardDueDate(row["Due Date"]).value;
+    const parsedDay = scanRow.bidBoardDueDate;
     if (parsedDay) {
       const days = dueDateDaysByProjectNumber.get(projectNumber) ?? new Set<string>();
       days.add(parsedDay);
@@ -1625,7 +1643,27 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       // Withholding the mirror is the right half to give up. It is never published to a user, so a stale
       // mirror costs nothing visible, whereas advancing it destroys provenance we legitimately earned on
       // an earlier, unambiguous sync — and nothing about today's ambiguity invalidates yesterday's write.
-      // It also keeps the feature's central promise intact: a sync that declines to write moves nothing.
+      //
+      // ⚠️ SCOPE, precisely — this withholds `bid_board_due_date` ONLY, not "everything the signal reads".
+      // An earlier draft of this comment said a declining sync "moves nothing", which is not true: the
+      // signal ALSO requires bid_due_date_bid_board_project_number == bid_board_project_number, and the
+      // mirror UPDATE advances bid_board_project_number ($14) unconditionally. So a declined run that ALSO
+      // sees a changed Project # does revoke the override, until the next run that can write re-earns the
+      // stamp for the new number.
+      //
+      // That is deliberate, not an oversight. bid_board_project_number is not merely a signal input — it
+      // is the matcher's own tier-2 identity and carries a canonical UNIQUE index, so freezing it would
+      // make the CRM's record of which board project this deal is stale and change how LATER runs match.
+      // And a genuine project change SHOULD revoke: that is exactly the retired-project rule the identity
+      // half exists for. The failure mode is bounded and self-healing — one cycle, once an attributor
+      // exists and the duplicate is resolved — and it fails toward the legacy precedence, which is the
+      // safe direction.
+      //
+      // Known sharp edge, deliberately left as-is: the resolver compares those two project numbers as RAW
+      // strings, while the matcher decides project identity CANONICALLY. So a purely cosmetic Project #
+      // edit on the board (case, spacing, a Unicode dash) also revokes the override until the next
+      // successful write re-stamps it. Conservative in the safe direction, self-healing, and changing the
+      // comparison would alter identity semantics — which deserves its own review, not a last-round edit.
       //
       // Mechanically this is just `$11 = NULL`, which the flag-on SET reads through
       // COALESCE($11::date, bid_board_due_date) as "leave it alone". Flag OFF is untouched: the SET is a

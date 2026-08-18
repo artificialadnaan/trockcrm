@@ -56,6 +56,16 @@ function exportRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * The conflicting duplicate pair, in either order. Both orders must behave identically — an assertion that
+ * only holds when the DIFFERING row is processed last is not testing the guard, it is testing luck.
+ */
+function conflictingPair(order: "differing-last" | "agreeing-last") {
+  const agreeing = exportRow({ "Due Date": "2026-09-01" });
+  const differing = exportRow({ "Due Date": "2026-10-15" });
+  return order === "differing-last" ? [agreeing, differing] : [differing, agreeing];
+}
+
 async function dealRow(id = DEAL) {
   const { rows } = await pg.query<Record<string, any>>(`SELECT * FROM ${SCHEMA}.deals WHERE id = '${id}'`);
   return rows[0];
@@ -94,13 +104,16 @@ async function mirrorDay(id = DEAL): Promise<string | null> {
 }
 
 /**
- * The read-back SIGNAL, evaluated in SQL exactly as the resolver evaluates it in TS: the provenance stamp
- * is present, it was earned on the project the deal is on now, and the written day still equals the mirror.
- * Asserting on this rather than on the columns individually is what makes "coherent" testable.
+ * The read-back SIGNAL, evaluated in SQL exactly as the resolver evaluates it in TS: not detached, the
+ * provenance stamp is present, it was earned on the project the deal is on now, and the written day still
+ * equals the mirror. Asserting on this rather than on the columns individually is what makes "coherent"
+ * testable — and it must keep ALL FOUR clauses, including the detach one, or a future reuse on a severed
+ * deal would quietly report a signal the resolver would refuse.
  */
 async function signalHolds(id = DEAL): Promise<boolean> {
   const { rows } = await pg.query<{ holds: boolean }>(
-    `SELECT (bid_due_date_from_bid_board_at IS NOT NULL
+    `SELECT (bid_board_detached_at IS NULL
+             AND bid_due_date_from_bid_board_at IS NOT NULL
              AND bid_due_date_bid_board_project_number IS NOT NULL
              AND bid_board_project_number IS NOT NULL
              AND bid_due_date_bid_board_project_number = bid_board_project_number
@@ -627,7 +640,12 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
    * The invariant: a refused write moves NOTHING. Value, mirror and stamp are never left in a state where
    * the signal is false but the data implies it should be true.
    */
-  it("leaves value, mirror and stamp COHERENT when a conflicting pair hits an already-stamped deal", async () => {
+  it.each([
+    ["differing row last", "differing-last"],
+    ["agreeing row last", "agreeing-last"],
+  ] as const)(
+    "leaves value, mirror and stamp COHERENT when a conflicting pair hits an already-stamped deal (%s)",
+    async (_label, order) => {
     // Earn provenance on an unambiguous sync first.
     await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
     const stamped = await dealRow();
@@ -636,14 +654,10 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     const signalBefore = await signalHolds();
     expect(signalBefore).toBe(true);
 
-    // Now a conflicting pair: one row agrees with the stored date, the other does not.
-    const result = await ingestBidBoardRows({
-      office_slug: "test",
-      rows: [
-        exportRow({ "Due Date": "2026-09-01" }),
-        exportRow({ "Due Date": "2026-10-15" }),
-      ],
-    });
+    // Now a conflicting pair. Order is parameterised below because the naive assertion only catches the
+    // bug when the DIFFERING row happens to be last — with the agreeing row last, a broken build writes
+    // the same value back and looks correct.
+    const result = await ingestBidBoardRows({ office_slug: "test", rows: conflictingPair(order) });
 
     const after = await dealRow();
     // Nothing moved: value, mirror and stamp are all exactly as they were.
@@ -655,6 +669,55 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     // …so the override still fires. This is the assertion the bug broke.
     expect(await signalHolds()).toBe(true);
     expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(2);
+  }
+  );
+
+  // ★ F2. The AUDIT half of the mirror fix. The columns can be withheld correctly while the trail still
+  // claims a move that never happened — reverting the audit call to `normalized` leaves every other test
+  // in this file green, because nothing else reads what the trail says about bid_board_due_date.
+  //
+  // Parameterised over BOTH orders for a reason worth recording: with the mirror withheld, the SECOND
+  // duplicate row's mirror UPDATE no-ops (nothing is distinct any more, since bid_board_last_updated_at is
+  // fixed per run), so no audit row is written for it at all. Only the order that puts the DIFFERING row
+  // first can observe a wrongly-claimed move — the "differing-last" variant is vacuous on its own, which a
+  // mutation check caught after this test was first written.
+  it.each(["differing-last", "agreeing-last"] as const)(
+    "does not record a mirror move in the audit trail when the mirror was withheld (%s)",
+    async (order) => {
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    await pg.exec(`DELETE FROM ${SCHEMA}.audit_log;`);
+
+    await ingestBidBoardRows({ office_slug: "test", rows: conflictingPair(order) });
+
+    // The column really is untouched...
+    expect(await mirrorDay()).toBe("2026-09-01");
+    // ...and the trail agrees: no entry claims the withheld date landed.
+    const mirrorChanges = (await auditFieldChanges())
+      .map((c) => c.bidBoardDueDate as { from?: unknown; to?: unknown } | undefined)
+      .filter((c): c is { from?: unknown; to?: unknown } => c != null);
+    for (const change of mirrorChanges) {
+      expect(String(change.to ?? "")).not.toContain("2026-10-15");
+    }
+  }
+  );
+
+  it("does not record a mirror move when there is no attributor either", async () => {
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    await pg.exec(`DELETE FROM ${SCHEMA}.audit_log;`);
+    await pg.exec(`UPDATE public.users SET is_active = false WHERE id = '${ADMIN}'`);
+    try {
+      await ingestBidBoardRows({ office_slug: "test", rows: [exportRow({ "Due Date": "2026-10-15" })] });
+
+      expect(await mirrorDay()).toBe("2026-09-01");
+      const mirrorChanges = (await auditFieldChanges())
+        .map((c) => c.bidBoardDueDate as { to?: unknown } | undefined)
+        .filter((c): c is { to?: unknown } => c != null);
+      for (const change of mirrorChanges) {
+        expect(String(change.to ?? "")).not.toContain("2026-10-15");
+      }
+    } finally {
+      await pg.exec(`UPDATE public.users SET is_active = true WHERE id = '${ADMIN}'`);
+    }
   });
 
   // The SAME asymmetry on the other guard that skips the write-through. This one is worse in blast radius:
@@ -679,6 +742,66 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     } finally {
       await pg.exec(`UPDATE public.users SET is_active = true WHERE id = '${ADMIN}'`);
     }
+  });
+
+  // ★ F1. A row the ingest DISCARDS must not be able to veto a row it processes. A Templates-status row
+  // sharing a canonical Project # is skipped before matching, so it never writes a competing date — but it
+  // was contributing its Due Date to the conflict scan, refusing the real row's write and (since the mirror
+  // now moves with the value) withholding its mirror too. That persists for as long as the board carries
+  // the row, and the warning names a project with no genuine conflict.
+  it("ignores a TEMPLATES row's Due Date when scanning for conflicts", async () => {
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ "Due Date": "2026-09-01" }),
+        exportRow({ Status: "Templates", "Due Date": "2026-10-15" }),
+      ],
+    });
+
+    // The real row wrote, and nothing was refused.
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(result.metrics.bidDueDateUpdated).toBe(1);
+    expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(0);
+    expect(result.metrics.skippedTemplate).toBe(1);
+    // …and the mirror moved with it, so the signal is live rather than stuck false.
+    expect(await mirrorDay()).toBe("2026-09-01");
+    expect(await signalHolds()).toBe(true);
+  });
+
+  it("ignores a NAMELESS row's Due Date too — the loop discards it before matching", async () => {
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ "Due Date": "2026-09-01" }),
+        exportRow({ Name: "", "Due Date": "2026-10-15" }),
+      ],
+    });
+
+    expect(result.metrics.bidDueDateUpdated).toBe(1);
+    expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(0);
+    expect(await signalHolds()).toBe(true);
+  });
+
+  // The duplicate WARNING deliberately still fires across every row, discarded or not: two board rows
+  // sharing a Project # is a hygiene problem worth reporting either way. Only the due-date CONFLICT
+  // narrowed, so this pins that the two did not get conflated.
+  it("still reports the duplicate Project # even when the duplicate is a discarded row", async () => {
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ "Due Date": "2026-09-01" }),
+        exportRow({ Status: "Templates", "Due Date": "2026-10-15" }),
+      ],
+    });
+
+    expect(result.metrics.duplicateProjectNumbers).toBe(1);
+    expect(result.warnings.join(" ")).toContain("duplicate Project #");
   });
 
   it("still writes when duplicate rows AGREE on the Due Date — a repeat is not a conflict", async () => {

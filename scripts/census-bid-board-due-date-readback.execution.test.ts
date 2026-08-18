@@ -130,6 +130,42 @@ describe("buildCensusSql — executes against a real Postgres", () => {
     expect(rows.every((r) => r.is_ambiguous_procore_bid_id === true)).toBe(true);
   });
 
+  // The NEGATIVE half. Without it, dropping `AND o.procore_bid_id = d.procore_bid_id` still parses and
+  // still returns true for the positive case above (two rows exist, so the EXISTS matches on the remaining
+  // predicates) — the text suite catches that one, but a suite should not depend on its neighbour.
+  it("evaluates the tier-1 EXISTS: DISTINCT procore_bid_ids are NOT flagged", async () => {
+    await pg.exec(`DELETE FROM ${SCHEMA}.deals;`);
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.deals
+         (id, name, deal_number, project_number, bid_board_project_number, stage_id, procore_bid_id,
+          bid_due_date, bid_board_due_date, is_active, is_change_order)
+       VALUES
+         ($1, 'A', 'P-1', 'P-1', 'P-1', $3, 4242, '2026-06-01T00:00:00Z', '2026-09-01', true, false),
+         ($2, 'B', 'P-2', 'P-2', 'P-2', $3, 9999, '2026-06-01T00:00:00Z', '2026-09-01', true, false)`,
+      [DEAL_ID, "00000000-0000-4000-8000-0000000000d2", STAGE_ID]
+    );
+
+    const { rows } = await pg.query<{ is_ambiguous_procore_bid_id: boolean }>(buildCensusSql(SCHEMA));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.is_ambiguous_procore_bid_id === false)).toBe(true);
+  });
+
+  it("evaluates the tier-2 EXISTS: DISTINCT project numbers are NOT flagged", async () => {
+    await pg.exec(`DELETE FROM ${SCHEMA}.deals;`);
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.deals
+         (id, name, deal_number, project_number, bid_board_project_number, stage_id,
+          bid_due_date, bid_board_due_date, is_active, is_change_order)
+       VALUES
+         ($1, 'A', 'P-1', 'P-1', 'P-1', $3, '2026-06-01T00:00:00Z', '2026-09-01', true, false),
+         ($2, 'B', 'P-2', 'P-2', 'P-2', $3, '2026-06-01T00:00:00Z', '2026-09-01', true, false)`,
+      [DEAL_ID, "00000000-0000-4000-8000-0000000000d2", STAGE_ID]
+    );
+
+    const { rows } = await pg.query<{ is_ambiguous_project_number: boolean }>(buildCensusSql(SCHEMA));
+    expect(rows.every((r) => r.is_ambiguous_project_number === false)).toBe(true);
+  });
+
   it("evaluates the tier-2 EXISTS: a shared canonical project number is detected", async () => {
     await pg.exec(`DELETE FROM ${SCHEMA}.deals;`);
     await pg.query(
