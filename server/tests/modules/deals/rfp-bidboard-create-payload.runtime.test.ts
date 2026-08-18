@@ -55,7 +55,7 @@ async function setup() {
       estimator text, bid_board_estimator text,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
       description text, bid_due_date timestamptz, bid_board_due_date date, bid_board_project_number text,
-      -- migration 0224: the resolver requires this provenance stamp, not a coincidental day match.
+      -- migration 0225: the resolver requires this provenance stamp, not a coincidental day match.
       bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text,
       -- migration 0200: the resolver refuses the Bid Board override on a severed deal.
       bid_board_detached_at timestamptz, created_at timestamptz DEFAULT now(),

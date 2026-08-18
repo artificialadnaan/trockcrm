@@ -1,4 +1,4 @@
--- Migration 0224: PROVENANCE for the Bid Board due-date read-back.
+-- Migration 0225: PROVENANCE for the Bid Board due-date read-back.
 --
 --   bid_due_date_from_bid_board_at        -- WHEN the sync wrote deals.bid_due_date
 --   bid_due_date_bid_board_project_number -- WHICH Bid Board project it wrote it FOR

@@ -12,7 +12,7 @@ import { isBidBoardDueDateReadbackEnabled } from "../../config/feature-flags.js"
  * the mirror column. The mirror only helps answer one question: "has the Bid Board's date actually LANDED
  * in the CRM column?", which requires BOTH
  *   1. PROVENANCE — `deals.bid_due_date_from_bid_board_at` is set, i.e. the sync itself wrote the column
- *      (migration 0224); and
+ *      (migration 0225); and
  *   2. CURRENCY — `(deals.bid_due_date AT TIME ZONE 'UTC')::date` still equals `deals.bid_board_due_date`.
  * When both hold, the deal column WINS over the source lead. Otherwise the legacy precedence applies
  * untouched.
@@ -77,13 +77,13 @@ export interface DealBidDueDateInput {
    */
   bidBoardDueDate?: Date | string | null;
   /**
-   * `deals.bid_due_date_from_bid_board_at` (migration 0224) — when the Bid Board sync last WROTE
+   * `deals.bid_due_date_from_bid_board_at` (migration 0225) — when the Bid Board sync last WROTE
    * `deals.bid_due_date`. NULL means the value did not come from the board, whatever the dates look like.
    * Required for the override; see the module doc for why a day match alone is not provenance.
    */
   bidDueDateFromBidBoardAt?: Date | string | null;
   /**
-   * `deals.bid_due_date_bid_board_project_number` (migration 0224) — the Bid Board project the stamp was
+   * `deals.bid_due_date_bid_board_project_number` (migration 0225) — the Bid Board project the stamp was
    * earned on, compared against `bidBoardProjectNumber` below. See the module doc.
    */
   bidDueDateBidBoardProjectNumber?: string | null;
@@ -172,7 +172,7 @@ export function resolveDealBidDueDate(input: DealBidDueDateInput): ResolvedDealB
   // THE SIGNAL. Not "what does the board say?" but "did the SYNC put what the board says into the column
   // every SQL surface reads, and is it still there?".
   //
-  // PROVENANCE first: without the 0224 stamp this is a deal the sync has never written, whatever its dates
+  // PROVENANCE first: without the 0225 stamp this is a deal the sync has never written, whatever its dates
   // happen to look like. This is the condition that makes the flag flip inert — at flip time no deal
   // carries a stamp (the write-through is gated by the same flag), so the override fires for NOBODY until
   // a sync writes, and thereafter only for the deals the census counted. A day match alone would accept a
@@ -230,7 +230,7 @@ export function resolveDealBidDueDate(input: DealBidDueDateInput): ResolvedDealB
  * getDealDetail derives from this date.
  *
  * Note what the flag buys, given the signal rule: at flip time nothing moves, because the write-through is
- * gated by the same flag and has therefore never run, so NO deal carries the 0224 provenance stamp. The
+ * gated by the same flag and has therefore never run, so NO deal carries the 0225 provenance stamp. The
  * read side follows the write side rather than racing ahead of it, and the census measures exactly the
  * change the flip causes.
  */

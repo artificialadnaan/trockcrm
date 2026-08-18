@@ -868,7 +868,7 @@ interface BidDueDateWritebackResult {
   skippedNoChange: boolean;
   /** No admin/director to attribute the deal_history row to, so the write was refused. */
   skippedNoAttributor?: boolean;
-  /** The value was already correct, but the Board's confirmation was newly recorded (the 0224 stamps). */
+  /** The value was already correct, but the Board's confirmation was newly recorded (the 0225 stamps). */
   provenanceStamped?: boolean;
   warning: string | null;
 }
@@ -1098,7 +1098,7 @@ async function writeBidDueDateIfNeeded(
        UPDATE ${schemaName}.deals d
           -- The value moves only when the day actually differs; the stamps are (re-)written either way.
           SET bid_due_date = CASE WHEN existing.value_changes THEN $2::timestamptz ELSE d.bid_due_date END,
-              -- PROVENANCE (migration 0224): WHEN the sync wrote or confirmed this date, and WHICH Bid
+              -- PROVENANCE (migration 0225): WHEN the sync wrote or confirmed this date, and WHICH Bid
               -- Board project it did so for. The read resolver requires both before it will let the deal
               -- column outrank the source lead, so this write is what MAKES a deal eligible for the
               -- override — a coincidental day match never does. The project number is copied FROM the live
