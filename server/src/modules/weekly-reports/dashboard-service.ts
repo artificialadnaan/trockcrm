@@ -37,6 +37,18 @@ export interface WeeklyReportDashboardRow {
   reportVersion: number | null;
   sentAt: string | null;
   sendError: string | null;
+  /** When the mail provider accepted it. Null on a `sent` week means it has NOT reached the client yet. */
+  sendDeliveredAt: string | null;
+  sendAttempts: number;
+  /**
+   * The week is `sent` but the client has not been proven to have received it, and the last attempt failed.
+   *
+   * Derived on the server so the CRM and the app cannot disagree about what "Send failed" means — the two
+   * facts it combines (an error, and no delivery) are individually misleading: an error left over from a
+   * failed attempt that a retry then succeeded is not a failure, and a null delivery on a send queued
+   * thirty seconds ago is not one either.
+   */
+  sendFailed: boolean;
   /** Who the week is waiting on, in plain words — the column a director actually reads. */
   waitingOn: string | null;
   dismissalReason: string | null;
@@ -137,7 +149,8 @@ export async function getWeeklyReportDashboard(
   // not decide the week's state — the correction that replaced it does.
   const reportsResult = await client.query(
     `SELECT DISTINCT ON (weekly_report_project_id, week_of)
-            id, weekly_report_project_id, week_of, status, version, sent_at, send_error
+            id, weekly_report_project_id, week_of, status, version, sent_at, send_error,
+            send_delivered_at, send_attempts
        FROM weekly_reports
       WHERE weekly_report_project_id = ANY($1::uuid[])
         AND is_active
@@ -216,9 +229,16 @@ export async function getWeeklyReportDashboard(
           ? "dismissed"
           : "not_started";
 
+      // A `sent` report whose email never reached the client is NOT settled. It is the one failure this
+      // feature has no other way of surfacing — nobody is waiting on it, the super has finished, and the
+      // client is simply never going to receive their report. Dropping it with the rest of the archive
+      // was how a send that failed three weeks ago became invisible on the page that exists to catch it.
+      const sendFailed =
+        state === "sent" && report != null && report.send_delivered_at == null && report.send_error != null;
+
       // A settled week that is not the current one carries no signal — drop it so the page shows what
       // needs attention rather than an ever-growing archive. History lives on the History tab.
-      if (!isCurrentWeek && (state === "sent" || state === "dismissed")) continue;
+      if (!isCurrentWeek && (state === "sent" || state === "dismissed") && !sendFailed) continue;
 
       const base = {
         trockSuperName: project.trock_super_name ?? null,
@@ -241,7 +261,12 @@ export async function getWeeklyReportDashboard(
         reportVersion: report ? Number(report.version) : null,
         sentAt: toIsoTimestamp(report?.sent_at),
         sendError: report?.send_error ?? null,
-        waitingOn: waitingOnFor({ state, ...base }),
+        sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
+        sendAttempts: Number(report?.send_attempts ?? 0),
+        sendFailed,
+        // A failed send is waiting on the PM to retry it. Left null, the column read "—" on the one row
+        // on the board that needs a person.
+        waitingOn: sendFailed ? (base.trockPmName ?? "Unassigned PM") : waitingOnFor({ state, ...base }),
         dismissalReason: dismissal?.reason ?? null,
       });
     }

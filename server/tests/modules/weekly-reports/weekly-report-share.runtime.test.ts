@@ -101,6 +101,10 @@ beforeAll(async () => {
   // 0224 adds weekly_reports.pdf_content_generation, which the artifact classifier and the publication CAS
   // both read. Without it every PDF assertion below fails on a missing column rather than on its subject.
   await pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation"));
+  // 0226 too, for the same reason and with more teeth: it ADDS COLUMNS to weekly_reports, and every
+  // dashboard read selects them. A suite that stops at 0223 fails with "column send_delivered_at does
+  // not exist" — or worse, would swallow it inside an office-level handler and skip the office.
+  await pg.exec(migrationSql("0226_weekly_report_send"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES

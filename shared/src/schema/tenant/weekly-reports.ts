@@ -166,6 +166,23 @@ export const weeklyReports = pgTable(
      *  silent failure means a client never received their report and nobody finds out. */
     sendAttempts: integer("send_attempts").default(0).notNull(),
     sendError: text("send_error"),
+    /** Migration 0226. The composed email the PM approved — recipients, subject, the paragraph they
+     *  edited, the attach-PDF choice and the share URL. Stored because a retry must re-send THE SAME
+     *  message, and because the raw share token exists exactly once (only its hash is kept) so the link
+     *  is unrecoverable if it is not carried here. */
+    sendRequest: jsonb("send_request"),
+    /** Migration 0226. Rotates the mail provider's idempotency key, per send request. A retry reuses it
+     *  (so a crash between "provider accepted" and the stamp cannot double-send); a correction is a new
+     *  report row and gets its own. */
+    sendDeliveryKey: uuid("send_delivery_key"),
+    /** Migration 0226. When the provider ACCEPTED the message. Distinct from `sentAt`, which is stamped
+     *  when the PM commits — the dashboard's counters read `status`, so `sentAt` cannot wait on a mail
+     *  server, and a report that claims delivery the instant a button was clicked hides the failure this
+     *  feature exists to surface. */
+    sendDeliveredAt: timestamp("send_delivered_at", { withTimezone: true }),
+    /** Migration 0226. `sendAttempts` alone cannot tell "failed twice an hour ago and gave up" from
+     *  "failed twice in the last minute and is still retrying". */
+    sendLastAttemptAt: timestamp("send_last_attempt_at", { withTimezone: true }),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -177,6 +194,10 @@ export const weeklyReports = pgTable(
     index("weekly_reports_project_week_idx").on(table.weeklyReportProjectId, table.weekOf.desc()),
     index("weekly_reports_deal_idx").on(table.dealId, table.weekOf.desc()),
     index("weekly_reports_status_idx").on(table.status, table.weekOf.desc()).where(sql`is_active`),
+    // Migration 0226. The "Send failed" row set: committed to the client but not proven delivered.
+    index("weekly_reports_send_undelivered_idx")
+      .on(table.weeklyReportProjectId, table.weekOf)
+      .where(sql`is_active AND status = 'sent' AND send_delivered_at IS NULL`),
     check(
       "weekly_reports_status_check",
       sql`${table.status} in ('draft', 'pending_review', 'approved', 'sent')`,

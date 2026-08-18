@@ -1,0 +1,429 @@
+import { pool } from "../db.js";
+import {
+  sendSystemEmailWithMetadata,
+  type SendSystemEmailAttachment,
+  type SendSystemEmailResult,
+} from "../lib/system-email.js";
+import { getObjectBuffer } from "../lib/r2-client.js";
+import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
+import {
+  normalizeWeeklyReportRecipients,
+  weeklyReportEmailParagraphs,
+  weeklyReportEmailBodyText,
+  type WeeklyReportEmailParts,
+  type WeeklyReportSenderContact,
+} from "@trock-crm/shared/lib/weeklyReportEmail";
+import { TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+
+// Deliver one weekly report to its client: render the PDF, attach it, send it, and record the outcome.
+//
+// WHAT MAKES THIS DIFFERENT FROM THE SCORECARD EMAIL IT IS MODELLED ON. That job is fire-and-forget: the
+// scorecard is durable, the notification is a convenience, and a lost one is noticed by nobody because
+// nobody outside the company was waiting for it. Here the recipient is a CLIENT who was told they would
+// receive their weekly report, and a silent failure means they never do and nobody finds out. So every
+// attempt is written back to the row — `send_attempts`, `send_error`, `send_last_attempt_at` — and the
+// dashboard surfaces the result as a chip a PM has to act on.
+//
+// IDEMPOTENCY, twice over, because the worker restarts routinely and a second copy of a client-facing
+// report is worse than a late one:
+//   1. `send_delivered_at` is checked before anything is sent and stamped after. A redelivered job for an
+//      already-delivered report is a no-op.
+//   2. The provider idempotency key is keyed on `send_delivery_key`, which the API mints per SEND REQUEST.
+//      That covers the window (1) cannot: provider accepted, process died before the stamp. A retry
+//      replays the same key and the provider answers "already delivered" rather than sending again. Only
+//      a CORRECTION — a new report row — gets a new key, and a correction is meant to reach the client.
+
+export const WEEKLY_REPORT_SEND_JOB = "weekly_report_send";
+
+/**
+ * Resend warns around 28 MB and base64 inflates a binary attachment by ~33%. A report over this goes out
+ * WITHOUT the attachment rather than not at all — the link in the body is the primary artifact and the PDF
+ * is a convenience, so a huge photo set must not cost the client their report.
+ */
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+export interface WeeklyReportSendPayload {
+  reportId?: string;
+  officeSlug?: string;
+  tenantSchema?: string;
+  /** Which send request this delivery belongs to. A job left over from an earlier one is dropped. */
+  deliveryKey?: string;
+}
+
+/** The `send_request` jsonb, as written by server/src/modules/weekly-reports/send-service.ts. */
+interface StoredSendRequest {
+  recipients?: unknown;
+  subject?: unknown;
+  greetingName?: unknown;
+  contextParagraph?: unknown;
+  shareUrl?: unknown;
+  sender?: { name?: unknown; email?: unknown; phone?: unknown } | null;
+  attachPdf?: unknown;
+  isCorrection?: unknown;
+}
+
+interface HandlerDeps {
+  query?: typeof pool.query;
+  sendEmail?: (
+    to: string | string[],
+    subject: string,
+    html: string,
+    options: { text: string; idempotencyKey: string; attachments?: SendSystemEmailAttachment[] },
+  ) => Promise<SendSystemEmailResult>;
+  getPdf?: (r2Key: string) => Promise<Buffer | null>;
+  /** Resolves (rendering if needed) the report's current PDF key. Injected so the suite needs no pdfkit. */
+  resolvePdfKey?: (officeSlug: string, reportId: string) => Promise<string | null>;
+  logger?: Pick<Console, "log" | "warn" | "error">;
+}
+
+const SERVER_PDF_MODULES = [
+  "../../../server/dist/modules/weekly-reports/pdf-service.js",
+  "../../../server/src/modules/weekly-reports/pdf-service.js",
+] as const;
+const SERVER_OFFICE_MODULES = [
+  "../../../server/dist/modules/weekly-reports/office-connection.js",
+  "../../../server/src/modules/weekly-reports/office-connection.js",
+] as const;
+
+async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
+  let lastError: unknown;
+  for (const path of paths) {
+    try {
+      return (await import(path)) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Unable to import server module");
+}
+
+/**
+ * Render (or reuse) the report's PDF through the SERVER's publisher.
+ *
+ * The renderer lives in the server package because everything it needs does — pdfkit, sharp, the R2
+ * client, the bundled fonts. The worker reaches it the same way procore-photos.ts reaches the R2 client.
+ * Crucially this goes through `resolveArtifactKey`, so a report whose artifact is already current is not
+ * re-rendered: the content-addressed key means the second delivery of the same content is a lookup.
+ */
+async function resolveWeeklyReportPdfKeyViaServer(
+  officeSlug: string,
+  reportId: string,
+): Promise<string | null> {
+  const pdfService = await importFirstAvailable<{
+    loadWeeklyReportPdfSource: (client: any, reportId: string) => Promise<any>;
+    resolveArtifactKey: (officeSlug: string, source: any) => Promise<string>;
+  }>(SERVER_PDF_MODULES);
+  const officeConnection = await importFirstAvailable<{
+    withWeeklyReportOfficeClient: <T>(
+      officeSlug: string,
+      options: Record<string, unknown>,
+      run: (client: any) => Promise<T>,
+    ) => Promise<T>;
+  }>(SERVER_OFFICE_MODULES);
+
+  // Read inside a SHORT transaction and let it commit before rendering. The render downloads and
+  // transcodes every photo and then uploads to R2; holding a pooled connection across that is the
+  // documented cause of the API pool saturating.
+  const source = await officeConnection.withWeeklyReportOfficeClient(officeSlug, {}, (client) =>
+    pdfService.loadWeeklyReportPdfSource(client, reportId),
+  );
+  if (!source) return null;
+  return pdfService.resolveArtifactKey(officeSlug, source);
+}
+
+function senderFrom(raw: StoredSendRequest["sender"]): WeeklyReportSenderContact {
+  return {
+    name: normalizeText(raw?.name),
+    email: normalizeText(raw?.email),
+    phone: normalizeText(raw?.phone),
+  };
+}
+
+/** The filename the client's downloads folder gets. ASCII-folded; the report uuid is not their business. */
+export function weeklyReportAttachmentFilename(input: {
+  propertyName: string | null;
+  weekOf: string | null;
+}): string {
+  const property = (input.propertyName ?? "")
+    .replace(/[^\x20-\x7e]/g, " ")
+    .replace(/[\\/:*?"<>|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  const base = `${property || "Weekly Report"} - Weekly Report ${input.weekOf ?? ""}`.trim();
+  return `${base.replace(/[^A-Za-z0-9 _.-]+/g, "-")}.pdf`;
+}
+
+/**
+ * The email itself, built from the SAME paragraph list the API previewed to the PM.
+ *
+ * `weeklyReportEmailParagraphs` is shared, so the plain-text part, the HTML part and the preview in the
+ * modal cannot say different things — this function only decides markup. Arial/Helvetica is deliberate:
+ * webfonts do not load in Outlook or Gmail desktop.
+ */
+export function buildWeeklyReportClientEmail(parts: WeeklyReportEmailParts & { subject: string }) {
+  const paragraphs = weeklyReportEmailParagraphs(parts);
+  const text = weeklyReportEmailBodyText(parts);
+  const shareUrl = (parts.shareUrl ?? "").trim();
+  const safeShareUrl = escapeHtml(shareUrl);
+
+  const htmlParagraphs = paragraphs
+    .map((paragraph) => {
+      // The link line is rendered as a button below, so it is not repeated as text. Everything else is
+      // escaped and newline-preserved.
+      if (shareUrl && paragraph.includes(shareUrl)) return "";
+      return `
+          <tr>
+            <td style="padding:0 28px 14px 28px;font-family:Arial,Helvetica,sans-serif;font-size:14.5px;line-height:22px;color:#111111;">${escapeHtml(
+              paragraph,
+            ).replace(/\n/g, "<br />")}</td>
+          </tr>`;
+    })
+    .join("");
+
+  const linkBlock = shareUrl
+    ? `
+          <tr>
+            <td align="center" style="padding:6px 24px 22px 24px;">
+              <!--[if mso]>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${safeShareUrl}" style="height:44px;v-text-anchor:middle;width:260px;" arcsize="9%" stroke="f" fillcolor="#CC0000">
+                <w:anchorlock/>
+                <center style="color:#ffffff;font-family:Arial,sans-serif;font-size:15px;font-weight:bold;">View Weekly Report</center>
+              </v:roundrect>
+              <![endif]-->
+              <!--[if !mso]><!-- -->
+              <a href="${safeShareUrl}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:260px;border-radius:4px;">View Weekly Report</a>
+              <!--<![endif]-->
+              <p style="margin:10px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;word-break:break-all;">${safeShareUrl}</p>
+            </td>
+          </tr>`
+    : "";
+
+  const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>${escapeHtml(parts.subject)}</title>
+  <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f5;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f4f5;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+        <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:#ffffff;border:1px solid #e2e8f0;">
+          <tr>
+            <td style="background-color:#CC0000;height:4px;line-height:4px;font-size:4px;mso-line-height-rule:exactly;">&nbsp;</td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:24px 24px 12px 24px;background-color:#ffffff;">
+              <img src="${TROCK_LOGO_EMAIL_URL}" alt="T Rock Construction" width="180" height="202" style="display:block;width:180px;height:202px;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic;" />
+            </td>
+          </tr>${htmlParagraphs}${linkBlock}
+          <tr>
+            <td style="padding:16px 24px;border-top:1px solid #e2e8f0;background-color:#fafafa;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">Sent by T Rock Construction. Reply to this email to reach your project manager.</p>
+            </td>
+          </tr>
+        </table>
+        <!--[if mso]></td></tr></table><![endif]-->
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  return { subject: parts.subject, html, text };
+}
+
+/**
+ * Record the outcome of an attempt.
+ *
+ * Conditioned on the report still being an undelivered `sent` — the same discipline every other write in
+ * this feature follows. Without it, a stamp from a slow attempt could land on a report that a correction
+ * or a concurrent success had already moved on, reporting a failure for a delivery that succeeded.
+ */
+async function recordAttempt(
+  query: typeof pool.query,
+  tenantSchema: string,
+  reportId: string,
+  outcome: { delivered: boolean; error: string | null },
+): Promise<void> {
+  await query(
+    `UPDATE ${tenantSchema}.weekly_reports
+        SET send_attempts = send_attempts + 1,
+            send_last_attempt_at = NOW(),
+            send_error = $2,
+            send_delivered_at = CASE WHEN $3::boolean THEN NOW() ELSE send_delivered_at END
+      WHERE id = $1::uuid AND is_active AND status = 'sent' AND send_delivered_at IS NULL`,
+    [reportId, outcome.error, outcome.delivered],
+  );
+}
+
+/**
+ * Deliver a weekly report to its client.
+ *
+ * THROWS on a delivery failure, so the queue retries and then dead-letters — and the row carries
+ * `send_error` either way, which is what the CRM chip reads. A handler that swallowed the error would
+ * leave the queue believing the work succeeded while the client had nothing.
+ */
+export async function handleWeeklyReportSend(
+  payload: WeeklyReportSendPayload,
+  _officeId: string | null,
+  deps: HandlerDeps = {},
+): Promise<void> {
+  const logger = deps.logger ?? console;
+  const tenantSchema = payload.tenantSchema;
+  const reportId = normalizeText(payload.reportId);
+  const officeSlug = normalizeText(payload.officeSlug);
+  const deliveryKey = normalizeText(payload.deliveryKey);
+  if (!isSafeTenantSchema(tenantSchema) || !reportId || !officeSlug || !deliveryKey) {
+    // A malformed payload is not retryable — nothing about waiting makes it well-formed. Logged and
+    // dropped rather than thrown, so it does not burn three attempts before dead-lettering.
+    logger.warn("[WeeklyReportSend] Invalid job payload - skipping", { tenantSchema, reportId, officeSlug });
+    return;
+  }
+
+  const query = deps.query ?? pool.query.bind(pool);
+  const existing = await query(
+    `SELECT status, week_of, version, send_request, send_delivery_key, send_delivered_at, send_attempts,
+            snapshot ->> 'propertyDisplayName' AS property_display_name
+       FROM ${tenantSchema}.weekly_reports
+      WHERE id = $1::uuid AND is_active
+      LIMIT 1`,
+    [reportId],
+  );
+  const row = existing.rows[0];
+  if (!row) {
+    logger.warn("[WeeklyReportSend] Report not found - skipping", { tenantSchema, reportId });
+    return;
+  }
+  if (row.send_delivered_at) {
+    logger.log("[WeeklyReportSend] Already delivered - skipping duplicate job", { reportId });
+    return;
+  }
+  if (row.status !== "sent") {
+    // Unreachable through the API — `sent` is terminal — but a job whose report is not in that state has
+    // no send to perform, and inventing one would email a client a report no PM released.
+    logger.warn("[WeeklyReportSend] Report is not in `sent` - skipping", { reportId, status: row.status });
+    return;
+  }
+  if (normalizeText(row.send_delivery_key) !== deliveryKey) {
+    // A leftover job from a superseded send request. Running it would deliver a message the row no longer
+    // describes — the wrong recipients, or a link that has since been replaced.
+    logger.warn("[WeeklyReportSend] Delivery key no longer matches the report - skipping stale job", {
+      reportId,
+      deliveryKey,
+    });
+    return;
+  }
+
+  const request = (row.send_request ?? null) as StoredSendRequest | null;
+  if (!request || typeof request !== "object") {
+    const error = new Error("Weekly report has no stored send request");
+    await recordAttempt(query, tenantSchema, reportId, { delivered: false, error: error.message });
+    logger.error("[WeeklyReportSend] No send_request on the report", { reportId });
+    throw error;
+  }
+
+  // Re-validated here, not trusted. The row was written by the API, but a job can outlive a release and
+  // an empty recipient list must fail loudly rather than be handed to the provider.
+  const recipients = normalizeWeeklyReportRecipients(
+    Array.isArray(request.recipients) ? request.recipients : [],
+  );
+  if (recipients.length === 0) {
+    const error = new Error("Weekly report send request has no valid recipients");
+    await recordAttempt(query, tenantSchema, reportId, { delivered: false, error: error.message });
+    logger.error("[WeeklyReportSend] No recipients on the stored send request", { reportId });
+    throw error;
+  }
+
+  const subject = normalizeText(request.subject) ?? "Weekly Progress Report";
+  const sender = senderFrom(request.sender);
+  const parts: WeeklyReportEmailParts & { subject: string } = {
+    subject,
+    greetingName: normalizeText(request.greetingName),
+    contextParagraph: normalizeText(request.contextParagraph) ?? "",
+    shareUrl: normalizeText(request.shareUrl),
+    sender,
+    isCorrection: request.isCorrection === true,
+  };
+
+  let attachments: SendSystemEmailAttachment[] | undefined;
+  if (request.attachPdf !== false) {
+    const resolvePdfKey = deps.resolvePdfKey ?? resolveWeeklyReportPdfKeyViaServer;
+    const getPdf = deps.getPdf ?? getObjectBuffer;
+    try {
+      const r2Key = await resolvePdfKey(officeSlug, reportId);
+      const buffer = r2Key ? await getPdf(r2Key) : null;
+      if (!buffer) {
+        // Degraded, not failed. The link in the body is the primary artifact and the CRM can always
+        // regenerate the PDF; refusing to send would cost the client their report over an attachment.
+        logger.warn("[WeeklyReportSend] PDF unavailable - sending without the attachment", { reportId, r2Key });
+      } else if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
+        logger.warn("[WeeklyReportSend] PDF exceeds the safe attachment size - sending without it", {
+          reportId,
+          bytes: buffer.byteLength,
+          limit: MAX_ATTACHMENT_BYTES,
+        });
+      } else {
+        attachments = [
+          {
+            // From the SNAPSHOT, which `sent` guarantees is present, rather than parsed back out of a
+            // subject line the PM may have retyped entirely.
+            filename: weeklyReportAttachmentFilename({
+              propertyName: normalizeText(row.property_display_name),
+              weekOf: normalizeText(
+                row.week_of instanceof Date ? row.week_of.toISOString().slice(0, 10) : row.week_of,
+              ),
+            }),
+            content: buffer,
+          },
+        ];
+      }
+    } catch (error) {
+      logger.warn("[WeeklyReportSend] PDF render/fetch failed - sending without the attachment", {
+        reportId,
+        error,
+      });
+    }
+  }
+
+  const email = buildWeeklyReportClientEmail(parts);
+
+  try {
+    const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
+    const result = await sendEmail(recipients, email.subject, email.html, {
+      text: email.text,
+      // Keyed on the SEND REQUEST, not on the report. A retry of the same request replays this key and the
+      // provider refuses to send twice — which is what makes retrying a job whose outcome is unknown safe.
+      // A correction is a different report row with its own key and genuinely does go out.
+      idempotencyKey: `weekly-report-${tenantSchema}-${reportId}-${deliveryKey}`,
+      // No Reply-To override. `sendSystemEmailWithMetadata` does not support one, and teaching a helper
+      // shared by fifteen jobs a new header to route this one email is a wider change than it earns —
+      // the PM's own address and phone are in the signature, which is the route the spec specifies.
+      attachments,
+    });
+    if (!result.success) throw new Error("Email provider returned unsuccessful result");
+
+    await recordAttempt(query, tenantSchema, reportId, { delivered: true, error: null });
+    logger.log("[WeeklyReportSend] Delivered weekly report", {
+      reportId,
+      recipientCount: recipients.length,
+      hadPdf: Boolean(attachments),
+      messageId: result.messageId,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Written BEFORE the rethrow, so the failure is visible on the dashboard whether the queue retries or
+    // dead-letters. This is the whole difference from the fire-and-forget scorecard path.
+    await recordAttempt(query, tenantSchema, reportId, {
+      delivered: false,
+      error: message.slice(0, 500),
+    });
+    logger.error("[WeeklyReportSend] Failed to deliver weekly report", { reportId, error });
+    throw error;
+  }
+}

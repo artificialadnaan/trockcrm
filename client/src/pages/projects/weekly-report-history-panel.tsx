@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CalendarClock, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
+  createWeeklyReportCorrection,
   fetchWeeklyReportDetail,
   useWeeklyReportHistory,
   type WeeklyReportDetail,
@@ -32,10 +35,16 @@ function fmtWeek(iso: string): string {
 export function WeeklyReportHistoryPanel({
   projects,
   refreshSignal,
+  onSend,
+  onChanged,
 }: {
   projects: WeeklyReportProject[];
   /** Incremented by the page's Refresh button. This panel's request belongs to no one else. */
   refreshSignal: number;
+  /** Opens the page-level send modal. One dialog for the whole page, not a second copy in here. */
+  onSend: (reportId: string) => void;
+  /** Fired after a correction is created, so the board picks up the new version. */
+  onChanged: () => void;
 }) {
   const [projectId, setProjectId] = useState<string>("");
 
@@ -145,14 +154,35 @@ export function WeeklyReportHistoryPanel({
                     {report.completionPercent == null ? "—" : `${report.completionPercent}%`}
                   </td>
                   <td className="px-3.5 py-3 text-right tabular-nums text-slate-500">{report.photos.length || "—"}</td>
-                  <td className="px-3.5 py-3 text-right">
-                    <button
-                      type="button"
-                      onClick={() => void openDetail(report.id)}
-                      className="rounded-lg border border-slate-200 px-2.5 py-1 text-[12.5px] font-semibold text-slate-600 hover:border-brand-red hover:text-brand-red"
-                    >
-                      View
-                    </button>
+                  <td className="px-3.5 py-3">
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void openDetail(report.id)}
+                        className="rounded-lg border border-slate-200 px-2.5 py-1 text-[12.5px] font-semibold text-slate-600 hover:border-brand-red hover:text-brand-red"
+                      >
+                        View
+                      </button>
+                      {report.status === "approved" && (
+                        <Button size="sm" onClick={() => onSend(report.id)}>
+                          Send
+                        </Button>
+                      )}
+                      {/* Only on the LIVE version. A report already superseded by a correction has nothing
+                          left to correct — the fix is on the version that replaced it. */}
+                      {report.status === "sent" && !report.supersededById && (
+                        <CorrectionButton
+                          reportId={report.id}
+                          onCreated={(correction) => {
+                            void refetch();
+                            onChanged();
+                            // Straight into the send modal on the new version: a correction nobody sends
+                            // is just a second draft, and the original keeps standing as current.
+                            onSend(correction.id);
+                          }}
+                        />
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -201,6 +231,48 @@ export function WeeklyReportHistoryPanel({
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+/**
+ * Clone a sent report to the next version so it can be corrected.
+ *
+ * Confirmed first: this creates a real second version of a document a client has already read, and the
+ * cost of an accidental click is a v2 sitting on the board that somebody has to explain.
+ */
+function CorrectionButton({
+  reportId,
+  onCreated,
+}: {
+  reportId: string;
+  onCreated: (correction: WeeklyReportDetail) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={busy}
+      onClick={async () => {
+        if (
+          !window.confirm(
+            "Issue a correction? This creates a new version of the report. Once you send it, the client is told it replaces the copy they already have and their old link shows a notice.",
+          )
+        ) {
+          return;
+        }
+        setBusy(true);
+        try {
+          onCreated(await createWeeklyReportCorrection(reportId));
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Couldn't create a correction");
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Send correction"}
+    </Button>
   );
 }
 
