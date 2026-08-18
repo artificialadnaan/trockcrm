@@ -1,0 +1,316 @@
+import { eq, sql } from "drizzle-orm";
+import { userLocalAuth, users } from "@trock-crm/shared/schema";
+import { db, pool } from "../../db.js";
+import { sendSystemEmail } from "../../lib/resend-client.js";
+import { hashPassword, recordLocalAuthEvent } from "./local-auth-service.js";
+import { buildPasswordChangedEmail, buildPasswordResetEmail } from "./password-reset-emails.js";
+import { generateResetToken, hashResetToken } from "./reset-tokens.js";
+import { incrementTokenVersion } from "./session-invalidation.js";
+
+/**
+ * Self-service password reset for CRM local-auth users.
+ *
+ * Separate from local-auth-service.ts (already ~600 lines) and from the field reset flow, whose consume
+ * path filters role = 'field_contractor'.
+ *
+ * The threat model is an attacker who knows a valid T-Rock email, has NO mailbox access, and can make
+ * unlimited unauthenticated requests. Everything below follows from that: identical responses, no
+ * timing signal, and a token that is useless without the inbox.
+ */
+
+// 60 minutes. The field flow uses 30; this is longer on purpose, because a link that expires while
+// someone walks away sends them back to emailing an admin, which is the problem being solved. The
+// token is single-use and 256-bit, so the TTL bounds blast radius rather than doing the security work.
+export const RESET_TTL_MINUTES = 60;
+
+const RATE_LIMIT_WINDOW_MINUTES = 15;
+const RATE_LIMIT_MAX_REQUESTS = 3;
+
+/**
+ * Where reset links point.
+ *
+ * NOT the FRONTEND_URL helper the other emails use: that resolves to the Railway frontend subdomain,
+ * and NOT ONBOARDING_CLEANUP_URL, which is a different service again. This must be the origin people
+ * actually sign in at.
+ */
+const DEFAULT_RESET_BASE_URL = "https://trockcrm.com";
+
+export type QueryClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
+};
+
+/**
+ * The production query client, backed by the shared pg pool.
+ *
+ * Deliberately the pool and NOT `db.execute(sql.raw(text, params))`: sql.raw does not bind $n
+ * parameters, so the raw-SQL helpers here would silently receive unsubstituted placeholders in
+ * production while passing under PGlite in tests. Same parameterised statements in both places.
+ */
+export const dbClient: QueryClient = {
+  query: (text: string, params?: unknown[]) => pool.query(text, params as unknown[]),
+};
+
+export function resetExpiry(baseDate = new Date()): Date {
+  return new Date(baseDate.getTime() + RESET_TTL_MINUTES * 60 * 1000);
+}
+
+export function resetUrl(rawToken: string): string {
+  const configured = (process.env.PASSWORD_RESET_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  // Falls back rather than throwing. The request route answers 200 BEFORE sending mail, so a throw
+  // here would produce "check your email" and no email at all -- a feature that ships dead with only a
+  // log line to show for it. Same durable-backstop shape as resolveFrontendBaseUrl in the daily summary.
+  let base = DEFAULT_RESET_BASE_URL;
+  if (configured) {
+    try {
+      const parsed = new URL(configured);
+      // Must be absolute http(s): a relative value would build a link that breaks in email clients.
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        base = (parsed.origin + parsed.pathname).replace(/\/+$/, "");
+      }
+    } catch {
+      /* not a valid absolute URL -- keep the default */
+    }
+  }
+  // FRAGMENT, not query string. The fragment is never transmitted to the server, so the token cannot
+  // appear in Railway/proxy access logs, in Referer, or in server-side error reporting that captures
+  // request URLs. The SPA reads location.hash and POSTs the value in a body.
+  return `${base}/reset-password#token=${encodeURIComponent(rawToken)}`;
+}
+
+/**
+ * Eligible = active user, local auth row exists, enabled, not revoked.
+ *
+ * Revoked users are deliberately ineligible: revocation must not be undoable by self-serve reset.
+ * Anything else returns null and the caller sends no email -- while still returning the SAME generic
+ * response to the requester.
+ */
+export async function selectEligibleUser(
+  client: QueryClient,
+  email: string
+): Promise<{ id: string; email: string; display_name: string } | null> {
+  const result = await client.query(
+    `SELECT u.id, u.email, COALESCE(u.display_name, u.email) AS display_name
+       FROM public.users u
+       JOIN public.user_local_auth la ON la.user_id = u.id
+      WHERE lower(u.email) = lower($1)
+        AND u.is_active = true
+        AND la.is_enabled = true
+        AND la.revoked_at IS NULL
+      LIMIT 1`,
+    [email]
+  );
+  return (result.rows ?? [])[0] ?? null;
+}
+
+/**
+ * Counts ALL rows in the window, including used and invalidated ones. Counting only live rows would
+ * let someone refill their quota simply by burning each link as it arrived.
+ *
+ * Counted from persisted rows rather than memory so the limit holds across API replicas and restarts.
+ */
+export async function countRecentResets(
+  client: QueryClient,
+  userId: string,
+  windowMinutes: number
+): Promise<number> {
+  const result = await client.query(
+    `SELECT count(*)::int AS n
+       FROM public.user_password_resets
+      WHERE user_id = $1
+        AND created_at > now() - ($2 || ' minutes')::interval`,
+    [userId, String(windowMinutes)]
+  );
+  return (result.rows ?? [])[0]?.n ?? 0;
+}
+
+/**
+ * Issues a token, or returns null when the caller should send no email.
+ *
+ * NEVER throws for ineligibility -- the route must respond identically either way, so "not eligible"
+ * and "rate limited" are both just null here and both still produce the generic 200 upstream.
+ */
+export async function issueResetToken(
+  client: QueryClient,
+  email: string,
+  requestedIp: string | null
+): Promise<{ rawToken: string; user: { id: string; email: string; display_name: string } } | null> {
+  const user = await selectEligibleUser(client, email);
+  if (!user) return null;
+
+  if ((await countRecentResets(client, user.id, RATE_LIMIT_WINDOW_MINUTES)) >= RATE_LIMIT_MAX_REQUESTS) {
+    return null;
+  }
+
+  const rawToken = generateResetToken();
+  const tokenHash = hashResetToken(rawToken);
+
+  // One live link at a time: requesting a new link kills the previous one, so a forwarded or shoulder-
+  // surfed older email stops working the moment the real owner asks again.
+  await client.query(
+    `UPDATE public.user_password_resets
+        SET invalidated_at = now()
+      WHERE user_id = $1 AND used_at IS NULL AND invalidated_at IS NULL`,
+    [user.id]
+  );
+  await client.query(
+    `INSERT INTO public.user_password_resets (user_id, token_hash, requested_by_user_id, requested_ip, expires_at)
+     VALUES ($1, $2, NULL, $3, $4)`,
+    [user.id, tokenHash, requestedIp, resetExpiry()]
+  );
+
+  await recordLocalAuthEvent({
+    userId: user.id,
+    eventType: "password_reset_requested",
+    // The raw token is never logged, never stored here, and never put in audit metadata.
+    metadata: { expiresAt: resetExpiry().toISOString(), source: "self_service" },
+  });
+
+  return { rawToken, user };
+}
+
+/**
+ * Called AFTER the response has been sent, so SMTP latency cannot become an enumeration oracle: the
+ * variable-cost step happens once response time is already fixed.
+ */
+export async function deliverResetEmail(
+  client: QueryClient,
+  issued: { rawToken: string; user: { email: string; display_name: string } }
+): Promise<void> {
+  const content = buildPasswordResetEmail({
+    displayName: issued.user.display_name,
+    resetUrl: resetUrl(issued.rawToken),
+    ttlMinutes: RESET_TTL_MINUTES,
+  });
+  const sent = await sendSystemEmail(issued.user.email, content.subject, content.html, {
+    text: content.text,
+    // MANDATORY. SYSTEM_EMAIL_BCC is live on the API and BCCs every system email; without this, every
+    // reset link in the company would be delivered to a personal inbox -- a standing account-takeover
+    // primitive. The field reset flow already does this; this must not be the exception.
+    suppressGlobalBcc: true,
+    // Fail loudly rather than reporting a successful "dev send" while the user waits for mail that is
+    // never coming.
+    requireConfiguredTransport: true,
+  });
+  if (!sent) {
+    // Never leave a live token behind a failed send: nobody can use it, and it would still consume the
+    // account's "one live link" slot.
+    await client.query(
+      `UPDATE public.user_password_resets
+          SET invalidated_at = now()
+        WHERE token_hash = $1 AND used_at IS NULL AND invalidated_at IS NULL`,
+      [hashResetToken(issued.rawToken)]
+    );
+  }
+}
+
+/**
+ * ONE statement. `used_at IS NULL` is evaluated under the row lock the UPDATE itself takes, so two
+ * concurrent requests carrying the same token cannot both succeed. A SELECT-then-UPDATE would race
+ * even inside a transaction at READ COMMITTED.
+ *
+ * Expiry is enforced HERE, not only in isResetTokenUsable -- that check is UX and carries no security
+ * weight.
+ */
+export async function consumeResetToken(
+  client: QueryClient,
+  rawToken: string
+): Promise<string | null> {
+  const result = await client.query(
+    `UPDATE public.user_password_resets
+        SET used_at = now()
+      WHERE token_hash = $1
+        AND used_at IS NULL
+        AND invalidated_at IS NULL
+        AND expires_at > now()
+    RETURNING user_id`,
+    [hashResetToken(rawToken)]
+  );
+  return (result.rows ?? [])[0]?.user_id ?? null;
+}
+
+/**
+ * Read-only pre-check so the page can show "this link is dead" without burning the token. UX only:
+ * consumeResetToken re-checks every condition atomically.
+ */
+export async function isResetTokenUsable(client: QueryClient, rawToken: string): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1
+       FROM public.user_password_resets
+      WHERE token_hash = $1 AND used_at IS NULL AND invalidated_at IS NULL AND expires_at > now()
+      LIMIT 1`,
+    [hashResetToken(rawToken)]
+  );
+  return (result.rows ?? []).length > 0;
+}
+
+export async function lookupUserContact(
+  client: QueryClient,
+  userId: string
+): Promise<{ email: string; display_name: string } | null> {
+  const result = await client.query(
+    `SELECT email, COALESCE(display_name, email) AS display_name
+       FROM public.users WHERE id = $1`,
+    [userId]
+  );
+  return (result.rows ?? [])[0] ?? null;
+}
+
+/**
+ * Applies the new password and every associated state change in one transaction.
+ *
+ * hashPassword validates the 12-character policy and throws on failure, so an invalid password aborts
+ * before anything is written -- note the token is already consumed by then, which is intended: a reset
+ * link is single-use even if the chosen password is rejected.
+ */
+export async function applyPasswordReset(userId: string, newPassword: string): Promise<void> {
+  const passwordHash = await hashPassword(newPassword);
+  const currentTime = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(userLocalAuth)
+      .set({
+        passwordHash,
+        mustChangePassword: false,
+        inviteExpiresAt: null,
+        // Clearing the lockout is REQUIRED, not incidental: someone who forgot their password has
+        // usually just burned MAX_FAILED_LOGIN_ATTEMPTS and is inside the 15-minute lockout. Without
+        // this they reset successfully, still cannot log in, and contact the admin anyway.
+        //
+        // This does mean mailbox access clears a lockout. That is correct: the lockout defends against
+        // online guessing, not against someone who controls the account's email.
+        failedLoginAttempts: 0,
+        lastFailedLoginAt: null,
+        lockedUntil: null,
+        passwordChangedAt: currentTime,
+        updatedAt: currentTime,
+      })
+      .where(eq(userLocalAuth.userId, userId));
+
+    // The single most important control here. The primary reason to reset is suspected compromise, and
+    // a reset that leaves the attacker's 30-day session alive accomplishes nothing.
+    await incrementTokenVersion(tx, userId);
+
+    // Any other outstanding link for this account dies with the one just used.
+    await tx.execute(sql`
+      UPDATE public.user_password_resets
+         SET invalidated_at = now()
+       WHERE user_id = ${userId}::uuid AND used_at IS NULL AND invalidated_at IS NULL
+    `);
+  });
+
+  await recordLocalAuthEvent({ userId, eventType: "password_reset_completed" });
+}
+
+/**
+ * The separate "it changed" notice. This is what makes an unauthorized reset visible rather than
+ * silent, so a failure to send it must not fail the reset itself -- the caller fires it and logs.
+ */
+export async function notifyPasswordChanged(email: string, displayName: string): Promise<void> {
+  const content = buildPasswordChangedEmail({ displayName });
+  await sendSystemEmail(email, content.subject, content.html, {
+    text: content.text,
+    suppressGlobalBcc: true,
+    requireConfiguredTransport: true,
+  });
+}
