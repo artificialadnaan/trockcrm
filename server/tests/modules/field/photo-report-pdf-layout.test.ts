@@ -35,15 +35,15 @@ function photo(i: number): ReportRenderSection["photos"][number] {
 }
 
 describe("renderFieldPhotoReportPdf page count", () => {
-  it("a single section of 4 photos is COVER + one photo page — no divider, no trailing blank pages", async () => {
+  it("a single section of 4 photos is COVER + two photo pages at 2-up — no trailing blank pages", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover,
       sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
     });
-    // Four fixed-size tiles fit one page, so 4 photos = 1 photo page + cover. Previously this produced ~12
-    // pages (footer text spilled onto auto-created blank pages); the guard is that there are NO trailing
-    // blank pages, not the exact per-page count.
-    expect(countPdfPages(buffer)).toBe(2);
+    // Two photos a page, so 4 photos = 2 photo pages + cover. The guard that matters is that there are NO
+    // trailing blank pages (an earlier layout produced ~12 here when footer text spilled onto auto-created
+    // pages), not the per-page density on its own.
+    expect(countPdfPages(buffer)).toBe(3);
   });
 
   it("names the photograph in the log when its bytes will not decode", async () => {
@@ -70,22 +70,21 @@ describe("renderFieldPhotoReportPdf page count", () => {
     }
   });
 
-  it("packs EIGHT photographs onto a page, two cells across", async () => {
-    // The page-count assertions elsewhere in this file cannot see the two-up change: at 4 photos, 4-per-page
-    // and 8-per-page both give cover + 1. These two counts are the ones that differ — 8 photos was two photo
-    // pages under the old grid and is one under this one, and 9 is the boundary that proves the chunk size
-    // is 8 rather than "everything on one page".
-    const eight = await renderFieldPhotoReportPdf({
+  it("packs TWO photographs onto a page, two cells across", async () => {
+    // Boundary proof of the chunk size: 2 photos is exactly one page, 3 spills to a second. Page-count
+    // assertions elsewhere in this file cannot see the chunk size on their own — a 4-photo fixture gives
+    // the same answer for several plausible densities — so the pair below is what pins it to 2.
+    const two = await renderFieldPhotoReportPdf({
       cover,
-      sections: [{ title: "Doors", photos: Array.from({ length: 8 }, (_, i) => photo(i + 1)) }],
+      sections: [{ title: "Doors", photos: [photo(1), photo(2)] }],
     });
-    expect(countPdfPages(eight)).toBe(2);
+    expect(countPdfPages(two)).toBe(2);
 
-    const nine = await renderFieldPhotoReportPdf({
+    const three = await renderFieldPhotoReportPdf({
       cover,
-      sections: [{ title: "Doors", photos: Array.from({ length: 9 }, (_, i) => photo(i + 1)) }],
+      sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3)] }],
     });
-    expect(countPdfPages(nine)).toBe(3);
+    expect(countPdfPages(three)).toBe(3);
   });
 
   it("lays the two cells of a row out side by side, both inside the page margins", async () => {
@@ -117,7 +116,8 @@ describe("renderFieldPhotoReportPdf page count", () => {
     expect(distinct[0]).toBeCloseTo(32, 1);
     expect(distinct[1]).toBeCloseTo(32 + 264 + 20, 1);
     // ...and the right-hand cell's tile still ends inside the right margin.
-    expect(distinct[1] + 148).toBeLessThanOrEqual(612 - 32);
+    // 316 + 256 = 572, inside the 580pt right margin with 8pt to spare.
+    expect(distinct[1] + 256).toBeLessThanOrEqual(612 - 32);
   });
 
   it("preserves a single-section custom title compactly without adding a divider page", async () => {
@@ -136,8 +136,8 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover: { ...cover, projectName: longName },
       sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
     });
-    // No-wrap + ellipsis footer text keeps it at cover + one photo page (4 photos/page) — no spill pages.
-    expect(countPdfPages(buffer)).toBe(2);
+    // No-wrap + ellipsis footer text keeps it at cover + two photo pages (2 photos/page) — no spill pages.
+    expect(countPdfPages(buffer)).toBe(3);
   });
 
   it("keeps a divider page per section when there are multiple sections", async () => {
@@ -168,9 +168,9 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover: { ...cover, projectName: longName },
       sections: [{ title: "Untagged", photos }],
     });
-    // 4 photos at 4/page = cover + 1 photo page; single-line ellipsised metadata + a height-capped
+    // 4 photos at 2/page = cover + 2 photo pages; single-line ellipsised metadata + a height-capped
     // description keep the LAST row's caption inside its tile, so no footer-overlap blank page appears.
-    expect(countPdfPages(buffer)).toBe(2);
+    expect(countPdfPages(buffer)).toBe(3);
   });
 
   it("caps a very long report title on the cover — no overflow page", async () => {

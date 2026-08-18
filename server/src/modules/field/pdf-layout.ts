@@ -33,14 +33,15 @@ const COVER_LOGO_FIT: [number, number] = [210, 210];
 // changing either re-flows the whole sheet consistently.
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
 /**
- * TWO photo cells per row, four rows down: eight photographs a page rather than four.
+ * TWO photo cells per row, ONE row down: two photographs a page.
  *
- * The one-up grid this replaces spent roughly half the page width on a caption column holding three short
- * lines, so a 22-photo report ran to six pages of half-empty sheets — "long" was the first thing anyone said
- * about it. Pairing the cells reclaims that gutter and halves the page count.
+ * The 8-up grid this replaces fit eight cells a page, which made every photograph small — and the app's
+ * captures are much narrower than a normal phone photo (measured 884x1920, ~0.46:1, against a 148pt-wide
+ * tile), so they rendered as thin strips nobody could read. Two cells a page is what buys the width back.
+ * The cost is stated plainly: four times the pages for the same number of photographs.
  */
 const PHOTO_COLUMNS = 2;
-const PHOTO_ROWS_PER_PAGE = 4;
+const PHOTO_ROWS_PER_PAGE = 1;
 const PHOTOS_PER_PAGE = PHOTO_COLUMNS * PHOTO_ROWS_PER_PAGE;
 const COLUMN_GAP = 20;
 const COLUMN_WIDTH = (CONTENT_WIDTH - COLUMN_GAP * (PHOTO_COLUMNS - 1)) / PHOTO_COLUMNS;
@@ -58,19 +59,23 @@ const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP + PHOTO_ROW_GAP) / P
  * rendered image, drifted with them. A constant tile gives every photograph the same footprint whatever its
  * shape, and letterboxing onto grey reads as deliberate framing where the identical letterbox on white just
  * reads as a mistake.
- */
-const PHOTO_TILE_HEIGHT = PHOTO_ROW_PITCH - PHOTO_ROW_GAP;
-/**
- * A very slightly PORTRAIT tile, and deliberately not the full column width.
  *
- * At eight cells a page no photograph can be large, so the question is only whether the space each one gets
- * is spent evenly. A wide tile flatters landscapes and ruins portraits: against the 19.5:9 frames the app
- * currently captures, a full-width tile filled 82% for a landscape and 26% for a portrait — the portrait
- * pages were the ones that read as broken. A near-square tile gives both orientations the same footprint,
- * and when the capture fix lands and photographs arrive as 4:3/3:4 it fills roughly three quarters either
- * way. The leftover column width is what the metadata gets.
+ * FIXED at 560 rather than derived from PHOTO_ROW_PITCH: the caption block now sits BELOW the tile inside
+ * the same cell, so the tile must leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT,
+ * ~112pt) is that room.
  */
-const PHOTO_TILE_WIDTH = 148;
+const PHOTO_TILE_HEIGHT = 560;
+/**
+ * Nearly the full column width, and a tall tile — sized for the narrow captures the app actually produces.
+ *
+ * A 0.46:1 photograph (the measured shape of the app's current captures) is WIDTH-bound: at the old 148pt
+ * tile it rendered 148x322 no matter how tall the tile got, so making rows taller alone would have grown
+ * the grey box and not the photograph. 256x560 renders that same photograph at 256x556 — the letterbox
+ * bars come to about 4pt, and the visible area roughly triples. A 3:4 portrait renders 256x341 and a 4:3
+ * landscape 256x193; both are larger than before, with more surrounding grey, because one fixed tile shape
+ * cannot be optimal for every aspect ratio and the narrow case is the one that was unreadable.
+ */
+const PHOTO_TILE_WIDTH = 256;
 const PHOTO_TILE_RADIUS = 8;
 const PHOTO_TILE_FILL = "#F4F5F7";
 const PHOTO_ROW_HEIGHT = PHOTO_TILE_HEIGHT;
