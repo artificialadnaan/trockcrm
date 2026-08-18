@@ -3896,6 +3896,31 @@ export async function getDealsForPipeline(
     estimateSentTo?: string;
     includeDd?: boolean;
     previewLimit?: number;
+    /**
+     * OPT-IN to the board-aggregates contract, and the single switch behind all three of its parts:
+     *   - `boardSummary` (the at-risk counts + the Pending RFP totals) is computed and returned;
+     *   - `pendingRfpDeals` (the Pending RFP column's own capped preview) is fetched and returned;
+     *   - the ordinary Opportunity CARDS exclude the Pending RFP bucket, because the caller renders
+     *     those rows from `pendingRfpDeals` instead.
+     *
+     * They are one contract, not three options: a caller that gets the Opportunity exclusion without
+     * `pendingRfpDeals` loses those cards entirely, which is exactly the regression this flag exists to
+     * prevent. Default OFF, and that default is load-bearing in two directions.
+     *
+     * DEPLOY WINDOW. A client and a server ship in one PR but deploy as two services. An OLD web bundle
+     * — deployed after the API, or simply a tab left open across the deploy — builds its Pending RFP
+     * column ONLY by carving matching cards out of `pipelineColumns` and never reads `pendingRfpDeals`.
+     * Excluding those rows unconditionally would leave that client's column empty. It cannot start
+     * sending a flag, so the narrow behaviour has to be the default and the new client opts in.
+     *
+     * COST. mobile-crm asks for 15 cards and does not declare `boardSummary` in its response type at
+     * all, yet the summary rewrite made it materialize every open-pipeline row into the API process to
+     * get them. Off by default, that caller pays exactly what it paid before: one aggregate row per
+     * stage.
+     *
+     * With this absent, the response and the work done to produce it are byte-identical to pre-change.
+     */
+    includeBoardAggregates?: boolean;
     scope?: WorkspaceScope;
     activeOfficeId?: string | null;
   } & PipelineTerminalDateFilters,
@@ -4032,6 +4057,7 @@ export async function getDealsForPipeline(
   // The OPEN columns' stage-entry window, hoisted out of the per-stage loop: the Pending RFP preview
   // below has to reproduce the open columns' population exactly, and re-deriving the window there would
   // be a second copy of the D-11 rule. Null when the flag is off or no period is requested.
+  const includeBoardAggregates = filters?.includeBoardAggregates === true;
   const openStageEntryWindow = stageEntryDateEnabled
     ? buildStageEntryDateWindow(
         { from: wonPeriodFrom ?? undefined, to: wonPeriodTo ?? undefined },
@@ -4158,7 +4184,7 @@ export async function getDealsForPipeline(
     // 153 columns x up to 1000 rows x 12 columns of CARD payload, but it is not free and the comment
     // should not imply it is. TERMINAL columns keep the pure aggregate: at-risk is not-applicable there
     // by definition and the Won column can hold every deal ever won.
-    const isSummaryRowStage = !stage.isTerminal;
+    const isSummaryRowStage = !stage.isTerminal && includeBoardAggregates;
     const summaryRows = isSummaryRowStage
       ? await tenantDb
           .select({
@@ -4207,9 +4233,12 @@ export async function getDealsForPipeline(
       !stage.isTerminal &&
       normalizeDealBoardStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)) ===
         "opportunity";
-    const cardsWhere = isOpportunityColumn
-      ? and(where, aliasedNotPendingRfpBucketCondition("deals"))
-      : where;
+    // Gated on the same opt-in as `pendingRfpDeals`: a caller that does not receive the dedicated
+    // preview must keep receiving these rows here, or its Pending RFP column has nothing to render.
+    const cardsWhere =
+      isOpportunityColumn && includeBoardAggregates
+        ? and(where, aliasedNotPendingRfpBucketCondition("deals"))
+        : where;
 
     const stageDeals = await tenantDb
       .select({
@@ -4266,8 +4295,9 @@ export async function getDealsForPipeline(
           "opportunity"
     )
     .map((stage) => stage.id);
-  let pendingRfpDeals: Array<Record<string, unknown>> = [];
-  if (pendingRfpStageIds.length > 0) {
+  let pendingRfpDeals: Array<Record<string, unknown>> | undefined;
+  if (includeBoardAggregates && pendingRfpStageIds.length > 0) {
+    pendingRfpDeals = [];
     const pendingCountedFilter = aliasedActiveDealCountFilterSql("deals");
     // The SAME value expression the Opportunity column totals with, so the client's
     // `opportunity.totalValue - pendingRfp.totalValue` split still reconciles to the stage total.
@@ -4379,7 +4409,15 @@ export async function getDealsForPipeline(
     await recordDealsDashboardWonYtdDefinition(tenantDb, currentWonColumn);
   }
 
-  return { pipelineColumns, terminalStages, boardSummary, pendingRfpDeals };
+  return {
+    pipelineColumns,
+    terminalStages,
+    // NULL, never a zeroed object: an all-zero summary reads as "0 at risk" and would be rendered as
+    // confidently as a real count. Absent means "this response cannot answer that", and the client has
+    // a documented fallback for exactly that.
+    boardSummary: includeBoardAggregates ? boardSummary : null,
+    pendingRfpDeals,
+  };
 }
 
 export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePageInput) {

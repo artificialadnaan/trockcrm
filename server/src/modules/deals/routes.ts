@@ -1056,6 +1056,12 @@ router.get("/pipeline", async (req, res, next) => {
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       previewLimit: Number.isFinite(parsedPreviewLimit) ? parsedPreviewLimit : undefined,
+      // Opt-in: `boardSummary` + `pendingRfpDeals`, and the Opportunity card exclusion that goes with
+      // them. Default OFF so an older web bundle (which builds its Pending RFP column by carving cards
+      // out of pipelineColumns, and cannot start sending a flag) and mobile-crm (which never reads the
+      // summary, and would otherwise pay to materialize the whole open pipeline for 15 cards) both get
+      // exactly the response they got before. See getDealsForPipeline's includeBoardAggregates.
+      includeBoardAggregates: req.query.boardAggregates === "true",
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,
       wonAllTime: req.query.won_all_time === "true",
@@ -1089,15 +1095,23 @@ router.get("/pipeline", async (req, res, next) => {
       // At-Risk KPI counts and the synthetic Pending RFP column's count/$. The client used to derive
       // both from the cards it received, which was only correct while it asked for 1000 cards per
       // column — shrink that slice and the numbers silently under-report.
-      boardSummary: result.boardSummary,
-      // The synthetic Pending RFP column's OWN cards. It used to be carved out of the Opportunity
-      // column's slice on the client, which silently lost every pending deal ranked below the cap.
-      // Redacted on the same path as the column cards — these are full deal rows.
-      pendingRfpDeals: redactDealList((result.pendingRfpDeals ?? []) as never, { includeHubspotId }).map((deal) =>
-        stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
-          isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
-        })
-      ),
+      // OMITTED entirely when the caller did not opt in — not sent as null or []. A caller that never
+      // asked for these must see the pre-change response shape, and an empty array here would read as
+      // "the bucket is empty" rather than "this response does not carry it".
+      ...(result.boardSummary ? { boardSummary: result.boardSummary } : {}),
+      ...(result.pendingRfpDeals
+        ? {
+            // The synthetic Pending RFP column's OWN cards. Carving them out of the Opportunity slice on
+            // the client silently lost every pending deal ranked below the cap. Redacted on the same
+            // path as the column cards — these are full deal rows.
+            pendingRfpDeals: redactDealList(result.pendingRfpDeals as never, { includeHubspotId }).map(
+              (deal) =>
+                stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+                  isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+                })
+            ),
+          }
+        : {}),
     });
   } catch (err) {
     next(err);

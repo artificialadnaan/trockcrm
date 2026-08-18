@@ -1388,7 +1388,10 @@ describe("Pending RFP preview — ABSENT is not EMPTY (the rolling-deploy window
     ] as any;
   const stages = [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any;
 
-  it("ABSENT (undefined) falls back to carving the cards out of Opportunity", () => {
+  it("ABSENT (undefined) falls back to carving the cards out of Opportunity — the OLD-CLIENT shape", () => {
+    // This is also the shape a NEW client gets from an OLD API, and the shape an OLD client gets from a
+    // NEW API: without the `boardAggregates` opt-in the server leaves the pending rows in the ordinary
+    // Opportunity cards precisely so this carve-out has something to find.
     const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, null, undefined);
     const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
     // The pre-field API sends nothing, so the client reconstructs the column from what it does have.

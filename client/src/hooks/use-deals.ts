@@ -1190,6 +1190,11 @@ export function useDealBoard(
     const params = new URLSearchParams({
       scope,
       includeDd: String(includeDd),
+      // Opt in to the board-aggregates contract: `boardSummary`, the Pending RFP column's own capped
+      // preview, and the Opportunity cards being pending-free because we render those rows from that
+      // preview. Server-side default is OFF so mobile-crm (which never reads the summary) and any web
+      // bundle predating this change keep the response they already had — see includeBoardAggregates.
+      boardAggregates: "true",
     });
     if (previewLimit !== null) {
       params.set("previewLimit", String(previewLimit));

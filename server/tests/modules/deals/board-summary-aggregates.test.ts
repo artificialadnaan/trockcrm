@@ -169,6 +169,8 @@ async function runBoard(tenantDb: any, overrides: Record<string, unknown> = {}) 
       previewLimit: CARD_LIMIT,
       wonAllTime: true,
       lostAllTime: true,
+      // The web board opts in; every assertion in this file is about that contract.
+      includeBoardAggregates: true,
       ...overrides,
     },
     "director"
@@ -438,5 +440,83 @@ describe("getDealsForPipeline — boardSummary counts ALL matching rows, not the
       "activeCount",
       "totalValue",
     ]);
+  });
+});
+
+
+describe("getDealsForPipeline — a caller that does NOT opt in pays nothing and sees the old shape", () => {
+  /**
+   * One PR, two services, deployed at different moments — and it cuts both ways. The reverse of the
+   * window already handled: the API deploys first (or a tab stays open across the deploy), so an OLD web
+   * bundle talks to a NEW API. That client builds its Pending RFP column ONLY by carving matching cards
+   * out of `pipelineColumns` and never reads `pendingRfpDeals`, so excluding those rows unconditionally
+   * would leave its column empty. It cannot start sending a flag — hence opt-in, default off.
+   *
+   * The same default answers mobile-crm, which requests 15 cards, does not declare `boardSummary` in its
+   * response type, and would otherwise have paid to materialize the entire open pipeline to get them.
+   */
+  const runWithoutOptIn = async (tenantDb: any) => {
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    return getDealsForPipeline(
+      tenantDb,
+      "director",
+      "director-1",
+      { scope: "all", activeOfficeId: null, previewLimit: CARD_LIMIT, wonAllTime: true, lostAllTime: true },
+      "director"
+    );
+  };
+
+  it("does NOT materialize the open-pipeline rows — the summary stays a single aggregate", async () => {
+    dbState.stages = [OPPORTUNITY_STAGE];
+    const { tenantDb, chains } = buildBoard(
+      Array.from({ length: 30 }, (_, i) => summaryRow(i)),
+      { totalCount: 30, activeCount: 30, totalValue: 30000 }
+    );
+
+    await runWithoutOptIn(tenantDb);
+
+    const summaryChain = chains.find(
+      (chain) => !chain._isStageConfigQuery && !isPendingRfpChain(chain) && chain.leftJoin.mock.calls.length === 0
+    );
+    // The one-row aggregate, exactly as before: three keys, no per-row projection, no window functions.
+    expect(Object.keys(summaryChain._selectArgs?.[0] ?? {})).toEqual([
+      "totalCount",
+      "activeCount",
+      "totalValue",
+    ]);
+    expect(renderSql(summaryChain._selectArgs[0].totalCount)).not.toContain("over ()");
+  });
+
+  it("keeps the Pending RFP rows IN the ordinary Opportunity cards, so an old client can carve them out", async () => {
+    dbState.stages = [OPPORTUNITY_STAGE];
+    const { tenantDb, chains } = buildBoard([summaryRow(1)], {
+      totalCount: 1,
+      activeCount: 1,
+      totalValue: 1000,
+    });
+
+    await runWithoutOptIn(tenantDb);
+
+    const cardsChain = chains.find(
+      (chain) => !isPendingRfpChain(chain) && chain.leftJoin.mock.calls.length > 0
+    );
+    // No exclusion: those rows are the only source this client has for its Pending RFP column.
+    expect(renderSql(cardsChain.where.mock.calls[0]?.[0])).not.toContain("rfp_approval_status");
+  });
+
+  it("issues NO Pending RFP preview query and returns neither new field", async () => {
+    dbState.stages = [OPPORTUNITY_STAGE];
+    const { tenantDb, chains } = buildBoard([summaryRow(1)], {
+      totalCount: 1,
+      activeCount: 1,
+      totalValue: 1000,
+    });
+
+    const result = await runWithoutOptIn(tenantDb);
+
+    expect(chains.some(isPendingRfpChain)).toBe(false);
+    // NULL / undefined, never a zeroed summary or an empty array — both would read as real answers.
+    expect(result.boardSummary).toBeNull();
+    expect(result.pendingRfpDeals).toBeUndefined();
   });
 });

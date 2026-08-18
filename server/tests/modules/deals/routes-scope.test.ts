@@ -174,6 +174,29 @@ describe("deal routes scope defaults", () => {
     );
   });
 
+  it("only opts into the board-aggregates contract when the caller asks for it", async () => {
+    // Default OFF is load-bearing in two directions: an OLD web bundle carves its Pending RFP column out
+    // of pipelineColumns and cannot start sending a flag, and mobile-crm never reads the summary but
+    // would otherwise pay to materialize the whole open pipeline for 15 cards.
+    const withoutFlag = await invokeRoute("/pipeline", { includeDd: "true" });
+    expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
+      withoutFlag.req.tenantDb,
+      "director",
+      "director-1",
+      expect.objectContaining({ includeBoardAggregates: false }),
+      "director"
+    );
+
+    const withFlag = await invokeRoute("/pipeline", { includeDd: "true", boardAggregates: "true" });
+    expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
+      withFlag.req.tenantDb,
+      "director",
+      "director-1",
+      expect.objectContaining({ includeBoardAggregates: true }),
+      "director"
+    );
+  });
+
   it("passes requester role separately from collaborative read role for stage At Risk results", async () => {
     accessMocks.getCollaborativeReadRole.mockReturnValueOnce("director");
     const { req } = await invokeRoute(
