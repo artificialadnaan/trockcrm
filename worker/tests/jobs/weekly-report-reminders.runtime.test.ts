@@ -844,6 +844,41 @@ describe("t-2 heads-up", () => {
     expect(sent[0]!.html).toContain("https://trockcrm.com/projects/weekly-reports?");
   });
 
+  it("actually EMITS the app link end-to-end when the flag is on", async () => {
+    // The control for the test above, and it was missing. Every job-level assertion about the deep link
+    // was negative — flag unset, expect no `trockcam://` — and the positive ones lived on the link
+    // builder in isolation or against a hand-written appUrl fixture. So nothing exercised the threading
+    // this branch exists to make work: env -> runWeeklyReportReminders -> appDeepLinksEnabled ->
+    // sendProjectReminder -> weeklyReportReminderLinks. Replacing the flag read with a literal `false`
+    // left all 97 tests green.
+    //
+    // The harness default env already sets WEEKLY_REPORT_APP_DEEP_LINKS: "true"; nothing asserted on it.
+    const { sent } = await run(T_MINUS_2);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.html).toContain("trockcam://reports");
+    expect(sent[0]!.text).toContain("trockcam://reports");
+  });
+
+  // A trockcam:// href does not dispatch in Gmail web or Outlook desktop. Suppressing the "write it in
+  // T-Rock Cam" sentence whenever the app link was present left exactly the recipients who cannot use
+  // the button with a CRM link their role is refused, and nothing saying where the report is written.
+  //
+  // Two tests rather than two runs in one: the ledger claim is per project/week/kind, so a second run in
+  // the same test correctly sends nothing and `sent[0]` is undefined.
+  it("still tells a field recipient where the report is written — with the deep link on", async () => {
+    const { sent } = await run(T_MINUS_2);
+    expect(sent[0]!.html).toContain("Reports</strong> tab");
+    expect(sent[0]!.text).toContain("Write it in T-Rock Cam on your phone");
+    expect(sent[0]!.text).toContain("needs CRM access");
+  });
+
+  it("still tells a field recipient where the report is written — with it off", async () => {
+    const { sent } = await run(T_MINUS_2, { env: { FRONTEND_URL: "https://trockcrm.com" } });
+    expect(sent[0]!.html).toContain("Reports</strong> tab");
+    expect(sent[0]!.text).toContain("Write it in T-Rock Cam on your phone");
+    expect(sent[0]!.text).toContain("needs CRM access");
+  });
+
   it("sends nothing on a day that is neither t-2, t-1 nor the due date", async () => {
     const { sent, summary } = await run("2026-08-10"); // Monday, three days out
     expect(sent).toHaveLength(0);

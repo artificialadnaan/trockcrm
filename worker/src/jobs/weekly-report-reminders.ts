@@ -191,9 +191,21 @@ export function formatDueDay(isoDate: string): string {
  * genuinely held one and leaving the glasses unpaired. That shape is deliberate and worth preserving:
  * Meta publishes no stable path for the callback, so an allow-list guessed from one observed URL would
  * quietly stop retaining the real thing. The cost of the deny-list is that every route group the app adds
- * must be added there too, or the app's own deep links start eating pairing callbacks. `"reports"` IS now
- * listed, pinned by `mobile/src/wearables/__tests__/pairing-callback.test.ts` — so a `trockcam://reports…`
- * link is recognised as ours and never reaches the pairing handler. That is what unblocks this flag.
+ * must be added there too, or the app's own deep links start eating pairing callbacks. `"reports"` IS
+ * listed in this REPO, pinned by `mobile/src/wearables/__tests__/pairing-callback.test.ts`.
+ *
+ * THAT IS NOT THE SAME AS BEING SAFE TO ENABLE, and the distinction is the whole point of this flag.
+ * The deny-list that decides what a tapped link does is the one compiled into the T-Rock Cam build ON
+ * THE PHONE, not the one in this checkout. `"reports"` and the `(app)/reports/` route both arrived in
+ * #1073, and `mobile/` has NO OTA — no `expo-updates`, no `updates`/`runtimeVersion` in app.config.ts —
+ * so they reach a device only via a new EAS build, TestFlight, and a user installing it. On any older
+ * build `APP_OWN_ROUTES` is still `{accept-invite, scorecards}`, `routeKeyOf` returns `"reports"`, the
+ * link is RETAINED as a possible pairing callback, and the super lands on Unmatched Route — the exact
+ * destruction described above, delivered by the change meant to prevent it, for as long as any device
+ * stays un-updated.
+ *
+ * So the gate on this flag is "the build in the field contains #1073", which no test in this repo can
+ * assert. It defaults OFF in `.env.example` for that reason.
  *
  * The link goes to the reports HUB, not to a specific week, and that is a deliberate downgrade from the
  * shape this used to emit. `trockcam://reports/weekly/<id>` resolves by file-system routing to
@@ -389,12 +401,18 @@ export function buildWeeklyReportReminderEmail(input: WeeklyReportReminderEmailI
   //
   // So with the deep link off, leading with a CRM button would hand most recipients a destination that
   // bounces them. The report is written in T-Rock Cam; the email says so in words, and the CRM link is
-  // offered as the secondary for whoever does have dashboard access. Once the deep link is enabled the
-  // app becomes a real button and this reduces to the obvious thing.
-  const writeItHere = input.appUrl
-    ? ""
-    : `<p style="margin:16px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#333333;">` +
-      `Write it in <strong>T-Rock Cam</strong> on your phone — the <strong>Reports</strong> tab.</p>`;
+  // offered as the secondary for whoever does have dashboard access.
+  //
+  // This sentence stays even WITH the deep link, which it did not use to. A `trockcam://` href does not
+  // dispatch in Gmail web or Outlook desktop — unknown schemes are inert or sanitised there, and a
+  // desktop has no app to hand off to. Suppressing the sentence left exactly the recipients who cannot
+  // use the button with a CRM link their role is refused and no words telling them where the report is
+  // actually written. That is the same bounce the paragraph above exists to prevent, reintroduced by the
+  // branch that was supposed to help them. Keeping it unconditional costs one line of copy to a super
+  // who is already looking at a working button.
+  const writeItHere =
+    `<p style="margin:16px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#333333;">` +
+    `Write it in <strong>T-Rock Cam</strong> on your phone — the <strong>Reports</strong> tab.</p>`;
 
   const html = renderBrandedEmail({
     title: isTomorrow ? "Weekly report due tomorrow" : "Weekly report due soon",
@@ -410,8 +428,12 @@ export function buildWeeklyReportReminderEmail(input: WeeklyReportReminderEmailI
   const text =
     `${preheader}\n\n` +
     rows.map(([rowLabel, value]) => `${rowLabel}: ${value}`).join("\n") +
+    // "needs CRM access" stays on the CRM line in BOTH branches, and so does the T-Rock Cam sentence.
+    // Most recipients are field roles that /projects/weekly-reports refuses; telling them where the
+    // report is written, and warning that the other link needs access they may not have, is exactly as
+    // true when the deep link is on. See writeItHere above.
     (input.appUrl
-      ? `\n\nOpen in T-Rock Cam: ${input.appUrl}\nOr open it in the CRM: ${input.webUrl}`
+      ? `\n\nWrite it in T-Rock Cam on your phone — the Reports tab.\nOpen in T-Rock Cam: ${input.appUrl}\nCRM dashboard (needs CRM access): ${input.webUrl}`
       : `\n\nWrite it in T-Rock Cam on your phone — the Reports tab.\nCRM dashboard (needs CRM access): ${input.webUrl}`);
 
   return { subject, html, text };
