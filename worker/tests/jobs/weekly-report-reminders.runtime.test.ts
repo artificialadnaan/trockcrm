@@ -80,7 +80,14 @@ interface SentEmail {
   idempotencyKey: string;
 }
 
-function emailSpy(behaviour: { fail?: boolean } = {}) {
+/**
+ * `fail` and `throws` are DIFFERENT failures and the job must treat them differently.
+ *
+ * `fail` is `{success:false}` — the provider answered, and the answer was "not sent". `throws` is the SDK
+ * raising: `sendSystemEmailWithMetadata` awaits `resend.emails.send` without a try/catch, so a socket
+ * timeout propagates, and the message may well have been accepted before the connection died.
+ */
+function emailSpy(behaviour: { fail?: boolean; throws?: boolean } = {}) {
   const sent: SentEmail[] = [];
   const sendEmail = async (
     to: string | string[],
@@ -95,6 +102,8 @@ function emailSpy(behaviour: { fail?: boolean } = {}) {
       text: options.text,
       idempotencyKey: options.idempotencyKey,
     });
+    // Recorded first: the attempt reached the provider, which is exactly what makes the outcome unknown.
+    if (behaviour.throws) throw new Error("socket hang up");
     if (behaviour.fail) return { success: false, messageId: null };
     return { success: true, messageId: `msg-${sent.length}` };
   };
@@ -110,7 +119,10 @@ function loggerSpy() {
   return { logs, logger: { log: record(logs.log), warn: record(logs.warn), error: record(logs.error) } };
 }
 
-async function run(onDate: string, behaviour: { fail?: boolean; env?: NodeJS.ProcessEnv } = {}) {
+async function run(
+  onDate: string,
+  behaviour: { fail?: boolean; throws?: boolean; env?: NodeJS.ProcessEnv } = {},
+) {
   const spy = emailSpy(behaviour);
   const { logs, logger } = loggerSpy();
   const summary = await runWeeklyReportReminders({
@@ -372,13 +384,22 @@ describe("buildWeeklyReportReminderEmail", () => {
 });
 
 describe("buildWeeklyReportLeadershipDigestEmail", () => {
-  const entry = (name: string, stateLabel: string, reachable = { superReachable: true, pmReachable: true }) => ({
+  const entry = (
+    name: string,
+    stateLabel: string,
+    overrides: { superReachable?: boolean; pmReachable?: boolean; remindersSent?: number } = {},
+  ) => ({
     projectName: name,
     projectNumber: null,
     superName: "Steve Sanchez",
     pmName: "Adam Sherwood",
     stateLabel,
-    ...reachable,
+    superReachable: true,
+    pmReachable: true,
+    // The ordinary case: both nudges went out. Every test that cares about the ledger says so explicitly,
+    // because the ledger and reachability are separate facts and the digest must not infer one from the other.
+    remindersSent: 2,
+    ...overrides,
   });
 
   it("counts filed vs outstanding in the subject and names both sides", () => {
@@ -495,10 +516,10 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
     expect(twoProjects.text).toContain("are still outstanding. Earlier weeks: 5 weeks behind on 2 projects.");
   });
 
-  it("marks an outstanding project nobody could be reminded about", () => {
-    // Both addresses undeliverable — a departed super whose account was deactivated, and no PM. The job
-    // warns, counts a skip and sends nothing, so listing the project as ordinary Outstanding beside the
-    // departed name tells leadership to chase somebody who was never asked, every week, forever.
+  it("marks an outstanding project nobody was ever reminded about", () => {
+    // Nothing in the ledger and nobody reachable — a departed super whose account was deactivated, and no
+    // PM. The job warned, counted a skip and sent nothing, so listing the project as ordinary Outstanding
+    // beside the departed name tells leadership to chase somebody who was never asked, every week, forever.
     const email = buildWeeklyReportLeadershipDigestEmail({
       dueDate: DUE,
       filed: [],
@@ -511,31 +532,112 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
           stateLabel: "Not started",
           superReachable: false,
           pmReachable: false,
+          remindersSent: 0,
         },
         entry("Cedar Springs", "Not started"),
       ],
       backlog: [],
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
-    expect(email.html).toContain("Outstanding — 1 with nobody to remind");
+    expect(email.html).toContain("Outstanding — 1 never reminded");
     expect(email.html).toContain("Super: Gone Fishing (unreachable) · PM: unassigned");
-    expect(email.html).toContain("No reminder was sent — no reachable super or PM email on this project.");
-    expect(email.text).toContain("Outstanding (2, 1 with nobody to remind)");
-    expect(email.text).toContain("No reminder was sent");
-    // The project that CAN be reminded carries neither the annotation nor the note.
+    expect(email.html).toContain(
+      "No reminder was sent for this week — and with no reachable super or PM email, none can be sent now either.",
+    );
+    expect(email.text).toContain("Outstanding (2, 1 never reminded)");
+    // The project that WAS reminded carries neither the annotation nor the note.
     expect(email.html).toContain("Super: Steve Sanchez · PM: Adam Sherwood");
     expect(email.text.match(/No reminder was sent/g)).toHaveLength(1);
   });
 
-  it("does not flag reachability on FILED projects — nobody is being chased there", () => {
+  it("says a reminder went out, and only that the NEXT one cannot, when the ledger and reachability disagree", () => {
+    // The ledger is the record of what was delivered; reachability is evaluated at digest time and predicts
+    // only the next send. Two projects, opposite directions, and reading either fact off the other prints a
+    // falsehood: a super assigned this morning is reachable and was never emailed, and a super deactivated
+    // last night received both nudges.
     const email = buildWeeklyReportLeadershipDigestEmail({
       dueDate: DUE,
-      filed: [entry("Cedar Springs", "Sent", { superReachable: false, pmReachable: false })],
+      filed: [],
+      outstanding: [
+        // Reachable now, never chased — assigned after both nudges had already skipped the project.
+        entry("Cedar Springs", "Not started", { remindersSent: 0 }),
+        // Chased twice, unreachable now — the super left on Wednesday night.
+        entry("Katy Freeway", "Not started", {
+          superReachable: false,
+          pmReachable: false,
+          remindersSent: 2,
+        }),
+      ],
+      backlog: [],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    // Exactly ONE project was never reminded, and it is the reachable one.
+    expect(email.html).toContain("Outstanding — 1 never reminded");
+    expect(email.text).toContain("Outstanding (2, 1 never reminded)");
+    expect(email.text).toContain(
+      "  - Cedar Springs (Not started) — Super: Steve Sanchez, PM: Adam Sherwood\n" +
+        "      No reminder was sent for this week.",
+    );
+    // The chased-then-departed project must NOT be told it was never emailed.
+    expect(email.text).toContain(
+      "2 reminders were sent for this week, but there is no reachable super or PM email now.",
+    );
+    expect(email.text.match(/No reminder was sent/g)).toHaveLength(1);
+    // Singular reads correctly when only the t-2 landed.
+    const one = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [],
+      outstanding: [
+        entry("Katy Freeway", "Not started", { superReachable: false, pmReachable: false, remindersSent: 1 }),
+      ],
+      backlog: [],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(one.text).toContain("1 reminder was sent for this week, but there is no reachable super or PM email now.");
+    expect(one.html).not.toContain("never reminded");
+  });
+
+  it("counts dismissed weeks apart from filed ones in the subject and the preheader", () => {
+    // A dismissed week is a decision not to file, not a report. Folding it into `filed` told a director
+    // reading only the subject that reports exist when none do.
+    const allDismissed = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [],
+      outstanding: [],
+      dismissed: [entry("Cedar Springs", "Dismissed")],
+      backlog: [],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(allDismissed.subject).toBe("Weekly reports due Thursday, Aug 13 — 0 filed, 0 outstanding, 1 dismissed");
+    expect(allDismissed.html).toContain("Nothing due Thursday, Aug 13 is outstanding: 0 filed, 1 dismissed.");
+    expect(allDismissed.html).not.toContain("has been filed");
+    // Placement is unchanged: the row still sits in the Filed section, under a heading that says what it is.
+    expect(allDismissed.html).toContain("Filed — 1 dismissed, not filed");
+    expect(allDismissed.text).toContain("Filed (0, plus 1 dismissed):\n  - Cedar Springs (Dismissed)");
+
+    const mixed = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [entry("Preston Hollow", "Sent")],
+      outstanding: [entry("Katy Freeway", "Not started")],
+      dismissed: [entry("Cedar Springs", "Dismissed")],
+      backlog: [],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(mixed.subject).toBe("Weekly reports due Thursday, Aug 13 — 1 filed, 1 outstanding, 1 dismissed");
+    // "1 of 3", so the three rows below add up — with the dismissed one named rather than counted as filed.
+    expect(mixed.text).toContain("1 of 3 reports due Thursday, Aug 13 are still outstanding, 1 dismissed.");
+  });
+
+  it("does not flag reachability or the ledger on FILED projects — nobody is being chased there", () => {
+    const email = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [entry("Cedar Springs", "Sent", { superReachable: false, pmReachable: false, remindersSent: 0 })],
       outstanding: [],
       backlog: [],
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
-    expect(email.html).not.toContain("nobody to remind");
+    expect(email.html).not.toContain("never reminded");
+    expect(email.html).not.toContain("No reminder was sent");
     expect(email.html).not.toContain("(unreachable)");
     expect(email.html).toContain("Super: Steve Sanchez · PM: Adam Sherwood");
   });
@@ -948,12 +1050,72 @@ describe("due-date leadership digest", () => {
     const headsUp = await run(T_MINUS_2);
     expect(headsUp.sent).toHaveLength(0);
     expect(headsUp.summary.skipped).toBe(1);
+    // Nothing sent, so nothing recorded — which is what the digest reads.
+    expect(await reminderLedger()).toEqual([]);
 
     const { sent } = await run(DUE);
     expect(sent[0]!.subject).toContain("0 filed, 1 outstanding");
-    expect(sent[0]!.html).toContain("Outstanding — 1 with nobody to remind");
+    expect(sent[0]!.html).toContain("Outstanding — 1 never reminded");
     expect(sent[0]!.text).toContain("Super: Gone Fishing (unreachable)");
-    expect(sent[0]!.text).toContain("No reminder was sent");
+    expect(sent[0]!.text).toContain(
+      "No reminder was sent for this week — and with no reachable super or PM email, none can be sent now either.",
+    );
+  });
+
+  it("says NO REMINDER WAS SENT for a project whose super was assigned after both nudges had skipped it", async () => {
+    // The common setup pattern: a project is created without a super and gets one later in the week. The
+    // digest used to decide "was anybody reminded" from reachability AT DIGEST TIME, so this project — a
+    // fresh, valid address by Thursday morning — printed as ordinary Outstanding beside a name that had
+    // never been emailed. The ledger is the record of what was sent, and it is empty here.
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects
+          SET trock_super_user_id = NULL, trock_pm_user_id = NULL`,
+    );
+
+    const tMinus2 = await run(T_MINUS_2);
+    expect(tMinus2.sent).toHaveLength(0);
+    expect(tMinus2.summary.skipped).toBe(1);
+    const tMinus1 = await run(T_MINUS_1);
+    expect(tMinus1.sent).toHaveLength(0);
+    expect(tMinus1.summary.skipped).toBe(1);
+    expect(await reminderLedger()).toEqual([]);
+
+    // Thursday morning: a super is assigned, hours before the digest.
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET trock_super_user_id = $1::uuid`, [SUPER]);
+
+    const { sent } = await run(DUE);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.html).toContain("Outstanding — 1 never reminded");
+    expect(sent[0]!.text).toContain(
+      "  - DFW-10432 — 4123 Cedar Springs (Not started) — Super: Steve Sanchez, PM: unassigned\n" +
+        "      No reminder was sent for this week.",
+    );
+    // Steve IS reachable — the next reminder can land. The note is about the past, and says only that.
+    expect(sent[0]!.text).not.toContain("(unreachable)");
+  });
+
+  it("does NOT claim a reminder was never sent when two were delivered before the super left", async () => {
+    // The mirror image. Both nudges are delivered on Tuesday and Wednesday; the super is deactivated on
+    // Wednesday night. Reading the past off present reachability printed "No reminder was sent" over two
+    // emails that leadership can see in the super's inbox.
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET trock_pm_user_id = NULL`);
+    expect((await run(T_MINUS_2)).summary.tMinus2Sent).toBe(1);
+    expect((await run(T_MINUS_1)).summary.tMinus1Sent).toBe(1);
+
+    await pg.query(`UPDATE public.users SET is_active = false WHERE id = $1::uuid`, [SUPER]);
+    try {
+      const { sent } = await run(DUE);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.text).not.toContain("No reminder was sent");
+      expect(sent[0]!.html).not.toContain("never reminded");
+      // Both facts, each said as itself: two reminders landed, and the next one cannot.
+      expect(sent[0]!.text).toContain(
+        "2 reminders were sent for this week, but there is no reachable super or PM email now.",
+      );
+      expect(sent[0]!.text).toContain("Super: Steve Sanchez (unreachable)");
+    } finally {
+      await pg.query(`UPDATE public.users SET is_active = true WHERE id = $1::uuid`, [SUPER]);
+    }
   });
 
   it("labels the SECOND digest of a day as an update, not a near-identical repeat", async () => {
@@ -1061,15 +1223,77 @@ describe("due-date leadership digest", () => {
     expect(retried.sent).toHaveLength(1);
   });
 
-  it("counts a dismissed week as accounted for rather than outstanding", async () => {
-    await pg.query(
-      `INSERT INTO office_dallas.weekly_report_dismissals (weekly_report_project_id, week_of, reason)
-       VALUES ($1::uuid, $2::date, 'Owner paused the job')`,
-      [PROJECT, DUE],
-    );
+  it("reports a dismissed week as dismissed, not as a report that was filed", async () => {
+    // Dismissing the due week and both earlier ones leaves an office where NOT ONE report exists. The
+    // subject used to read "1 filed, 0 outstanding" and the preheader "Everything due Thursday, Aug 13 has
+    // been filed" — the same defect the backlog clause already fixed, on the same argument: a director
+    // triaging on a phone reads the subject and the preheader and stops.
+    for (const weekOf of [DUE, "2026-08-06", "2026-07-30"]) {
+      await pg.query(
+        `INSERT INTO office_dallas.weekly_report_dismissals (weekly_report_project_id, week_of, reason)
+         VALUES ($1::uuid, $2::date, 'Owner paused the job')`,
+        [PROJECT, weekOf],
+      );
+    }
     const { sent } = await run(DUE);
-    expect(sent[0]!.subject).toContain("1 filed, 0 outstanding");
-    expect(sent[0]!.text).toContain("Dismissed");
+    expect(sent[0]!.subject).toBe("Weekly reports due Thursday, Aug 13 — 0 filed, 0 outstanding, 1 dismissed");
+    expect(sent[0]!.html).toContain("Nothing due Thursday, Aug 13 is outstanding: 0 filed, 1 dismissed.");
+    expect(sent[0]!.html).not.toContain("has been filed");
+
+    // Placement is deliberately UNCHANGED: a dismissed week is not chaseable, so it stays out of
+    // Outstanding, where it would inflate a count nobody can act on. Only the counting changed.
+    const text = sent[0]!.text;
+    expect(text).toContain("Filed (0, plus 1 dismissed):");
+    expect(text).toContain("(Dismissed)");
+    expect(text.indexOf("(Dismissed)")).toBeGreaterThan(text.indexOf("Filed (0, plus 1 dismissed):"));
+    expect(text.indexOf("(Dismissed)")).toBeLessThan(text.indexOf("Outstanding (0):"));
+  });
+
+  it("does not send a second, unlabelled digest after a send whose outcome is unknown", async () => {
+    // 07:00. The SDK THROWS — a socket timeout, which sendSystemEmailWithMetadata does not catch — so
+    // Resend may have accepted and delivered the digest before the connection died. Releasing the claims
+    // here (the old behaviour) is what turns one ambiguous send into two unlabelled digests: the rollback
+    // empties the very ledger `alreadyDigested` is read from.
+    const first = await run(DUE, { throws: true });
+    expect(first.sent).toHaveLength(1);
+    expect(first.summary.digestsSent).toBe(0);
+    expect(first.summary.failed).toBe(1);
+    // Claims KEPT — an unknown outcome is treated as delivered, and the log says so in those terms.
+    expect(await reminderLedger()).toEqual([
+      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
+    ]);
+    expect(first.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
+
+    // 09:00. A second project becomes due, so the cohort — and therefore the idempotency key — changes.
+    // Resend cannot dedup a key it has never seen, so the ONLY thing that can stop leadership reading this
+    // as an independent second report is the subject.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [OTHER_PROJECT, OTHER_DEAL, SUPER],
+    );
+    const second = await run(DUE);
+    expect(second.sent).toHaveLength(1);
+    expect(second.sent[0]!.idempotencyKey).not.toBe(first.sent[0]!.idempotencyKey);
+    expect(second.sent[0]!.subject.startsWith("Update — Weekly reports due Thursday, Aug 13")).toBe(true);
+    expect(second.sent[0]!.text.startsWith("This updates the digest sent earlier today")).toBe(true);
+    // Still a FULL digest, so nothing is lost if the first email never arrived.
+    expect(second.sent[0]!.text).toContain("4123 Cedar Springs");
+    expect(second.sent[0]!.text).toContain("Katy Freeway Shops");
+  });
+
+  it("does not re-send at all after an unknown outcome when the cohort has not changed", async () => {
+    // The deliberate cost of treating "accepted, then the connection died" as delivered: if the message
+    // really was lost, the day's digest is lost with it. That is logged and counted (`summary.failed`),
+    // and it is the trade the alternative cannot make — a blind retry cannot be labelled as a repeat,
+    // because at 09:00 nothing distinguishes a lost send from a delivered one.
+    const first = await run(DUE, { throws: true });
+    expect(first.summary.failed).toBe(1);
+
+    const second = await run(DUE);
+    expect(second.sent).toHaveLength(0);
+    expect(second.summary.digestsSent).toBe(0);
   });
 
   it("surfaces earlier unfiled weeks as a backlog block", async () => {
@@ -1205,6 +1429,48 @@ describe("office guards", () => {
       expect(logs.log.some((line) => line.includes("Weekly-report tables not present"))).toBe(true);
     } finally {
       await pg.exec(`DELETE FROM public.offices WHERE slug = 'austin'; DROP SCHEMA office_austin CASCADE;`);
+    }
+  });
+
+  it("still runs the remaining offices when one office's table probe THROWS", async () => {
+    // The probe is a query like any other, and it can fail for reasons that say nothing about this office:
+    // a pool-acquisition timeout under saturation (`connectionTimeoutMillis: 10000` in worker/src/db.ts) is
+    // a known production failure mode here. It was the ONE per-office statement outside processOffice's
+    // try, so the first office's timeout propagated out of runWeeklyReportReminders and offices 2..N never
+    // ran — precisely the silent whole-office loss the probe was added to prevent, one level further out.
+    //
+    // Offices are ordered by slug, so Austin runs FIRST: Dallas's reminder only exists if the throw was
+    // contained.
+    await pg.exec(`
+      INSERT INTO public.offices (id, name, slug) VALUES ('${U("00002")}', 'Austin', 'austin')
+        ON CONFLICT (id) DO NOTHING;
+    `);
+    const spy = emailSpy();
+    const { logs, logger } = loggerSpy();
+    try {
+      const summary = await runWeeklyReportReminders({
+        query: async (text: string, params?: unknown[]) => {
+          if (text.includes("to_regclass") && JSON.stringify(params ?? []).includes("office_austin.")) {
+            throw new Error("timeout exceeded when trying to connect");
+          }
+          return query(text, params);
+        },
+        sendEmail: spy.sendEmail,
+        env: { FRONTEND_URL: "https://trockcrm.com" },
+        now: atNoonUtc(T_MINUS_2),
+        logger,
+        acquireLock: async () => async () => {},
+      });
+      expect(summary.failed).toBe(1);
+      expect(summary.offices).toBe(1);
+      expect(spy.sent).toHaveLength(1);
+      expect(spy.sent[0]!.subject).toContain("4123 Cedar Springs");
+      // A probe that threw and tables that are legitimately absent mean OPPOSITE things — unknown state
+      // versus a migration that has not landed — so they must not read the same in the logs.
+      expect(logs.error.some((line) => line.includes("Weekly-report table probe failed"))).toBe(true);
+      expect(logs.log.some((line) => line.includes("Weekly-report tables not present"))).toBe(false);
+    } finally {
+      await pg.exec(`DELETE FROM public.offices WHERE slug = 'austin';`);
     }
   });
 

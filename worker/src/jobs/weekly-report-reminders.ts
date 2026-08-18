@@ -117,9 +117,14 @@ function isBasicValidEmail(email: string): boolean {
 /**
  * Is this stored address something a reminder can actually be sent to?
  *
- * ONE predicate, deliberately shared: `sendProjectReminder` decides whether to send by it, and the
- * digest marks a project "nobody could be reminded" by it. Two spellings of the same rule is how the
- * email ends up asserting a reminder went out that never did, or vice versa.
+ * ONE predicate, deliberately shared: `sendProjectReminder` decides whether to send by it, and the digest
+ * marks a project "(unreachable)" by it. Two spellings of the same rule would make the annotation disagree
+ * with the send.
+ *
+ * It answers only "can a reminder be addressed RIGHT NOW". Whether one actually WAS sent is a different
+ * question with a different source — `weekly_report_reminders_sent`, read in sendLeadershipDigest — because
+ * an assignment changes between the nudge and the digest, and reading the past off this predicate told
+ * leadership both that a never-emailed super had been chased and that a chased one had not.
  */
 function isDeliverableEmail(email: string | null | undefined): email is string {
   return email != null && isBasicValidEmail(email);
@@ -404,17 +409,27 @@ export interface WeeklyReportDigestEntry {
   pmName: string | null;
   stateLabel: string;
   /**
-   * Whether a reminder for this project could actually be ADDRESSED to that person — set from the same
+   * Whether a reminder for this project could be ADDRESSED to that person AS OF THIS DIGEST — the same
    * predicate `sendProjectReminder` uses to decide whether to send at all.
    *
-   * Both false means the t−2 and t−1 nudges were never delivered to anybody: the job logged a warning,
-   * counted a skip, and wrote no ledger row. Without carrying that fact the digest lists the project as
-   * ordinary Outstanding beside the name of whoever was assigned — frequently someone who has left, whose
-   * account deactivation is what nulled the address in the first place — and leadership chases a person
-   * who was never asked, every week, with nothing in the email hinting why.
+   * A statement about the NEXT reminder, never about the ones already sent. Reachability is evaluated at
+   * digest time and the assignment moves underneath it: a super assigned on Thursday morning is reachable
+   * here and was not on Tuesday, and a super who left on Wednesday night is unreachable here having been
+   * emailed twice. What actually went out is `remindersSent`.
    */
   superReachable: boolean;
   pmReachable: boolean;
+  /**
+   * How many t−2 / t−1 reminders `weekly_report_reminders_sent` records for this project's due week.
+   *
+   * The LEDGER is the record of what was sent — it is written only after a delivery and rolled back when
+   * one fails — so it is the only thing that can answer "was anybody actually chased about this". The
+   * digest used to answer that from current reachability, which is wrong in both directions: it stayed
+   * silent about a project whose super was assigned after both nudges had already skipped it (leadership
+   * told to chase someone who was never emailed), and it printed "no reminder was sent" over a project
+   * whose super received both and then left (leadership told two delivered emails did not exist).
+   */
+  remindersSent: number;
 }
 
 export interface WeeklyReportDigestBacklogEntry {
@@ -464,6 +479,14 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   dueDate: string;
   filed: WeeklyReportDigestEntry[];
   outstanding: WeeklyReportDigestEntry[];
+  /**
+   * Weeks consciously written off. Listed WITH the filed ones — a dismissed week is neither filed nor
+   * chaseable, and putting it in Outstanding inflates a count nobody can act on — but counted apart from
+   * them, because "filed" in the subject is a claim that a report EXISTS. Folding the two together made a
+   * cohort of three dismissed weeks read as "3 filed, 0 outstanding" over a body listing three reports
+   * that were never written.
+   */
+  dismissed?: WeeklyReportDigestEntry[] | null;
   backlog: WeeklyReportDigestBacklogEntry[];
   dashboardUrl: string;
   /**
@@ -473,6 +496,7 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   followUpForProjects?: string[] | null;
 }): { subject: string; html: string; text: string } {
   const dueDay = formatDueDay(input.dueDate);
+  const dismissed = input.dismissed ?? [];
 
   // The backlog belongs in the SUBJECT, not only in the body. Reporting the due-today cohort alone lets
   // leadership receive "2 filed, 0 outstanding / Everything has been filed" above a body listing a job
@@ -486,17 +510,29 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   const followUpProjects = input.followUpForProjects ?? [];
   const isFollowUp = followUpProjects.length > 0;
 
+  // Dismissed weeks get their own clause rather than being absorbed into either count. "0 filed, 0
+  // outstanding" with nothing else said would be true and unreadable; "1 filed" would be false.
+  const dismissedClause = dismissed.length ? `${dismissed.length} dismissed` : null;
+
   // A second digest for a cohort that GREW mid-morning re-lists the first email's projects, under a
   // subject that otherwise differs only in its counts. Saying which email this is costs one word and is
   // the difference between "leadership got an update" and "the cron sent it twice".
   const subject =
     `${isFollowUp ? "Update — " : ""}Weekly reports due ${dueDay} — ` +
     `${input.filed.length} filed, ${input.outstanding.length} outstanding` +
+    (dismissedClause ? `, ${dismissedClause}` : "") +
     (backlogClause ? `, ${backlogClause}` : "");
+  const dueTotal = input.filed.length + dismissed.length + input.outstanding.length;
   const duePreheader =
     input.outstanding.length === 0
-      ? `Everything due ${dueDay} has been filed.`
-      : `${input.outstanding.length} of ${input.filed.length + input.outstanding.length} reports due ${dueDay} are still outstanding.`;
+      ? dismissed.length === 0
+        ? `Everything due ${dueDay} has been filed.`
+        : // "Everything has been filed" over a cohort of write-offs is the same lie the subject used to
+          // tell, one line further down. Name both numbers.
+          `Nothing due ${dueDay} is outstanding: ${input.filed.length} filed, ${dismissed.length} dismissed.`
+      : `${input.outstanding.length} of ${dueTotal} reports due ${dueDay} are still outstanding` +
+        (dismissedClause ? `, ${dismissedClause}` : "") +
+        `.`;
   const preheader = backlogClause ? `${duePreheader} Earlier weeks: ${backlogClause}.` : duePreheader;
 
   const followUpLine = isFollowUp
@@ -511,15 +547,18 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   // `flagUnreachable` is set for Outstanding only. On a filed week nobody is being chased, so who could
   // or could not have been emailed is noise; on an outstanding one it is the difference between a person
   // who ignored two reminders and a project the job has never been able to notify at all.
+  //
+  // The heading's count comes from the LEDGER (`remindersSent === 0`), not from reachability. "Nobody to
+  // remind" described the present and was printed as a claim about the past — see reminderNote.
   const section = (
     heading: string,
     entries: WeeklyReportDigestEntry[],
     emptyNote: string,
     flagUnreachable = false,
   ) => {
-    const unreachable = flagUnreachable ? entries.filter((entry) => !isRemindable(entry)).length : 0;
+    const neverReminded = flagUnreachable ? entries.filter((entry) => entry.remindersSent === 0).length : 0;
     const fullHeading =
-      unreachable > 0 ? `${heading} — ${unreachable} with nobody to remind` : heading;
+      neverReminded > 0 ? `${heading} — ${neverReminded} never reminded` : heading;
     const items = entries.length
       ? entries
           .map((entry) => {
@@ -528,11 +567,11 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
               personLabel("Super", entry.superName, entry.superReachable, flagUnreachable),
               personLabel("PM", entry.pmName, entry.pmReachable, flagUnreachable),
             ].join(" · ");
-            const note =
-              flagUnreachable && !isRemindable(entry)
-                ? `
-                    <div style="font-size:12px;line-height:18px;color:#CC0000;">${escapeHtml(UNREMINDABLE_NOTE)}</div>`
-                : "";
+            const noteText = flagUnreachable ? reminderNote(entry) : null;
+            const note = noteText
+              ? `
+                    <div style="font-size:12px;line-height:18px;color:#CC0000;">${escapeHtml(noteText)}</div>`
+              : "";
             return `
                 <tr>
                   <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;font-family:Arial,Helvetica,sans-serif;vertical-align:top;">
@@ -568,12 +607,19 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
               </table>`
     : "";
 
+  // Dismissed weeks sit in this section, after the filed ones, under a heading that says how many of the
+  // rows below are write-offs rather than reports. Same placement as before, without the same claim.
+  const accountedFor = [...input.filed, ...dismissed];
+  const filedHeading = dismissed.length
+    ? `Filed — ${dismissed.length} dismissed, not filed`
+    : "Filed";
+
   const html = renderBrandedEmail({
     title: isFollowUp ? `Weekly reports due ${dueDay} (update)` : `Weekly reports due ${dueDay}`,
     preheader,
     bodyHtml:
       followUpHtml +
-      section("Filed", input.filed, "Nothing filed yet.") +
+      section(filedHeading, accountedFor, "Nothing filed yet.") +
       section("Outstanding", input.outstanding, "Nothing outstanding.", true) +
       backlogHtml,
     primaryLabel: "Open the weekly reports board",
@@ -586,15 +632,17 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
       personLabel("Super", entry.superName, entry.superReachable, flagUnreachable),
       personLabel("PM", entry.pmName, entry.pmReachable, flagUnreachable),
     ].join(", ");
-    const note = flagUnreachable && !isRemindable(entry) ? `\n      ${UNREMINDABLE_NOTE}` : "";
+    const noteText = flagUnreachable ? reminderNote(entry) : null;
+    const note = noteText ? `\n      ${noteText}` : "";
     return `  - ${name} (${entry.stateLabel}) — ${people}${note}`;
   };
-  const outstandingUnreachable = input.outstanding.filter((entry) => !isRemindable(entry)).length;
+  const outstandingNeverReminded = input.outstanding.filter((entry) => entry.remindersSent === 0).length;
   const text =
     (followUpLine ? `${followUpLine}\n\n` : "") +
     `${preheader}\n\n` +
-    `Filed (${input.filed.length}):\n${input.filed.map((entry) => textEntry(entry)).join("\n") || "  - none"}\n\n` +
-    `Outstanding (${input.outstanding.length}${outstandingUnreachable > 0 ? `, ${outstandingUnreachable} with nobody to remind` : ""}):\n` +
+    `Filed (${input.filed.length}${dismissed.length ? `, plus ${dismissed.length} dismissed` : ""}):\n` +
+    `${accountedFor.map((entry) => textEntry(entry)).join("\n") || "  - none"}\n\n` +
+    `Outstanding (${input.outstanding.length}${outstandingNeverReminded > 0 ? `, ${outstandingNeverReminded} never reminded` : ""}):\n` +
     `${input.outstanding.map((entry) => textEntry(entry, true)).join("\n") || "  - none"}\n` +
     (input.backlog.length
       ? `\nStill outstanding from earlier weeks:\n${input.backlog
@@ -606,10 +654,36 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   return { subject, html, text };
 }
 
-/** The one sentence that says a project's reminders went nowhere. Same words in HTML and in text. */
-const UNREMINDABLE_NOTE = "No reminder was sent — no reachable super or PM email on this project.";
+/**
+ * What this digest can honestly say about one outstanding project's reminders. Same words in HTML and text.
+ *
+ * TWO facts, and the note used to collapse them into one sentence drawn from the wrong one. The LEDGER
+ * (`remindersSent`) is the record of what was delivered — past tense, authoritative. Reachability is
+ * evaluated NOW and predicts only whether the next reminder can land. Deriving "no reminder was sent" from
+ * reachability was wrong in both directions:
+ *
+ *   • a project created without a super, assigned one on the due-date morning, was reachable here and had
+ *     been skipped by both nudges — printed as ordinary Outstanding, so leadership chased a person who was
+ *     never emailed. That is the common setup pattern, and it is the case the note exists to catch.
+ *   • a super who received both nudges and was deactivated on Wednesday night was unreachable here —
+ *     printed as "no reminder was sent" over two emails that had in fact been delivered.
+ *
+ * So the past comes from the ledger and the future from reachability, and neither sentence claims the other.
+ */
+function reminderNote(entry: WeeklyReportDigestEntry): string | null {
+  const reachable = isRemindable(entry);
+  if (entry.remindersSent === 0) {
+    return reachable
+      ? "No reminder was sent for this week."
+      : "No reminder was sent for this week — and with no reachable super or PM email, none can be sent now either.";
+  }
+  if (!reachable) {
+    return `${entry.remindersSent} reminder${entry.remindersSent === 1 ? " was" : "s were"} sent for this week, but there is no reachable super or PM email now.`;
+  }
+  return null;
+}
 
-/** Could a t−2 / t−1 reminder for this project be addressed to anybody at all? */
+/** Could the NEXT t−2 / t−1 reminder for this project be addressed to anybody at all? */
 function isRemindable(entry: WeeklyReportDigestEntry): boolean {
   return entry.superReachable || entry.pmReachable;
 }
@@ -741,11 +815,29 @@ export async function runWeeklyReportReminders(
       // 0223 that errored partway — sailed past the guard and then threw 42P01 out of processOffice. That
       // is caught one level up, so the office silently lost its t−2, its t−1 AND its digest for the tick,
       // visible only as a single logger.error. The tables are cheap to probe and the failure is not.
-      const present = await query(
-        `SELECT t.qualified, to_regclass(t.qualified) AS reg FROM UNNEST($1::text[]) AS t(qualified)`,
-        [REQUIRED_TENANT_TABLES.map((table) => `${tenantSchema}.${table}`)],
-      );
-      const missing = present.rows.filter((row) => row.reg == null).map((row) => String(row.qualified));
+      //
+      // The probe is GUARDED SEPARATELY, and not merely because a query can fail: it is the one per-office
+      // statement that ran outside processOffice's try, so a pool-acquisition timeout on office 1 — the
+      // known saturation failure mode, `connectionTimeoutMillis: 10000` in db.ts — threw straight out of
+      // the run and offices 2..N never executed. Exactly the silent whole-office loss this probe was added
+      // to prevent, one level further out. Its own catch also keeps a FAILED probe distinguishable in the
+      // logs from tables that are legitimately absent: an office skipped for want of 0223 is routine and
+      // logs at INFO; a probe that threw means the office's state is unknown and logs at ERROR.
+      let missing: string[];
+      try {
+        const present = await query(
+          `SELECT t.qualified, to_regclass(t.qualified) AS reg FROM UNNEST($1::text[]) AS t(qualified)`,
+          [REQUIRED_TENANT_TABLES.map((table) => `${tenantSchema}.${table}`)],
+        );
+        missing = present.rows.filter((row) => row.reg == null).map((row) => String(row.qualified));
+      } catch (err) {
+        logger.error("[WeeklyReportReminders] Weekly-report table probe failed - skipping office", {
+          tenantSchema,
+          err,
+        });
+        summary.failed += 1;
+        continue;
+      }
       if (missing.length > 0) {
         logger.log("[WeeklyReportReminders] Weekly-report tables not present - skipping office", {
           tenantSchema,
@@ -1093,15 +1185,23 @@ async function sendLeadershipDigest(
   // day, and merging cohorts would mean reporting a Monday project as outstanding on a Thursday.)
   //
   // Read before claiming. The claim has to be the last thing before the send, so what the email needs to
-  // KNOW — which of today's projects an earlier tick already reported on — is a separate read. It is
-  // advisory only: the claim below is what actually decides whether this run sends, so a concurrent run
-  // cannot turn this read into a double send. (The advisory lock makes concurrency impossible anyway.)
+  // KNOW — which of today's projects an earlier tick already reported on, and which of them anybody was
+  // actually reminded about — is a separate read. It is advisory only: the claim below is what actually
+  // decides whether this run sends, so a concurrent run cannot turn this read into a double send. (The
+  // advisory lock makes concurrency impossible anyway.)
+  //
+  // ALL kinds, not just `due_digest`. The t−2/t−1 rows for this same week are the only record of who was
+  // genuinely chased, and the digest asserts that in print — see reminderNote.
   const dueTodayIds = input.dueToday.map((project) => project.id);
-  const alreadyDigested = await digestedProjectIds(query, tenantSchema, dueTodayIds, input.today);
+  const ledger = await reminderLedgerByProject(query, tenantSchema, dueTodayIds, input.today);
+  const alreadyDigested = new Set(
+    [...ledger].filter(([, kinds]) => kinds.has("due_digest")).map(([projectId]) => projectId),
+  );
   const newlyDue = dueTodayIds.filter((id) => !alreadyDigested.has(id));
   if (newlyDue.length === 0) return;
 
   const filed: WeeklyReportDigestEntry[] = [];
+  const dismissed: WeeklyReportDigestEntry[] = [];
   const outstanding: WeeklyReportDigestEntry[] = [];
   for (const project of input.dueToday) {
     const key = `${project.id}|${project.dueDate}`;
@@ -1109,6 +1209,7 @@ async function sendLeadershipDigest(
       status: input.statusByWeek.get(key) ?? null,
       isDismissed: input.dismissedWeeks.has(key),
     });
+    const kinds = ledger.get(project.id);
     const entry: WeeklyReportDigestEntry = {
       projectName: project.projectName,
       projectNumber: project.projectNumber,
@@ -1117,12 +1218,17 @@ async function sendLeadershipDigest(
       stateLabel: weeklyReportWeekStateLabel(state),
       // Reachability, not merely assignment: `superEmail`/`pmEmail` are already nulled for deactivated
       // accounts upstream, and this is the same predicate sendProjectReminder addresses its mail with.
+      // It describes THIS MOMENT, so it answers only "can the next reminder land".
       superReachable: isDeliverableEmail(project.superEmail),
       pmReachable: isDeliverableEmail(project.pmEmail),
+      // ...and what already went out comes from the ledger, which is written only after a delivery.
+      remindersSent: CHASE_REMINDER_KINDS.filter((kind) => kinds?.has(kind)).length,
     };
-    // A dismissed week is neither filed nor chaseable — it was consciously written off — so it lands in
-    // Filed with its own label rather than inflating an outstanding count nobody can act on.
-    if (input.filedWeeks.has(key) || state === "dismissed") filed.push(entry);
+    // A dismissed week is neither filed nor chaseable — it was consciously written off — so it is listed
+    // in the Filed section with its own label rather than inflating an outstanding count nobody can act
+    // on. It is COUNTED separately, because "filed" in the subject means a report exists.
+    if (state === "dismissed") dismissed.push(entry);
+    else if (input.filedWeeks.has(key)) filed.push(entry);
     else outstanding.push(entry);
   }
 
@@ -1131,6 +1237,7 @@ async function sendLeadershipDigest(
     dueDate: input.today,
     filed,
     outstanding,
+    dismissed,
     backlog,
     dashboardUrl: weeklyReportDashboardUrl(input.frontendUrl, input.officeId),
     followUpForProjects:
@@ -1149,8 +1256,9 @@ async function sendLeadershipDigest(
   const claimed = await claimDigest(query, tenantSchema, newlyDue, input.today);
   if (claimed.length === 0) return;
 
+  let result: SendSystemEmailResult;
   try {
-    const result = await sendEmail(recipients, email.subject, email.html, {
+    result = await sendEmail(recipients, email.subject, email.html, {
       text: email.text,
       // Scoped to the COVERED SET, not just the day. A day-stable key looks right and is a trap: when a
       // newly-due project triggers a second digest, that email's subject counts and project list differ,
@@ -1160,15 +1268,43 @@ async function sendLeadershipDigest(
       // while a true duplicate (same cohort, same day) still dedups.
       idempotencyKey: `weekly-report-digest-${tenantSchema}-${input.today}-${digestCohortKey(input.dueToday.map((project) => project.id))}`,
     });
-    if (!result.success) throw new Error("Email provider returned unsuccessful result");
-    summary.digestsSent += 1;
   } catch (err) {
-    // Release ONLY the rows this run claimed. Deleting every due_digest row for the day would also erase
-    // an earlier run's successful send and re-digest leadership on the catch-up tick.
-    await releaseDigestClaims(query, tenantSchema, claimed, input.today).catch(() => undefined);
-    logger.error("[WeeklyReportReminders] Digest send failed - claims released for retry", { tenantSchema, err });
+    // A THROW is not a rejection — it is an UNKNOWN OUTCOME. `sendSystemEmailWithMetadata` returns
+    // `{success:false}` for everything the provider actually answered and lets exceptions through, so this
+    // path is a socket timeout or a crash: Resend may well have accepted and delivered the digest before
+    // the connection died.
+    //
+    // Treated as DELIVERED, deliberately, and the claims stay. Releasing them looks like the safe retry —
+    // it is what this catch used to do — and it is precisely how leadership gets two unlabelled copies:
+    // rolling the ledger back empties `alreadyDigested`, so when a project becomes due later in the
+    // morning the next tick's cohort HASH ROTATES (Resend cannot dedup a key it has never seen) AND the
+    // `Update — ` prefix, which is gated on that same ledger, disappears. Two full digests, neither
+    // admitting the other exists.
+    //
+    // Keeping them means the cost of the ambiguity is a possibly-missed digest — logged, and visible in
+    // `summary.failed` — instead of a silent duplicate, and any later digest for this due date correctly
+    // announces itself as an update to one leadership may already have. The per-project reminders need no
+    // equivalent rule: their idempotency key is fixed by (project, week, kind), so a catch-up re-send of
+    // an accepted-but-unconfirmed reminder is deduped by the provider.
+    logger.error("[WeeklyReportReminders] Digest send outcome UNKNOWN - claims kept, no retry", {
+      tenantSchema,
+      err,
+    });
     summary.failed += 1;
+    return;
   }
+
+  if (!result.success) {
+    // The provider answered, and the answer was "not sent" — so nothing was delivered and a catch-up tick
+    // can safely re-send under the same key. Release ONLY the rows this run claimed: deleting every
+    // due_digest row for the day would also erase an earlier run's successful send and re-digest
+    // leadership about projects it already reported on.
+    await releaseDigestClaims(query, tenantSchema, claimed, input.today).catch(() => undefined);
+    logger.error("[WeeklyReportReminders] Digest send failed - claims released for retry", { tenantSchema });
+    summary.failed += 1;
+    return;
+  }
+  summary.digestsSent += 1;
 }
 
 /** Stable short digest of the project set an email covers, so the idempotency key tracks the payload. */
@@ -1288,20 +1424,36 @@ async function releaseReminderClaim(
   );
 }
 
-/** Which of `weeklyReportProjectIds` an earlier tick has already digested for `weekOf`. */
-async function digestedProjectIds(
+/** The two reminders that CHASE a person. `due_digest` reports to leadership and chases nobody. */
+const CHASE_REMINDER_KINDS = ["t_minus_2", "t_minus_1"] as const satisfies readonly WeeklyReportReminderKind[];
+
+/**
+ * Every reminder the ledger records for these projects in `weekOf`, keyed by project.
+ *
+ * Reads ALL kinds. `due_digest` answers "has an earlier tick already reported on this project today"; the
+ * t−2/t−1 rows answer "was anybody actually chased about it", which the digest states in print and used to
+ * infer from present-tense reachability instead.
+ */
+async function reminderLedgerByProject(
   query: PgQuery,
   tenantSchema: string,
   weeklyReportProjectIds: string[],
   weekOf: string,
-): Promise<Set<string>> {
+): Promise<Map<string, Set<WeeklyReportReminderKind>>> {
   const result = await query(
-    `SELECT weekly_report_project_id
+    `SELECT weekly_report_project_id, kind
        FROM ${tenantSchema}.weekly_report_reminders_sent
-      WHERE weekly_report_project_id = ANY($1::uuid[]) AND week_of = $2::date AND kind = 'due_digest'`,
+      WHERE weekly_report_project_id = ANY($1::uuid[]) AND week_of = $2::date`,
     [weeklyReportProjectIds, weekOf],
   );
-  return new Set(result.rows.map((row) => String(row.weekly_report_project_id)));
+  const byProject = new Map<string, Set<WeeklyReportReminderKind>>();
+  for (const row of result.rows) {
+    const projectId = String(row.weekly_report_project_id);
+    const kinds = byProject.get(projectId) ?? new Set<WeeklyReportReminderKind>();
+    kinds.add(String(row.kind) as WeeklyReportReminderKind);
+    byProject.set(projectId, kinds);
+  }
+  return byProject;
 }
 
 /** Claims `due_digest` for every project due today; returns the ids this run actually won. */
@@ -1334,7 +1486,10 @@ async function releaseDigestClaims(
   );
 }
 
-/** Who a per-project reminder goes to. The digest's "nobody to remind" marker is decided by this too. */
+/**
+ * Who a per-project reminder goes to. The digest's "(unreachable)" annotation is decided by the same
+ * predicate — but only as a statement about the NEXT reminder. What already went out comes from the ledger.
+ */
 function reminderRecipients(project: Pick<ProjectRow, "superEmail" | "pmEmail">): string[] {
   return dedupeEmails([project.superEmail, project.pmEmail].filter(isDeliverableEmail));
 }
