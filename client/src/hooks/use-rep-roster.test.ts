@@ -63,7 +63,9 @@ describe("useRepRoster", () => {
     const captured = await mountHook("office-1");
 
     expect(apiMock).toHaveBeenCalledWith("/dashboard/rep-roster", expect.anything());
-    expect(captured.current.reps).toEqual([{ id: "u1", displayName: "Colby Burling" }]);
+    // The response above carries no `group` — an older or cached server. The hook defaults it to "sales"
+    // so such a rep still lands in a section instead of being dropped from both.
+    expect(captured.current.reps).toEqual([{ id: "u1", displayName: "Colby Burling", group: "sales" }]);
     expect(captured.current.loading).toBe(false);
   });
 

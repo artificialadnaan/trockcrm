@@ -34,6 +34,12 @@ export interface RfpPayloadSourceDeal {
   propertyZip?: string | null;
   propertyCountry?: string | null;
   description?: string | null;
+  /**
+   * Pre-rendered CRM activity history (see bid-board-activity-note.ts). SyncHub posts it as a NOTE on
+   * the Bid Board project's Overview tab — never into Project Description, which stays the deal
+   * description only. Null when the deal has no activity.
+   */
+  crmActivityLog?: string | null;
   bidDueDate?: Date | string | null;
   bidBoardDueDate?: Date | string | null;
   createdAt?: Date | string | null;
@@ -63,6 +69,12 @@ export interface NormalizedRfpRequestBody {
       country: string | null;
     } | null;
     description: string | null;
+    /**
+     * The deal's CRM activity history as plain text, for the Note SyncHub posts on the Bid Board
+     * project. `.nullable().optional()` in SyncHub's contract, so it is safe to drop entirely — which
+     * fitWithinBudget does first, ahead of everything else.
+     */
+    crmActivityLog: string | null;
     dueDate: string | null;
     workflowRoute: string | null;
   };
@@ -361,6 +373,28 @@ function trimAttachmentsToBudget(body: NormalizedRfpRequestBody, budget: number,
 }
 
 function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number, protectedCount = 0): void {
+  // FIRST, and whole: the activity log is the most expendable thing in the body. It is purely
+  // informational, the full history is one click away in the CRM, and it is a second UNBOUNDED input
+  // alongside the description.
+  //
+  // The ORDER matters and is not interchangeable with SACRIFICIAL_DEAL_FIELDS: leaving it to that list
+  // would shrink the DESCRIPTION — the deal's actual scope, which Procore shows as Project Description —
+  // in order to preserve an activity log, which is backwards. It is `.nullable()` in SyncHub's contract,
+  // so dropping it can never turn a 413 into a 422. The build-time caps in bid-board-activity-note.ts
+  // (MAX_NOTE_CHARS) mean this is a rare backstop, not the normal path.
+  if (body.deal?.crmActivityLog != null && serializedBytes(body) > budget) {
+    const droppedChars = body.deal.crmActivityLog.length;
+    body.deal.crmActivityLog = null;
+    // Say so. Unlike `attachmentsOmitted` there is no field on the wire carrying this, so without a log
+    // line "why did this Bid Board project get no note?" has no answer anywhere — and since the
+    // build-time caps make this a rare backstop, a line here is also the signal that something upstream
+    // is producing notes far larger than MAX_NOTE_CHARS.
+    console.warn(
+      `[RFP] Dropped crmActivityLog (${droppedChars} chars) from the body for deal ${body.sourceDealId} ` +
+        `to fit the ${budget}-byte budget; the Bid Board project will get no activity note.`
+    );
+  }
+
   const original = body.deal?.description;
   if (original && serializedBytes(body) > budget) {
     // Geometric shrink: guaranteed progress, terminates in O(log n), and exactness doesn't
@@ -429,6 +463,10 @@ export function capRfpRequestBody(
   // The retry path feeds us a body read back out of job_queue, which may predate this shape (older
   // dead jobs carry no attachmentsOmitted) — so tolerate a partial record rather than throwing and
   // turning a retry into a 500.
+  // The shallow spread carries every deal field through, including crmActivityLog. A body stored before
+  // that field existed simply has no key — `undefined` is treated as absent by both fitWithinBudget and
+  // JSON.stringify, so an old dead job re-caps to exactly the same shape it had (never a "undefined"
+  // string, never a spurious null).
   const deal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
   const next: NormalizedRfpRequestBody = {
     ...body,
@@ -481,6 +519,9 @@ export function buildNormalizedRfpRequestBody(input: {
       clientPhone: cleanString(deal.clientPhone),
       address: buildAddress(deal),
       description: cleanString(deal.description),
+      // Pre-rendered by loadRfpPayloadDeal; cleanString so a blank/whitespace-only render lands as null
+      // (SyncHub then posts no note) rather than as an empty string.
+      crmActivityLog: cleanString(deal.crmActivityLog),
       dueDate: cleanIso(deal.bidDueDate) ?? cleanIso(deal.bidBoardDueDate),
       workflowRoute: deal.workflowRoute ?? null,
     },
