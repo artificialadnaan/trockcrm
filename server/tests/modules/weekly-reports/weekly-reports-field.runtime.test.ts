@@ -155,6 +155,19 @@ async function seedDraft(projectId: string, weekOf: string, actor = SUPER_ACTOR)
   return report.id;
 }
 
+/**
+ * A week actually FILED: submitted, out of the super's hands.
+ *
+ * Distinct from seedDraft on purpose. A draft leaves the week owed — nobody has seen anything — so it
+ * stays on the hub as outstanding; only a submission takes the week off the super's list.
+ */
+async function seedFiled(projectId: string, weekOf: string, actor = SUPER_ACTOR) {
+  const id = await seedDraft(projectId, weekOf, actor);
+  await updateWeeklyReportContent(db, id, { workCompleted: "- Framing" }, actor);
+  await transitionWeeklyReport(db, id, "pending_review", actor);
+  return id;
+}
+
 /** UTC throughout, matching the date-only columns these tests compare against. */
 const addDays = (isoDate: string, days: number): string =>
   new Date(new Date(`${isoDate}T00:00:00Z`).getTime() + days * 86_400_000).toISOString().slice(0, 10);
@@ -228,9 +241,45 @@ describe("hub assignments", () => {
     expect(view.projects[0]!.currentWeekOf).toBe(WEEK_OF);
   });
 
-  it("does not offer a week that already has a report, in any state", async () => {
+  it("does not offer a week once its report has left the super's hands", async () => {
+    // Submitted, approved or sent: nothing there is the superintendent's move, and the chip would open a
+    // wizard whose final button 403s. A DRAFT is the opposite case — see the test below.
     const project = await seedProject();
-    await seedDraft(project.id, PRIOR_WEEK);
+    const id = await seedDraft(project.id, PRIOR_WEEK);
+    await updateWeeklyReportContent(db, id, { workCompleted: "- Framing" }, SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    expect(view.projects[0]!.outstandingWeeks).toEqual(["2026-07-30"]);
+  });
+
+  it("keeps a week whose report is still a DRAFT outstanding, carrying its report id", async () => {
+    // The row is created lazily on the photos step, so a super who walked that far and then discarded
+    // the local draft — or reinstalled, or changed phone — used to lose the week entirely: it was not
+    // the current week so it had no card, it was not pending_review so it was not in the PM's queue,
+    // and a report row existed so it was struck off `outstandingWeeks`. Invisible on the phone forever
+    // while the CRM board still showed "With super".
+    const project = await seedProject();
+    const priorId = await seedDraft(project.id, PRIOR_WEEK);
+
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    const assignment = view.projects[0]!;
+    expect(assignment.outstandingWeeks).toEqual(["2026-07-30", PRIOR_WEEK]);
+    // The id is what makes the wizard RESUME the row rather than post a second create for the week.
+    expect(assignment.outstandingWeekReportIds).toEqual({ [PRIOR_WEEK]: priorId });
+    // A week nobody has started carries no id at all.
+    expect(assignment.outstandingWeekReportIds["2026-07-30"]).toBeUndefined();
+  });
+
+  it("still hides a week that was dismissed rather than filed", async () => {
+    // Draft-tolerance must not become dismissal-tolerance: a dismissed week is a decision that the week
+    // is not owed, and it has no report row to distinguish it.
+    const project = await seedProject();
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_dismissals (weekly_report_project_id, week_of, reason, dismissed_by)
+       VALUES ($1::uuid, $2::date, 'No crew on site', $3::uuid)`,
+      [project.id, PRIOR_WEEK, PM],
+    );
     const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
     expect(view.projects[0]!.outstandingWeeks).toEqual(["2026-07-30"]);
   });
@@ -361,11 +410,28 @@ describe("hub assignments", () => {
     expect(view.projects[0]!.daysLate).toBe(14);
   });
 
+  it("ages from the oldest week owed even when the offered list was truncated", async () => {
+    // `outstanding` is collected walking backwards from the newest and stops at APP_OUTSTANDING_WEEK_LIMIT,
+    // so `outstanding[0]` is the oldest of the five NEWEST weeks — not the oldest owed. Reading daysLate
+    // off it understated lateness on exactly the projects neglected longest: this project is 32 weeks
+    // behind and reported 35 days late.
+    await seedProject({ cadenceStartDate: "2026-01-01" });
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    const assignment = view.projects[0]!;
+    expect(assignment.hasMoreOutstandingWeeks).toBe(true);
+    expect(assignment.outstandingWeeks).toHaveLength(APP_OUTSTANDING_WEEK_LIMIT);
+    // 2026-01-01 is the first Thursday owed; 2026-07-09 is the oldest week the list carries.
+    expect(assignment.outstandingWeeks[0]).toBe("2026-07-09");
+    expect(assignment.daysLate).toBe(224);
+    expect(assignment.daysLate).not.toBe(35);
+  });
+
   it("reports 0 late when the only week owed is the current one, before its due date", async () => {
     const project = await seedProject();
-    // File both earlier weeks so the current one is all that is left.
-    await seedDraft(project.id, "2026-07-30");
-    await seedDraft(project.id, PRIOR_WEEK);
+    // File both earlier weeks so the current one is all that is left. Filed, not merely started: a draft
+    // leaves the week owed.
+    await seedFiled(project.id, "2026-07-30");
+    await seedFiled(project.id, PRIOR_WEEK);
     const monday = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: "2026-08-10" });
     expect(monday.projects[0]!.outstandingWeeks).toEqual([]);
     expect(monday.projects[0]!.daysLate).toBe(0);
@@ -373,8 +439,8 @@ describe("hub assignments", () => {
 
   it("starts ageing the moment a due date passes, because the week becomes outstanding", async () => {
     const project = await seedProject();
-    await seedDraft(project.id, "2026-07-30");
-    await seedDraft(project.id, PRIOR_WEEK);
+    await seedFiled(project.id, "2026-07-30");
+    await seedFiled(project.id, PRIOR_WEEK);
     // Friday: the 13th is now late, and the 20th has become the current week.
     const friday = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: "2026-08-14" });
     expect(friday.projects[0]!.currentWeekOf).toBe("2026-08-20");

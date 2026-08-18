@@ -3,6 +3,7 @@ import path from "path";
 import * as ts from "typescript";
 import {
   formatWeekOf,
+  weeklyReportCandidateTruncationNote,
   weeklyReportDueLabel,
   weeklyReportFinalAction,
   weeklyReportProjectAction,
@@ -203,6 +204,36 @@ describe("the review queue's truncation note", () => {
   it("stays silent when an older API build sends no total", () => {
     // Absent is not "everything is hidden" — the field did not exist before this change.
     expect(weeklyReportQueueTruncationNote(3, undefined)).toBeNull();
+  });
+});
+
+describe("the photo window's truncation note", () => {
+  it("says nothing when the grid holds the whole window", () => {
+    expect(weeklyReportCandidateTruncationNote(42, 42)).toBeNull();
+  });
+
+  it("names what is missing, and that it is the OLDEST of the window", () => {
+    // The window is anchored on the report's week and ordered newest-first, so the cap removes the
+    // earliest days of the fortnight — for a report filed late, the days the report is actually about.
+    // A refresh cannot change that, so the note points at the device library instead.
+    const note = weeklyReportCandidateTruncationNote(300, 412)!;
+    expect(note).toContain("300 newest of 412");
+    expect(note).toContain("112 oldest");
+    expect(note).toContain("import from the device");
+  });
+
+  it("reads correctly when exactly one photo is hidden", () => {
+    expect(weeklyReportCandidateTruncationNote(300, 301)).toContain("1 oldest is");
+  });
+
+  it("stays silent when an older API build sends no total", () => {
+    expect(weeklyReportCandidateTruncationNote(300, undefined)).toBeNull();
+  });
+
+  it("stays silent when the grid carries MORE than the window reported", () => {
+    // Reachable by design: a selection outside the window is merged into the grid, so `shown` can exceed
+    // `total`. That is not a truncation and must not render as "-2 oldest are not listed".
+    expect(weeklyReportCandidateTruncationNote(12, 10)).toBeNull();
   });
 });
 

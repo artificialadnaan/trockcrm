@@ -123,6 +123,26 @@ export function weeklyReportQueueTruncationNote(shown: number, total: number | u
   return `Showing the ${shown} most recent of ${Math.trunc(total)}. The ${hidden} older report${hidden === 1 ? "" : "s"} ${hidden === 1 ? "is" : "are"} on the weekly report board in the CRM.`;
 }
 
+/**
+ * What to say when the photo window came back capped, or null when the grid holds all of it.
+ *
+ * Same standard as the review queue above, and for a sharper reason. The window is anchored on the
+ * report's `week_of`, not on today, and it is ordered newest-first — so what the cap removes is the
+ * EARLIEST days of the fortnight the report is about. For a report filed late that is exactly the range
+ * the super is looking for, and saying nothing would present a partial fortnight as the fortnight.
+ *
+ * Names the way out (the device library) rather than suggesting a refresh, which cannot change the cap.
+ */
+export function weeklyReportCandidateTruncationNote(
+  shown: number,
+  total: number | undefined,
+): string | null {
+  if (typeof total !== "number" || !Number.isFinite(total)) return null;
+  const hidden = Math.max(0, Math.trunc(total) - shown);
+  if (hidden <= 0) return null;
+  return `Showing the ${shown} newest of ${Math.trunc(total)}. The ${hidden} oldest ${hidden === 1 ? "is" : "are"} not listed — import from the device if you need ${hidden === 1 ? "it" : "one of them"}.`;
+}
+
 /** yyyy-mm-dd → "Aug 13". Parsed at LOCAL midnight so a date-only string never shifts a day westward. */
 export function formatWeekOf(isoDate: string): string {
   const parsed = new Date(`${isoDate}T00:00:00`);

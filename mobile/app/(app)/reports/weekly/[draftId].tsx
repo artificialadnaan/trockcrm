@@ -34,6 +34,7 @@ import { uploadCapture } from "../../../../src/capture/upload";
 import { getLiveGps } from "../../../../src/capture/metadata";
 import { formatDictationAsBullets } from "../../../../src/dictation/bullets";
 import { retryWeeklyReportPhotoUploads } from "../../../../src/weekly-reports/photo-import";
+import { transitionWeeklyReportIdempotently } from "../../../../src/weekly-reports/transition";
 import {
   MAX_WEEKLY_REPORT_CAPTION_CHARS,
   MAX_WEEKLY_REPORT_PHOTOS,
@@ -46,6 +47,7 @@ import {
   weeklyReportDraftToPatch,
   weeklyReportDraftToPhotoPayload,
   weeklyReportPhotoPreviewUri,
+  weeklyReportPickerCandidates,
   weeklyReportStepAt,
   weeklyReportStepIndex,
   type WeeklyReportDraft,
@@ -69,7 +71,11 @@ import {
   weeklyReportStepLabel,
   weeklyReportSubmitErrorMessage,
 } from "../../../../src/weekly-reports/editor-state";
-import { formatWeekOf, weeklyReportFinalAction } from "../../../../src/weekly-reports/status";
+import {
+  formatWeekOf,
+  weeklyReportCandidateTruncationNote,
+  weeklyReportFinalAction,
+} from "../../../../src/weekly-reports/status";
 import { Banner } from "../../../../src/components/Banner";
 import { PhotoPickerGrid } from "../../../../src/components/PhotoPickerGrid";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
@@ -535,12 +541,24 @@ function Wizard({
       // fixing a caption on an approved report. The ladder has no self-transition, so asking anyway would
       // 409 on work that saved perfectly well.
       if (finalAction.transitionTo) {
-        const { report } = await transitionWeeklyReport(fetcher, reportId, finalAction.transitionTo);
+        const outcome = await transitionWeeklyReportIdempotently({
+          to: finalAction.transitionTo,
+          transition: async () => {
+            const { report } = await transitionWeeklyReport(fetcher, reportId, finalAction.transitionTo!);
+            return report.status;
+          },
+          // Only reached on a 409. A transition that COMMITTED and then lost its response leaves the
+          // phone certain it failed: `serverStatus` was never recorded, so the retry asks for the same
+          // move and is refused for the rest of the draft's life. Asking the server where the report
+          // actually is turns that into the success it was.
+          readStatus: async () => (await getWeeklyReport(fetcher, reportId)).report.status,
+        });
         // Record where the report landed BEFORE anything that can still fail. Everything after this point
-        // is local cleanup, and if the disk delete throws the user is left holding a draft whose report has
-        // already moved — a retry would then ask for the same transition again and 409 on work that
-        // succeeded. With the status recorded, the retry reads "Save changes" and does the right thing.
-        dispatch({ type: "setServerStatus", status: report.status });
+        // is local cleanup, and if the disk delete throws the user is left holding a draft whose report
+        // has already moved. This covers the IN-SESSION retry — the reducer state survives it — and the
+        // 409 recovery above covers the case it cannot: a phone restarted, or a draft reloaded from disk,
+        // after a response was lost in transit.
+        dispatch({ type: "setServerStatus", status: outcome.status });
       }
 
       // Stop autosaves BEFORE the delete, or a save already queued behind this one resurrects the draft.
@@ -594,9 +612,15 @@ function Wizard({
       >
         {draft.step === "photos" && photoView === "pick" ? (
           <PhotoPickerStep
-            candidates={candidates.data?.photos ?? []}
+            // Merged, not raw: a selected photo the window does not carry would otherwise count toward
+            // "N selected" with no tick on screen and no way to deselect it.
+            candidates={weeklyReportPickerCandidates(candidates.data?.photos ?? [], draft.photos)}
             loading={candidates.isLoading}
             failed={candidates.isError}
+            truncationNote={weeklyReportCandidateTruncationNote(
+              candidates.data?.photos?.length ?? 0,
+              candidates.data?.total,
+            )}
             selectedFileIds={new Set(draft.photos.map((photo) => photo.fileId).filter(Boolean) as string[])}
             selectedCount={draft.photos.length}
             cellSize={cell}
@@ -774,6 +798,7 @@ function PhotoPickerStep({
   candidates,
   loading,
   failed,
+  truncationNote,
   selectedFileIds,
   selectedCount,
   cellSize,
@@ -788,6 +813,8 @@ function PhotoPickerStep({
   candidates: WeeklyReportPhotoCandidate[];
   loading: boolean;
   failed: boolean;
+  /** Set when the window came back capped — see weeklyReportCandidateTruncationNote. */
+  truncationNote: string | null;
   selectedFileIds: Set<string>;
   selectedCount: number;
   cellSize: number;
@@ -815,6 +842,9 @@ function PhotoPickerStep({
         Photos from the two weeks ending {formatWeekOf(weekOf)}. Anything used on an earlier report is
         marked.
       </Text>
+      {/* And say when the window was CAPPED. The list is newest-first, so what is missing is the start of
+          the fortnight — for a late report, the days it is actually about. */}
+      {truncationNote ? <Text style={styles.hint}>{truncationNote}</Text> : null}
       <Button title="Import from device" variant="ghost" onPress={onImport} loading={importing} />
       {pendingUploadCount > 0 && (
         <Button

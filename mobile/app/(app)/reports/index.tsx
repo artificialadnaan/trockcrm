@@ -21,6 +21,7 @@ import {
   listWeeklyReportDrafts,
   saveWeeklyReportDraft,
 } from "../../../src/weekly-reports/draft-store";
+import { weeklyReportOpenTarget } from "../../../src/weekly-reports/hub";
 import {
   formatWeekOf,
   weeklyReportDueLabel,
@@ -113,39 +114,37 @@ export default function ReportsHubScreen() {
   /**
    * Open a week: resume the local draft if there is one, else start from whatever the server holds.
    *
-   * The LOCAL draft wins when both exist. It is the durability unit — it may carry text typed on a
-   * jobsite with no signal that has not reached the server yet — so seeding from the server copy would
-   * quietly discard exactly the work this store exists to protect.
+   * Which of those applies is decided by `weeklyReportOpenTarget`, where the reasoning lives — the rules
+   * are order-sensitive (a review draft must be re-read, an authoring draft must NOT be) and belong
+   * somewhere a test can reach them.
    */
   async function openWeek(
     project: WeeklyReportAssignment,
     weekOf: string,
-    existingReportId: string | null,
     mode: "author" | "review" = "author",
   ) {
     if (!ownerKey || opening) return;
     const key = `${project.weeklyReportProjectId}:${weekOf}`;
     setOpening(key);
     try {
-      const local = drafts.find(
-        (draft) => draft.weeklyReportProjectId === project.weeklyReportProjectId && draft.weekOf === weekOf,
-      );
-      // A REVIEW draft is never opened from the local copy without re-reading the server first — see
-      // openReviewFresh. An AUTHORING draft is the opposite case: it is the durability unit, may hold
-      // text typed with no signal that the server has never seen, and seeding from the server copy would
-      // discard exactly the work the store exists to protect.
-      if (local?.mode === "review" && local.reportId) {
-        await openReviewFresh(local.reportId, project.projectName);
+      const target = weeklyReportOpenTarget({ project, weekOf, drafts });
+      if (target.kind === "review-fresh") {
+        await openReviewFresh(target.reportId, project.projectName);
         return;
       }
-      if (local) {
-        openDraft(local);
-        return;
+      if (target.kind === "resume-local") {
+        // Resolved FROM this list, so it is always found. Falling through to the fresh-draft path if it
+        // ever is not beats returning with nothing having happened under the user's tap.
+        const local = drafts.find((draft) => draft.id === target.draftId);
+        if (local) {
+          openDraft(local);
+          return;
+        }
       }
 
       let draft: WeeklyReportDraft;
-      if (existingReportId) {
-        const detail = await getWeeklyReport(fetcher, existingReportId);
+      if (target.kind === "resume-server") {
+        const detail = await getWeeklyReport(fetcher, target.reportId);
         // The SERVER's answer to "may this person still write this?", not a guess from the hub row —
         // which can be minutes stale. A report approved (or sent) while this list sat on screen is no
         // longer the superintendent's, and opening it would walk them into a 403 several steps in, after
@@ -487,12 +486,7 @@ function ProjectCard({
 }: {
   project: WeeklyReportAssignment;
   busyKey: string | null;
-  onOpenWeek: (
-    project: WeeklyReportAssignment,
-    weekOf: string,
-    reportId: string | null,
-    mode: "author" | "review",
-  ) => void;
+  onOpenWeek: (project: WeeklyReportAssignment, weekOf: string, mode: "author" | "review") => void;
 }) {
   const tone = weeklyReportWeekStateTone(project.currentState, project.daysLate);
   const currentKey = `${project.weeklyReportProjectId}:${project.currentWeekOf}`;
@@ -536,9 +530,7 @@ function ProjectCard({
           }
           loading={busyKey === currentKey}
           disabled={busyKey !== null && busyKey !== currentKey}
-          onPress={() =>
-            onOpenWeek(project, project.currentWeekOf, project.currentReportId, action.mode)
-          }
+          onPress={() => onOpenWeek(project, project.currentWeekOf, action.mode)}
         />
       )}
 
@@ -559,9 +551,11 @@ function ProjectCard({
                 loading={busyKey === `${project.weeklyReportProjectId}:${weekOf}`}
                 disabled={busyKey !== null && busyKey !== `${project.weeklyReportProjectId}:${weekOf}`}
                 accessibilityLabel={`Fill in the missed weekly report for week of ${formatWeekOf(weekOf)}`}
-                // Always authoring: an outstanding week by definition has no report yet, so there is
-                // nothing for a PM to review on it.
-                onPress={() => onOpenWeek(project, weekOf, null, "author")}
+                // Always AUTHORING: an outstanding week is by definition still owed, so there is nothing
+                // for a PM to review on it. It may nonetheless already have a draft row on the server —
+                // the wizard creates one on the photos step — which `weeklyReportOpenTarget` resolves and
+                // resumes rather than creating a second report for the week.
+                onPress={() => onOpenWeek(project, weekOf, "author")}
                 style={styles.outstandingButton}
               />
             ))}

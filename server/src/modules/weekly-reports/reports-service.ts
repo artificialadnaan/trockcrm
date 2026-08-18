@@ -676,8 +676,13 @@ const MAX_CAPTION_CHARS = 500;
  * every candidate it returns — so an unbounded set is a large JSON body on precisely the LTE connection
  * the rest of this feature is shaped around. Five times the per-report photo cap is more than anyone
  * scrolls, and the newest-first ordering means what is dropped is the far end of the window.
+ *
+ * A TRANSPORT cap, so it is reported rather than applied silently — the same standard the review queue and
+ * the outstanding-week backlog hold themselves to. What it drops is not neutral: the window is anchored on
+ * `week_of`, not on today, so the far end is the EARLIEST days of the fortnight the report is about, which
+ * is exactly what somebody filing a late report is looking for.
  */
-const MAX_PHOTO_CANDIDATES = 300;
+export const MAX_PHOTO_CANDIDATES = 300;
 
 function normalizeCaption(value: unknown): string | null {
   if (value == null) return null;
@@ -696,51 +701,78 @@ function normalizeCaption(value: unknown): string | null {
  * `alreadyUsedOn` marks photos that appeared on an earlier report so the super does not repeat them —
  * shown rather than hidden, because re-using a photo is sometimes right (a defect photographed last
  * week that is now fixed).
+ *
+ * `total` is the size of the WHOLE candidate set, so the caller can say what it is not showing. Two
+ * things follow from the cap being reported rather than hidden, and both are load-bearing:
+ *
+ *   - A photo ALREADY ON THIS REPORT is never dropped, however far down the window it sits (and even if
+ *     it has since fallen outside the window, which an import with old EXIF can do). It would otherwise
+ *     vanish from the grid while still counting toward the picker's "N selected", leaving the count and
+ *     the visible ticks disagreeing with no way to reconcile them — and no way to DESELECT it.
+ *   - Everything else is ranked strictly newest-first, so the rows the cap removes are the oldest, which
+ *     is what the header tells the user.
  */
 export async function listWeeklyReportPhotoCandidates(
   client: QueryExecutor,
   reportId: string,
-): Promise<Array<WeeklyReportPhoto & { alreadyUsedOn: string | null; selected: boolean }>> {
+): Promise<{
+  photos: Array<WeeklyReportPhoto & { alreadyUsedOn: string | null; selected: boolean }>;
+  total: number;
+}> {
   const { reportRow } = await loadReportWithProject(client, reportId);
   const weekOf = toIsoDate(reportRow.week_of)!;
   const window = weeklyReportPhotoWindow(weekOf);
 
   const result = await client.query(
-    `SELECT f.id AS file_id,
-            f.description AS original_description,
-            f.taken_at, f.created_at, f.mime_type,
-            selected.caption AS selected_caption,
-            selected.sort_order AS selected_sort_order,
-            (selected.file_id IS NOT NULL) AS selected,
-            prior.week_of AS already_used_on
-       FROM files f
-       LEFT JOIN weekly_report_photos selected
-              ON selected.file_id = f.id AND selected.weekly_report_id = $1::uuid
-       LEFT JOIN LATERAL (
-            SELECT wr.week_of
-              FROM weekly_report_photos wrp
-              JOIN weekly_reports wr ON wr.id = wrp.weekly_report_id
-             WHERE wrp.file_id = f.id
-               AND wr.id <> $1::uuid
-               AND wr.is_active
-               -- EARLIER weeks only. Without this, filing a missed week after a newer draft has
-               -- already picked the same photo warns that it was "already used" on a week that has
-               -- not happened yet.
-               AND wr.week_of < $5::date
-             ORDER BY wr.week_of DESC
-             LIMIT 1
-       ) prior ON true
-      WHERE f.deal_id = $2::uuid
-        AND f.category = 'photo'
-        AND f.is_active = true
-        AND f.deleted_at IS NULL
-        AND (COALESCE(f.taken_at, f.created_at))::date BETWEEN $3::date AND $4::date
-      ORDER BY COALESCE(f.taken_at, f.created_at) DESC
-      LIMIT ${MAX_PHOTO_CANDIDATES}`,
+    `WITH candidate AS (
+       SELECT f.id AS file_id,
+              f.description AS original_description,
+              f.taken_at, f.created_at, f.mime_type,
+              selected.caption AS selected_caption,
+              selected.sort_order AS selected_sort_order,
+              (selected.file_id IS NOT NULL) AS selected,
+              prior.week_of AS already_used_on,
+              COALESCE(f.taken_at, f.created_at) AS sort_at
+         FROM files f
+         LEFT JOIN weekly_report_photos selected
+                ON selected.file_id = f.id AND selected.weekly_report_id = $1::uuid
+         LEFT JOIN LATERAL (
+              SELECT wr.week_of
+                FROM weekly_report_photos wrp
+                JOIN weekly_reports wr ON wr.id = wrp.weekly_report_id
+               WHERE wrp.file_id = f.id
+                 AND wr.id <> $1::uuid
+                 AND wr.is_active
+                 -- EARLIER weeks only. Without this, filing a missed week after a newer draft has
+                 -- already picked the same photo warns that it was "already used" on a week that has
+                 -- not happened yet.
+                 AND wr.week_of < $5::date
+               ORDER BY wr.week_of DESC
+               LIMIT 1
+         ) prior ON true
+        WHERE f.deal_id = $2::uuid
+          AND f.category = 'photo'
+          AND f.is_active = true
+          AND f.deleted_at IS NULL
+          AND ((COALESCE(f.taken_at, f.created_at))::date BETWEEN $3::date AND $4::date
+               OR selected.file_id IS NOT NULL)
+     ), ranked AS (
+       SELECT candidate.*,
+              -- Evaluated before the outer WHERE, so this is the true depth on every returned row and
+              -- costs no second round trip. file_id breaks ties so the cap falls in the same place on
+              -- every refetch rather than shuffling two photos taken in the same second.
+              COUNT(*) OVER () AS total_count,
+              ROW_NUMBER() OVER (ORDER BY sort_at DESC, file_id) AS window_rank
+         FROM candidate
+     )
+     SELECT * FROM ranked
+      WHERE selected OR window_rank <= ${MAX_PHOTO_CANDIDATES}
+      ORDER BY sort_at DESC, file_id`,
     [reportId, reportRow.deal_id, window.from, window.to, weekOf],
   );
 
-  return result.rows.map((row) => ({
+  const total = Number(result.rows[0]?.total_count ?? 0);
+  const photos = result.rows.map((row) => ({
     fileId: row.file_id,
     // For an ALREADY-SELECTED photo the stored caption wins outright, null included: `??` treated a
     // deliberately cleared caption as absent and restored the capture description, so the user could
@@ -754,6 +786,7 @@ export async function listWeeklyReportPhotoCandidates(
     alreadyUsedOn: toIsoDate(row.already_used_on),
     selected: Boolean(row.selected),
   }));
+  return { photos, total };
 }
 
 /**

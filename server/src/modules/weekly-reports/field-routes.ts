@@ -214,9 +214,11 @@ router.get("/reports/:id/photo-candidates", async (req, res, next) => {
     const id = requireUuid(req.params.id, "id");
     await getWeeklyReportForActor(req.tenantClient!, id, actorFrom(req));
     const candidates = await listWeeklyReportPhotoCandidates(req.tenantClient!, id);
-    const photos = await withPhotoUrls(req.tenantClient!, candidates);
+    const photos = await withPhotoUrls(req.tenantClient!, candidates.photos);
     await req.commitTransaction!();
-    res.json({ photos });
+    // `total` is the whole candidate set; `photos` is the capped slice of it. The app compares the two
+    // and says what it is not showing rather than presenting a truncated fortnight as the fortnight.
+    res.json({ photos, total: candidates.total });
   } catch (error) {
     next(error);
   }

@@ -316,10 +316,23 @@ export type WeeklyReportAssignment = {
    * date and the server refuses it, so the card must not offer to start it.
    */
   currentWeekFilable: boolean;
-  /** How late the OLDEST week still owed is. 0 when only the current, not-yet-due week is outstanding. */
+  /**
+   * How late the OLDEST week still owed is — over the whole backlog, not just the weeks this payload
+   * carries. 0 when only the current, not-yet-due week is outstanding.
+   */
   daysLate: number;
-  /** Earlier weeks with nothing filed, oldest first. Offered, never auto-selected. */
+  /**
+   * Earlier weeks still owed, oldest first. Offered, never auto-selected. A week whose only report is a
+   * DRAFT is still owed and still listed: the wizard creates the row on the photos step, so dropping it
+   * once a row existed put the week beyond reach of the phone entirely.
+   */
   outstandingWeeks: string[];
+  /**
+   * weekOf → the report id an outstanding week already has, so the wizard resumes that row instead of
+   * posting a second create. Only weeks that were started appear. Optional: an older API build does not
+   * send it, and absent simply means every outstanding week starts fresh, as it did before.
+   */
+  outstandingWeekReportIds?: Record<string, string>;
   hasMoreOutstandingWeeks: boolean;
   previousWeekOf: string | null;
   previousCompletionPercent: number | null;
@@ -435,7 +448,14 @@ export type WeeklyReportDetailResponse = {
   project: WeeklyReportProjectView;
   permissions: WeeklyReportPermissions;
 };
-export type WeeklyReportPhotoCandidatesResponse = { photos: WeeklyReportPhotoCandidate[] };
+export type WeeklyReportPhotoCandidatesResponse = {
+  photos: WeeklyReportPhotoCandidate[];
+  /**
+   * The true size of the window, which `photos` caps. Greater than `photos.length` ⇒ the oldest days of
+   * the fortnight were left out and the picker must say so. Optional for an older API build.
+   */
+  total?: number;
+};
 
 // ── Corrective actions ────────────────────────────────────────────────────────
 // A response-evidence photo linked to a corrective-action item. Mirrors the server's

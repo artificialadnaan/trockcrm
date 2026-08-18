@@ -69,14 +69,31 @@ export interface WeeklyReportAssignment {
    * `cadence_end_date` and `assertValidWeekOf` refuses it, so the card must not offer to start it.
    */
   currentWeekFilable: boolean;
-  /** How late the OLDEST week still owed is. 0 when only the current, not-yet-due week is outstanding. */
+  /**
+   * How late the OLDEST week still owed is. 0 when only the current, not-yet-due week is outstanding.
+   *
+   * Measured over the WHOLE backlog, not over the truncated `outstandingWeeks` list — see the comment at
+   * the assignment below. A project 32 weeks behind must not report the lateness of a project 5 behind.
+   */
   daysLate: number;
   /**
-   * Earlier weeks with nothing filed and no dismissal, oldest first. Offered rather than auto-selected:
-   * a super opening the app on Thursday is almost always writing THIS week, and silently retargeting them
-   * at a week from a month ago would file the wrong report under the wrong date.
+   * Earlier weeks still owed, oldest first. Offered rather than auto-selected: a super opening the app on
+   * Thursday is almost always writing THIS week, and silently retargeting them at a week from a month ago
+   * would file the wrong report under the wrong date.
+   *
+   * "Still owed" means nothing was FILED — a week whose only report is a `draft` is still owed, and stays
+   * here carrying its id in `outstandingWeekReportIds`. Dropping it the moment a row existed made a week
+   * unreachable from the phone forever: the wizard creates the row on the photos step, so a super who
+   * walked that far and then discarded the local draft (or reinstalled, or changed phone) lost the week
+   * off the hub while the CRM board still showed it as "With super".
    */
   outstandingWeeks: string[];
+  /**
+   * The existing report id for an outstanding week, when one exists. Absent for a week that was never
+   * started. The app passes it to the wizard so a resumed week reopens ITS row rather than posting a
+   * second create for the same week.
+   */
+  outstandingWeekReportIds: Record<string, string>;
   /** True when the backlog was truncated, so the app can say so instead of implying it is complete. */
   hasMoreOutstandingWeeks: boolean;
   /** Last filed week's numbers, so step 5 is a nudge rather than re-entry. */
@@ -251,18 +268,30 @@ export async function listWeeklyReportAssignments(
 
     // Walk BACKWARDS from the most recent so the truncation drops the oldest weeks, not the newest —
     // reversed at the end to keep the app's list chronological.
+    //
+    // The walk does NOT stop at the limit, it only stops COLLECTING. `daysLate` has to answer "how late is
+    // the oldest week still owed", and breaking out left it answering "how late is the oldest of the five
+    // newest" — so a project 32 weeks behind reported 35 days late, understating lateness exactly on the
+    // projects neglected longest. Scanning the rest of an already-materialised array is free.
     const outstanding: string[] = [];
+    const outstandingReportIds: Record<string, string> = {};
     let olderStillOutstanding = false;
+    let oldestOutstanding: string | null = null;
     for (let i = expected.length - 1; i >= 0; i -= 1) {
       const weekOf = expected[i]!;
       if (weekOf === currentWeekOf) continue;
       const key = `${project.id}|${weekOf}`;
-      if (dismissedKeys.has(key) || reportByKey.has(key)) continue;
+      // A DRAFT is not a filing — the client has seen nothing — so the week stays owed and stays offered,
+      // carrying its report id. Anything past draft is with the PM or done, and is not the super's move.
+      const existing = reportByKey.get(key);
+      if (dismissedKeys.has(key) || (existing && existing.status !== "draft")) continue;
+      oldestOutstanding = weekOf;
       if (outstanding.length >= APP_OUTSTANDING_WEEK_LIMIT) {
         olderStillOutstanding = true;
-        break;
+        continue;
       }
       outstanding.push(weekOf);
+      if (existing) outstandingReportIds[weekOf] = existing.id;
     }
     outstanding.reverse();
 
@@ -314,15 +343,18 @@ export async function listWeeklyReportAssignments(
       currentReportId: currentReport?.id ?? null,
       currentReportStatus: (currentReport?.status as WeeklyReportStatus) ?? null,
       currentWeekFilable,
-      // Measured from the OLDEST week still owed, not from the current one.
+      // Measured from the OLDEST week still owed, not from the current one — and not from the oldest
+      // week the payload happens to CARRY.
       //
       // `weeklyReportWeekOf` returns the first cadence day ON OR AFTER `asOf`, so `currentWeekOf` is
       // never in the past and `weeklyReportDaysLate(currentWeekOf, asOf)` is structurally always 0 — the
       // late signal would be dead in every case, and the app's "N days late" line and its red chip would
       // be unreachable code. The moment a due date passes, that week leaves `currentWeekOf` and becomes
-      // an OUTSTANDING week, which is exactly where the lateness now comes from.
-      daysLate: outstanding.length > 0 ? weeklyReportDaysLate(outstanding[0]!, input.asOf) : 0,
+      // an OUTSTANDING week, which is exactly where the lateness now comes from. `oldestOutstanding` is
+      // the whole backlog's oldest, which is why the walk above scans past APP_OUTSTANDING_WEEK_LIMIT.
+      daysLate: oldestOutstanding ? weeklyReportDaysLate(oldestOutstanding, input.asOf) : 0,
       outstandingWeeks: outstanding,
+      outstandingWeekReportIds: outstandingReportIds,
       hasMoreOutstandingWeeks: olderStillOutstanding,
       // Kept for the current week, which is what the primary card fills.
       previousWeekOf: previousForCurrent?.weekOf ?? null,

@@ -13,6 +13,7 @@ import {
   weeklyReportDraftToPatch,
   weeklyReportDraftToPhotoPayload,
   weeklyReportPhotoPreviewUri,
+  weeklyReportPickerCandidates,
   weeklyReportStepAt,
   weeklyReportStepIndex,
   type WeeklyReportDraft,
@@ -379,5 +380,62 @@ describe("step arithmetic", () => {
 
   it("counts only the sections that have text", () => {
     expect(weeklyReportDraftSectionsFilled(newDraft({ workCompleted: "a", issuesConcerns: "  " }))).toBe(1);
+  });
+});
+
+describe("the picker's grid", () => {
+  function candidate(fileId: string, overrides: Record<string, unknown> = {}) {
+    return {
+      fileId,
+      caption: null,
+      originalDescription: null,
+      sortOrder: 0,
+      takenAt: null,
+      mimeType: null,
+      thumbnailUrl: `https://example.test/${fileId}-thumb.jpg`,
+      fullUrl: null,
+      alreadyUsedOn: null,
+      selected: false,
+      ...overrides,
+    };
+  }
+
+  it("leaves the server's window untouched when it already carries every selection", () => {
+    const merged = weeklyReportPickerCandidates(
+      [candidate("a"), candidate("b")],
+      [galleryPhoto("a")],
+    );
+    expect(merged.map((c) => c.fileId)).toEqual(["a", "b"]);
+  });
+
+  it("appends a selected photo the window does not carry, so the ticks match the count", () => {
+    // The window is CAPPED newest-first and anchored on week_of. A photo picked from the far end of it
+    // drops out as soon as enough newer ones exist, and an import carries its own EXIF time so it can
+    // fall outside the window entirely. Either way the header kept counting it as selected while no tick
+    // appeared anywhere on screen — and there was no way to deselect it.
+    const merged = weeklyReportPickerCandidates(
+      [candidate("new")],
+      [galleryPhoto("old", { caption: "North slab", localUri: "file:///doc/old.jpg" })],
+    );
+    expect(merged.map((c) => c.fileId)).toEqual(["new", "old"]);
+    expect(merged[1]).toMatchObject({
+      selected: true,
+      caption: "North slab",
+      // The durable local copy, not the expired presigned url — same rule as the preview.
+      thumbnailUrl: "file:///doc/old.jpg",
+    });
+  });
+
+  it("ignores a photo that is still uploading, which has no server identity yet", () => {
+    const merged = weeklyReportPickerCandidates(
+      [candidate("a")],
+      [galleryPhoto("pending", { fileId: null, localUri: "file:///doc/pending.jpg" })],
+    );
+    expect(merged.map((c) => c.fileId)).toEqual(["a"]);
+  });
+
+  it("never duplicates a photo, whatever the draft holds twice", () => {
+    const merged = weeklyReportPickerCandidates([], [galleryPhoto("a"), galleryPhoto("a", { key: "a2" })]);
+    expect(merged.map((c) => c.fileId)).toEqual(["a"]);
   });
 });

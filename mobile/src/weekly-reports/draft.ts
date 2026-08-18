@@ -3,7 +3,7 @@
 // it via useReducer. Mirrors scorecards/draft.ts, and for the same reason: kept pure so it is unit-testable
 // in a suite CI does not run, which is the only automated coverage `mobile/` gets.
 
-import type { WeeklyReportStatusValue } from "../api/types";
+import type { WeeklyReportPhotoCandidate, WeeklyReportStatusValue } from "../api/types";
 
 /** The wizard's steps, in the order the design lays them out. */
 export const WEEKLY_REPORT_STEPS = ["work", "lookahead", "issues", "numbers", "photos", "review"] as const;
@@ -318,6 +318,48 @@ export function weeklyReportDraftReducer(
 /** What to render for a photo: the durable local copy first, because a presigned URL expires. */
 export function weeklyReportPhotoPreviewUri(photo: WeeklyReportDraftPhoto): string | null {
   return photo.localUri ?? photo.remoteUrl;
+}
+
+/**
+ * The picker's grid: the server's candidate window, plus any selected photo it does not contain.
+ *
+ * The header counts `draft.photos`, the grid renders candidates, and nothing guaranteed the two agreed.
+ * Two ways they came apart, both of them leaving a photo counted as selected with no tick anywhere on
+ * screen and no way to deselect it:
+ *
+ *   • the window is CAPPED newest-first, so a photo picked from the far end of it drops out as soon as
+ *     enough newer ones exist (the server now protects a photo already saved on the report, but a
+ *     selection that has not been PUT yet is only known here);
+ *   • an import carries the shot's own EXIF time, so it can land outside the window entirely.
+ *
+ * Appended rather than merged in place: the list is newest-first and these are, by construction, the
+ * oldest — or not in the window's ordering at all.
+ */
+export function weeklyReportPickerCandidates(
+  candidates: readonly WeeklyReportPhotoCandidate[],
+  photos: readonly WeeklyReportDraftPhoto[],
+): WeeklyReportPhotoCandidate[] {
+  const present = new Set(candidates.map((candidate) => candidate.fileId));
+  const merged: WeeklyReportPhotoCandidate[] = [...candidates];
+  for (const photo of photos) {
+    // A photo still uploading has no fileId and no server identity yet; it is shown on the arrange step,
+    // never in this grid.
+    if (!photo.fileId || present.has(photo.fileId)) continue;
+    present.add(photo.fileId);
+    merged.push({
+      fileId: photo.fileId,
+      caption: photo.caption || null,
+      originalDescription: photo.originalDescription,
+      sortOrder: 0,
+      takenAt: photo.takenAt,
+      mimeType: null,
+      thumbnailUrl: weeklyReportPhotoPreviewUri(photo),
+      fullUrl: null,
+      alreadyUsedOn: null,
+      selected: true,
+    });
+  }
+  return merged;
 }
 
 /**
