@@ -88,6 +88,35 @@ not alert; the sweep cannot cross offices.
 
 ---
 
+## ⚠️ Known cross-branch collision — A2 × B1
+
+**`server/tests/weekly-report-field-route-surface.test.ts` asserts the field router's route list with an
+exact `toEqual`.** A2 (dictation) added `/dictation` to it. **B1 (field send) adds four more —
+`/reports/:id/send-draft`, `/reports/:id/send`, `/reports/:id/send/retry`, `/reports/:id/correction` —
+and will break that assertion the moment both are on the same branch.**
+
+Neither PR's reviewer can see this: A2 branches off `main`, B1 off PR5, and a per-PR reviewer gets one
+worktree. This is the exact drift shape that hit this feature four times already. **Whoever merges
+second updates the list** — and should read the test's comments rather than just appending, because two
+of them encode real constraints:
+
+- `/dictation` is registered **above** `router.use(requireFieldContractor, tenantMiddleware)` on purpose.
+  It waits on a model round trip and touches no rows, so opening an office transaction would hold a
+  pooled Postgres connection for the whole call — the shape of a pool-saturation outage this API has
+  already had. It keeps its own `requireFieldContractor`, so it is not a hole in the mount. Moving it
+  below the `use` passes every other test in the file and silently reintroduces the outage.
+- B1's four endpoints **do** write, so they belong **below** the `use`, unlike `/dictation`.
+
+## Corrections to this plan, found during implementation
+
+- **`mobile/` runs jest, not vitest.** "`TZ=UTC npm run test:ci` per workspace" does not apply there —
+  it is `npm test`. (`mobile/` *is* CI-gated now, contrary to older notes, but still has no OTA.)
+- **A server-side fallback for dictation was missing from the spec** and is required: without it, a
+  deploy with no `ANTHROPIC_API_KEY` pays a model round trip per dictation purely to get an error.
+- **Claude calls in this repo use raw `fetch` with an injected `fetchFn`**, not `@anthropic-ai/sdk` —
+  matching `field/ai-report-service.ts` and `worker/jobs/call-recording-transcribe.ts`. Keep that style;
+  it also lets tests assert the exact wire body.
+
 ## Standing rules for every PR here
 
 **Verification** — `shared` must be built first or typecheck reports thousands of phantom errors. Run
