@@ -1,6 +1,6 @@
-// Executes migration 0223 FROM DISK against a real Postgres (PGlite).
+// Executes migration 0224 FROM DISK against a real Postgres (PGlite).
 //
-// 0223 adds the PROVENANCE stamp the read resolver requires: `bid_due_date_from_bid_board_at`, set by the
+// 0224 adds the PROVENANCE stamp the read resolver requires: `bid_due_date_from_bid_board_at`, set by the
 // Bid Board sync when it writes `bid_due_date`. It is what makes "flipping the flag changes nothing until
 // a sync writes" true — the design it replaced inferred provenance by comparing the column's day against
 // `bid_board_due_date`, which has been populated on prod for months and so answers TRUE for coincidences.
@@ -15,7 +15,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
 
-const MIGRATION = "0223_deals_bid_due_date_from_bid_board_at";
+const MIGRATION = "0224_deals_bid_due_date_from_bid_board_at";
 const COLUMN = "bid_due_date_from_bid_board_at";
 const PROJECT_COLUMN = "bid_due_date_bid_board_project_number";
 
@@ -30,7 +30,7 @@ async function columnRow(schema: string, column: string = COLUMN) {
   return result.rows[0] ?? null;
 }
 
-/** The minimum shape 0223 needs: a deals table per office, carrying the two columns the signal reads. */
+/** The minimum shape 0224 needs: a deals table per office, carrying the two columns the signal reads. */
 async function seedOffices(schemas: string[]) {
   for (const schema of schemas) {
     await pg.exec(`
@@ -50,7 +50,7 @@ beforeEach(async () => {
   pg = new PGlite();
 });
 
-describe("migration 0223 — deals.bid_due_date_from_bid_board_at", () => {
+describe("migration 0224 — deals.bid_due_date_from_bid_board_at", () => {
   it("adds the column to EVERY office schema, not just the first", async () => {
     await seedOffices(["office_dallas", "office_atlanta"]);
     await pg.exec(migrationSql(MIGRATION));

@@ -170,7 +170,7 @@ beforeAll(async () => {
       bid_board_last_updated_at timestamptz, bid_estimate numeric, awarded_amount numeric,
       -- The column under test: a timestamptz stored at UTC midnight (migration 0132).
       bid_due_date timestamptz,
-      -- Migration 0223: the provenance stamp the read resolver requires.
+      -- Migration 0224: the provenance stamp the read resolver requires.
       bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text,
       won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       actual_close_date date, lost_at timestamptz, bid_board_loss_outcome text,
@@ -256,7 +256,7 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     expect(result.metrics.bidDueDateUpdated).toBe(1);
   });
 
-  // ★ PROVENANCE (migration 0223). The read resolver refuses the override without this stamp, so the write
+  // ★ PROVENANCE (migration 0224). The read resolver refuses the override without this stamp, so the write
   // is what makes a deal eligible — a coincidental day match never does. Stamped in the same statement as
   // the value it vouches for.
   it("stamps bid_due_date_from_bid_board_at on the SAME write, so the deal becomes override-eligible", async () => {

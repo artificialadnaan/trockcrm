@@ -175,7 +175,7 @@ export const deals = pgTable(
      */
     bidBoardDueDate: date("bid_board_due_date"),
     /**
-     * PROVENANCE for the read-back (migration 0223): when the Bid Board sync last wrote `bid_due_date`.
+     * PROVENANCE for the read-back (migration 0224): when the Bid Board sync last wrote `bid_due_date`.
      * NULL means "this deal's bid due date did not come from the Bid Board".
      *
      * Required by the bid-due-date resolver's signal, together with a still-matching day. Neither alone is
@@ -187,7 +187,7 @@ export const deals = pgTable(
      */
     bidDueDateFromBidBoardAt: timestamp("bid_due_date_from_bid_board_at", { withTimezone: true }),
     /**
-     * The Bid Board project the stamp above was earned ON (migration 0223) — a copy of
+     * The Bid Board project the stamp above was earned ON (migration 0224) — a copy of
      * `bid_board_project_number` taken in the same write.
      *
      * The stamp vouches for "the sync wrote this value FOR THE PROJECT THIS DEAL IS CURRENTLY ON", not

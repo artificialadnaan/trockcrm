@@ -98,7 +98,7 @@ async function seed(options: {
   expectedCloseDate?: string | null;
   bidBoardTotalSales?: string | null;
   detachedAt?: Date | null;
-  /** Models writeBidDueDateIfNeeded's provenance stamp (0223). Absent => a coincidental day match. */
+  /** Models writeBidDueDateIfNeeded's provenance stamp (0224). Absent => a coincidental day match. */
   fromBidBoardAt?: Date | null;
   /** The project the stamp was earned on. Defaults to the deal's current project when a stamp is set. */
   stampedProjectNumber?: string | null;
@@ -239,7 +239,7 @@ describe("Bid Board due date read precedence — flag ON", () => {
   const landed = {
     dealInstant: new Date(`${MIRROR_DAY}T00:00:00.000Z`),
     mirrorDay: MIRROR_DAY,
-    // The 0223 stamp. Without it the same two dates are only a COINCIDENCE and the override must refuse.
+    // The 0224 stamp. Without it the same two dates are only a COINCIDENCE and the override must refuse.
     fromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
   };
 

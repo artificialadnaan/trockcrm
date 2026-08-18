@@ -56,7 +56,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
   const LANDED_INSTANT = new Date(`${LANDED}T00:00:00.000Z`);
   const LEAD = "2026-06-01";
   const STALE_DEAL = new Date("2026-07-01T00:00:00.000Z");
-  /** The 0223 provenance stamp: the sync WROTE the column. Absent => a coincidence, never an override. */
+  /** The 0224 provenance stamp: the sync WROTE the column. Absent => a coincidence, never an override. */
   const STAMP = new Date("2026-08-01T09:00:00.000Z");
   /** The project the stamp was earned on == the project the deal is on now. */
   const PROJECT = { bidDueDateBidBoardProjectNumber: "DFW-1-00001-aa", bidBoardProjectNumber: "DFW-1-00001-aa" };
