@@ -176,11 +176,15 @@ router.get("/projects/:id", async (req, res, next) => {
 
 router.patch("/projects/:id", async (req, res, next) => {
   try {
+    // No `asOf` here on purpose: pausing and resuming are recorded on the day they happen. Letting the
+    // query string date a WRITE would let a caller backdate a pause over weeks that were genuinely
+    // missed and clear them off the board without a dismissal.
     const project = await updateWeeklyReportProject(
       req.tenantClient!,
       requireUuid(req.params.id, "id"),
       req.body ?? {},
       officeIdFrom(req),
+      { actorUserId: actorFrom(req).id },
     );
     await req.commitTransaction!();
     res.json(project);

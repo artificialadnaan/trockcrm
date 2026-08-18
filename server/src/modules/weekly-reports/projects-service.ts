@@ -5,6 +5,7 @@ import {
   isIsoDateString,
   type WeeklyReportProjectStatus,
 } from "@trock-crm/shared/types";
+import { businessToday } from "../../lib/period.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 export type QueryExecutor = Pick<PoolClient, "query">;
@@ -382,6 +383,14 @@ export async function createWeeklyReportProject(
     throw new AppError(409, "This project already has a weekly report setup");
   }
 
+  // A setup created ALREADY stopped never makes an active -> paused transition for the ledger to catch,
+  // so the interval is opened here instead. Anchored at the cadence start, which is the earliest week it
+  // could ever have owed: whenever someone sets it to Active, it starts owing from that day, not from a
+  // backlog it spent its whole life paused for.
+  if (values.status !== "active") {
+    await openWeeklyReportPause(client, result.rows[0].id, values.cadenceStartDate, actorUserId);
+  }
+
   const created = await getWeeklyReportProject(client, result.rows[0].id);
   if (!created) throw new AppError(500, "Weekly report project could not be read back after creation");
   return created;
@@ -457,11 +466,18 @@ const CLIENT_TEAM_COLUMNS: Record<string, { role: WeeklyReportClientRole; field:
 /** Cadence columns: retroactively changing these rewrites which weeks were ever owed. */
 const CADENCE_COLUMNS = ["cadence_weekday", "cadence_start_date"] as const;
 
+/**
+ * @param options.asOf the business day a pause is recorded as starting or ending. INJECTABLE FOR TESTS
+ *   ONLY — the route deliberately does not forward the request's `?asOf`, because a client-chosen date
+ *   on a WRITE could backdate a pause across weeks that were genuinely missed and quietly clear them off
+ *   the board. Reads may look at any date they like; the ledger records when it actually happened.
+ */
 export async function updateWeeklyReportProject(
   client: QueryExecutor,
   id: string,
   patch: Partial<WeeklyReportProjectInput>,
   officeId: string,
+  options: { actorUserId?: string | null; asOf?: string } = {},
 ): Promise<WeeklyReportProject> {
   const current = await getWeeklyReportProjectRow(client, id);
   if (!current) throw new AppError(404, "Weekly report project not found");
@@ -556,9 +572,82 @@ export async function updateWeeklyReportProject(
   );
   if (result.rows.length === 0) throw new AppError(404, "Weekly report project not found");
 
+  // Recorded only when the status genuinely moved. Re-saving the form with the same status is not a new
+  // pause, and treating it as one would restart the interval and re-bill the weeks already skipped.
+  if (values.status !== current.status) {
+    await recordWeeklyReportStatusChange(client, {
+      projectId: id,
+      from: String(current.status),
+      to: values.status,
+      onDate: options.asOf ?? businessToday(),
+      actorUserId: options.actorUserId ?? null,
+    });
+  }
+
   const updated = await getWeeklyReportProject(client, id);
   if (!updated) throw new AppError(404, "Weekly report project not found");
   return updated;
+}
+
+/** Everything that is not `active` is stopped: the CRM makes the same promise about paused and completed. */
+function isStoppedStatus(status: string): boolean {
+  return status !== "active";
+}
+
+/**
+ * Open a stretch during which this project owes nothing.
+ *
+ * ON CONFLICT against `weekly_report_pauses_open_uidx` rather than a prior SELECT: that SELECT
+ * serialises nothing, so two PATCHes pausing the same project would both pass it and leave two
+ * overlapping open intervals — and the second Resume would then close only one, silently leaving the
+ * project stopped forever from the generator's point of view.
+ */
+async function openWeeklyReportPause(
+  client: QueryExecutor,
+  projectId: string,
+  fromDate: string,
+  actorUserId: string | null,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO weekly_report_pauses (weekly_report_project_id, paused_from, paused_by)
+     VALUES ($1::uuid, $2::date, $3::uuid)
+     ON CONFLICT (weekly_report_project_id) WHERE resumed_on IS NULL DO NOTHING`,
+    [projectId, fromDate, actorUserId],
+  );
+}
+
+/**
+ * Keep the pause ledger in step with a status change.
+ *
+ * `status` answers only "is this project reporting today", which is not the question the board asks: it
+ * regenerates the expected weeks from the cadence start on every read, so a project that spent six weeks
+ * paused came back owing all six as missed and late — contradicting the very sentence the form shows
+ * when you pause one. The interval is written when reporting stops and closed when it starts again, and
+ * the weeks BEFORE the pause are deliberately untouched. They were missed, and they stay missed.
+ *
+ * paused -> completed (and back) is not a boundary: both are stopped, so the open interval simply runs on.
+ */
+async function recordWeeklyReportStatusChange(
+  client: QueryExecutor,
+  input: { projectId: string; from: string; to: string; onDate: string; actorUserId: string | null },
+): Promise<void> {
+  if (!isStoppedStatus(input.from) && isStoppedStatus(input.to)) {
+    await openWeeklyReportPause(client, input.projectId, input.onDate, input.actorUserId);
+    return;
+  }
+  if (isStoppedStatus(input.from) && !isStoppedStatus(input.to)) {
+    // GREATEST, so a resume dated before the pause began cannot violate weekly_report_pauses_range and
+    // turn a legitimate Resume into a 500. Every open interval is closed, not just one, so a row left
+    // open by a direct SQL edit cannot blank the board for a project that is demonstrably reporting again.
+    await client.query(
+      `UPDATE weekly_report_pauses
+          SET resumed_on = GREATEST(paused_from, $2::date),
+              resumed_by = $3::uuid,
+              updated_at = now()
+        WHERE weekly_report_project_id = $1::uuid AND resumed_on IS NULL`,
+      [input.projectId, input.onDate, input.actorUserId],
+    );
+  }
 }
 
 function pick<K extends keyof WeeklyReportProjectInput>(

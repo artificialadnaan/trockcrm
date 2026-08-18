@@ -2,6 +2,7 @@ import {
   weeklyReportDaysLate,
   weeklyReportExpectedWeeks,
   weeklyReportWeekOf,
+  type WeeklyReportPauseInterval,
   type WeeklyReportWeekState,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -94,10 +95,10 @@ function waitingOnFor(row: {
  * untouched week has no row, so the projects nobody has filed for would be exactly the ones that never
  * appear.
  *
- * Three queries total regardless of project count: projects, their reports, their dismissals. The join
- * happens in memory because the expected-week set is generated in TypeScript (shared with the CRM, the
- * app and the reminder worker) rather than in SQL, and duplicating that generator as a recursive CTE
- * would be a second definition of the cadence.
+ * Four queries total regardless of project count: projects, their reports, their dismissals, their
+ * pauses. The join happens in memory because the expected-week set is generated in TypeScript (shared
+ * with the CRM, the app and the reminder worker) rather than in SQL, and duplicating that generator as a
+ * recursive CTE would be a second definition of the cadence.
  */
 export async function getWeeklyReportDashboard(
   client: QueryExecutor,
@@ -150,6 +151,16 @@ export async function getWeeklyReportDashboard(
       WHERE weekly_report_project_id = ANY($1::uuid[])`,
     [projectIds],
   );
+  // Every project here is `status = 'active'`, so nothing is paused RIGHT NOW — these are the stretches
+  // it was stopped for and has since come back from. Without them a project paused for six weeks returns
+  // owing all six, which is the opposite of what the CRM told whoever paused it.
+  const pausesResult = await client.query(
+    `SELECT weekly_report_project_id, paused_from, resumed_on
+       FROM weekly_report_pauses
+      WHERE weekly_report_project_id = ANY($1::uuid[])
+      ORDER BY weekly_report_project_id, paused_from`,
+    [projectIds],
+  );
 
   const reportByKey = new Map<string, Record<string, any>>();
   for (const row of reportsResult.rows) {
@@ -158,6 +169,12 @@ export async function getWeeklyReportDashboard(
   const dismissalByKey = new Map<string, Record<string, any>>();
   for (const row of dismissalsResult.rows) {
     dismissalByKey.set(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`, row);
+  }
+  const pausesByProject = new Map<string, WeeklyReportPauseInterval[]>();
+  for (const row of pausesResult.rows) {
+    const intervals = pausesByProject.get(row.weekly_report_project_id) ?? [];
+    intervals.push({ from: toIsoDate(row.paused_from)!, to: toIsoDate(row.resumed_on) });
+    pausesByProject.set(row.weekly_report_project_id, intervals);
   }
 
   const rows: WeeklyReportDashboardRow[] = [];
@@ -171,6 +188,7 @@ export async function getWeeklyReportDashboard(
       cadenceStartDate: toIsoDate(project.cadence_start_date)!,
       cadenceEndDate: toIsoDate(project.cadence_end_date),
       throughDate: currentWeekOf,
+      pausedIntervals: pausesByProject.get(project.id) ?? null,
     });
     if (expected.length === 0) continue;
 

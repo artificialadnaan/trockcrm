@@ -110,18 +110,53 @@ export function weeklyReportWeekOf(cadenceWeekday: number, onDate: string): stri
 }
 
 /**
+ * One stretch during which the project was not reporting — `weekly_report_pauses`. `to` is null while
+ * reporting is still stopped.
+ */
+export interface WeeklyReportPauseInterval {
+  from: string;
+  to: string | null;
+}
+
+/**
+ * Was this cadence date inside a stretch when reporting was stopped?
+ *
+ * HALF-OPEN, [from, to). A week falling on the day reporting stopped is not owed — pausing is a decision
+ * about the weeks still ahead — while a week falling on the day it resumed is. The asymmetry is the
+ * point: pausing must never act as an amnesty for the weeks already missed BEFORE it, which is exactly
+ * what an inclusive lower bound plus a backdated pause would buy.
+ */
+export function isWeeklyReportWeekPaused(
+  weekOf: string,
+  pausedIntervals: ReadonlyArray<WeeklyReportPauseInterval> | null | undefined,
+): boolean {
+  if (!pausedIntervals || pausedIntervals.length === 0) return false;
+  return pausedIntervals.some(
+    (interval) =>
+      daysBetweenIsoDates(interval.from, weekOf) >= 0 &&
+      (interval.to == null || daysBetweenIsoDates(weekOf, interval.to) > 0),
+  );
+}
+
+/**
  * Every `week_of` this project is expected to produce, from its cadence start through `throughDate`
- * (clamped by `cadenceEndDate` when set). Ascending.
+ * (clamped by `cadenceEndDate` when set, and skipping any stretch reporting was paused for). Ascending.
  *
  * This is the dashboard's row set. A returned week with neither a report nor a dismissal is
  * "not_started" and keeps aging — reading `weekly_reports` alone would make an untouched week invisible,
  * which is precisely the case the page exists to surface.
+ *
+ * `pausedIntervals` is what keeps the CRM's promise that a paused project stops generating weeks true
+ * after it comes back: `status` describes only where the setup stands today, so without the intervals a
+ * resumed project is billed for every week it spent stopped. The weeks missed BEFORE the pause are
+ * untouched by this and stay outstanding.
  */
 export function weeklyReportExpectedWeeks(input: {
   cadenceWeekday: number;
   cadenceStartDate: string;
   cadenceEndDate?: string | null;
   throughDate: string;
+  pausedIntervals?: ReadonlyArray<WeeklyReportPauseInterval> | null;
 }): string[] {
   assertWeekday(input.cadenceWeekday);
   const last = input.cadenceEndDate
@@ -134,7 +169,7 @@ export function weeklyReportExpectedWeeks(input: {
   const weeks: string[] = [];
   let cursor = weeklyReportWeekOf(input.cadenceWeekday, input.cadenceStartDate);
   while (daysBetweenIsoDates(cursor, last) >= 0) {
-    weeks.push(cursor);
+    if (!isWeeklyReportWeekPaused(cursor, input.pausedIntervals)) weeks.push(cursor);
     cursor = shiftIsoDate(cursor, 7);
   }
   return weeks;
