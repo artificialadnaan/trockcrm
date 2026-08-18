@@ -33,6 +33,7 @@ import { newClientUploadId, uploadOwnerKey } from "../../../../src/capture/uploa
 import { uploadCapture } from "../../../../src/capture/upload";
 import { getLiveGps } from "../../../../src/capture/metadata";
 import { formatDictationAsBullets } from "../../../../src/dictation/bullets";
+import { retryWeeklyReportPhotoUploads } from "../../../../src/weekly-reports/photo-import";
 import {
   MAX_WEEKLY_REPORT_CAPTION_CHARS,
   MAX_WEEKLY_REPORT_PHOTOS,
@@ -40,6 +41,7 @@ import {
   WEEKLY_REPORT_STEPS,
   isImportedWeeklyReportPhoto,
   weeklyReportDraftBlocker,
+  weeklyReportDraftPendingUploads,
   weeklyReportDraftReducer,
   weeklyReportDraftToPatch,
   weeklyReportDraftToPhotoPayload,
@@ -281,6 +283,63 @@ function Wizard({
     setNotice(null);
     setPhotoView("pick");
     dispatch({ type: "setStep", step });
+  }
+
+  /**
+   * Re-drive photos that are attached to the draft but never reached the server.
+   *
+   * Without this the submit blocker is permanent: nothing else re-tries a failed upload, so a super who
+   * imported with no signal could not file the report at all once back in coverage — waiting did
+   * nothing and re-importing just duplicated the rows.
+   */
+  const [retryingUploads, setRetryingUploads] = useState(false);
+  async function retryUploads() {
+    const pending = weeklyReportDraftPendingUploads(draft).filter(
+      (photo) => photo.localUri && photo.clientUploadId,
+    );
+    if (pending.length === 0 || retryingUploads) return;
+    setRetryingUploads(true);
+    setNotice(null);
+    try {
+      const outcome = await retryWeeklyReportPhotoUploads(
+        pending.map((photo) => ({
+          clientUploadId: photo.clientUploadId!,
+          localUri: photo.localUri!,
+          width: photo.width,
+          height: photo.height,
+        })),
+        {
+          upload: async (input) => {
+            const uploaded = await uploadCapture(fetcher, {
+              uri: input.uri,
+              width: input.width,
+              height: input.height,
+              target: { dealId: draft.dealId },
+              category: null,
+              caption: null,
+              tags: ["weekly-report"],
+              metadata: input.metadata,
+              clientUploadId: input.clientUploadId,
+            });
+            return { fileId: uploaded.id, remoteUrl: uploaded.imageUrl };
+          },
+          resolveUpload: (key, fileId, remoteUrl) =>
+            dispatch({ type: "resolvePhotoUpload", key, fileId, remoteUrl }),
+        },
+      );
+      setNotice(
+        outcome.failedToUpload > 0
+          ? {
+              tone: "error",
+              text: `${outcome.failedToUpload} photo${outcome.failedToUpload === 1 ? " still could not" : "s still could not"} upload. Try again with a better signal, or remove ${outcome.failedToUpload === 1 ? "it" : "them"}.`,
+            }
+          : { tone: "success", text: "Photos uploaded." },
+      );
+    } catch (error) {
+      setNotice({ tone: "error", text: weeklyReportSubmitErrorMessage(error) });
+    } finally {
+      setRetryingUploads(false);
+    }
   }
 
   const stepIndex = weeklyReportStepIndex(draft.step);
@@ -545,6 +604,9 @@ function Wizard({
             weekOf={draft.weekOf}
             onToggle={toggleCandidate}
             onImport={() => void importPhotos()}
+            pendingUploadCount={weeklyReportDraftPendingUploads(draft).length}
+            retrying={retryingUploads}
+            onRetryUploads={() => void retryUploads()}
           />
         ) : (
           <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
@@ -719,6 +781,9 @@ function PhotoPickerStep({
   weekOf,
   onToggle,
   onImport,
+  pendingUploadCount,
+  retrying,
+  onRetryUploads,
 }: {
   candidates: WeeklyReportPhotoCandidate[];
   loading: boolean;
@@ -730,6 +795,9 @@ function PhotoPickerStep({
   weekOf: string;
   onToggle: (candidate: WeeklyReportPhotoCandidate) => void;
   onImport: () => void;
+  pendingUploadCount: number;
+  retrying: boolean;
+  onRetryUploads: () => void;
 }) {
   const byFileId = new Map(candidates.map((candidate) => [candidate.fileId, candidate]));
   const pickable = candidates.map((candidate) => ({
@@ -748,6 +816,14 @@ function PhotoPickerStep({
         marked.
       </Text>
       <Button title="Import from device" variant="ghost" onPress={onImport} loading={importing} />
+      {pendingUploadCount > 0 && (
+        <Button
+          title={`Retry uploads (${pendingUploadCount})`}
+          variant="ghost"
+          onPress={onRetryUploads}
+          loading={retrying}
+        />
+      )}
     </View>
   );
 
