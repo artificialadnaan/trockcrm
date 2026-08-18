@@ -21,7 +21,10 @@ import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../../src/middleware/error-handler.js";
-import { createWeeklyReportProject } from "../../../src/modules/weekly-reports/projects-service.js";
+import {
+  createWeeklyReportProject,
+  updateWeeklyReportProject,
+} from "../../../src/modules/weekly-reports/projects-service.js";
 import {
   createWeeklyReportDraft,
   getWeeklyReportDetail,
@@ -1636,7 +1639,15 @@ describe("the per-project counters", () => {
  * "and N older" tally — and therefore no Retry beside the number that demanded one.
  */
 describe("a setup that has stopped reporting can still owe the client an email", () => {
-  async function undeliveredThenStopped(status: "paused" | "completed") {
+  /**
+   * @param options.sendError explicit `null` leaves the row SILENT — committed, undelivered, nothing
+   *   written down about why. Every test in this block used to take the default, so the pass's other two
+   *   verdicts (`sendStalled`, `sendPending`) were never once produced by it.
+   */
+  async function undeliveredThenStopped(
+    status: "paused" | "completed",
+    options: { sendError?: string | null } = {},
+  ) {
     const { projectId, reportId } = await seedApprovedReport();
     await sendWeeklyReport(db, {
       reportId,
@@ -1645,11 +1656,13 @@ describe("a setup that has stopped reporting can still owe the client an email",
       payload: { recipients: ["jay@example.com"] },
       shareUrlFor,
     });
-    await pg.query(
-      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out', send_attempts = 3
-        WHERE id = $1::uuid`,
-      [reportId],
-    );
+    const sendError = options.sendError === undefined ? "Resend timed out" : options.sendError;
+    if (sendError != null) {
+      await pg.query(
+        `UPDATE office_dallas.weekly_reports SET send_error = $2, send_attempts = 3 WHERE id = $1::uuid`,
+        [reportId, sendError],
+      );
+    }
     await pg.query(`UPDATE office_dallas.weekly_report_projects SET status = $2 WHERE id = $1::uuid`, [
       projectId,
       status,
@@ -1721,6 +1734,139 @@ describe("a setup that has stopped reporting can still owe the client an email",
     expect(forThisWeek[0]!.sendFailed).toBe(true);
   });
 
+  it("calls a stopped setup's SILENT send stuck once the clock has run out", async () => {
+    // The pass's `sendStalled` verdict, which nothing here ever drove: every test in this block that
+    // produced an undelivered send at all wrote `send_error`, so `send_error == null &&
+    // isStalledSend(...)` was never reached and dropping either half of it cost nothing. This state is
+    // no rare shape on a stopped setup — the last send of a job dead-letters, somebody marks the setup
+    // complete, and the row that reads `sent` with no error and no delivery is the ONLY trace that a
+    // client was promised a report they were never going to receive.
+    const { reportId } = await undeliveredThenStopped("completed", { sendError: null });
+    await ageSend(reportId, STALLED_MINUTES);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.sendRetryReportId === reportId);
+    expect(row).toBeDefined();
+    expect(row!.sendStalled).toBe(true);
+    expect(row!.sendFailed).toBe(false);
+    expect(row!.sendPending).toBe(false);
+    expect(row!.waitingOn).toBe("Adam Sherwood");
+  });
+
+  it("still calls a stopped setup's freshly queued send in flight rather than stuck", async () => {
+    // `sendPending` on this pass, pinned. Hard-wiring it false was free before: the correction a PM sends
+    // in the same hour the job is marked complete would then never say "Sending…" on the board at all,
+    // and the row would sit with no verdict of any kind while the delivery was simply on its way.
+    const { reportId } = await undeliveredThenStopped("completed", { sendError: null });
+    await ageSend(reportId, IN_FLIGHT_MINUTES);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.sendRetryReportId === reportId);
+    expect(row).toBeDefined();
+    expect(row!.sendPending).toBe(true);
+    expect(row!.sendStalled).toBe(false);
+    expect(row!.sendFailed).toBe(false);
+  });
+
+  it("never reports a stopped setup's FAILED send as stuck as well, however old it is", async () => {
+    // The `send_error == null` conjunct on THIS pass. The cadence loop's copy is pinned separately, and
+    // that test does not cover this one — but the conjunct matters more here, because on a setup that has
+    // stopped reporting an old failed send is the typical row rather than the exotic one. Without it both
+    // verdicts read true and the deferred T-Rock Cam surface, which reads `sendStalled` directly and is
+    // the whole reason these verdicts are derived server-side, renders "Send stuck" — no error shown,
+    // nobody to chase — for a delivery that recorded exactly why it failed.
+    //
+    // Aged on BOTH clocks, so the row really is past the threshold and only the conjunct holds it false.
+    const { reportId } = await undeliveredThenStopped("completed");
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_last_attempt_at = now() WHERE id = $1::uuid`,
+      [reportId],
+    );
+    await ageDelivery(reportId, STALLED_MINUTES);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.sendRetryReportId === reportId);
+    expect(row).toBeDefined();
+    expect(row!.sendFailed).toBe(true);
+    expect(row!.sendStalled).toBe(false);
+    expect(row!.sendPending).toBe(false);
+    expect(row!.sendError).toBe("Resend timed out");
+  });
+
+  it("tags the stopped setup's current cadence week as current and an older one as backlog", async () => {
+    // `isCurrentWeek` on this pass, pinned in BOTH directions. Hard-wiring it false renders every one of
+    // these rows with the permanent "backlog" tag the CRM prints for a past week, including the send a PM
+    // committed this morning; hard-wiring it true does the reverse and hides a genuinely old failure
+    // among this week's work.
+    const current = await seedApprovedReport();
+    const backlog = await seedApprovedReport({ weekOf: PRIOR_WEEK, projectId: current.projectId });
+    for (const reportId of [current.reportId, backlog.reportId]) {
+      await sendWeeklyReport(db, {
+        reportId,
+        office: OFFICE_CONTEXT,
+        actor: SENDER,
+        payload: { recipients: ["jay@example.com"] },
+        shareUrlFor,
+      });
+      await pg.query(
+        `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out' WHERE id = $1::uuid`,
+        [reportId],
+      );
+    }
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET status = 'completed' WHERE id = $1::uuid`, [
+      current.projectId,
+    ]);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const byReport = (reportId: string) => board.rows.find((entry) => entry.sendRetryReportId === reportId);
+    // Both weeks are on the board — one stopped setup can owe more than one email.
+    expect(byReport(current.reportId)!.weekOf).toBe(WEEK_OF);
+    expect(byReport(backlog.reportId)!.weekOf).toBe(PRIOR_WEEK);
+    expect(byReport(current.reportId)!.isCurrentWeek).toBe(true);
+    expect(byReport(backlog.reportId)!.isCurrentWeek).toBe(false);
+  });
+
+  it("counts an undelivered send older than the lookback window instead of dropping it", async () => {
+    // `lookbackWeeks` is a documented parameter with a documented contract — weeks beyond the window are
+    // COUNTED, not dropped — and this pass escaped both halves of it: it neither bounded its rows nor
+    // tallied them, so a narrow window rendered ancient sends that the cadence loop, reading the same
+    // board, would have folded into "and N older".
+    const project = await seedProject({ cadenceStartDate: "2026-01-01" });
+    const januaryWeeks = ["2026-01-08", "2026-01-15", "2026-01-22"];
+    for (const weekOf of januaryWeeks) {
+      const { reportId } = await seedApprovedReport({ weekOf, projectId: project.id });
+      await sendWeeklyReport(db, {
+        reportId,
+        office: OFFICE_CONTEXT,
+        actor: SENDER,
+        payload: { recipients: ["jay@example.com"] },
+        shareUrlFor,
+      });
+    }
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET status = 'completed' WHERE id = $1::uuid`, [
+      project.id,
+    ]);
+
+    const narrow = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 1 });
+    expect(narrow.rows.filter((entry) => entry.weeklyReportProjectId === project.id)).toHaveLength(0);
+    expect(narrow.olderOutstandingCounts[project.id]).toBe(3);
+
+    // And a window wide enough to reach January renders them — a BOUND, not an unconditional drop. Both
+    // directions, for the same reason the stall fixtures are pinned absolutely: with only the narrow case
+    // asserted, a pass that simply never emitted these rows would stay green.
+    const wide = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 40 });
+    expect(wide.rows.filter((entry) => entry.weeklyReportProjectId === project.id).map((e) => e.weekOf)).toEqual(
+      januaryWeeks,
+    );
+    expect(wide.olderOutstandingCounts[project.id] ?? 0).toBe(0);
+
+    // The Projects tab counts all three either way — the window is the board's, not the counter's.
+    const summary = (await listWeeklyReportProjectSummaries(db, WEEK_OF)).find(
+      (entry) => entry.weeklyReportProjectId === project.id,
+    )!;
+    expect(summary.undeliveredSends).toBe(3);
+  });
+
   it("generates no cadence weeks for it — a stopped project owes no new reports", async () => {
     // The scope widened for undelivered sends ONLY. If the stopped project were simply folded into the
     // cadence loop it would return every week since its start date as outstanding, which is the opposite
@@ -1733,6 +1879,170 @@ describe("a setup that has stopped reporting can still owe the client an email",
 
     const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     expect(board.rows).toHaveLength(0);
+    expect(board.olderOutstandingCounts[projectId] ?? 0).toBe(0);
+  });
+});
+
+/**
+ * THE OTHER HALF OF THE SAME MISMATCH — and the half reachable through the workflow the product itself
+ * recommends.
+ *
+ * Widening the board's project scope to every `wrp.is_active` setup closed the case where the SETUP had
+ * stopped. It did not close the case where the setup is still `active` and the CADENCE has stopped
+ * generating the week the undelivered send belongs to, because the pass tested `status`. Two ordinary
+ * PATCHes get there:
+ *
+ *   1. A reporting END DATE entered behind the send. `weeklyReportWeekOf` returns the UPCOMING cadence
+ *      day, so reports routinely go out days before their `week_of` — sent Monday for Thursday's week.
+ *      The delivery fails, the job wraps up, and the PM sets the end date to the Tuesday. That PATCH is
+ *      deliberately permitted (`cadence_end_date` is outside `CADENCE_COLUMNS`) and is literally what
+ *      `updateWeeklyReportProject`'s 409 tells PMs to do: "Set a reporting end date and create a new
+ *      setup instead."
+ *   2. A PAUSE spanning the week, then a resume. `isWeeklyReportWeekPaused` excludes that week from the
+ *      expected set permanently, and the setup is `active` again.
+ *
+ * In both, the cadence loop never reaches the week and a `status`-keyed skip sent it nowhere else. No
+ * chip, no Retry, and nothing in the "and N older" tally either — that loop iterates the expected weeks,
+ * which is precisely what no longer contains this one — while the Projects tab showed a permanent red
+ * "1 not delivered". The client never receives their report, and History is the only surface left, which
+ * requires already knowing which project to open.
+ */
+describe("an ACTIVE setup whose undelivered week the cadence has stopped generating", () => {
+  async function failedSendOnActiveSetup() {
+    const { projectId, reportId } = await seedApprovedReport();
+    await sendWeeklyReport(db, {
+      reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out', send_attempts = 3
+        WHERE id = $1::uuid`,
+      [reportId],
+    );
+    return { projectId, reportId };
+  }
+
+  /** The board's outstanding deliveries, as the "Send failures" card counts them. */
+  function retryableRows(board: { rows: Array<{ sendRetryReportId: string | null }> }) {
+    return board.rows.filter((entry) => entry.sendRetryReportId != null);
+  }
+
+  it("keeps the failed send on the board after a reporting end date is set behind it", async () => {
+    const { projectId, reportId } = await failedSendOnActiveSetup();
+
+    // The ordinary PATCH, through the service the route calls — not a hand-written UPDATE. The whole
+    // point is that this is permitted and recommended.
+    const updated = await updateWeeklyReportProject(
+      db,
+      projectId,
+      { cadenceEndDate: "2026-08-11" },
+      OFFICE,
+      { actorUserId: DIRECTOR },
+    );
+    expect(updated.status).toBe("active");
+    expect(updated.cadenceEndDate).toBe("2026-08-11");
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === WEEK_OF);
+    expect(row).toBeDefined();
+    expect(row!.sendFailed).toBe(true);
+    expect(row!.sendError).toBe("Resend timed out");
+    expect(row!.sendAttempts).toBe(3);
+    // The Retry the Projects tab's counter implies, pointed at the report that actually needs one.
+    expect(row!.sendRetryReportId).toBe(reportId);
+    expect(row!.sendRetrySentAt).not.toBeNull();
+    expect(row!.waitingOn).toBe("Adam Sherwood");
+    // Never late: the cadence has stopped expecting this week, so there is nothing to be late for.
+    expect(row!.daysLate).toBe(0);
+    expect(row!.isCurrentWeek).toBe(true);
+
+    // One send, one row, one counter — the reconciliation the two surfaces claim to share.
+    const summary = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    expect(summary.undeliveredSends).toBe(1);
+    expect(retryableRows(board)).toHaveLength(1);
+  });
+
+  it("keeps it on the board across a pause that spanned the week, with the setup active again", async () => {
+    const { projectId, reportId } = await failedSendOnActiveSetup();
+
+    // Paused before the week, resumed after it — the interval is half-open [from, to), so this week is
+    // excluded from the expected set for good, while the setup itself is reporting again.
+    await updateWeeklyReportProject(db, projectId, { status: "paused" }, OFFICE, {
+      asOf: "2026-08-10",
+      actorUserId: DIRECTOR,
+    });
+    const resumed = await updateWeeklyReportProject(db, projectId, { status: "active" }, OFFICE, {
+      asOf: "2026-08-25",
+      actorUserId: DIRECTOR,
+    });
+    expect(resumed.status).toBe("active");
+
+    // The pause really does span the week, and it is the ledger — not `status` — that keeps the week out
+    // of the expected set once the project is reporting again.
+    const ledger = await pg.query<{ paused_from: string; resumed_on: string }>(
+      `SELECT paused_from::text AS paused_from, resumed_on::text AS resumed_on
+         FROM office_dallas.weekly_report_pauses WHERE weekly_report_project_id = $1::uuid`,
+      [projectId],
+    );
+    expect(ledger.rows).toEqual([{ paused_from: "2026-08-10", resumed_on: "2026-08-25" }]);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(board.rows.filter((entry) => entry.weekOf === WEEK_OF)).toHaveLength(1);
+
+    const row = board.rows.find((entry) => entry.weekOf === WEEK_OF);
+    expect(row).toBeDefined();
+    expect(row!.sendFailed).toBe(true);
+    expect(row!.sendRetryReportId).toBe(reportId);
+    expect(row!.waitingOn).toBe("Adam Sherwood");
+
+    const summary = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    expect(summary.undeliveredSends).toBe(1);
+    expect(retryableRows(board)).toHaveLength(1);
+  });
+
+  it("still emits exactly one row for a week the cadence DOES generate", async () => {
+    // The skip is keyed on the week, not on the project, so it has to keep holding for the weeks the
+    // cadence loop did decide — including on a project that also owns a week it did not. Emitting one
+    // twice doubles the "Send failures" card, which counts rows.
+    const { projectId, reportId } = await failedSendOnActiveSetup();
+    const stray = await seedApprovedReport({ weekOf: PRIOR_WEEK, projectId });
+    await sendWeeklyReport(db, {
+      reportId: stray.reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await updateWeeklyReportProject(db, projectId, { cadenceEndDate: "2026-08-11" }, OFFICE, {
+      actorUserId: DIRECTOR,
+    });
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    // PRIOR_WEEK is still inside the cadence (end date 08-11) and its send is undelivered, so the cadence
+    // loop emits it; WEEK_OF fell outside and comes from the second pass. One row each.
+    expect(board.rows.filter((entry) => entry.weekOf === PRIOR_WEEK)).toHaveLength(1);
+    expect(board.rows.filter((entry) => entry.weekOf === WEEK_OF)).toHaveLength(1);
+    expect(retryableRows(board).map((entry) => entry.sendRetryReportId).sort()).toEqual(
+      [stray.reportId, reportId].sort(),
+    );
+    expect((await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!.undeliveredSends).toBe(2);
+  });
+
+  it("leaves a DELIVERED week the cadence dropped filed away, rather than resurrecting it", async () => {
+    // The bound in the other direction. The pass is for sends that never got out; a week that reached the
+    // client and then fell out of the cadence must stay off the board, or every completed project would
+    // grow a permanent row for its final report.
+    const { projectId, reportId } = await failedSendOnActiveSetup();
+    await markDelivered(reportId);
+    await updateWeeklyReportProject(db, projectId, { cadenceEndDate: "2026-08-11" }, OFFICE, {
+      actorUserId: DIRECTOR,
+    });
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(board.rows.some((entry) => entry.weekOf === WEEK_OF)).toBe(false);
     expect(board.olderOutstandingCounts[projectId] ?? 0).toBe(0);
   });
 });

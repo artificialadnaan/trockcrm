@@ -1,4 +1,5 @@
 import {
+  shiftIsoDate,
   weeklyReportDaysLate,
   weeklyReportExpectedWeeks,
   weeklyReportWeekOf,
@@ -15,6 +16,16 @@ import type { QueryExecutor } from "./projects-service.js";
  * would spend its whole viewport on ancient history instead of this week. Anything older than the window
  * is COUNTED rather than dropped — `olderOutstandingCount` on each row group — so the page can say "and
  * 9 older" instead of silently pretending they do not exist.
+ *
+ * THE WINDOW BINDS UNDELIVERED SENDS TOO, and is measured the same way for both of the board's passes.
+ * The cadence pass counts back `lookbackWeeks` ENTRIES through the generated week list; the undelivered
+ * pass has no generated list to count through — that is the whole reason it exists — so it counts back
+ * the same number of CALENDAR weeks from the week the project's cadence is on today. The two agree
+ * exactly whenever no pause intervenes, and where a pause makes the cadence window reach further back the
+ * undelivered pass is the more conservative of the two; it never renders a week the cadence pass would
+ * have tallied instead. Either way the week is counted, never dropped: an undelivered send is the one
+ * thing on this page nothing else would ever mention, so exempting it from the window was tempting, and
+ * would have meant two passes disagreeing about where "recent" ends on the same board.
  */
 export const DEFAULT_OUTSTANDING_LOOKBACK_WEEKS = 26;
 
@@ -110,7 +121,12 @@ export interface WeeklyReportDashboardRow {
 export interface WeeklyReportDashboard {
   asOf: string;
   rows: WeeklyReportDashboardRow[];
-  /** Outstanding weeks older than the lookback window, per project id. Never silently dropped. */
+  /**
+   * Outstanding weeks older than the lookback window, per project id. Never silently dropped.
+   *
+   * Both passes contribute: a cadence week nobody filed, and an undelivered send that fell out of the
+   * window — including one whose project the cadence no longer generates weeks for at all.
+   */
   olderOutstandingCounts: Record<string, number>;
   lookbackWeeks: number;
 }
@@ -233,7 +249,7 @@ export async function getWeeklyReportDashboard(
   //
   // The CADENCE is still generated for `status = 'active'` alone — a paused or completed project owes
   // nothing, and generating weeks for one would contradict what the CRM told whoever stopped it. What the
-  // wider scope buys is the second pass at the bottom: an UNDELIVERED SEND on a stopped setup.
+  // wider scope buys is the second pass at the bottom: an UNDELIVERED SEND THE CADENCE DOES NOT COVER.
   //
   // That is the common end state, not an edge case. The last report of a job fails to send, the job
   // finishes, somebody marks the setup completed — and with `wrp.status = 'active'` here the board had no
@@ -306,7 +322,9 @@ export async function getWeeklyReportDashboard(
   // Read for the CADENCE loop, whose projects are all `status = 'active'` — so for those nothing is
   // paused RIGHT NOW and these are the stretches they were stopped for and have since come back from.
   // Without them a project paused for six weeks returns owing all six, which is the opposite of what the
-  // CRM told whoever paused it. The stopped-setup pass below reads no cadence and needs none of this.
+  // CRM told whoever paused it. The undelivered pass below generates no expected weeks and needs none of
+  // this — it reads the sends that exist, and a pause is precisely one of the reasons a week with a real
+  // send in it is no longer generated.
   const pausesResult = await client.query(
     `SELECT weekly_report_project_id, paused_from, resumed_on
        FROM weekly_report_pauses
@@ -336,6 +354,20 @@ export async function getWeeklyReportDashboard(
 
   const rows: WeeklyReportDashboardRow[] = [];
   const olderOutstandingCounts: Record<string, number> = {};
+  /**
+   * Every `project|week` THE CADENCE LOOP DECIDED — rendered, tallied, or dropped as settled.
+   *
+   * The hand-off to the second pass, and it is a set of weeks rather than a set of projects on purpose.
+   * `project.status === 'active'` was the earlier test and it answers the wrong question: it asks whether
+   * the project is generating weeks at all, when what the second pass needs to know is whether THIS week
+   * was one of them. An active setup can perfectly well stop generating a week that already has a send in
+   * it — a reporting end date entered after the fact (`cadence_end_date` is deliberately outside
+   * `CADENCE_COLUMNS` so PMs can do exactly that, and `updateWeeklyReportProject`'s own 409 tells them
+   * to), or a pause spanning it. Both leave the week out of `expected` while the status stays `active`,
+   * so the cadence loop never reaches it and a project-level skip sent it nowhere either: no chip, no
+   * Retry, not even a tally entry, opposite a Projects tab reading a permanent red "1 not delivered".
+   */
+  const cadenceDecidedKeys = new Set<string>();
 
   // Every project here is `status = 'active'`, so nothing is paused RIGHT NOW — see the pauses query.
   const activeProjects = projectsResult.rows.filter((project) => project.status === "active");
@@ -351,6 +383,7 @@ export async function getWeeklyReportDashboard(
       pausedIntervals: pausesByProject.get(project.id) ?? null,
     });
     if (expected.length === 0) continue;
+    for (const weekOf of expected) cadenceDecidedKeys.add(`${project.id}|${weekOf}`);
 
     const cutoffIndex = Math.max(0, expected.length - lookbackWeeks);
     let olderOutstanding = 0;
@@ -452,29 +485,55 @@ export async function getWeeklyReportDashboard(
     }
   }
 
-  // A SETUP THAT HAS STOPPED REPORTING CAN STILL OWE THE CLIENT AN EMAIL.
+  // A WEEK THE CADENCE NO LONGER GENERATES CAN STILL OWE THE CLIENT AN EMAIL.
   //
-  // Second pass rather than folding these projects into the loop above, because the two questions are
+  // Second pass rather than folding these weeks into the loop above, because the two questions are
   // genuinely different. Above: "which weeks does the cadence say are owed" — a question a paused or
   // completed project has no answer to, and generating one for it would contradict the CRM's own promise
   // that pausing stops the obligation (a completed setup often has no `cadence_end_date` at all, so the
   // generator would simply keep producing weeks forever). Here: "which sends never got out" — which does
-  // not depend on the cadence and does not stop mattering when the job does.
+  // not depend on the cadence and does not stop mattering when the cadence stops covering the week.
+  //
+  // The setup's STATUS is not the test; `cadenceDecidedKeys` is. Stopping reporting is only the commonest
+  // way a week with an outstanding send drops out of the generated set, not the only one — an active
+  // setup given a reporting end date after the failed send, or paused across the week and resumed, lands
+  // in exactly the same place with `status = 'active'` throughout, and both are reached through the
+  // ordinary PATCH the product recommends.
   //
   // These rows carry the same `sendRetryReportId` as any other, so the Retry that the Projects tab's
   // "1 not delivered" counter implies actually exists on the board, rather than living only on History.
   const projectById = new Map(projectsResult.rows.map((project) => [project.id, project]));
   for (const undelivered of undeliveredResult.rows) {
     const project = projectById.get(undelivered.weekly_report_project_id);
-    // Active projects already had this week decided by the cadence loop; emitting it again here would
-    // double every failed send on the board.
-    if (!project || project.status === "active") continue;
+    if (!project) continue;
 
     const weekOf = toIsoDate(undelivered.week_of)!;
+    // Weeks the cadence loop already decided are ITS business — rendered, tallied or settled. Emitting
+    // one again here would double every failed send on the board, and the "Send failures" card counts
+    // rows, so the number a director acts on would be exactly doubled.
+    if (cadenceDecidedKeys.has(`${project.id}|${weekOf}`)) continue;
+
+    const currentWeekOf = weeklyReportWeekOf(Number(project.cadence_weekday), asOf);
+    // The SAME window the cadence loop applies, counted in calendar weeks because there is no generated
+    // week list to count entries through — see DEFAULT_OUTSTANDING_LOOKBACK_WEEKS. Beyond it the send is
+    // tallied rather than rendered, exactly as an undelivered week beyond the cadence loop's cutoff is:
+    // a documented parameter that these rows quietly escaped would leave the two passes disagreeing
+    // about where "recent" ends on one board.
+    if (weekOf < shiftIsoDate(currentWeekOf, -7 * (lookbackWeeks - 1))) {
+      olderOutstandingCounts[project.id] = (olderOutstandingCounts[project.id] ?? 0) + 1;
+      continue;
+    }
+
     // The LIVE version of the week, exactly as the loop above reads it — so a correction drafted over
     // this failed send still shows as the week's current state while the failure keeps its own facts.
     const report = reportByKey.get(`${project.id}|${weekOf}`);
     const sendFailed = undelivered.send_error != null;
+    // The `send_error == null` conjunct is load-bearing HERE IN PARTICULAR, and for the same reason it is
+    // in the cadence loop: `sendStalled` is a PUBLISHED field the deferred T-Rock Cam surface reads
+    // directly, so the two surfaces must not be able to disagree about what the chip means. On a week the
+    // cadence has stopped generating an OLD FAILED send is the typical case rather than the exotic one,
+    // so without it these rows routinely report both verdicts and the app says "Send stuck" — no error to
+    // show, nobody to chase — for a delivery that recorded exactly why it failed.
     const sendStalled = undelivered.send_error == null && isStalledSend(undelivered, now);
 
     rows.push({
@@ -488,10 +547,10 @@ export async function getWeeklyReportDashboard(
       trockSuperName: project.trock_super_name ?? null,
       trockPmName: project.trock_pm_name ?? null,
       weekOf,
-      isCurrentWeek: weekOf === weeklyReportWeekOf(Number(project.cadence_weekday), asOf),
+      isCurrentWeek: weekOf === currentWeekOf,
       state: report ? REPORT_STATE_BY_STATUS[report.status] ?? "sent" : "sent",
-      // Never late. Lateness measures a report the cadence still expects, and this setup is not
-      // expecting any — the row is here for the delivery, not for the week.
+      // Never late. Lateness measures a report the cadence still expects, and it does not expect this
+      // one — the row is here for the delivery, not for the week.
       daysLate: 0,
       reportId: report?.id ?? null,
       reportVersion: report ? Number(report.version) : null,
@@ -504,8 +563,8 @@ export async function getWeeklyReportDashboard(
       sendPending: !sendFailed && !sendStalled,
       sendRetryReportId: undelivered.id,
       sendRetrySentAt: toIsoTimestamp(undelivered.sent_at),
-      // Always the PM: the ONLY reason this row exists is a delivery that has to be dealt with, and
-      // nobody is waiting on the superintendent for a project that has stopped reporting.
+      // Always the PM: the ONLY reason this row exists is a delivery that has to be dealt with, and the
+      // superintendent owes nothing for a week the cadence has stopped asking for.
       waitingOn: project.trock_pm_name ?? "Unassigned PM",
       dismissalReason: null,
     });
@@ -541,11 +600,19 @@ export interface WeeklyReportProjectSummary {
    * the moment v2 goes out, and a tab that kept counting it would leave a permanent "1 not delivered"
    * beside a week the client has actually received. Two surfaces, one definition of "still owed".
    *
-   * The PROJECT scope matches too, and did not always: this aggregate covers every `wrp.is_active` setup
-   * while the board once generated rows only for `wrp.status = 'active'` ones. A completed or paused
-   * project whose last send failed — the common way this feature ends — counted here and appeared nowhere
-   * on the board, so the number had no row behind it and no Retry beside it. `getWeeklyReportDashboard`
-   * now emits a row for an undelivered send whatever the setup's status.
+   * The SCOPE matches too, and did not always. This aggregate has always counted every undelivered send
+   * on every `wrp.is_active` setup, while the board reached them only through the cadence: rows for
+   * `wrp.status = 'active'` projects, and only for the weeks that generator still produces. Two ways to
+   * be counted here with no row and no Retry over there, both of them ordinary — a completed or paused
+   * project whose last send failed (the common way this feature ends), and an ACTIVE project whose
+   * undelivered week the cadence stopped generating, via a reporting end date entered after the fact or a
+   * pause spanning it.
+   *
+   * `getWeeklyReportDashboard` now ACCOUNTS FOR every undelivered send this counter counts, whatever the
+   * setup's status and whatever the cadence currently says about the week: a row inside the lookback
+   * window, an entry in `olderOutstandingCounts` beyond it. Accounted for, never dropped — which is the
+   * strongest claim the two surfaces can share, since the board renders a window and this number does
+   * not.
    */
   undeliveredSends: number;
   /** Null when reporting has stopped — paused, completed, or past its cadence end date. */
