@@ -1609,12 +1609,42 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           `[BidBoardSync] Preserved existing estimator_user_id ${existingEstimatorUserId} for deal ${matches[0].id}; ignored incoming ${estimatorUserId ?? "null"} (empties-only sync)`
         );
       }
+      // ★ THE MIRROR AND THE VALUE ADVANCE TOGETHER, OR NEITHER DOES.
+      //
+      // `bid_board_due_date` is not decoration — it is half the read-back's signal, which fires only while
+      // it EQUALS the stamped `bid_due_date`. This mirror UPDATE runs earlier and unconditionally, so any
+      // later guard that declines the value write leaves the two columns disagreeing and SILENTLY switches
+      // the override off for a deal that had legitimately earned it. The deal keeps its correct date and
+      // loses the provenance that made it authoritative — worse than either writing or not writing.
+      //
+      // Two guards have that shape, and this covers both rather than the one that surfaced it:
+      //   - a canonically-duplicated Project # whose rows DISAGREE about the Due Date (below);
+      //   - no admin/director to attribute the deal_history row to, which refuses the write for the WHOLE
+      //     run, so without this every matched deal in that run would lose its signal at once.
+      //
+      // Withholding the mirror is the right half to give up. It is never published to a user, so a stale
+      // mirror costs nothing visible, whereas advancing it destroys provenance we legitimately earned on
+      // an earlier, unambiguous sync — and nothing about today's ambiguity invalidates yesterday's write.
+      // It also keeps the feature's central promise intact: a sync that declines to write moves nothing.
+      //
+      // Mechanically this is just `$11 = NULL`, which the flag-on SET reads through
+      // COALESCE($11::date, bid_board_due_date) as "leave it alone". Flag OFF is untouched: the SET is a
+      // plain $11 there and this whole notion does not exist, so main parity is preserved by construction.
+      const canonicalProjectNumber = normalizeBidBoardProjectNumber(normalized.bidBoardProjectNumber);
+      const dueDateConflicted =
+        canonicalProjectNumber != null && conflictingDueDateProjectNumbers.has(canonicalProjectNumber);
+      const dueDateCanAdvance = changedByUserId != null && !dueDateConflicted;
+      const mirrorRow: NormalizedBidBoardRow =
+        bidDueDateReadbackEnabled && !dueDateCanAdvance
+          ? { ...normalized, bidBoardDueDate: null }
+          : normalized;
+
       let updateResult;
       await client.query(`SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
       try {
         updateResult = await client.query(
           updateSql,
-          updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt, estimatorUserId)
+          updateParams(matches[0].id, mirrorRow, bidBoardLastUpdatedAt, estimatorUserId)
         );
         await client.query(`RELEASE SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
       } catch (err) {
@@ -1641,7 +1671,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           client,
           schemaName,
           updateDeal,
-          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled),
+          // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
+          // claim a mirror move that did not happen.
+          buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled),
           { source: "bid_board_mirror", runId }
         );
       }
@@ -1668,9 +1700,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         // that silently decides the deal's reported value too. Refuse instead, and say so: an operator can
         // fix the duplicate on the board, which is the only real remedy.
         // Scoped to THIS write only — deliberately not a `continue`, which would also skip the stage
-        // writeback below and silently widen an ambiguous due date into an ambiguous stage.
-        const canonicalProjectNumber = normalizeBidBoardProjectNumber(normalized.bidBoardProjectNumber);
-        if (canonicalProjectNumber && conflictingDueDateProjectNumbers.has(canonicalProjectNumber)) {
+        // writeback below and silently widen an ambiguous due date into an ambiguous stage. The mirror was
+        // already withheld for this row above, so the two columns stay in agreement.
+        if (dueDateConflicted) {
           metrics.bidDueDateSkippedDuplicateProjectNumber++;
           warnings.push(
             `Skipped Bid Board bid due date update for deal ${matches[0].id}: Project # ${normalized.bidBoardProjectNumber} appears more than once in this export with different Due Dates, so the correct date is ambiguous`

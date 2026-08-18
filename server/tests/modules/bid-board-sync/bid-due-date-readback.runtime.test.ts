@@ -93,6 +93,23 @@ async function mirrorDay(id = DEAL): Promise<string | null> {
   return rows[0]?.mirror ?? null;
 }
 
+/**
+ * The read-back SIGNAL, evaluated in SQL exactly as the resolver evaluates it in TS: the provenance stamp
+ * is present, it was earned on the project the deal is on now, and the written day still equals the mirror.
+ * Asserting on this rather than on the columns individually is what makes "coherent" testable.
+ */
+async function signalHolds(id = DEAL): Promise<boolean> {
+  const { rows } = await pg.query<{ holds: boolean }>(
+    `SELECT (bid_due_date_from_bid_board_at IS NOT NULL
+             AND bid_due_date_bid_board_project_number IS NOT NULL
+             AND bid_board_project_number IS NOT NULL
+             AND bid_due_date_bid_board_project_number = bid_board_project_number
+             AND (bid_due_date AT TIME ZONE 'UTC')::date = bid_board_due_date) AS holds
+       FROM ${SCHEMA}.deals WHERE id = '${id}'`
+  );
+  return rows[0]?.holds === true;
+}
+
 async function latestRun() {
   const { rows } = await pg.query<Record<string, any>>(
     `SELECT * FROM ${SCHEMA}.bid_board_sync_runs ORDER BY created_at DESC LIMIT 1`
@@ -595,6 +612,73 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     expect((await historyRows()).filter((h) => h.field_name === "bid_due_date")).toHaveLength(0);
     // …and the operator is told which project to fix on the board, not just that a duplicate exists.
     expect(result.warnings.join(" ")).toContain("appears more than once in this export with different Due Dates");
+  });
+
+  /**
+   * ★ THE SIGNAL-COHERENCE INVARIANT, and the sharpest case for it: a deal that is ALREADY STAMPED
+   * receives a conflicting duplicate pair where ONE row matches its current date and the other does not.
+   *
+   * The mirror UPDATE runs earlier and unconditionally, so before this fix each row advanced
+   * bid_board_due_date while the duplicate guard refused the value write — leaving the mirror holding the
+   * OTHER row's date. The resolver requires mirror == stamped bid_due_date, so the signal silently went
+   * false and the override stopped firing for a deal whose date was still correct. Refusing the value
+   * while letting the mirror drift is worse than either writing or not writing.
+   *
+   * The invariant: a refused write moves NOTHING. Value, mirror and stamp are never left in a state where
+   * the signal is false but the data implies it should be true.
+   */
+  it("leaves value, mirror and stamp COHERENT when a conflicting pair hits an already-stamped deal", async () => {
+    // Earn provenance on an unambiguous sync first.
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    const stamped = await dealRow();
+    expect(stamped.bid_due_date_from_bid_board_at).not.toBeNull();
+    expect(await mirrorDay()).toBe("2026-09-01");
+    const signalBefore = await signalHolds();
+    expect(signalBefore).toBe(true);
+
+    // Now a conflicting pair: one row agrees with the stored date, the other does not.
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ "Due Date": "2026-09-01" }),
+        exportRow({ "Due Date": "2026-10-15" }),
+      ],
+    });
+
+    const after = await dealRow();
+    // Nothing moved: value, mirror and stamp are all exactly as they were.
+    expect(new Date(after.bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(await mirrorDay()).toBe("2026-09-01");
+    expect(new Date(after.bid_due_date_from_bid_board_at).toISOString()).toBe(
+      new Date(stamped.bid_due_date_from_bid_board_at).toISOString()
+    );
+    // …so the override still fires. This is the assertion the bug broke.
+    expect(await signalHolds()).toBe(true);
+    expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(2);
+  });
+
+  // The SAME asymmetry on the other guard that skips the write-through. This one is worse in blast radius:
+  // changedByUserId is resolved once per RUN, so without the fix every matched deal in that run would have
+  // its mirror advanced past a value that never moved, losing the override all at once.
+  it("leaves the mirror alone when there is no attributor, so no deal loses its signal", async () => {
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    expect(await signalHolds()).toBe(true);
+
+    await pg.exec(`UPDATE public.users SET is_active = false WHERE id = '${ADMIN}'`);
+    try {
+      const result = await ingestBidBoardRows({
+        office_slug: "test",
+        rows: [exportRow({ "Due Date": "2026-10-15" })],
+      });
+
+      expect(result.metrics.bidDueDateSkippedNoAttributor).toBe(1);
+      // The mirror did NOT advance to 2026-10-15, so the signal survives the attributor outage.
+      expect(await mirrorDay()).toBe("2026-09-01");
+      expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+      expect(await signalHolds()).toBe(true);
+    } finally {
+      await pg.exec(`UPDATE public.users SET is_active = true WHERE id = '${ADMIN}'`);
+    }
   });
 
   it("still writes when duplicate rows AGREE on the Due Date — a repeat is not a conflict", async () => {
