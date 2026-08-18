@@ -8,6 +8,80 @@ function countPdfPages(buffer: Buffer): number {
   return (buffer.toString("latin1").match(/\/Type\s*\/Page(?![s])/g) ?? []).length;
 }
 
+// --- Locating drawn text in the content stream ---------------------------------------------------
+// Text is found by its POSITION AND FONT SIZE, never by its characters. PDFKit SUBSETS the embedded font,
+// so the literal glyphs do not appear in the content stream at all — a `streams.indexOf("SomeName")` lookup
+// silently returns -1 and the test degrades into asserting nothing. Verified against pdfkit directly.
+
+const PAGE_HEIGHT = 792;
+const PAGE_MARGIN = 32;
+/** PAGE_MARGIN + COLUMN_WIDTH (264) + COLUMN_GAP (20) — the right-hand cell's left edge. */
+const RIGHT_COLUMN_X = 316;
+/**
+ * The tile's bottom edge in PDF coordinates: PHOTO_ROWS_TOP (72) + PHOTO_TILE_HEIGHT (560) = layout y 632,
+ * flipped, because pdfkit's `Tm` y counts UP from the page bottom while the layout counts down from the top.
+ * A caption drawn BELOW the tile therefore has a SMALLER Tm y than this.
+ */
+const TILE_BOTTOM_PDF_Y = PAGE_HEIGHT - (72 + 560);
+/** The description runs at 8pt and each metadata line at META_FONT_SIZE (7.5). Nothing else in a cell does. */
+const CELL_FONT_SIZES = [8, 7.5];
+
+function inflateStreams(buffer: Buffer): string {
+  return [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
+    .map((m) => {
+      try {
+        return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
+      } catch {
+        return "";
+      }
+    })
+    .join("\n");
+}
+
+/**
+ * Every text run pdfkit emitted, as its position AND the font size it was drawn at.
+ *
+ * Both halves are load-bearing. Position alone does not identify anything: the page header, the compact
+ * section title and the page footer are ALL drawn at PAGE_MARGIN — the identical x as the left cell's
+ * caption column — on every content page. Measured sizes for a single-photo page, not assumed: header 11,
+ * section title 10, footer 10, index badge 11, the centred "Image unavailable" placeholder 8 (but at
+ * x=124.5, not a column edge), and the cell's own caption/metadata at 8 / 7.5.
+ *
+ * PDFKit emits each run as `Tm` (position) FOLLOWED by `Tf` (font/size) — position before size, not after;
+ * verified directly against pdfkit's raw output. The naive assumption that Tf precedes its Tm silently pairs
+ * every position with the PRECEDING run's size instead of its own.
+ */
+function textRuns(buffer: Buffer): { x: number; y: number; size: number }[] {
+  const tokens = [
+    ...inflateStreams(buffer).matchAll(
+      /([\d.\-]+) [\d.\-]+ [\d.\-]+ [\d.\-]+ ([\d.\-]+) ([\d.\-]+) Tm|\/(\S+) ([\d.\-]+) Tf/g,
+    ),
+  ];
+  const runs: { x: number; y: number; size: number }[] = [];
+  let pending: { x: number; y: number } | null = null;
+  for (const token of tokens) {
+    if (token[2] !== undefined) {
+      // Tm: remember the position; it is completed once the following Tf supplies the font size.
+      pending = { x: Number(token[2]), y: Number(token[3]) };
+      continue;
+    }
+    if (token[5] !== undefined && pending) {
+      runs.push({ ...pending, size: Number(token[5]) });
+      pending = null;
+    }
+  }
+  return runs;
+}
+
+/** The runs that are a photo cell's own caption/metadata: at a column's left edge AND at a cell font size. */
+function cellTextRuns(buffer: Buffer): { x: number; y: number; size: number }[] {
+  return textRuns(buffer).filter(
+    (run) =>
+      (Math.abs(run.x - PAGE_MARGIN) < 1 || Math.abs(run.x - RIGHT_COLUMN_X) < 1) &&
+      CELL_FONT_SIZES.some((size) => Math.abs(run.size - size) < 0.01),
+  );
+}
+
 const cover = {
   reportTitle: "University place doors",
   creatorName: "Brett Bell",
@@ -97,15 +171,7 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover,
       sections: [{ title: "Doors", photos: [photo(1), photo(2)] }],
     });
-    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
-      .map((m) => {
-        try {
-          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
-        } catch {
-          return "";
-        }
-      })
-      .join("\n");
+    const streams = inflateStreams(buffer);
     // A rounded rect's path opens at (left + radius), not at left, so these coordinates are offset by the
     // 8pt corner radius — the arithmetic below carries it rather than pretending it isn't there.
     const RADIUS = 8;
@@ -124,38 +190,36 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // The caption used to sit in the leftover column width to the right of the tile. At a 256pt tile in a
     // 264pt column that space is gone (264 - 256 - 10 = -2pt), so the block moves underneath.
     //
-    // Asserting on the drawn text's X ORIGIN is what distinguishes "moved below" from "still beside, just
+    // Asserting on the drawn text's ORIGIN is what distinguishes "moved below" from "still beside, just
     // clipped off the page" — a page count cannot see that difference and neither can a byte length.
     //
-    // NOTE ON TECHNIQUE: do NOT try to locate the caption by searching the stream for its text. PDFKit
-    // SUBSETS the embedded font, so the literal characters do not appear in the content stream — a
-    // `streams.indexOf("SomeName")` lookup silently returns -1 and the test degrades into asserting
-    // nothing. Verified against pdfkit directly before writing this. What IS emitted, per text run, is a
-    // text matrix `1 0 0 1 <x> <y> Tm`, so the x values are readable even when the glyphs are not.
+    // The x origin ALONE is not enough for the positive half, which is the mistake this test previously
+    // made: it asserted only that *something* was drawn at x=32, and the page header, the compact section
+    // title and the footer are all drawn at PAGE_MARGIN too. The caption could vanish entirely and it still
+    // passed. Identifying the caption needs its FONT SIZE as well (see `cellTextRuns`), and its position
+    // needs to be checked on the axis the change actually moved it along — down.
     const buffer = await renderFieldPhotoReportPdf({
       cover,
       sections: [{ title: "Doors", photos: [photo(1)] }],
     });
-    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
-      .map((m) => {
-        try {
-          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
-        } catch {
-          return "";
-        }
-      })
-      .join("\n");
-
-    const textXs = [...streams.matchAll(/[\d.\-]+ [\d.\-]+ [\d.\-]+ [\d.\-]+ ([\d.\-]+) [\d.\-]+ Tm/g)].map((m) =>
-      Number(m[1]),
-    );
-    expect(textXs.length).toBeGreaterThan(0); // guard: a regex that matched nothing must fail, not pass
 
     // A single photo occupies the LEFT cell, so a caption drawn beside a 256pt tile would land at
-    // 32 + 256 + 10 = 298. Nothing may be drawn there.
-    expect(textXs.filter((x) => Math.abs(x - 298) < 1)).toEqual([]);
-    // ...and the caption is drawn at the tile's own left edge instead.
-    expect(textXs.some((x) => Math.abs(x - 32) < 1)).toBe(true);
+    // 32 + 256 + 10 = 298. Nothing at all may be drawn there — this half needs no font-size filter, and it
+    // is what catches a straight revert to the old side-by-side layout.
+    const allRuns = textRuns(buffer);
+    expect(allRuns.length).toBeGreaterThan(0); // guard: a regex that matched nothing must fail, not pass
+    expect(allRuns.filter((run) => Math.abs(run.x - 298) < 1)).toEqual([]);
+
+    // ...and the caption block is really drawn, at the tile's own left edge, BELOW the tile: one description
+    // line at 8pt plus this fixture's two metadata lines at 7.5pt.
+    const cellRuns = cellTextRuns(buffer);
+    expect(cellRuns.length).toBeGreaterThanOrEqual(3);
+    expect(cellRuns.every((run) => Math.abs(run.x - PAGE_MARGIN) < 1)).toBe(true);
+    // Below the tile, in flipped PDF space, means a SMALLER y than the tile's bottom edge. Every cell run
+    // must clear it — a caption still drawn level with the tile fails here even if it is at the right x.
+    // (The 8pt "Image unavailable" placeholder is centred in the tile at x=124.5, so it is not in this set;
+    // should it ever be left-aligned it would land inside the tile and correctly fail this assertion.)
+    expect(Math.max(...cellRuns.map((run) => run.y))).toBeLessThan(TILE_BOTTOM_PDF_Y);
   });
 
   it("keeps the caption band clear of the page footer", async () => {
@@ -170,43 +234,12 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover,
       sections: [{ title: "Doors", photos: [photo(1), photo(2)] }],
     });
-    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
-      .map((m) => {
-        try {
-          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
-        } catch {
-          return "";
-        }
-      })
-      .join("\n");
 
-    // Pair each text run's position with its font size: the page footer's OWN left-aligned label is drawn at
-    // `PAGE_MARGIN` (x=32, `drawFooter`) — the identical x as this layout's left caption column, on every
-    // content page — so an x-only filter cannot tell the two apart. The footer always runs at 10pt; the
-    // cell's caption/metadata run at 8pt (description) or META_FONT_SIZE=7.5pt (metadata). Filtering on BOTH
-    // x and size is what actually isolates cell content.
-    //
-    // PDFKit emits each text run as `Tm` (position) followed by `Tf` (font/size) — position BEFORE size, not
-    // after — verified directly against pdfkit's raw output before writing this; the naive assumption that
-    // Tf precedes its Tm silently pairs every position with the PRECEDING run's size instead of its own.
-    const runs = [...streams.matchAll(/([\d.\-]+) [\d.\-]+ [\d.\-]+ [\d.\-]+ ([\d.\-]+) ([\d.\-]+) Tm|\/(\S+) ([\d.\-]+) Tf/g)];
-    let pending: { x: number; y: number } | null = null;
-    const cellTextYs: number[] = [];
-    for (const run of runs) {
-      if (run[2] !== undefined) {
-        // Tm: remember the position; it is completed once the following Tf supplies the font size.
-        pending = { x: Number(run[2]), y: Number(run[3]) };
-        continue;
-      }
-      if (run[5] !== undefined && pending) {
-        // Tf immediately after a Tm: this is the size for the run just remembered.
-        const size = Number(run[5]);
-        const inCellColumn = Math.abs(pending.x - 32) < 1 || Math.abs(pending.x - 316) < 1;
-        const inCellFontSize = Math.abs(size - 7.5) < 0.01 || Math.abs(size - 8) < 0.01;
-        if (inCellColumn && inCellFontSize) cellTextYs.push(pending.y);
-        pending = null;
-      }
-    }
+    // `cellTextRuns` filters on BOTH x and font size, which is what isolates cell content here: the page
+    // footer's own left-aligned label is drawn at PAGE_MARGIN (`drawFooter`) — the identical x as this
+    // layout's left caption column, on every content page — so an x-only filter cannot tell the two apart.
+    // The footer always runs at 10pt; a cell's caption/metadata at 8pt or META_FONT_SIZE (7.5pt).
+    const cellTextYs = cellTextRuns(buffer).map((run) => run.y);
     expect(cellTextYs.length).toBeGreaterThan(0);
 
     // 52 = comfortably above the footer's own rendered position (~34) and well below the lowest real cell
@@ -241,32 +274,8 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover,
       sections: [{ title: "Doors", photos: [worstCase] }],
     });
-    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
-      .map((m) => {
-        try {
-          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
-        } catch {
-          return "";
-        }
-      })
-      .join("\n");
 
-    const runs = [...streams.matchAll(/([\d.\-]+) [\d.\-]+ [\d.\-]+ [\d.\-]+ ([\d.\-]+) ([\d.\-]+) Tm|\/(\S+) ([\d.\-]+) Tf/g)];
-    let pending: { x: number; y: number } | null = null;
-    const cellTextYs: number[] = [];
-    for (const run of runs) {
-      if (run[2] !== undefined) {
-        pending = { x: Number(run[2]), y: Number(run[3]) };
-        continue;
-      }
-      if (run[5] !== undefined && pending) {
-        const size = Number(run[5]);
-        const inCellColumn = Math.abs(pending.x - 32) < 1 || Math.abs(pending.x - 316) < 1;
-        const inCellFontSize = Math.abs(size - 7.5) < 0.01 || Math.abs(size - 8) < 0.01;
-        if (inCellColumn && inCellFontSize) cellTextYs.push(pending.y);
-        pending = null;
-      }
-    }
+    const cellTextYs = cellTextRuns(buffer).map((run) => run.y);
     // Three metadata lines must actually be present, or this fixture is not exercising the worst case and
     // the assertion below would pass for the wrong reason.
     expect(cellTextYs.length).toBeGreaterThanOrEqual(4); // >=1 description line + 3 metadata lines
