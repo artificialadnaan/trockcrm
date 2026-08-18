@@ -25,14 +25,16 @@ const DRAFT = {
   version: 1,
   isCorrection: false,
   propertyName: "4123 Cedar Springs",
-  recipients: ["jay@example.com"],
-  recipientOptions: [{ role: "DOC", name: "Jay Stauble", email: "jay@example.com" }],
+  recipients: ["jay@example.com", "melissa@example.com"],
+  recipientOptions: [
+    { role: "DOC", name: "Jay Stauble", email: "jay@example.com" },
+    { role: "PM", name: "Melissa Garcia", email: "melissa@example.com" },
+  ],
   subject: "4123 Cedar Springs — Weekly Progress Report, Week of 8/13/26",
   greeting: "Hello Jay,",
   contextParagraph: "Please find this week's progress report.",
   sender: { name: "Adam Sherwood", email: "adam@trockconstruction.com", phone: "(214) 555-0142" },
   attachPdf: true,
-  shareUrl: null,
   bodyPreview: "Hello Jay,\n\nPlease find this week's progress report.",
 };
 
@@ -84,6 +86,11 @@ function button(label: string): HTMLButtonElement {
   if (!match) throw new Error(`button ${label} not found`);
   return match as HTMLButtonElement;
 }
+function removeRecipient(email: string) {
+  const remove = document.querySelector<HTMLButtonElement>(`button[aria-label="Remove ${email}"]`);
+  if (!remove) throw new Error(`remove button for ${email} not found`);
+  remove.click();
+}
 function setValue(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype =
     element instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
@@ -114,11 +121,54 @@ describe("the modal renders what the SERVER composed", () => {
     expect(document.body.textContent).toMatch(/no T-Rock PM on file/i);
   });
 
+  it("RECOMPUTES the greeting as the PM edits the recipients", async () => {
+    // The server picks the greeting from the recipients it is FINALLY given, and does so deliberately.
+    // The modal rendered `draft.greeting`, computed from the PRE-FILLED list — so removing the DOC left
+    // the PM approving "Hello Jay," for an email the client would read as "Hello Melissa,". On a modal
+    // whose whole premise is that the PM approves exactly what the client receives, that is the one line
+    // that must not be a guess.
+    await render();
+    expect(document.body.textContent).toContain("Hello Jay,");
+
+    await act(async () => {
+      removeRecipient("jay@example.com");
+    });
+    expect(document.body.textContent).toContain("Hello Melissa,");
+    expect(document.body.textContent).not.toContain("Hello Jay,");
+  });
+
+  it("falls back to a generic greeting for an address it cannot attribute", async () => {
+    await render();
+    await act(async () => {
+      removeRecipient("jay@example.com");
+    });
+    await act(async () => {
+      removeRecipient("melissa@example.com");
+    });
+    setValue(input("Add a recipient"), "someone@elsewhere.com");
+    await act(async () => {
+      button("Add").click();
+    });
+    expect(document.body.textContent).toContain("Hello,");
+    expect(document.body.textContent).not.toContain("Hello Melissa,");
+  });
+
   it("says a correction replaces what the client already has", async () => {
     mocks.fetchWeeklyReportSendDraft.mockResolvedValue({ ...DRAFT, isCorrection: true, version: 2 });
     await render();
     expect(document.body.textContent).toMatch(/Send correction to client/i);
     expect(document.body.textContent).toMatch(/replaces the copy they already have/i);
+  });
+
+  it("does NOT claim to replace anything when the earlier version never reached the client", async () => {
+    // A v2 exists for two very different reasons — the content was wrong, or the v1 email never got out.
+    // Only the first replaces something. The server decides which, on the same predicate the email uses,
+    // and the modal must not announce a correction the client will not be told about.
+    mocks.fetchWeeklyReportSendDraft.mockResolvedValue({ ...DRAFT, isCorrection: false, version: 2 });
+    await render();
+    expect(document.body.textContent).toMatch(/Send weekly report to client/i);
+    expect(document.body.textContent).toMatch(/never reached the client/i);
+    expect(document.body.textContent).not.toMatch(/replaces the copy they already have/i);
   });
 });
 
@@ -132,7 +182,7 @@ describe("sending", () => {
     });
 
     expect(mocks.sendWeeklyReport).toHaveBeenCalledWith("report-1", {
-      recipients: ["jay@example.com"],
+      recipients: ["jay@example.com", "melissa@example.com"],
       subject: "Cedar Springs weekly",
       contextParagraph: "Framing wrapped up on 3 and 4.",
       attachPdf: true,
@@ -143,7 +193,7 @@ describe("sending", () => {
     // The data-loss bug, and it is worse here than on the settings dialog: the address that gets dropped
     // belongs to a client the PM believes has just been sent their report.
     await render();
-    setValue(input("Add a recipient"), "melissa@example.com");
+    setValue(input("Add a recipient"), "owner@client.com");
     await act(async () => {
       button("Send to client").click();
     });
@@ -151,6 +201,7 @@ describe("sending", () => {
     expect(mocks.sendWeeklyReport.mock.calls[0]![1].recipients).toEqual([
       "jay@example.com",
       "melissa@example.com",
+      "owner@client.com",
     ]);
   });
 
@@ -166,10 +217,11 @@ describe("sending", () => {
 
   it("does not send to nobody when every recipient has been removed", async () => {
     await render();
-    const remove = document.querySelector<HTMLButtonElement>('button[aria-label="Remove jay@example.com"]');
-    if (!remove) throw new Error("remove button not found");
     await act(async () => {
-      remove.click();
+      removeRecipient("jay@example.com");
+    });
+    await act(async () => {
+      removeRecipient("melissa@example.com");
     });
     await act(async () => {
       button("Send to client").click();

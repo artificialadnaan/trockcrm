@@ -59,6 +59,13 @@ export interface WeeklyReportDetail {
    * When the mail provider ACCEPTED the message — a different fact from `sentAt`, which is stamped when
    * the PM commits. Null on a `sent` report means the delivery is still in flight or has failed, which is
    * exactly the state the dashboard's "Send failed" chip exists to surface.
+   *
+   * AND NOTHING MORE THAN THAT. There is no bounce webhook anywhere in this codebase (no svix handler, no
+   * resend-signature verification), and client addresses are hand-typed with no verification — so a report
+   * addressed to `jay@examle.com` is accepted, hard-bounces, and reads here forever as though it landed.
+   * Every surface that consumes this field is worded accordingly. Ingesting Resend's delivery/bounce
+   * webhooks is the real fix and is deliberately out of scope for this PR: it needs a public unauthenticated
+   * endpoint, signature verification, and an event table, which is a feature rather than a correction.
    */
   sendDeliveredAt: string | null;
   sendLastAttemptAt: string | null;

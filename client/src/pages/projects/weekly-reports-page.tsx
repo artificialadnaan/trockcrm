@@ -10,6 +10,10 @@ import {
   type WeeklyReportWeekState,
 } from "@trock-crm/shared/types";
 import {
+  WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
+  weeklyReportRetryIsProviderDeduped,
+} from "@trock-crm/shared/lib/weeklyReportEmail";
+import {
   dismissWeeklyReportWeek,
   retryWeeklyReportSend,
   useWeeklyReportDashboard,
@@ -93,9 +97,14 @@ export default function WeeklyReportsPage() {
     () => dashboard.rows.filter((row) => row.state === "pending_review" || row.state === "approved"),
     [dashboard.rows],
   );
-  // `sendFailed`, not `sendError`. The server owns that judgement, and reading the raw error would count
-  // a report whose retry succeeded — the error text is left in place as the record of what happened.
-  const failed = useMemo(() => dashboard.rows.filter((row) => row.sendFailed), [dashboard.rows]);
+  // `sendFailed || sendStalled`, never the raw `sendError`. The server owns both judgements: a report
+  // whose retry succeeded keeps its error text as the record of what happened, and a send that failed
+  // WITHOUT recording anything — the delivery job's own bookkeeping goes to the same database whose
+  // absence is the likeliest reason it failed — has no error text to read at all.
+  const failed = useMemo(
+    () => dashboard.rows.filter((row) => row.sendFailed || row.sendStalled),
+    [dashboard.rows],
+  );
 
   return (
     <div className="space-y-6">
@@ -352,11 +361,20 @@ function ThisWeekTable({
                         <span className="font-semibold text-slate-400">· {row.sendAttempts} attempts</span>
                       )}
                     </div>
+                  ) : row.sendStalled ? (
+                    // Committed, never delivered, and nothing was ever written down about why. Worded
+                    // differently from "Send failed" because there is no error to show and no provider
+                    // to blame — the report simply never went anywhere.
+                    <div
+                      className="mt-1 flex items-center gap-1 text-[11.5px] font-bold text-brand-red"
+                      title="This report was marked sent but no delivery was ever recorded."
+                    >
+                      <AlertTriangle className="h-3 w-3" /> Send stuck
+                    </div>
                   ) : (
-                    // A `sent` week with no delivery yet and no error is a queued job, not a problem.
-                    // Saying "Sending…" instead of nothing is what stops a PM re-sending on top of it.
-                    row.state === "sent" &&
-                    !row.sendDeliveredAt && (
+                    // Undelivered, no error, and recent enough to still be a queued job rather than a
+                    // problem. Saying "Sending…" instead of nothing is what stops a PM re-sending on it.
+                    row.sendPending && (
                       <div className="mt-1 text-[11.5px] font-semibold text-slate-400">Sending…</div>
                     )
                   )}
@@ -370,8 +388,15 @@ function ThisWeekTable({
                   {latenessLabel(row)}
                 </td>
                 <td className="px-3.5 py-3 text-right">
-                  {row.sendFailed && row.reportId ? (
-                    <RetryButton reportId={row.reportId} onRetried={onRetried} />
+                  {(row.sendFailed || row.sendStalled) && row.sendRetryReportId ? (
+                    // `sendRetryReportId`, not `reportId`: once a PM has drafted a correction over a
+                    // failed send the live row is the unsent clone, and retrying THAT would replay a
+                    // report nobody sent.
+                    <RetryButton
+                      reportId={row.sendRetryReportId}
+                      sentAt={row.sentAt}
+                      onRetried={onRetried}
+                    />
                   ) : row.state === "approved" && row.reportId ? (
                     <Button size="sm" onClick={() => onSend(row.reportId!)}>
                       <Send className="mr-1.5 h-3.5 w-3.5" /> Send
@@ -430,8 +455,21 @@ function DismissButton({ row, onDismissed }: { row: WeeklyReportDashboardRow; on
  * Not a re-send with new recipients — the server replays the stored request under the same provider
  * idempotency key, so a job that actually succeeded before the process died cannot become a second copy
  * in the client's inbox. Reaching different people is a correction.
+ *
+ * THAT PROTECTION EXPIRES. Resend keeps an idempotency key for 24 hours and this chip lives on the board
+ * for the 26-week lookback, so a PM clicking Retry the following Monday is outside the window and the
+ * replay is a real second email. Past it the PM is told so and has to agree; the server refuses without
+ * the acknowledgement, so this dialog is the explanation, not the enforcement.
  */
-function RetryButton({ reportId, onRetried }: { reportId: string; onRetried: () => void }) {
+function RetryButton({
+  reportId,
+  sentAt,
+  onRetried,
+}: {
+  reportId: string;
+  sentAt: string | null;
+  onRetried: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   return (
     <Button
@@ -439,9 +477,20 @@ function RetryButton({ reportId, onRetried }: { reportId: string; onRetried: () 
       size="sm"
       disabled={busy}
       onClick={async () => {
+        const deduped = weeklyReportRetryIsProviderDeduped(sentAt);
+        if (
+          !deduped &&
+          !window.confirm(
+            `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the ` +
+              "mail provider will no longer treat a retry as a duplicate. If the first email did go out, " +
+              "the client will receive a second copy. Send it again?",
+          )
+        ) {
+          return;
+        }
         setBusy(true);
         try {
-          await retryWeeklyReportSend(reportId);
+          await retryWeeklyReportSend(reportId, !deduped);
           toast.success("Send queued again");
           onRetried();
         } catch (error) {
@@ -578,6 +627,14 @@ function ProjectsTable({
                     </td>
                     <td className="px-3.5 py-3 text-right font-bold tabular-nums text-slate-800">
                       {project.summary?.reportsSent ?? 0}
+                      {/* The count is DELIVERED reports, so a committed send that never got out would
+                          otherwise vanish from this tab entirely — and this tab is the only place some of
+                          them are mentioned at all. Shown next to the number it was removed from. */}
+                      {(project.summary?.undeliveredSends ?? 0) > 0 && (
+                        <div className="mt-0.5 text-[11px] font-bold text-brand-red">
+                          {project.summary!.undeliveredSends} not delivered
+                        </div>
+                      )}
                     </td>
                     <td className="px-3.5 py-3 text-slate-600">
                       {project.summary?.lastSentAt ? (

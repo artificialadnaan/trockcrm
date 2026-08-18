@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { weeklyReportRoutes } from "../src/modules/weekly-reports/routes.js";
 import { errorHandler } from "../src/middleware/error-handler.js";
 
@@ -12,9 +12,16 @@ import { errorHandler } from "../src/middleware/error-handler.js";
 //      sent_at, freeze the snapshot and light up "Sent" on the board with no email existing anywhere.
 //      The client would never receive their report and every surface would insist they had.
 //
-//   2. The send, retry and correction routes sit behind the router's role gate. `requireCrmUser` on the
-//      tenant mount admits `construction` — that is how superintendents reach the CRM at all — so without
-//      the gate any superintendent in the office could send a client-facing report themselves.
+//   2. WHO MAY SEND. The CRM's send is a LEADERSHIP action — admin or director — and this file is where
+//      that is pinned. It matters because the service layer suggests otherwise: `canPublishWeeklyReport`
+//      allows "the assigned PM or an admin/director", but the roles that may HOLD the PM slot
+//      (ASSIGNABLE_ROLES: field_contractor/construction/admin/director) do not intersect the roles these
+//      routes admit except at admin/director — so the assigned-PM arm is unreachable here and this PR
+//      ships no send capability for a PM. That capability is deferred to the T-Rock Cam field mount.
+//
+//   3. WHO MAY REWRITE THE CLIENT ADDRESSES the send modal pre-fills. The project routes are open to
+//      every `rep`, and `client_*_email` became an email sink the moment this branch turned it into
+//      `draft.recipients`.
 
 function appAs(role: string) {
   const app = express();
@@ -29,6 +36,12 @@ function appAs(role: string) {
 }
 
 const REPORT = "6b1f6f2e-9d1a-4e4a-9c2b-1f4d8a0c5e31";
+const PROJECT = "0f6d2f5a-1c2b-4a3e-8b7c-2d4e6f8a0b1c";
+const DEAL = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("the generic transition endpoint cannot send a report", () => {
   it("refuses `sent` with a 400 that names the endpoint to use instead", async () => {
@@ -72,9 +85,101 @@ describe("the send routes sit behind the role gate", () => {
     expect((await request(appAs("field_contractor"))[method](path)).status).toBe(403);
   });
 
+  it.each(SEND_ROUTES)("refuses a rep on %s", async (_label, method, path) => {
+    // A rep passes the ROUTER's own allow-list (admin/director/rep) — this refusal comes from the send
+    // routes' own narrower gate. Without it a rep reached the handler and was refused only after
+    // `loadSendTarget` had taken FOR UPDATE on two rows, and only because they happen not to be the PM.
+    expect((await request(appAs("rep"))[method](path)).status).toBe(403);
+  });
+
   it.each(SEND_ROUTES)("lets leadership past the gate on %s", async (_label, method, path) => {
     // Past the gate it reaches the handler and fails on the missing tenant client — which is exactly the
     // difference the refusals above rely on. A gate that refused everyone would pass those and fail this.
     expect((await request(appAs("director"))[method](path)).status).not.toBe(403);
+  });
+
+  it("refuses the role a real assigned PM actually holds — the deferral, stated", async () => {
+    // `construction` is what a T-Rock PM logs in as. The send service would accept them; the CRM has no
+    // route that will. Their send belongs on /api/field, which the mobile PR mounts.
+    const response = await request(appAs("construction")).post(
+      `/weekly-reports/reports/${REPORT}/send`,
+    );
+    expect(response.status).toBe(403);
+  });
+});
+
+/**
+ * The client contact fields are an EMAIL SINK, not ordinary setup data.
+ *
+ * `recipientOptionsFrom` turns `client_doc_email` and its siblings into the send modal's pre-selected
+ * recipients. The project routes admit every `rep` in the office, so without a gate any of them could
+ * typo-squat a client address on any project and wait: the next director to press Send delivers that
+ * client's report, the attached PDF and a live 180-day unauthenticated link to the attacker's mailbox,
+ * with the CRM showing an entirely ordinary send.
+ */
+describe("who may change the addresses a report is sent to", () => {
+  const contactPatch = { clientTeam: { doc: { name: "Jay", email: "jay@examp1e.com" } } };
+
+  it("refuses a rep supplying client contacts on create", async () => {
+    const response = await request(appAs("rep"))
+      .post("/weekly-reports/projects")
+      .send({ dealId: DEAL, ...contactPatch });
+    expect(response.status).toBe(403);
+    expect(String(response.body?.error?.message ?? response.body?.message ?? response.text)).toMatch(
+      /client contacts/i,
+    );
+  });
+
+  it("refuses a rep rewriting client contacts on update", async () => {
+    const response = await request(appAs("rep"))
+      .patch(`/weekly-reports/projects/${PROJECT}`)
+      .send(contactPatch);
+    expect(response.status).toBe(403);
+  });
+
+  it("still lets a rep edit the rest of the setup", async () => {
+    // The gate is specific to the contacts. Past it the handler runs and fails on the absent tenant
+    // client, which is a different outcome from the 403 — the whole distinction above rests on that.
+    const response = await request(appAs("rep"))
+      .patch(`/weekly-reports/projects/${PROJECT}`)
+      .send({ cadenceWeekday: 3 });
+    expect(response.status).not.toBe(403);
+  });
+
+  it("lets leadership set them", async () => {
+    const response = await request(appAs("director"))
+      .patch(`/weekly-reports/projects/${PROJECT}`)
+      .send(contactPatch);
+    expect(response.status).not.toBe(403);
+  });
+});
+
+/**
+ * The client link's host is config, and getting it wrong is invisible from inside the CRM.
+ *
+ * `/wr` is served by the API service; `publicViewerBaseUrl` falls back to FRONTEND_URL and then to the
+ * request's own host, so an unset var mints links against the SPA-only CRM host, which has no such route.
+ * The client's one way into their report 404s and nobody else ever sees it.
+ */
+describe("a client link is never minted against an unconfigured host", () => {
+  it("refuses the send in production BEFORE anything is minted", async () => {
+    // This used to be a console.warn AFTER commitTransaction — after the token existed, the snapshot was
+    // frozen, the report was terminally `sent` and the delivery job was queued. A warning at that point
+    // can only describe an email that has already gone.
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PUBLIC_SHARE_BASE_URL", "");
+    const response = await request(appAs("director")).post(`/weekly-reports/reports/${REPORT}/send`);
+    expect(response.status).toBe(500);
+    expect(String(response.body?.error?.message ?? response.body?.message ?? response.text)).toMatch(
+      /Nothing has been sent/i,
+    );
+  });
+
+  it("does not refuse when the host IS configured", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PUBLIC_SHARE_BASE_URL", "https://reports.trockcam.com");
+    const response = await request(appAs("director")).post(`/weekly-reports/reports/${REPORT}/send`);
+    // Falls through to the handler and dies on the missing tenant context instead — a different failure.
+    expect(response.status).not.toBe(500);
   });
 });

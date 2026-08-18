@@ -122,6 +122,51 @@ function readQueryString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/**
+ * Refuse to mint a client link when nothing says where client links live.
+ *
+ * FAILS CLOSED IN PRODUCTION, warns elsewhere. The deploy is configured today
+ * (reports.trockcam.com), so this is fragility rather than a live bug — but the cost of being wrong is a
+ * client receiving an email whose only link 404s, discoverable by nobody but them, and the send is
+ * irreversible the moment the transaction commits. A local or CI process legitimately has no such host,
+ * so the refusal is scoped to the environment where a real client is on the other end.
+ */
+function assertClientLinksAreConfigured(): void {
+  if (process.env.PUBLIC_SHARE_BASE_URL?.trim()) return;
+  if (process.env.NODE_ENV === "production") {
+    throw new AppError(
+      500,
+      "Client links are not configured (PUBLIC_SHARE_BASE_URL is unset), so the link in the client's " +
+        "email would not resolve. Nothing has been sent.",
+    );
+  }
+  console.warn(
+    "[weekly-report] PUBLIC_SHARE_BASE_URL is unset — a client link would be minted against FRONTEND_URL " +
+      "or the request host, neither of which is guaranteed to serve /wr.",
+  );
+}
+
+/**
+ * Who may rewrite the addresses the send modal pre-fills.
+ *
+ * `client_doc_email` and its three siblings are not ordinary setup fields: `recipientOptionsFrom` turns
+ * them into `draft.recipients`, PRE-SELECTED in the send dialog. The project routes are open to every
+ * `rep` in the office, so without this any of them could typo-squat a client address on any project and
+ * wait — the next director to press Send delivers that client's report, the PDF and a live 180-day
+ * unauthenticated link to the attacker's mailbox, with the CRM showing a perfectly ordinary send.
+ *
+ * The same shape is already guarded one field over: `assertAssignableUser` re-validates assignees on every
+ * patch precisely because the route admits `rep`. This is the other end of the same problem, and it became
+ * one the moment these columns turned into an email sink.
+ */
+function assertMayEditClientContacts(req: Request, body: unknown): void {
+  const clientTeam = (body as { clientTeam?: unknown } | null | undefined)?.clientTeam;
+  if (clientTeam == null) return;
+  const role = String(req.user?.role ?? "");
+  if (role === "admin" || role === "director") return;
+  throw new AppError(403, "Only an admin or director can change a project's client contacts");
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
@@ -184,6 +229,7 @@ router.get("/assignable-users", async (req, res, next) => {
 
 router.post("/projects", async (req, res, next) => {
   try {
+    assertMayEditClientContacts(req, req.body);
     const actor = actorFrom(req);
     const project = await createWeeklyReportProject(
       req.tenantClient!,
@@ -211,6 +257,7 @@ router.get("/projects/:id", async (req, res, next) => {
 
 router.patch("/projects/:id", async (req, res, next) => {
   try {
+    assertMayEditClientContacts(req, req.body);
     // No `asOf` here on purpose: pausing and resuming are recorded on the day they happen. Letting the
     // query string date a WRITE would let a caller backdate a pause over weeks that were genuinely
     // missed and clear them off the board without a dismissal.
@@ -394,13 +441,35 @@ router.post("/reports/:id/transition", async (req, res, next) => {
 // ---------------------------------------------------------------------------
 
 /**
+ * THE CRM's SEND IS A LEADERSHIP ACTION. The assigned PM's send is on the field route, and it is deferred.
+ *
+ * Stated as a role gate rather than left implicit, because implicit it was WRONG in a way that read as
+ * right. `canPublishWeeklyReport` allows "the assigned PM or an admin/director"; the router above admits
+ * admin/director/rep; and `ASSIGNABLE_ROLES` (projects-service.ts) — who may hold the PM slot at all —
+ * is field_contractor/construction/admin/director. Intersect those and the assigned-PM arm can only ever
+ * fire for somebody who is ALREADY an admin or director. A `construction` PM, which is the normal case,
+ * gets 403 at the router before any of it runs.
+ *
+ * So the shipped CRM capability is exactly "an admin or director in this office may send any of that
+ * office's client reports", and this line says so. The alternative — widening the router to admit
+ * `construction` — is deliberately NOT taken: this router is the office-wide leadership board, the client
+ * contact book and the dismissal ledger, and the construction role's CRM boundary is a known open issue.
+ *
+ * The assigned PM's own send belongs on /api/field/weekly-reports, where that PM already authenticates and
+ * where `canPublishWeeklyReport`'s assigned-PM arm becomes reachable and meaningful. That mount is the
+ * mobile PR's work (the app's Reports group has not merged), which is why every piece of composition,
+ * validation and delivery lives in send-service.ts: that PR adds a route and no logic.
+ */
+const requireWeeklyReportSender = requireRole("admin", "director");
+
+/**
  * The send modal, COMPOSED SERVER-SIDE and returned as data.
  *
  * The CRM and T-Rock Cam both render this and both post the same mutation back, which is the whole reason
  * "review from either surface" does not mean two implementations of the recipient rules, the subject line
  * and the body.
  */
-router.get("/reports/:id/send-draft", async (req, res, next) => {
+router.get("/reports/:id/send-draft", requireWeeklyReportSender, async (req, res, next) => {
   try {
     const draft = await buildWeeklyReportSendDraft(
       req.tenantClient!,
@@ -421,8 +490,15 @@ router.get("/reports/:id/send-draft", async (req, res, next) => {
  * be atomic: the `approved -> sent` transition, the frozen header snapshot, the minted 180-day token, and
  * the job row that will deliver it.
  */
-router.post("/reports/:id/send", async (req, res, next) => {
+router.post("/reports/:id/send", requireWeeklyReportSender, async (req, res, next) => {
   try {
+    // CHECKED BEFORE ANYTHING IS MINTED. This used to be a console.warn AFTER the commit — after the
+    // token existed, the snapshot was frozen, the report was terminally `sent` and the delivery job was
+    // queued. Nothing downstream of that can stop the email, so a warning there could only describe a
+    // client link that had already gone out. `publicViewerBaseUrl` falls back to FRONTEND_URL and then to
+    // the request's own host, so an unset var quietly mints links against the SPA-only CRM host, which
+    // does not serve /wr: the client's one way into their report 404s, and only the client sees it.
+    assertClientLinksAreConfigured();
     const office = officeContextFrom(req);
     const { report, shareUrl } = await sendWeeklyReport(req.tenantClient!, {
       reportId: requireUuid(req.params.id, "id"),
@@ -432,24 +508,20 @@ router.post("/reports/:id/send", async (req, res, next) => {
       shareUrlFor: (rawToken) => weeklyReportShareUrl(req, rawToken),
     });
     await req.commitTransaction!();
-
-    // Same warning the mint route carries, for the same reason: `/wr` is served by the API service, so a
-    // base URL pointing at the field host or an SPA-only frontend produces a link that 404s for the client
-    // and for nobody else — and this one has already gone into an email.
-    if (!process.env.PUBLIC_SHARE_BASE_URL?.trim()) {
-      console.warn(
-        "[weekly-report] PUBLIC_SHARE_BASE_URL is unset — a client link was minted against FRONTEND_URL " +
-          "or the request host, neither of which is guaranteed to serve /wr.",
-      );
-    }
     res.status(202).json({ report, shareUrl });
   } catch (error) {
     next(error);
   }
 });
 
-/** Queue the same message again for a send that has not reached the client. */
-router.post("/reports/:id/send/retry", async (req, res, next) => {
+/**
+ * Queue the same message again for a send that has not reached the client.
+ *
+ * `acknowledgeDuplicateRisk` is the caller confirming they understand that past the provider's 24-hour
+ * idempotency window a replay is a genuinely second email, not a no-op. Default false: silence must mean
+ * the safe answer.
+ */
+router.post("/reports/:id/send/retry", requireWeeklyReportSender, async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
     const report = await retryWeeklyReportSend(
@@ -457,6 +529,7 @@ router.post("/reports/:id/send/retry", async (req, res, next) => {
       requireUuid(req.params.id, "id"),
       actorFrom(req),
       { tenantId: office.tenantId, slug: office.slug },
+      { acknowledgeDuplicateRisk: req.body?.acknowledgeDuplicateRisk === true },
     );
     await req.commitTransaction!();
     res.status(202).json(report);
@@ -472,7 +545,7 @@ router.post("/reports/:id/send/retry", async (req, res, next) => {
  * — a correction the PM abandons half-written must not put "a newer version was issued" in front of a
  * client with nothing behind it.
  */
-router.post("/reports/:id/correction", async (req, res, next) => {
+router.post("/reports/:id/correction", requireWeeklyReportSender, async (req, res, next) => {
   try {
     const correction = await createWeeklyReportCorrection(
       req.tenantClient!,
@@ -486,12 +559,21 @@ router.post("/reports/:id/correction", async (req, res, next) => {
   }
 });
 
-// T-ROCK CAM: the same three endpoints serve the app's send modal. They are mounted here, on the CRM
-// router, which the app cannot reach — its surface is /api/field, a separate mount with its own
-// authorisation. Attaching them there is deliberately left to the mobile PR: the app's Reports group
-// (#1073) has not merged, so there is nowhere for the modal to live and a field mount added now would be
-// an unreachable, untested authorisation surface. The composition, validation and delivery are all in
-// send-service.ts precisely so that PR adds a route and no logic.
+// T-ROCK CAM — AND THE ASSIGNED PM'S SEND, WHICH DOES NOT EXIST YET.
+//
+// The four endpoints above are the LEADERSHIP send: admin/director only, as `requireWeeklyReportSender`
+// states. They are mounted on the CRM router, which the app cannot reach — its surface is /api/field, a
+// separate mount with its own authorisation.
+//
+// The assigned PM is normally a `construction` or `field_contractor` user (ASSIGNABLE_ROLES), so they are
+// refused here by design and have NO send capability in this PR. That is the deferral, stated plainly so
+// nobody reads `canPublishWeeklyReport`'s assigned-PM arm as a shipped feature: on this router that arm
+// can only ever fire for somebody who is already an admin or director, and it exists for the field mount.
+//
+// Attaching that mount is deliberately left to the mobile PR: the app's Reports group (#1073) has not
+// merged, so there is nowhere for the modal to live and a field route added now would be an unreachable,
+// untested authorisation surface. The composition, validation and delivery are all in send-service.ts
+// precisely so that PR adds a route and no logic.
 
 // ---------------------------------------------------------------------------
 // PDF + the client share link

@@ -1,6 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, Copy, Loader2, Send, X } from "lucide-react";
 import { toast } from "sonner";
+import {
+  weeklyReportGreeting,
+  weeklyReportGreetingNameFor,
+} from "@trock-crm/shared/lib/weeklyReportEmail";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -41,6 +45,17 @@ export function WeeklyReportSendDialog({
   const [pendingRecipient, setPendingRecipient] = useState("");
   const [sending, setSending] = useState(false);
   const [sentUrl, setSentUrl] = useState<string | null>(null);
+
+  // RECOMPUTED, not rendered from the draft. The server picks the greeting from the recipients it is
+  // FINALLY given (send-service.ts), while `draft.greeting` was computed from the PRE-FILLED list — so the
+  // moment the PM removes the DOC and leaves the client's PM on, the two disagree and the modal shows
+  // "Hello Jay," for an email that will read "Hello Melissa,". On a modal whose entire premise is that the
+  // PM approves exactly what the client receives, that is the one line that must not be a guess. The rule
+  // itself lives in shared, so this is the same function the server runs, not a second copy of it.
+  const greeting = useMemo(
+    () => weeklyReportGreeting(weeklyReportGreetingNameFor(draft?.recipientOptions ?? [], recipients)),
+    [draft, recipients],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -142,11 +157,21 @@ export function WeeklyReportSendDialog({
           <SentPanel url={sentUrl} onClose={onClose} />
         ) : (
           <div className="space-y-4">
-            {draft.isCorrection && (
+            {draft.isCorrection ? (
               <p className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-[13px] font-semibold text-violet-700">
                 Version {draft.version}. The client is told plainly that this replaces the copy they already
                 have, and the earlier link starts showing a notice that a newer version was issued.
               </p>
+            ) : (
+              draft.version > 1 && (
+                // A later version whose predecessor never reached the client. Saying "this replaces the
+                // copy you already have" to somebody who never received one sends them looking for an
+                // email that does not exist, so this goes out as a first copy and says so here.
+                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] font-semibold text-amber-800">
+                  Version {draft.version}. The earlier version never reached the client, so this is sent as
+                  their first copy — it does not say it replaces anything.
+                </p>
+              )
             )}
 
             <Field label="To">
@@ -211,7 +236,7 @@ export function WeeklyReportSendDialog({
             </Field>
 
             <Field label="Message">
-              <p className="mb-1.5 text-[13px] font-semibold text-slate-500">{draft.greeting}</p>
+              <p className="mb-1.5 text-[13px] font-semibold text-slate-500">{greeting}</p>
               <textarea
                 value={message}
                 onChange={(event) => setMessage(event.target.value)}

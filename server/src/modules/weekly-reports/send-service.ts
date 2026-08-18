@@ -1,13 +1,18 @@
 import crypto from "node:crypto";
 import {
+  WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
   WEEKLY_REPORT_SEND_LIMITS,
   normalizeWeeklyReportRecipients,
+  sanitizeWeeklyReportSubject,
   weeklyReportDefaultContextParagraph,
   weeklyReportEmailBodyText,
   weeklyReportEmailSubject,
   weeklyReportGreeting,
+  weeklyReportGreetingNameFor,
+  weeklyReportRetryIsProviderDeduped,
   type WeeklyReportRecipientOption,
   type WeeklyReportSenderContact,
+  type WeeklyReportSendRequest,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import { canTransitionWeeklyReport } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -46,6 +51,11 @@ export interface WeeklyReportSendDraft {
   reportId: string;
   weekOf: string;
   version: number;
+  /**
+   * True only when an earlier version of this week ACTUALLY REACHED the client — the same predicate the
+   * email uses, so the modal's "this replaces the copy they already have" banner and the sentence the
+   * client reads can never disagree. A v2 whose v1 never got out is not a correction; it is a first copy.
+   */
   isCorrection: boolean;
   propertyName: string | null;
   recipients: string[];
@@ -56,14 +66,6 @@ export interface WeeklyReportSendDraft {
   contextParagraph: string;
   sender: WeeklyReportSenderContact;
   attachPdf: boolean;
-  /**
-   * The link as it WILL read once minted, or null before the report is sent.
-   *
-   * Null is the honest answer for an unsent report: the raw token exists exactly once, at send, and only
-   * its hash is stored — so there is no way to show a working link before the PM commits to sending one.
-   * The modal says so rather than showing a fake.
-   */
-  shareUrl: string | null;
   /** The exact plain-text body the client will receive, given the values above. Preview, not input. */
   bodyPreview: string;
 }
@@ -76,20 +78,13 @@ export interface WeeklyReportSendPayload {
   attachPdf?: unknown;
 }
 
-/** Frozen onto the report row, and the ONLY thing the worker reads when it builds the message. */
-export interface WeeklyReportSendRequest {
-  recipients: string[];
-  subject: string;
-  greetingName: string | null;
-  contextParagraph: string;
-  shareUrl: string;
-  sender: WeeklyReportSenderContact;
-  attachPdf: boolean;
-  isCorrection: boolean;
-  requestedBy: string;
-  requestedAt: string;
-  requestVersion: 1;
-}
+/**
+ * Frozen onto the report row, and the ONLY thing the worker reads when it builds the message.
+ *
+ * Declared in `shared` and re-exported here: the worker reads this object out of jsonb, and while it was a
+ * server-local interface the worker's suite could only assert it against a fixture it wrote itself.
+ */
+export type { WeeklyReportSendRequest } from "@trock-crm/shared/lib/weeklyReportEmail";
 
 export interface WeeklyReportSendOffice {
   /** `offices.id` — what public.weekly_report_tokens.tenant_id and job_queue.office_id both hold. */
@@ -163,36 +158,34 @@ function senderFrom(projectRow: Record<string, any>): WeeklyReportSenderContact 
 }
 
 /**
- * Who the greeting names.
+ * Has an EARLIER version of this week's report actually reached the client?
  *
- * The first SELECTED recipient that maps to a client-team role, so removing the DOC and leaving only the
- * client's PM re-addresses the greeting to them rather than continuing to greet somebody who is no longer
- * on the email. A free-typed address matches no role and leaves the greeting generic, which is right — the
- * platform does not know whose mailbox it is.
- */
-function greetingNameFor(
-  options: WeeklyReportRecipientOption[],
-  recipients: string[],
-): string | null {
-  const byEmail = new Map(options.map((option) => [option.email.toLowerCase(), option]));
-  for (const recipient of recipients) {
-    const match = byEmail.get(recipient.toLowerCase());
-    if (match?.name) return match.name;
-  }
-  return null;
-}
-
-/**
- * The share URL already in front of this client, if any.
+ * This — not `version > 1` — is what makes a send a correction. Two very different situations produce a
+ * v2: the content was wrong, or the v1 email never got out. Only the first replaces something. Telling a
+ * client that this version "replaces the previous copy" when no previous copy ever arrived sends them
+ * hunting for an email that does not exist, and it is the second situation that is common, because a PM
+ * looking at a "Send failed" chip reaches for the most prominent button on the row.
  *
- * Only for a report that has BEEN sent — the modal reopening on a sent report shows the link that went
- * out, so "copy client link" and the send record agree. It reads the stored request rather than the token
- * table because the token table holds only hashes; the URL is unrecoverable from it by design.
+ * `send_delivered_at` is the strongest evidence the platform holds. It records that the mail provider
+ * ACCEPTED the message, not that a human read it — see the note on `retryWeeklyReportSend`.
  */
-function storedShareUrl(reportRow: Record<string, any>): string | null {
-  const request = reportRow.send_request;
-  if (!request || typeof request !== "object") return null;
-  return text((request as Record<string, unknown>).shareUrl);
+async function priorVersionReachedClient(
+  client: QueryExecutor,
+  input: { weeklyReportProjectId: string; weekOf: string; version: number },
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1
+       FROM weekly_reports
+      WHERE weekly_report_project_id = $1::uuid
+        AND week_of = $2::date
+        AND version < $3
+        AND is_active
+        AND status = 'sent'
+        AND send_delivered_at IS NOT NULL
+      LIMIT 1`,
+    [input.weeklyReportProjectId, input.weekOf, input.version],
+  );
+  return Boolean(result.rows[0]);
 }
 
 /**
@@ -200,6 +193,14 @@ function storedShareUrl(reportRow: Record<string, any>): string | null {
  *
  * Readable by anyone who may publish the report (the assigned PM or leadership) — the same gate the send
  * itself takes, because the draft exposes the client's contact addresses and the PM's phone number.
+ *
+ * IT DOES NOT RETURN A SHARE URL, for a sent report or any other. An earlier revision read the raw link
+ * back off `send_request.shareUrl` so the modal could re-show it, which made every sent report's live
+ * 180-day client link readable through the API by anyone who can open the modal — and made "This link is
+ * shown once" false. The token table stores only a hash precisely so that a database read cannot
+ * reconstruct a live link; a jsonb column that keeps the raw URL forever hands that property straight
+ * back. The link is returned exactly once, in the response to the send itself; a PM who needs another
+ * mints one from the share-link route, which is auditable.
  */
 export async function buildWeeklyReportSendDraft(
   client: QueryExecutor,
@@ -208,18 +209,21 @@ export async function buildWeeklyReportSendDraft(
 ): Promise<WeeklyReportSendDraft> {
   const { reportRow, projectRow } = await loadSendTarget(client, reportId);
   if (!canPublishWeeklyReport(projectRow, actor)) {
-    throw new AppError(403, "Only the assigned project manager can send this report to the client");
+    throw new AppError(403, "Only the assigned project manager or office leadership can send this report to the client");
   }
 
   const weekOf = toIsoDate(reportRow.week_of)!;
   const version = Number(reportRow.version ?? 1);
-  const isCorrection = version > 1;
+  const isCorrection = await priorVersionReachedClient(client, {
+    weeklyReportProjectId: reportRow.weekly_report_project_id,
+    weekOf,
+    version,
+  });
   const propertyName = text(projectRow.property_display_name);
   const options = recipientOptionsFrom(projectRow);
   const recipients = options.map((option) => option.email);
   const sender = senderFrom(projectRow);
   const contextParagraph = weeklyReportDefaultContextParagraph({ propertyName, weekOf, isCorrection });
-  const shareUrl = storedShareUrl(reportRow);
 
   return {
     reportId,
@@ -230,17 +234,16 @@ export async function buildWeeklyReportSendDraft(
     recipients,
     recipientOptions: options,
     subject: weeklyReportEmailSubject({ propertyName, weekOf }),
-    greeting: weeklyReportGreeting(greetingNameFor(options, recipients)),
+    greeting: weeklyReportGreeting(weeklyReportGreetingNameFor(options, recipients)),
     contextParagraph,
     sender,
     attachPdf: true,
-    shareUrl,
     bodyPreview: weeklyReportEmailBodyText({
-      greetingName: greetingNameFor(options, recipients),
+      greetingName: weeklyReportGreetingNameFor(options, recipients),
       contextParagraph,
       // The preview says what the sentence will look like even though the real token does not exist yet.
       // Showing the line with a placeholder beats hiding it and having the PM wonder where the link went.
-      shareUrl: shareUrl ?? "(a link is generated when you send)",
+      shareUrl: "(a link is generated when you send)",
       sender,
       isCorrection,
     }),
@@ -276,7 +279,15 @@ export function normalizeWeeklyReportSendPayload(
     throw new AppError(400, `A report can be sent to at most ${WEEKLY_REPORT_SEND_LIMITS.maxRecipients} recipients`);
   }
 
-  const subject = text(payload.subject) ?? fallback.subject;
+  // Sanitised BEFORE the length check, and before it can reach a provider: this string is handed to
+  // `resend.emails.send({ subject })` verbatim, and a CR or LF inside a header value is the classic
+  // header-injection shape. Collapsing whitespace also stops a pasted multi-line subject arriving as a
+  // subject the client's mail client renders in pieces.
+  const suppliedSubject = text(payload.subject);
+  const subject = suppliedSubject ? sanitizeWeeklyReportSubject(suppliedSubject) : fallback.subject;
+  if (!subject) {
+    throw new AppError(400, "The subject cannot be blank");
+  }
   if (subject.length > WEEKLY_REPORT_SEND_LIMITS.maxSubjectChars) {
     throw new AppError(400, `The subject is limited to ${WEEKLY_REPORT_SEND_LIMITS.maxSubjectChars} characters`);
   }
@@ -326,7 +337,7 @@ export async function sendWeeklyReport(
 ): Promise<{ report: WeeklyReportDetail; shareUrl: string; sendRequest: WeeklyReportSendRequest }> {
   const { reportRow, projectRow } = await loadSendTarget(client, input.reportId);
   if (!canPublishWeeklyReport(projectRow, input.actor)) {
-    throw new AppError(403, "Only the assigned project manager can send this report to the client");
+    throw new AppError(403, "Only the assigned project manager or office leadership can send this report to the client");
   }
   // Named before the generic ladder check so the PM is told what to do rather than merely refused. `sent`
   // is terminal for everyone, admin included — the client may already have opened the link.
@@ -339,7 +350,11 @@ export async function sendWeeklyReport(
 
   const weekOf = toIsoDate(reportRow.week_of)!;
   const version = Number(reportRow.version ?? 1);
-  const isCorrection = version > 1;
+  const isCorrection = await priorVersionReachedClient(client, {
+    weeklyReportProjectId: reportRow.weekly_report_project_id,
+    weekOf,
+    version,
+  });
   const propertyName = text(projectRow.property_display_name);
   const options = recipientOptionsFrom(projectRow);
   const sender = senderFrom(projectRow);
@@ -363,7 +378,7 @@ export async function sendWeeklyReport(
   const sendRequest: WeeklyReportSendRequest = {
     recipients: normalized.recipients,
     subject: normalized.subject,
-    greetingName: greetingNameFor(options, normalized.recipients),
+    greetingName: weeklyReportGreetingNameFor(options, normalized.recipients),
     contextParagraph: normalized.contextParagraph,
     shareUrl,
     sender,
@@ -382,13 +397,25 @@ export async function sendWeeklyReport(
     sendRequest: { request: sendRequest as unknown as Record<string, unknown>, deliveryKey },
   });
 
-  if (isCorrection) {
+  if (version > 1) {
     // Superseded HERE, at send, and not when the correction was cloned. Stamping it at clone time would
     // put "a newer version was issued" in front of a client the moment a PM started drafting a fix they
     // might never finish — pointing at a version that does not exist for them to read.
     //
-    // Only rows that are not already superseded: v1 superseded by v2 keeps pointing at v2 when v3 goes
-    // out. The banner does not name a version, and rewriting the pointer would lose the chain.
+    // Four predicates, each load-bearing:
+    //   `version < $4`          — strictly earlier. `<=` would make this version supersede ITSELF, which
+    //                             the dashboard reads as "no live report for this week".
+    //   `superseded_by_id IS NULL` — v1 superseded by v2 keeps pointing at v2 when v3 goes out. The
+    //                             banner does not name a version, and rewriting the pointer loses the chain.
+    //   `status = 'sent'`       — only a version the CLIENT WAS SENT can be superseded. An unsent draft
+    //                             stamped here would show the "a newer version was issued" notice on a
+    //                             link the client opens from the email that just arrived, for a version
+    //                             they were never sent, and nothing ever clears the stamp.
+    //   `is_active`             — a discarded report is not part of the chain.
+    //
+    // Keyed on `version > 1` rather than on `isCorrection`: a v2 whose v1 never reached the client is not
+    // a correction (the email says so), but v1 is still the older row of the same week and must stop
+    // being the live one.
     await client.query(
       `UPDATE weekly_reports
           SET superseded_by_id = $1::uuid, updated_at = now()
@@ -396,6 +423,7 @@ export async function sendWeeklyReport(
           AND week_of = $3::date
           AND version < $4
           AND is_active
+          AND status = 'sent'
           AND superseded_by_id IS NULL`,
       [input.reportId, reportRow.weekly_report_project_id, weekOf, version],
     );
@@ -444,8 +472,14 @@ async function enqueueWeeklyReportSendJob(
  * Replays the STORED request unchanged, with the SAME delivery key. Rotating the key would make this a
  * genuinely new message to the provider — and a "failed" job is not proof nothing was sent: the provider
  * can accept a message and the process die before `send_delivered_at` is stamped, which is precisely the
- * case a retry exists for. Reusing the key means the worst outcome is a no-op, not a client receiving
- * their report twice.
+ * case a retry exists for.
+ *
+ * THE KEY ONLY DEDUPES FOR 24 HOURS. Resend keeps an idempotency key for a day; the "Send failed" chip
+ * lives on the board for the 26-week lookback. So the guarantee that "the worst outcome is a no-op" holds
+ * INSIDE the window and not outside it, and a PM clicking Retry the following Monday would be sending a
+ * genuinely second copy while the UI told them it was safe. Past the window the retry is still available —
+ * an undelivered client report has to have a way forward — but it is a DELIBERATE act: the caller must
+ * pass `acknowledgeDuplicateRisk`, which the CRM only sets after saying plainly what it risks.
  *
  * A PM who needs to reach DIFFERENT people issues a correction; that is a new report row with its own key
  * and its own link, which is also the only honest way to tell the client something changed.
@@ -455,16 +489,35 @@ export async function retryWeeklyReportSend(
   reportId: string,
   actor: WeeklyReportActor,
   office: WeeklyReportSendOffice,
+  options: { acknowledgeDuplicateRisk?: boolean; now?: Date } = {},
 ): Promise<WeeklyReportDetail> {
   const { reportRow, projectRow } = await loadSendTarget(client, reportId);
   if (!canPublishWeeklyReport(projectRow, actor)) {
-    throw new AppError(403, "Only the assigned project manager can retry a send");
+    throw new AppError(403, "Only the assigned project manager or office leadership can retry a send");
   }
   if (reportRow.status !== "sent") {
     throw new AppError(409, "Only a report that has been sent can have its delivery retried");
   }
   if (reportRow.send_delivered_at) {
-    throw new AppError(409, "This report has already reached the client");
+    // Worded as what the platform can actually evidence. `send_delivered_at` records that the MAIL
+    // PROVIDER ACCEPTED the message — there is no bounce webhook anywhere in this codebase, so a report
+    // addressed to a mistyped domain is accepted, hard-bounces, and reads exactly like one that arrived.
+    // "This report has already reached the client" was a claim nothing here can support.
+    throw new AppError(
+      409,
+      "This report's email was already accepted by the mail provider — issue a correction to send it again",
+    );
+  }
+  if (
+    !options.acknowledgeDuplicateRisk &&
+    !weeklyReportRetryIsProviderDeduped(reportRow.sent_at, options.now)
+  ) {
+    throw new AppError(
+      409,
+      `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
+        "provider will no longer recognise it as a duplicate. Retrying now can put a second copy in the " +
+        "client's inbox — confirm that you want to send it again.",
+    );
   }
   const deliveryKey = text(reportRow.send_delivery_key);
   if (!reportRow.send_request || !deliveryKey) {
@@ -508,7 +561,7 @@ export async function createWeeklyReportCorrection(
 ): Promise<WeeklyReportDetail> {
   const { reportRow, projectRow } = await loadSendTarget(client, reportId);
   if (!canPublishWeeklyReport(projectRow, actor)) {
-    throw new AppError(403, "Only the assigned project manager can issue a correction");
+    throw new AppError(403, "Only the assigned project manager or office leadership can issue a correction");
   }
   if (reportRow.status !== "sent") {
     throw new AppError(409, "Only a report that has been sent needs a correction — edit it instead");
@@ -524,7 +577,26 @@ export async function createWeeklyReportCorrection(
       WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date AND is_active`,
     [reportRow.weekly_report_project_id, weekOf],
   );
-  const nextVersion = Number(latest.rows[0]?.version ?? 0) + 1;
+  const latestVersion = Number(latest.rows[0]?.version ?? 0);
+  const sourceVersion = Number(reportRow.version ?? 1);
+
+  // REFUSED when a newer version already exists, which is the difference between one correction and a
+  // pile of them. History offers "Send correction" on any sent row that is not yet superseded, and a row
+  // is only superseded when its replacement is SENT — so a PM who drafts a v2 and comes back to the same
+  // v1 row is offered the button again and gets a v3. Both land `approved`, sending v2 supersedes only v1,
+  // and the week is then left live on v3: the board says the client is still owed a report they have
+  // already received, its Send button targets a THIRD email, and a delivery failure on v2 shows no chip
+  // because the live row is v3.
+  //
+  // Refusing names the version to work on instead, which is what the PM actually wants.
+  if (latestVersion > sourceVersion) {
+    throw new AppError(
+      409,
+      `Version ${latestVersion} of this week's report already exists — finish and send that one instead ` +
+        "of starting another correction",
+    );
+  }
+  const nextVersion = latestVersion + 1;
 
   const inserted = await client.query(
     `INSERT INTO weekly_reports (

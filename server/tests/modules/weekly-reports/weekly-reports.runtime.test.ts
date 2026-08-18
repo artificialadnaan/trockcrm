@@ -525,6 +525,20 @@ async function seedDraft(projectId: string, weekOf = WEEK_OF, submissionId = U("
   return report.id;
 }
 
+/**
+ * Stand in for the delivery worker stamping a successful send.
+ *
+ * `status = 'sent'` alone means "a PM committed to sending"; the week is only SETTLED once the email
+ * actually got out, which is `send_delivered_at`. These fixtures reach `sent` through the generic
+ * transition (a path the API itself refuses), so nothing else here would ever stamp it.
+ */
+async function markDelivered(reportId: string) {
+  await pg.query(
+    `UPDATE office_dallas.weekly_reports SET send_delivered_at = now() WHERE id = $1::uuid`,
+    [reportId],
+  );
+}
+
 describe("the PM gate", () => {
   it("lets the super submit for review", async () => {
     const project = await seedProject();
@@ -632,9 +646,14 @@ describe("a sent report is immutable", () => {
     // for a report the client has already received.
     expect(detail!.sentAt).not.toBeNull();
 
+    // The counters are DELIVERED reports, not merely committed ones — "reports sent" and "last sent" are
+    // numbers a director reads to a client, and `status = 'sent'` records only that somebody pressed a
+    // button. Stamping delivery is what this fixture was implicitly assuming all along.
+    await markDelivered(id);
     const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
     expect(summary!.reportsSent).toBe(1);
     expect(summary!.lastSentAt).not.toBeNull();
+    expect(summary!.undeliveredSends).toBe(0);
   });
 
   it("refuses content edits after send", async () => {
@@ -863,6 +882,9 @@ describe("dashboard", () => {
     await transitionWeeklyReport(db, priorId, "pending_review", SUPER_ACTOR);
     await transitionWeeklyReport(db, priorId, "approved", PM_ACTOR);
     await transitionWeeklyReport(db, priorId, "sent", PM_ACTOR);
+    // SETTLED means the client got it. A `sent` week whose email never reached the provider is the one
+    // failure this board exists to catch, and it is deliberately kept — see the send suite.
+    await markDelivered(priorId);
 
     const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     expect(dashboard.rows.some((r) => r.weekOf === PRIOR_WEEK)).toBe(false);
@@ -911,6 +933,7 @@ describe("dashboard", () => {
     await transitionWeeklyReport(db, priorId, "pending_review", SUPER_ACTOR);
     await transitionWeeklyReport(db, priorId, "approved", PM_ACTOR);
     await transitionWeeklyReport(db, priorId, "sent", PM_ACTOR);
+    await markDelivered(priorId);
 
     const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
     expect(summary).toMatchObject({
