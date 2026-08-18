@@ -214,6 +214,65 @@ describe("renderFieldPhotoReportPdf page count", () => {
     expect(Math.min(...cellTextYs)).toBeGreaterThan(52);
   });
 
+  it("keeps the caption band clear of the footer at its WORST case, not just the typical one", async () => {
+    // The sibling test above runs the ordinary path: two metadata lines and a short description. This one
+    // renders the maximum a cell can hold — THREE metadata lines (the third prints only when a photo's own
+    // project differs from the report's) plus an over-long description, i.e. the composite that gets
+    // closest to the footer.
+    //
+    // WHAT THIS DOES AND DOES NOT PIN, measured rather than assumed. Two independent guards keep the band
+    // in bounds, and EITHER ONE ALONE is sufficient:
+    //   1. clampText(..., 200) — 200 chars of unbreakable text measures 53.7pt at 8pt/256pt wide
+    //   2. descriptionAvailable = band(98) - metaBlock(30) - 4 = 64pt, which ellipsises anything longer
+    // 53.7 < 64, so guard 2 is never actually reached at today's clamp; it is a backstop for if the clamp
+    // is ever raised. Verified by sabotage: removing either guard on its own leaves this test PASSING, and
+    // it only fails when BOTH are removed together. So this is a composite regression guard on "max content
+    // stays off the footer", NOT a tight discriminator for either guard individually — recorded plainly so
+    // nobody later reads a green run here as proof that one of them still works.
+    const worstCase = {
+      ...photo(1),
+      // Differs from cover.projectName, so metaLines gets its third entry.
+      projectName: "A Different Project Entirely",
+      // Longer than the 200-char clamp, so the description is capped at its maximum height, not its
+      // natural one.
+      description: "N".repeat(400),
+    };
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Doors", photos: [worstCase] }],
+    });
+    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
+      .map((m) => {
+        try {
+          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
+        } catch {
+          return "";
+        }
+      })
+      .join("\n");
+
+    const runs = [...streams.matchAll(/([\d.\-]+) [\d.\-]+ [\d.\-]+ [\d.\-]+ ([\d.\-]+) ([\d.\-]+) Tm|\/(\S+) ([\d.\-]+) Tf/g)];
+    let pending: { x: number; y: number } | null = null;
+    const cellTextYs: number[] = [];
+    for (const run of runs) {
+      if (run[2] !== undefined) {
+        pending = { x: Number(run[2]), y: Number(run[3]) };
+        continue;
+      }
+      if (run[5] !== undefined && pending) {
+        const size = Number(run[5]);
+        const inCellColumn = Math.abs(pending.x - 32) < 1 || Math.abs(pending.x - 316) < 1;
+        const inCellFontSize = Math.abs(size - 7.5) < 0.01 || Math.abs(size - 8) < 0.01;
+        if (inCellColumn && inCellFontSize) cellTextYs.push(pending.y);
+        pending = null;
+      }
+    }
+    // Three metadata lines must actually be present, or this fixture is not exercising the worst case and
+    // the assertion below would pass for the wrong reason.
+    expect(cellTextYs.length).toBeGreaterThanOrEqual(4); // >=1 description line + 3 metadata lines
+    expect(Math.min(...cellTextYs)).toBeGreaterThan(52);
+  });
+
   it("preserves a single-section custom title compactly without adding a divider page", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover,
