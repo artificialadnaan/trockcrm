@@ -456,6 +456,43 @@ describe("useDealBoard — the enabled gate", () => {
     vi.unstubAllGlobals();
   });
 
+  it("OPTS IN to the board-aggregates contract on the request URL", async () => {
+    /**
+     * The one line this asserts is `boardAggregates: "true"` in useDealBoard's param builder, and its
+     * absence is completely SILENT — which is why it needs a test rather than a comment.
+     *
+     * Drop it and the server (default OFF) omits `boardSummary`; the page's serverOmitsBoardSummary latch
+     * then sees a summary-less response and reverts the board to 1000-card requests, where every
+     * card-derived fallback is correct again. So every number on the page stays RIGHT, nothing looks
+     * broken, and the entire point of this work — the small card slice and the server-side aggregates —
+     * just stops happening. Nothing else in the client suite references the flag.
+     *
+     * It also lives in use-deals.ts, one of the files that conflicted when main was merged in, i.e.
+     * exactly where a future conflict resolution could drop it without anything going red.
+     */
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+
+    const url = String(apiMock.mock.calls[0]![0]);
+    expect(url).toContain("boardAggregates=true");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("issues exactly ONE request once enabled", async () => {
     const apiMock = vi.mocked(api);
     apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
@@ -476,6 +513,7 @@ describe("useDealBoard — the enabled gate", () => {
     expect(apiMock).toHaveBeenCalledTimes(1);
     expect(String(apiMock.mock.calls[0]![0])).toContain("/deals/pipeline?");
     expect(String(apiMock.mock.calls[0]![0])).toContain("previewLimit=50");
+    expect(String(apiMock.mock.calls[0]![0])).toContain("boardAggregates=true");
 
     await act(async () => {
       root.unmount();

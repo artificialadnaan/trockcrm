@@ -353,6 +353,10 @@ describe("getDealsForPipeline — boardSummary counts ALL matching rows, not the
     // features textually would not have guaranteed this; sharing commonConditions is what does.
     expect(containsValue(where, "00000000-0000-4000-8000-000000000088")).toBe(true);
     const text = renderSql(where);
+    // The value alone is not the claim. containsValue is a deep walk for a BOUND PARAMETER, so it would
+    // still pass if the estimator id had been wired into an OWNER predicate instead — the two features
+    // would then look composed while asking entirely different questions. Assert the COLUMN too.
+    expect(text).toContain("estimator_user_id");
     expect(text).toContain("rfp_approval_status");
     expect(text).toContain("is_bid_board_owned");
     expect(text).toContain("denial_reconfirmed");
