@@ -150,6 +150,10 @@ beforeAll(async () => {
   // 0223 too. Nothing in the PDF path reads weekly_report_pauses today, but the cadence helpers
   // these suites reach through do, and two sibling suites already failed exactly this way.
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
+  // 0226 too, for the same reason and with more teeth: it ADDS COLUMNS to weekly_reports, and every
+  // dashboard read selects them. A suite that stops at 0223 fails with "column send_delivered_at does
+  // not exist" — or worse, would swallow it inside an office-level handler and skip the office.
+  await pg.exec(migrationSql("0226_weekly_report_send"));
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
     INSERT INTO public.users (id, display_name, email, role, office_id) VALUES

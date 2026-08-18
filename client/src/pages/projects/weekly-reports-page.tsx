@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { AlertTriangle, CalendarClock, Loader2, Plus, RefreshCw, Search, Settings2 } from "lucide-react";
+import { AlertTriangle, CalendarClock, Loader2, Plus, RefreshCw, Search, Send, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/layout/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -11,6 +11,7 @@ import {
 } from "@trock-crm/shared/types";
 import {
   dismissWeeklyReportWeek,
+  retryWeeklyReportSend,
   useWeeklyReportDashboard,
   useWeeklyReportProjects,
   type WeeklyReportDashboardRow,
@@ -18,6 +19,7 @@ import {
 } from "@/hooks/use-weekly-reports";
 import { WeeklyReportProjectDialog } from "./weekly-report-project-dialog";
 import { WeeklyReportHistoryPanel } from "./weekly-report-history-panel";
+import { WeeklyReportSendDialog } from "./weekly-report-send-dialog";
 import { WeeklyReportSettingsDialog } from "./weekly-report-settings-dialog";
 
 const WEEKDAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -64,6 +66,9 @@ export default function WeeklyReportsPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editing, setEditing] = useState<WeeklyReportProject | null>(null);
   const [creating, setCreating] = useState(false);
+  // One send modal for the whole page, so opening it from This Week and from History cannot end up as two
+  // divergent copies of the same dialog.
+  const [sendingReportId, setSendingReportId] = useState<string | null>(null);
 
   const [historyRefreshSignal, setHistoryRefreshSignal] = useState(0);
 
@@ -88,7 +93,9 @@ export default function WeeklyReportsPage() {
     () => dashboard.rows.filter((row) => row.state === "pending_review" || row.state === "approved"),
     [dashboard.rows],
   );
-  const failed = useMemo(() => dashboard.rows.filter((row) => Boolean(row.sendError)), [dashboard.rows]);
+  // `sendFailed`, not `sendError`. The server owns that judgement, and reading the raw error would count
+  // a report whose retry succeeded — the error text is left in place as the record of what happened.
+  const failed = useMemo(() => dashboard.rows.filter((row) => row.sendFailed), [dashboard.rows]);
 
   return (
     <div className="space-y-6">
@@ -141,6 +148,8 @@ export default function WeeklyReportsPage() {
           olderOutstandingCounts={dashboard.data?.olderOutstandingCounts ?? {}}
           lookbackWeeks={dashboard.data?.lookbackWeeks ?? 0}
           onDismissed={refreshAll}
+          onSend={setSendingReportId}
+          onRetried={refreshAll}
         />
       )}
       {tab === "projects" && (
@@ -152,7 +161,12 @@ export default function WeeklyReportsPage() {
         />
       )}
       {tab === "history" && (
-        <WeeklyReportHistoryPanel projects={projectsQuery.projects} refreshSignal={historyRefreshSignal} />
+        <WeeklyReportHistoryPanel
+          projects={projectsQuery.projects}
+          refreshSignal={historyRefreshSignal}
+          onSend={setSendingReportId}
+          onChanged={refreshAll}
+        />
       )}
 
       {(creating || editing) && (
@@ -168,6 +182,15 @@ export default function WeeklyReportsPage() {
             setEditing(null);
             refreshAll();
           }}
+        />
+      )}
+      {sendingReportId && (
+        <WeeklyReportSendDialog
+          reportId={sendingReportId}
+          onClose={() => setSendingReportId(null)}
+          // Refresh WITHOUT closing: the dialog stays open to show the client link, which is the only
+          // moment it exists in a copyable form.
+          onSent={refreshAll}
         />
       )}
       {settingsOpen && <WeeklyReportSettingsDialog onClose={() => setSettingsOpen(false)} />}
@@ -231,6 +254,8 @@ function ThisWeekTable({
   olderOutstandingCounts,
   lookbackWeeks,
   onDismissed,
+  onSend,
+  onRetried,
 }: {
   loading: boolean;
   error: string | null;
@@ -238,6 +263,8 @@ function ThisWeekTable({
   olderOutstandingCounts: Record<string, number>;
   lookbackWeeks: number;
   onDismissed: () => void;
+  onSend: (reportId: string) => void;
+  onRetried: () => void;
 }) {
   const { sortedRows, toggle, getHeaderProps } = useTableSort(rows, THIS_WEEK_COLUMNS, {
     initialSort: { key: "daysLate", dir: "desc" },
@@ -315,10 +342,23 @@ function ThisWeekTable({
                   <Badge variant="outline" className={`${STATE_BADGE[row.state]} whitespace-nowrap`}>
                     {weeklyReportWeekStateLabel(row.state)}
                   </Badge>
-                  {row.sendError && (
-                    <div className="mt-1 flex items-center gap-1 text-[11.5px] font-bold text-brand-red">
+                  {row.sendFailed ? (
+                    <div
+                      className="mt-1 flex items-center gap-1 text-[11.5px] font-bold text-brand-red"
+                      title={row.sendError ?? undefined}
+                    >
                       <AlertTriangle className="h-3 w-3" /> Send failed
+                      {row.sendAttempts > 1 && (
+                        <span className="font-semibold text-slate-400">· {row.sendAttempts} attempts</span>
+                      )}
                     </div>
+                  ) : (
+                    // A `sent` week with no delivery yet and no error is a queued job, not a problem.
+                    // Saying "Sending…" instead of nothing is what stops a PM re-sending on top of it.
+                    row.state === "sent" &&
+                    !row.sendDeliveredAt && (
+                      <div className="mt-1 text-[11.5px] font-semibold text-slate-400">Sending…</div>
+                    )
                   )}
                 </td>
                 <td className="px-3.5 py-3 text-slate-600">{row.waitingOn ?? "—"}</td>
@@ -330,9 +370,15 @@ function ThisWeekTable({
                   {latenessLabel(row)}
                 </td>
                 <td className="px-3.5 py-3 text-right">
-                  {row.state === "not_started" && row.daysLate > 0 && (
+                  {row.sendFailed && row.reportId ? (
+                    <RetryButton reportId={row.reportId} onRetried={onRetried} />
+                  ) : row.state === "approved" && row.reportId ? (
+                    <Button size="sm" onClick={() => onSend(row.reportId!)}>
+                      <Send className="mr-1.5 h-3.5 w-3.5" /> Send
+                    </Button>
+                  ) : row.state === "not_started" && row.daysLate > 0 ? (
                     <DismissButton row={row} onDismissed={onDismissed} />
-                  )}
+                  ) : null}
                 </td>
               </tr>
             ))}
@@ -374,6 +420,38 @@ function DismissButton({ row, onDismissed }: { row: WeeklyReportDashboardRow; on
   return (
     <Button variant="ghost" size="sm" disabled={busy} onClick={onClick}>
       {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Dismiss"}
+    </Button>
+  );
+}
+
+/**
+ * Queue the SAME email again.
+ *
+ * Not a re-send with new recipients — the server replays the stored request under the same provider
+ * idempotency key, so a job that actually succeeded before the process died cannot become a second copy
+ * in the client's inbox. Reaching different people is a correction.
+ */
+function RetryButton({ reportId, onRetried }: { reportId: string; onRetried: () => void }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await retryWeeklyReportSend(reportId);
+          toast.success("Send queued again");
+          onRetried();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Couldn't retry that send");
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Retry send"}
     </Button>
   );
 }

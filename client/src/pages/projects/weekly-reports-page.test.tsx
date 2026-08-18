@@ -29,6 +29,12 @@ vi.mock("@/hooks/use-weekly-reports", () => ({
   createWeeklyReportProject: vi.fn(),
   updateWeeklyReportProject: vi.fn(),
   deleteWeeklyReportProject: vi.fn(),
+  // The send flow's exports. vi.mock replaces the WHOLE module, so anything the page or the panels
+  // import has to appear here or the import resolves to undefined at render time.
+  retryWeeklyReportSend: vi.fn(),
+  fetchWeeklyReportSendDraft: vi.fn(),
+  sendWeeklyReport: vi.fn(),
+  createWeeklyReportCorrection: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
@@ -56,6 +62,11 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     reportVersion: null,
     sentAt: null,
     sendError: null,
+    // Added with migration 0226. `sendFailed` is derived on the SERVER — the CRM and the app must not
+    // each decide what "Send failed" means — so the fixture carries it rather than the page inferring it.
+    sendDeliveredAt: null,
+    sendAttempts: 0,
+    sendFailed: false,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
     ...overrides,
@@ -158,9 +169,51 @@ describe("This Week board", () => {
   });
 
   it("surfaces a send failure rather than showing the week as done", () => {
-    mockDashboard([dashboardRow({ state: "sent", sendError: "SMTP timeout" })]);
+    // Keyed on `sendFailed`, which the server derives, rather than on `sendError` alone: the error text
+    // is deliberately LEFT in place after a retry succeeds, as the record of what happened, so a chip
+    // reading the raw error would keep shouting about a delivery that has since reached the client.
+    // `reportId` is present because a `sent` week always has a report behind it — and the retry has to
+    // address one. A fixture without it would render the chip and silently no retry button.
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendError: "SMTP timeout",
+        sendAttempts: 2,
+        sendFailed: true,
+      }),
+    ]);
     const text = renderPage();
     expect(text).toContain("Send failed");
+    expect(text).toContain("Retry send");
+  });
+
+  it("does not call a send that is merely still queued a failure", () => {
+    // No error yet — the job was enqueued seconds ago. Calling that "Send failed" would have PMs
+    // re-sending on top of deliveries that are simply in flight.
+    mockDashboard([dashboardRow({ state: "sent", sendFailed: false, sendDeliveredAt: null })]);
+    const text = renderPage();
+    expect(text).not.toContain("Send failed");
+    expect(text).toContain("Sending…");
+  });
+
+  it("stops calling it a failure once the retry has delivered it", () => {
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        sendError: "SMTP timeout",
+        sendFailed: false,
+        sendDeliveredAt: "2026-08-13T22:00:00.000Z",
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).not.toContain("Send failed");
+    expect(text).not.toContain("Sending…");
+  });
+
+  it("offers Send on an approved week, so the PM never has to leave the board", () => {
+    mockDashboard([dashboardRow({ state: "approved", reportId: "r1", waitingOn: "Adam Sherwood" })]);
+    expect(renderPage()).toContain("Send");
   });
 
   it("declares outstanding weeks hidden by the lookback window", () => {

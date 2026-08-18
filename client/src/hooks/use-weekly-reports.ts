@@ -25,6 +25,15 @@ export interface WeeklyReportDashboardRow {
   reportVersion: number | null;
   sentAt: string | null;
   sendError: string | null;
+  /** When the mail provider accepted it. Null on a `sent` week means the client has not received it. */
+  sendDeliveredAt: string | null;
+  sendAttempts: number;
+  /**
+   * Derived on the SERVER, not here — an error left over from an attempt a retry then won is not a
+   * failure, and neither is a null delivery on a send queued seconds ago. The CRM and the app must agree
+   * on what the chip means, so neither of them decides it.
+   */
+  sendFailed: boolean;
   waitingOn: string | null;
   dismissalReason: string | null;
 }
@@ -111,6 +120,8 @@ export interface WeeklyReportDetail {
   sentAt: string | null;
   sendError: string | null;
   sendAttempts: number;
+  sendDeliveredAt: string | null;
+  sendLastAttemptAt: string | null;
   pdfAvailable: boolean;
   photos: WeeklyReportPhoto[];
 }
@@ -261,6 +272,72 @@ export function transitionWeeklyReport(reportId: string, to: WeeklyReportStatus)
     method: "POST",
     json: { to },
   });
+}
+
+// --- Send ------------------------------------------------------------------------------------------
+
+export interface WeeklyReportRecipientOption {
+  role: string;
+  name: string | null;
+  email: string;
+}
+
+export interface WeeklyReportSenderContact {
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+}
+
+/**
+ * The send modal, COMPOSED BY THE SERVER.
+ *
+ * Nothing in this shape is assembled on the client — not the subject, not the greeting, not the default
+ * message. That is the whole reason the modal can be identical in the CRM and in T-Rock Cam without two
+ * implementations of the recipient rules and the wording.
+ */
+export interface WeeklyReportSendDraft {
+  reportId: string;
+  weekOf: string;
+  version: number;
+  isCorrection: boolean;
+  propertyName: string | null;
+  recipients: string[];
+  recipientOptions: WeeklyReportRecipientOption[];
+  subject: string;
+  greeting: string;
+  contextParagraph: string;
+  sender: WeeklyReportSenderContact;
+  attachPdf: boolean;
+  /** Null until the report is sent — the raw token exists exactly once, at send. */
+  shareUrl: string | null;
+  bodyPreview: string;
+}
+
+export interface WeeklyReportSendPayload {
+  recipients: string[];
+  subject: string;
+  contextParagraph: string;
+  attachPdf: boolean;
+}
+
+export function fetchWeeklyReportSendDraft(reportId: string) {
+  return api<WeeklyReportSendDraft>(`/weekly-reports/reports/${reportId}/send-draft`);
+}
+
+export function sendWeeklyReport(reportId: string, payload: WeeklyReportSendPayload) {
+  return api<{ report: WeeklyReportDetail; shareUrl: string }>(`/weekly-reports/reports/${reportId}/send`, {
+    method: "POST",
+    json: payload,
+  });
+}
+
+export function retryWeeklyReportSend(reportId: string) {
+  return api<WeeklyReportDetail>(`/weekly-reports/reports/${reportId}/send/retry`, { method: "POST" });
+}
+
+/** Clone a sent report to the next version. It is NOT sent, and the original is not superseded yet. */
+export function createWeeklyReportCorrection(reportId: string) {
+  return api<WeeklyReportDetail>(`/weekly-reports/reports/${reportId}/correction`, { method: "POST" });
 }
 
 export interface WeeklyReportAssignableUser {

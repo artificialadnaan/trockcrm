@@ -69,6 +69,10 @@
       "types": "./dist/lib/rfpVoteState.d.ts",
       "default": "./dist/lib/rfpVoteState.js"
     },
+    "./lib/weeklyReportEmail": {
+      "types": "./dist/lib/weeklyReportEmail.d.ts",
+      "default": "./dist/lib/weeklyReportEmail.js"
+    },
     "./lib/userProvisioningGuards": {
       "types": "./dist/lib/userProvisioningGuards.d.ts",
       "default": "./dist/lib/userProvisioningGuards.js"

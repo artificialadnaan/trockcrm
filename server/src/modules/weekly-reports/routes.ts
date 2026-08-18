@@ -42,6 +42,12 @@ import {
   revokeWeeklyReportToken,
   weeklyReportShareUrl,
 } from "./tokens-service.js";
+import {
+  buildWeeklyReportSendDraft,
+  createWeeklyReportCorrection,
+  retryWeeklyReportSend,
+  sendWeeklyReport,
+} from "./send-service.js";
 import { isIsoDateString } from "@trock-crm/shared/types";
 
 const router = Router();
@@ -360,6 +366,16 @@ router.put("/reports/:id/photos", async (req, res, next) => {
 
 router.post("/reports/:id/transition", async (req, res, next) => {
   try {
+    // `sent` is NOT reachable here, deliberately.
+    //
+    // The state machine can perform the transition — the send flow calls it — but reaching it through the
+    // generic endpoint would mark a report delivered, stamp `sent_at`, freeze the snapshot and light up
+    // "Sent" on the board without an email existing anywhere. The client would never receive their report
+    // and every surface would insist they had. Sending is `POST /reports/:id/send`, which composes the
+    // message, mints the link and queues the delivery in one transaction.
+    if (req.body?.to === "sent") {
+      throw new AppError(400, "Use the send endpoint to send a report to the client");
+    }
     const report = await transitionWeeklyReport(
       req.tenantClient!,
       requireUuid(req.params.id, "id"),
@@ -372,6 +388,110 @@ router.post("/reports/:id/transition", async (req, res, next) => {
     next(error);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Send + corrections
+// ---------------------------------------------------------------------------
+
+/**
+ * The send modal, COMPOSED SERVER-SIDE and returned as data.
+ *
+ * The CRM and T-Rock Cam both render this and both post the same mutation back, which is the whole reason
+ * "review from either surface" does not mean two implementations of the recipient rules, the subject line
+ * and the body.
+ */
+router.get("/reports/:id/send-draft", async (req, res, next) => {
+  try {
+    const draft = await buildWeeklyReportSendDraft(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      actorFrom(req),
+    );
+    await req.commitTransaction!();
+    res.json(draft);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Send the report to the client.
+ *
+ * Everything below the commit is a queued job. What happens INSIDE the transaction is the part that must
+ * be atomic: the `approved -> sent` transition, the frozen header snapshot, the minted 180-day token, and
+ * the job row that will deliver it.
+ */
+router.post("/reports/:id/send", async (req, res, next) => {
+  try {
+    const office = officeContextFrom(req);
+    const { report, shareUrl } = await sendWeeklyReport(req.tenantClient!, {
+      reportId: requireUuid(req.params.id, "id"),
+      office: { tenantId: office.tenantId, slug: office.slug },
+      actor: actorFrom(req),
+      payload: req.body ?? {},
+      shareUrlFor: (rawToken) => weeklyReportShareUrl(req, rawToken),
+    });
+    await req.commitTransaction!();
+
+    // Same warning the mint route carries, for the same reason: `/wr` is served by the API service, so a
+    // base URL pointing at the field host or an SPA-only frontend produces a link that 404s for the client
+    // and for nobody else — and this one has already gone into an email.
+    if (!process.env.PUBLIC_SHARE_BASE_URL?.trim()) {
+      console.warn(
+        "[weekly-report] PUBLIC_SHARE_BASE_URL is unset — a client link was minted against FRONTEND_URL " +
+          "or the request host, neither of which is guaranteed to serve /wr.",
+      );
+    }
+    res.status(202).json({ report, shareUrl });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Queue the same message again for a send that has not reached the client. */
+router.post("/reports/:id/send/retry", async (req, res, next) => {
+  try {
+    const office = officeContextFrom(req);
+    const report = await retryWeeklyReportSend(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      actorFrom(req),
+      { tenantId: office.tenantId, slug: office.slug },
+    );
+    await req.commitTransaction!();
+    res.status(202).json(report);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Clone a sent report to the next version so it can be corrected.
+ *
+ * Answers 201 with the new report. It is NOT sent by this call and it does NOT supersede the original yet
+ * — a correction the PM abandons half-written must not put "a newer version was issued" in front of a
+ * client with nothing behind it.
+ */
+router.post("/reports/:id/correction", async (req, res, next) => {
+  try {
+    const correction = await createWeeklyReportCorrection(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      actorFrom(req),
+    );
+    await req.commitTransaction!();
+    res.status(201).json(correction);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// T-ROCK CAM: the same three endpoints serve the app's send modal. They are mounted here, on the CRM
+// router, which the app cannot reach — its surface is /api/field, a separate mount with its own
+// authorisation. Attaching them there is deliberately left to the mobile PR: the app's Reports group
+// (#1073) has not merged, so there is nowhere for the modal to live and a field mount added now would be
+// an unreachable, untested authorisation surface. The composition, validation and delivery are all in
+// send-service.ts precisely so that PR adds a route and no logic.
 
 // ---------------------------------------------------------------------------
 // PDF + the client share link
