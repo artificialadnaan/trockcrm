@@ -28,7 +28,7 @@ const COVER_LOGO_Y = 334;
 const COVER_LOGO_FIT: [number, number] = [210, 210];
 
 // --- Photo grid layout (contact sheet) -----------------------------------------------------------
-// The page is a grid of identical CELLS, each one a photo tile with its caption and metadata beside it.
+// The page is a grid of identical CELLS, each one a photo tile with its caption and metadata below it.
 // PHOTO_COLUMNS x PHOTO_ROWS_PER_PAGE drives the chunking, the cell pitch and the tile size together, so
 // changing either re-flows the whole sheet consistently.
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
@@ -60,9 +60,9 @@ const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP + PHOTO_ROW_GAP) / P
  * shape, and letterboxing onto grey reads as deliberate framing where the identical letterbox on white just
  * reads as a mistake.
  *
- * FIXED at 560 rather than derived from PHOTO_ROW_PITCH, because the caption block is moving BELOW the tile
- * (next commit) and the tile has to leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT =
- * 682 - 560 = 122pt) is that room, of which ~98pt is usable once CAPTION_GAP and PHOTO_ROW_GAP are taken.
+ * FIXED at 560 rather than derived from PHOTO_ROW_PITCH, because the caption block sits BELOW the tile and
+ * the tile has to leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT = 682 - 560 =
+ * 122pt) is that room, of which ~98pt is usable once CAPTION_GAP and PHOTO_ROW_GAP are taken.
  *
  * Being a literal rather than a derivation is the trade: it no longer moves with PHOTO_ROW_PITCH, so if
  * PHOTO_ROWS_TOP/BOTTOM/GAP are ever retuned this number must be revisited by hand or the caption band
@@ -128,9 +128,9 @@ const SUMMARY_BODY_FONT_SIZE = 11;
 const SUMMARY_LINE_GAP = 4;
 
 // --- Findings layout (AI condition assessment) ---------------------------------------------------
-// A SECOND per-photo layout, opt-in via `photoLayout: "findings"`. The default grid above packs three
-// photos per page beside a 174pt caption column clamped to ~320 chars — built for short human captions and
-// structurally unable to carry a multi-sentence, multi-bullet AI finding without ellipsising most of it.
+// A SECOND per-photo layout, opt-in via `photoLayout: "findings"`. The default grid above packs two photos
+// per page over a caption band clamped to ~200 chars and ~98pt of height — built for short human captions
+// and structurally unable to carry a multi-sentence, multi-bullet AI finding without ellipsising most of it.
 // This layout inverts the proportions to match a written condition assessment: ONE photo per page, image
 // across the full content width, a subject caption under it, then the findings as bullets. Bullets flow
 // onto continuation pages (image not repeated) so a long finding is never truncated — the grid layout's
