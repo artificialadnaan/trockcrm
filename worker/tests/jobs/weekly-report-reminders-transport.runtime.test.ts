@@ -64,7 +64,17 @@ describe("sendSystemEmailWithMetadata: the real failure shapes", () => {
 
     const result = await send();
 
-    expect(result).toEqual({ success: false, messageId: null, outcome: "unknown" });
+    // `reason` is asserted EXACTLY, from the real SDK rather than from a description of it. resend@6's
+    // `fetchRequest` synthesises this literal message when its own fetch throws, and a well-formed JSON
+    // error body is passed through verbatim (`JSON.parse(rawError)`), so every string below is the
+    // provider's own — which is the point of carrying it. A caller that persists only `outcome` still
+    // cannot tell a mistyped domain from a rate limit; see weekly-report-send.ts.
+    expect(result).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "unknown",
+      reason: "application_error: Unable to fetch data. The request could not be resolved.",
+    });
     expect(fetchCalls).toHaveLength(1); // the request WAS attempted — that is what makes it ambiguous
   });
 
@@ -73,13 +83,24 @@ describe("sendSystemEmailWithMetadata: the real failure shapes", () => {
     // with the HTTP status. The message may already have been enqueued behind the gateway.
     stubFetch(async () => new Response("<html>504 Gateway Time-out</html>", { status: 504 }));
 
-    expect(await send()).toEqual({ success: false, messageId: null, outcome: "unknown" });
+    expect(await send()).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "unknown",
+      reason:
+        "application_error 504: Internal server error. We are unable to process your request right now, please try again later.",
+    });
   });
 
   it("reports UNKNOWN for a 500 with a well-formed error body", async () => {
     stubFetch(async () => errorResponse(500, "application_error", "Internal server error"));
 
-    expect(await send()).toEqual({ success: false, messageId: null, outcome: "unknown" });
+    expect(await send()).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "unknown",
+      reason: "application_error 500: Internal server error",
+    });
   });
 
   it("reports UNKNOWN for 409 concurrent_idempotent_requests — the original is still in flight", async () => {
@@ -89,7 +110,12 @@ describe("sendSystemEmailWithMetadata: the real failure shapes", () => {
       errorResponse(409, "concurrent_idempotent_requests", "Same idempotency key is being processed"),
     );
 
-    expect(await send()).toEqual({ success: false, messageId: null, outcome: "unknown" });
+    expect(await send()).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "unknown",
+      reason: "concurrent_idempotent_requests 409: Same idempotency key is being processed",
+    });
   });
 
   it("reports REJECTED for a 422 validation error — provably no email exists", async () => {
@@ -97,21 +123,39 @@ describe("sendSystemEmailWithMetadata: the real failure shapes", () => {
     // happen, so this one MUST stay distinguishable from the ambiguous failures above.
     stubFetch(async () => errorResponse(422, "validation_error", "Invalid `to` field"));
 
-    expect(await send()).toEqual({ success: false, messageId: null, outcome: "rejected" });
+    expect(await send()).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "rejected",
+      reason: "validation_error 422: Invalid `to` field",
+    });
   });
 
   it("reports REJECTED for a 401 bad API key and a 429 rate limit", async () => {
+    // The two `rejected` cases whose FIXES have nothing in common — rotate a key, or wait. They are what
+    // makes `reason` load-bearing rather than decorative for anything that shows a failure to a human.
     stubFetch(async () => errorResponse(401, "restricted_api_key", "This API key is restricted"));
-    expect(await send()).toEqual({ success: false, messageId: null, outcome: "rejected" });
+    expect(await send()).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "rejected",
+      reason: "restricted_api_key 401: This API key is restricted",
+    });
 
     stubFetch(async () => errorResponse(429, "rate_limit_exceeded", "Too many requests"));
-    expect(await send()).toEqual({ success: false, messageId: null, outcome: "rejected" });
+    expect(await send()).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "rejected",
+      reason: "rate_limit_exceeded 429: Too many requests",
+    });
   });
 
   it("reports DELIVERED on success, and on the already-delivered idempotency answer", async () => {
     stubFetch(async () =>
       new Response(JSON.stringify({ id: "msg-1" }), { status: 200, headers: { "content-type": "application/json" } }),
     );
+    // No `reason` on a success — there is nothing to explain.
     expect(await send()).toEqual({ success: true, messageId: "msg-1", outcome: "delivered" });
 
     // 409 invalid_idempotent_request = this key already went out under a DIFFERENT payload, i.e. delivered.
@@ -147,7 +191,12 @@ describe("sendSystemEmailWithMetadata: the real failure shapes", () => {
 
     const result = await sendSystemEmailWithMetadata([], "Subject", "<p>x</p>");
 
-    expect(result).toEqual({ success: false, messageId: null, outcome: "rejected" });
+    expect(result).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "rejected",
+      reason: "no recipients remained after the EMAIL_OVERRIDE_RECIPIENT redirect",
+    });
     expect(fetchCalls).toEqual([]); // nothing was sent, so a retry is safe
   });
 
@@ -157,7 +206,14 @@ describe("sendSystemEmailWithMetadata: the real failure shapes", () => {
 
     const result = await sendSystemEmailWithMetadata("a@example.com", "Subject", "<p>x</p>");
 
-    expect(result).toEqual({ success: false, messageId: null, outcome: "rejected" });
+    // The one production failure that never reaches Resend, and the one whose fix is an env var rather
+    // than anything about the message. Without the reason it reads exactly like a malformed address.
+    expect(result).toEqual({
+      success: false,
+      messageId: null,
+      outcome: "rejected",
+      reason: "RESEND_API_KEY is not configured on this service, so no request was made",
+    });
     expect(fetchCalls).toEqual([]);
   });
 });
