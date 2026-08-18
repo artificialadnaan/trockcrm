@@ -10,6 +10,13 @@ waiting — see [What runs today](#what-runs-today) for exactly where the line i
 > **Local only.** Nothing here touches production. The seed script refuses any database whose host is
 > not `localhost`. If you ever find yourself wanting a Railway connection string for this, stop.
 
+**Where this runs.** Every command below assumes a checkout at
+`/Users/adnaaniqbal/Developer/trockcrm-wr-e2e` — a worktree of the main repo, created off `origin/main`
+on branch `e2e/weekly-reports-runbook` and given its own `npm install`. Any checkout of this branch
+works; use a dedicated one rather than the main checkout, which usually sits on other work, and
+**never** one of the `.claude/worktrees/*` trees, which have live PRs in them. A worktree with no
+`node_modules` of its own resolves `shared` to the main checkout and will lie to you.
+
 ---
 
 ## 0. What runs today
