@@ -107,6 +107,20 @@ of them encode real constraints:
   below the `use` passes every other test in the file and silently reintroduces the outage.
 - B1's four endpoints **do** write, so they belong **below** the `use`, unlike `/dictation`.
 
+## ⚠️ Second known collision — B3 × PR5 in `dashboard-service.ts`
+
+B3 (sweep) branches off PR5 at `2bb4bcb90` and moves `WEEKLY_REPORT_SEND_STALL_MINUTES` plus the
+max(`sent_at`, `send_last_attempt_at`) arithmetic **out of `dashboard-service.ts`** into
+`shared/src/lib/weeklyReportSendStall.ts`, leaving the service importing and re-exporting it. PR5 has
+since taken the dashboard corrections, which rewrote the `settled` predicate in the same file. **Expect a
+conflict when B3 rebases onto the merged PR5** — both edits are wanted, neither supersedes the other.
+
+Resolve toward: B3's shared-module extraction *and* PR5's
+`!undeliveredByKey.has(key) && (dismissalByKey.has(key) || deliveredByKey.has(key))`. Verify afterwards
+that the board and the sweep still read the same stall clock, which is the entire point of the
+extraction — a sweep that announces a stall the board renders as "Sending…" is the drift it exists to
+prevent.
+
 ## Corrections to this plan, found during implementation
 
 - **`mobile/` runs jest, not vitest.** "`TZ=UTC npm run test:ci` per workspace" does not apply there —

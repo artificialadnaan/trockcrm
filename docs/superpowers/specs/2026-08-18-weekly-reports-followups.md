@@ -132,11 +132,22 @@ CREATE INDEX weekly_reports_send_undelivered_idx
 ### What to build
 A worker sweep over that index, plus a notification.
 
-**Age stalled sends against `send_last_attempt_at`, never `sent_at`.** This is the specific bug 0226 was
-written to fix: `sent_at` is stamped once when the sender commits and never moves, so every legitimate
-retry read as "Send stuck". `send_attempts` alone cannot distinguish "failed twice an hour ago and gave
-up" from "failed twice in the last minute and is still retrying" — which is the whole difference between
-a chip somebody must act on and one they should leave alone.
+**Age stalled sends against `max(sent_at, send_last_attempt_at)`.**
+
+⚠️ **Corrected 2026-08-18, during implementation.** This section originally said "against
+`send_last_attempt_at`, **never** `sent_at`", and taken literally that is **wrong** —
+`send_last_attempt_at` is NULL in precisely the case this feature exists for, a job that dead-lettered
+having written nothing. PR5's board already had it right: `lastSendActivityAt` takes the later of the
+two. B3 moved that arithmetic and the stall constant into `shared/src/lib/weeklyReportSendStall.ts` so
+the board and the sweep cannot disagree — otherwise the sweep could announce a stall the board is still
+rendering as "Sending…".
+
+The *intent* behind the original wording stands and is what to preserve: **never age off `sent_at`
+alone.** That is the specific bug 0226 was written to fix — `sent_at` is stamped once when the sender
+commits and never moves, so every legitimate retry read as "Send stuck". And `send_attempts` alone
+cannot distinguish "failed twice an hour ago and gave up" from "failed twice in the last minute and is
+still retrying", which is the whole difference between a chip somebody must act on and one they should
+leave alone.
 
 ### Failure modes to design against
 - **Migrations do not auto-run on the worker in this repo.** The API runs the runner before start; the
