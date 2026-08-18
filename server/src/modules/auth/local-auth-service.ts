@@ -59,7 +59,9 @@ function computeLockoutUntil(baseDate: Date): Date {
   return new Date(baseDate.getTime() + LOCKOUT_WINDOW_MINUTES * 60 * 1000);
 }
 
-function validatePasswordPolicy(password: string) {
+// Exported so callers can enforce the policy BEFORE taking a destructive step. The reset route checks
+// it before consuming the single-use token, so a too-short password does not burn the user's link.
+export function validatePasswordPolicy(password: string) {
   if (password.length < PASSWORD_MIN_LENGTH) {
     throw new AppError(
       400,

@@ -51,6 +51,7 @@ import {
   loginWithLocalPassword,
 } from "./local-auth-service.js";
 import { loginMobileUser } from "./mobile-auth-service.js";
+import { validatePasswordPolicy } from "./local-auth-service.js";
 import {
   applyPasswordReset,
   consumeResetToken,
@@ -789,15 +790,20 @@ router.post("/password-reset/complete", authLimiter, async (req, res, next) => {
       return;
     }
 
+    // Policy check BEFORE consuming, because consuming is destructive. Validating afterwards would burn
+    // the user's single-use link on a typo -- they would be told their password was too short AND have
+    // to request a whole new email to try again.
+    validatePasswordPolicy(password);
+
     const userId = await consumeResetToken(dbClient, token);
     if (!userId) {
       res.status(400).json({ error: { message: GENERIC_RESET_FAILURE } });
       return;
     }
 
-    // Anything thrown from here on is a real error (most often the 12-character policy) and is passed
-    // to the error handler unchanged. Reporting a policy rejection as GENERIC_RESET_FAILURE would send
-    // the user back for another email when their link was fine and only their password was not.
+    // Anything thrown from here on is a real error and is passed to the error handler unchanged, never
+    // flattened into GENERIC_RESET_FAILURE -- telling someone their link is dead when it was fine sends
+    // them back for an email they do not need.
     await applyPasswordReset(userId, password);
     res.json({ ok: true });
 

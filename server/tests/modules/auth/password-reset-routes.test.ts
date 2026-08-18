@@ -29,11 +29,19 @@ vi.mock("../../../src/middleware/rate-limit.js", () => ({
 
 vi.mock("../../../src/modules/auth/password-reset-service.js", () => serviceMocks);
 
-vi.mock("../../../src/modules/auth/local-auth-service.js", () => ({
-  loginWithLocalPassword: vi.fn(),
-  changeLocalPassword: vi.fn(),
-  getUserLocalAuthGate: vi.fn().mockResolvedValue({ mustChangePassword: false }),
-}));
+vi.mock("../../../src/modules/auth/local-auth-service.js", async () => {
+  // importActual, so validatePasswordPolicy is the REAL policy rather than a hand-copied duplicate that
+  // could drift from the 12-character minimum this suite asserts on.
+  const actual = await vi.importActual<
+    typeof import("../../../src/modules/auth/local-auth-service.js")
+  >("../../../src/modules/auth/local-auth-service.js");
+  return {
+    ...actual,
+    loginWithLocalPassword: vi.fn(),
+    changeLocalPassword: vi.fn(),
+    getUserLocalAuthGate: vi.fn().mockResolvedValue({ mustChangePassword: false }),
+  };
+});
 
 const { authRoutes } = await import("../../../src/modules/auth/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
@@ -168,21 +176,34 @@ describe("POST /api/auth/password-reset/complete", () => {
     expect(serviceMocks.consumeResetToken).not.toHaveBeenCalled();
   });
 
-  it("surfaces a password-policy rejection instead of the generic link failure", async () => {
-    // The link WAS valid; the chosen password was not. Telling the user "your link is dead" here would
-    // send them back for another email they do not need.
-    serviceMocks.consumeResetToken.mockResolvedValueOnce("user-1");
-    const { AppError } = await import("../../../src/middleware/error-handler.js");
-    serviceMocks.applyPasswordReset.mockRejectedValueOnce(
-      new AppError(400, "Password must be at least 12 characters")
-    );
-
+  it("rejects a too-short password WITHOUT consuming the token, so the link survives a typo", async () => {
     const res = await request(createTestApp())
       .post("/api/auth/password-reset/complete")
       .send({ token: "good", password: "short" });
 
     expect(res.status).toBe(400);
     expect(res.body?.error?.message).toContain("at least 12 characters");
+    // The important half: burning the link on a typo would force a whole new email to try again.
+    expect(serviceMocks.consumeResetToken).not.toHaveBeenCalled();
+    expect(serviceMocks.applyPasswordReset).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a post-consume failure as itself, not as the generic link failure", async () => {
+    // The link WAS valid and WAS consumed; the write then failed. Reporting that as "your link is no
+    // longer valid" would be actively misleading -- the link is gone, and a new one would fail too.
+    // Password is deliberately policy-VALID so the failure comes from applyPasswordReset and not from
+    // the pre-consume policy check.
+    serviceMocks.consumeResetToken.mockResolvedValueOnce("user-1");
+    const { AppError } = await import("../../../src/middleware/error-handler.js");
+    serviceMocks.applyPasswordReset.mockRejectedValueOnce(new AppError(409, "Local login is not enabled"));
+
+    const res = await request(createTestApp())
+      .post("/api/auth/password-reset/complete")
+      .send({ token: "good", password: ["correct", "horse", "battery"].join("-") });
+
+    expect(serviceMocks.consumeResetToken).toHaveBeenCalled();
+    expect(res.status).toBe(409);
+    expect(res.body?.error?.message).toContain("Local login is not enabled");
   });
 });
 
