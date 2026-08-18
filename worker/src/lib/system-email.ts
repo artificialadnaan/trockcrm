@@ -43,9 +43,61 @@ export interface SendSystemEmailOptions {
   attachments?: SendSystemEmailAttachment[];
 }
 
+/**
+ * What we actually LEARNED about a send. `success` alone cannot express it.
+ *
+ *   • `delivered` — the provider accepted the message (or told us this key was already used, which means
+ *     the original payload went out). `success` is true for exactly this outcome and no other.
+ *   • `rejected`  — the request positively failed and created NOTHING: a validation error, a bad key, a
+ *     rate limit, or a pre-flight bail before the request was ever made. Re-sending is safe.
+ *   • `unknown`   — we never learned the outcome. A transport failure, a 5xx, or a 409 telling us an
+ *     identical request is still in flight. The message MAY have been accepted and delivered.
+ *
+ * The third case is not hypothetical and it is not reachable as an exception. `resend@6` wraps its whole
+ * `fetch` in `try { ... } catch { return { error: { name: "application_error", statusCode: null } } }`
+ * (see `fetchRequest` in its dist), so a socket hang-up, a DNS failure and a gateway timeout ALL arrive
+ * here as an ordinary error result — indistinguishable, without this field, from "the address was
+ * malformed and nothing was sent". A caller that cannot tell those apart either re-sends a message that
+ * was already delivered or silently drops one that never was; both are live bugs in a job whose retry is
+ * keyed on the payload. Callers that only ever read `success` are unaffected.
+ */
+export type SendSystemEmailOutcome = "delivered" | "rejected" | "unknown";
+
+/**
+ * NOTE for anyone adding a send stub in a test: the compiler will NOT tell you this type has three fields.
+ * `worker/tsconfig.typecheck.json` builds a program of `src/**` only, so nothing under `worker/tests/**`
+ * is type-checked at all (see the note at the top of that file), and ~93 stubs there still return
+ * `{success, messageId}`. They compile, they run, and they cannot express the ambiguous outcome their
+ * callers branch on. Give a new stub the `outcome` by hand until that config is widened.
+ */
 export interface SendSystemEmailResult {
   success: boolean;
   messageId: string | null;
+  /** Invariant: `success === (outcome === "delivered")`. */
+  outcome: SendSystemEmailOutcome;
+}
+
+/**
+ * Split a provider error into "definitely created nothing" and "we do not know".
+ *
+ * Keyed on the HTTP status rather than on `error.name`, because the name space is the provider's to grow
+ * and an unrecognised name must not silently read as a definitive rejection. Anything we cannot positively
+ * place — no numeric status (the transport-failure shape), a 5xx, or an in-flight idempotency conflict —
+ * is `unknown`. That default is the conservative one: over-reporting `unknown` costs a retry we decline to
+ * make, over-reporting `rejected` costs a duplicate delivery.
+ */
+function classifySendFailure(error: unknown): "rejected" | "unknown" {
+  const statusCode = (error as { statusCode?: unknown } | null)?.statusCode;
+  // `application_error` + `statusCode: null` is resend's swallowed-fetch shape: no request outcome exists.
+  if (typeof statusCode !== "number") return "unknown";
+  // 5xx: the request reached a server that may well have enqueued it before failing.
+  if (statusCode >= 500) return "unknown";
+  // 408 (server gave up mid-request) and 409 `concurrent_idempotent_requests` (an identical send is still
+  // in flight, and its outcome is the one that counts) are ambiguous by definition.
+  if (statusCode === 408 || statusCode === 409) return "unknown";
+  // Every other 4xx — validation, auth, payload too large, rate limit — was refused before an email existed.
+  if (statusCode >= 400) return "rejected";
+  return "unknown";
 }
 
 export async function sendSystemEmailWithMetadata(
@@ -90,7 +142,8 @@ export async function sendSystemEmailWithMetadata(
   if (!resend) {
     if (process.env.NODE_ENV === "production") {
       console.error("[Email] RESEND_API_KEY is not configured in production");
-      return { success: false, messageId: null };
+      // No request was ever made, so nothing was delivered — a definitive rejection, not an unknown.
+      return { success: false, messageId: null, outcome: "rejected" };
     }
     console.log("[Email:dev] Would send email:");
     if (override) console.log(`  [override active -> ${recipients.join(", ")}]`);
@@ -103,12 +156,13 @@ export async function sendSystemEmailWithMetadata(
       console.log(`  Attachments: ${options.attachments.map((a) => a.filename).join(", ")}`);
     }
     console.log(`  Body: ${body.substring(0, 200)}...`);
-    return { success: true, messageId: null };
+    return { success: true, messageId: null, outcome: "delivered" };
   }
 
   if (recipients.length === 0) {
     console.warn("[Email] No recipients after override - skipping");
-    return { success: false, messageId: null };
+    // Bailed before the request: nothing was sent and re-sending is safe.
+    return { success: false, messageId: null, outcome: "rejected" };
   }
 
   // Resend's post-encoding attachment limit is ~40MB and base64 inflates raw bytes by ~33%, so warn well
@@ -139,21 +193,23 @@ export async function sendSystemEmailWithMetadata(
     // Resend returns 409 `invalid_idempotent_request` when this key was already used with a DIFFERENT payload —
     // i.e. the email was already delivered under the original payload (e.g. SYSTEM_EMAIL_BCC changed between the
     // original send and this retry across a redeploy). Treat ONLY that as delivered so the caller stamps 'sent'
-    // instead of stranding on a re-send it can never win. Everything else falls through to the normal failure/retry
-    // path — including `concurrent_idempotent_requests` (the original is still in flight, so its outcome is unknown)
-    // and a malformed-key validation error (the email was never sent).
+    // instead of stranding on a re-send it can never win. Everything else falls through to the normal failure path
+    // with `outcome` set by classifySendFailure — which is what keeps `concurrent_idempotent_requests` (the original
+    // is still in flight, so its outcome is unknown) distinguishable from a malformed-key validation error (the
+    // email was definitively never sent). Both used to arrive at the caller as an undifferentiated `{success:false}`.
     const err = result.error as { name?: string };
     if (options.idempotencyKey != null && err.name === "invalid_idempotent_request") {
       console.warn(`[Email] invalid_idempotent_request for "${subjectLine}" — already delivered, treating as sent`);
-      return { success: true, messageId: null };
+      return { success: true, messageId: null, outcome: "delivered" };
     }
-    console.error("[Email] Resend error:", result.error);
-    return { success: false, messageId: null };
+    const outcome = classifySendFailure(result.error);
+    console.error(`[Email] Resend error (outcome: ${outcome}):`, result.error);
+    return { success: false, messageId: null, outcome };
   }
 
   const tag = override ? " [override]" : "";
   console.log(`[Email] Sent${tag}: "${subjectLine}" to ${recipients.join(", ")} (id: ${result.data?.id})`);
-  return { success: true, messageId: result.data?.id ?? null };
+  return { success: true, messageId: result.data?.id ?? null, outcome: "delivered" };
 }
 
 function fromAddress(): string {

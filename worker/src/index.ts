@@ -12,6 +12,7 @@ import { runEmailSync } from "./jobs/email-sync.js";
 import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
+import { runWeeklyReportReminders } from "./jobs/weekly-report-reminders.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
@@ -211,6 +212,27 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: activity drop detection at 7:00 AM CT daily");
+
+  // Weekly Reports reminders: 7:00 AM CT daily, with catch-up ticks at 9 and 11.
+  //
+  // Daily rather than on a fixed weekday because each project carries its OWN cadence_weekday — the job
+  // derives per-project due dates and only emails the ones landing on t-2, t-1 or today, so most days it
+  // sends nothing for most projects.
+  //
+  // The catch-up ticks are not belt-and-braces. A reminder is bound to a LEAD TIME, so tomorrow's 07:00
+  // run is not a retry of today's: by then t-2 has become t-1 and the due date has passed. Without a
+  // second attempt inside the same day, one Resend 5xx or a saturated connection pool at 07:00 means that
+  // reminder is never sent at all. Re-running is free — weekly_report_reminders_sent makes an already-sent
+  // reminder a no-op, and the advisory lock keeps overlapping ticks single-flight.
+  cron.schedule("0 7,9,11 * * *", async () => {
+    console.log("[Worker:cron] Running weekly report reminders...");
+    try {
+      await runWeeklyReportReminders();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report reminders failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: weekly report reminders at 7:00 AM CT daily (catch-up 9 & 11 AM)");
 
   // Weekly digest: Monday at 7:00 AM CT
   cron.schedule("0 7 * * 1", async () => {
