@@ -109,7 +109,7 @@ beforeAll(async () => {
       sales_source_user_id uuid, bid_board_office text, bid_board_status text,
       bid_board_sales_price_per_area text, bid_board_project_cost numeric,
       bid_board_profit_margin_pct numeric, bid_board_total_sales numeric,
-      bid_board_created_at timestamptz, bid_board_due_date date, bid_board_customer_name text,
+      bid_board_created_at timestamptz, bid_board_due_date date, bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text, bid_board_customer_name text,
       bid_board_customer_contact_raw text, bid_board_stage_slug text, bid_board_stage_family text,
       bid_board_stage_status text, bid_board_stage_entered_at timestamptz,
       bid_board_last_updated_at timestamptz, bid_estimate numeric, awarded_amount numeric,
@@ -153,7 +153,11 @@ beforeAll(async () => {
       estimate_updated_count int DEFAULT 0, estimate_updated_higher_count int DEFAULT 0,
       estimate_updated_lower_count int DEFAULT 0, estimate_skipped_no_value_count int DEFAULT 0,
       estimate_skipped_no_change_count int DEFAULT 0, estimate_warning_count int DEFAULT 0,
-      estimate_skipped_terminal_count int DEFAULT 0, status text DEFAULT 'received',
+      estimate_skipped_terminal_count int DEFAULT 0,
+      -- Migration 0222 (Bid Board Due Date read-back). Every ingest run writes this column, so a fixture
+      -- missing it fails the whole run — which is exactly the signal it should give.
+      bid_due_date_updated_count int NOT NULL DEFAULT 0,
+      status text DEFAULT 'received',
       errors jsonb DEFAULT '[]', warnings jsonb DEFAULT '[]',
       unmatched_project_numbers jsonb DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now()
     );

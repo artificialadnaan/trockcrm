@@ -103,8 +103,17 @@ function genuineEstimatingStageSqlPredicate(identifierPath?: string): string {
  *
  * REQUIRED COLUMNS at the caller's alias: `stage_id`, `bid_due_date`, `expected_close_date`. A future CTE
  * that projects an explicit narrow column list will fail at runtime here; pass `deals`/`d`/`SELECT d.*`.
+ *
+ * EXPORTED so an operator census can PRINT the horizon date a verdict was measured against (old vs new)
+ * rather than hand-rolling the CASE/COALESCE a second time and quietly disagreeing with the app. The
+ * predicate below remains the thing to reach for when you only need the verdict.
  */
-function holdHorizonDateSql(identifierPath?: string): string {
+export function holdHorizonDateSql(identifierPath?: string): string {
+  // Validated HERE as well as in closeTargetFarOutSqlPredicate now that this is a public entry point —
+  // the alias reaches raw SQL either way, so the guard has to sit on every door, not just the old one.
+  if (identifierPath && !SQL_IDENTIFIER_PATH.test(identifierPath)) {
+    throw new Error(`Invalid hold horizon SQL identifier: ${identifierPath}`);
+  }
   const column = (name: string) => (identifierPath ? `${identifierPath}.${name}` : name);
   return (
     `CASE WHEN ${genuineEstimatingStageSqlPredicate(identifierPath)} ` +

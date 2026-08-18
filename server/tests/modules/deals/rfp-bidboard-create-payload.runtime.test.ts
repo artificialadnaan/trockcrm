@@ -54,7 +54,11 @@ async function setup() {
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric,
       estimator text, bid_board_estimator text,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
-      description text, bid_due_date timestamptz, bid_board_due_date date, created_at timestamptz DEFAULT now(),
+      description text, bid_due_date timestamptz, bid_board_due_date date, bid_board_project_number text,
+      -- migration 0225: the resolver requires this provenance stamp, not a coincidental day match.
+      bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text,
+      -- migration 0200: the resolver refuses the Bid Board override on a severed deal.
+      bid_board_detached_at timestamptz, created_at timestamptz DEFAULT now(),
       rfp_approval_request_event_id uuid, rfp_approval_request_id integer,
       assigned_rep_id uuid, hubspot_owner_email text, created_by_user_id uuid,
       company_id uuid, primary_contact_id uuid, source_lead_id uuid
@@ -80,13 +84,13 @@ async function setup() {
   await db.query(`INSERT INTO leads (id, bid_due_date) VALUES ($1, '2026-09-15T00:00:00Z')`, [LEAD]);
   await db.query(
     `INSERT INTO deals (
-       id, name, deal_number, project_number, project_type, workflow_route,
+       id, name, deal_number, project_number, bid_board_project_number, project_type, workflow_route,
        awarded_amount, description, estimator,
        property_address, property_city, property_state, property_zip, property_country,
        bid_due_date, rfp_approval_request_event_id, rfp_approval_request_id,
        assigned_rep_id, company_id, primary_contact_id, source_lead_id
      ) VALUES (
-       $1, 'Jason Ranches', 'TR-2001', 'TR-2001', 'roofing', 'normal',
+       $1, 'Jason Ranches', 'TR-2001', 'TR-2001', 'TR-2001', 'roofing', 'normal',
        '125000.00', 'Full roof replacement', 'Colby',
        '100 Main St', 'Dallas', 'TX', '75001', 'US',
        '2026-08-01T00:00:00Z', $2, NULL,
@@ -121,7 +125,15 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     expect(deal.description).toBe("Full roof replacement");
     expect(deal.estimator).toBe("Colby");
     expect(deal.address).toEqual({ street: "100 Main St", city: "Dallas", state: "TX", zip: "75001", country: "US" });
-    expect(deal.dueDate).toContain("2026-08-01"); // deal's own bid_due_date
+    // The deal's OWN bid_due_date (2026-08-01), NOT the source lead's (2026-09-15) — with
+    // BID_BOARD_DUE_DATE_READBACK off, which is the default this test runs under.
+    //
+    // ⚠️ This is DELIBERATE PARITY, not a stale expectation. The RFP payload's deal-column-first ordering
+    // is backwards relative to the other two read sites (the lead owns the field), and the flag-ON branch
+    // corrects it — see the describe block at the bottom of this file. The correction is gated because
+    // this value leaves the CRM for SyncHub and is typed into the Procore Bid Board project's Due Date, so
+    // it must not change before the census has been read. Do not "fix" this line to 2026-09-15.
+    expect(deal.dueDate).toContain("2026-08-01");
     expect(deal.name).toBe("Jason Ranches");
     expect(deal.projectNumber).toBe("TR-2001");
     // Resolved owner (assigned rep -> users) — NOT null:
@@ -153,5 +165,135 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     expect(body.deal.name).toBe("Untitled Deal");
     expect(body.deal.ownerEmail ?? null).toBeNull();
     expect(body.deal.companyName ?? null).toBeNull();
+  });
+
+  /**
+   * The RFP payload is the THIRD read site of the shared bid-due-date resolver, alongside the deal-detail
+   * banner and getResolvedDeal — and the ONLY one whose flag-OFF branch is not the shared precedence.
+   *
+   * The fixture is lead-backed with a deal column of 2026-08-01 and a lead of 2026-09-15, so every case
+   * identifies exactly which source won. `mirror` sets deals.bid_board_due_date; `landed` additionally
+   * rewrites the deal column to that day, modelling the state AFTER the write-through has run — the only
+   * state in which the Bid Board override fires at all (the mirror is a signal, never a value).
+   */
+  describe("Bid Board due-date read-back in the payload", () => {
+    async function dueDateFor(options: {
+      env?: string;
+      mirror?: string;
+      landed?: string;
+      detached?: boolean;
+      /** Stamp the provenance against a DIFFERENT project than the deal is on (the re-link shape). */
+      stampedProject?: string;
+    }): Promise<string> {
+      pg = await setup();
+      const boardDay = options.landed ?? options.mirror;
+      if (boardDay) {
+        await pg!.query(`UPDATE deals SET bid_board_due_date = $2 WHERE id = $1`, [DEAL, boardDay]);
+      }
+      if (options.landed) {
+        // Both halves of the signal, exactly as writeBidDueDateIfNeeded writes them: the value AND the
+        // provenance stamp. Setting only the value would model the COINCIDENCE case, not a landed write.
+        await pg!.query(
+          `UPDATE deals
+              SET bid_due_date = $2::timestamptz,
+                  bid_due_date_from_bid_board_at = now(),
+                  bid_due_date_bid_board_project_number = COALESCE($3, bid_board_project_number)
+            WHERE id = $1`,
+          [DEAL, `${options.landed}T00:00:00.000Z`, options.stampedProject ?? null]
+        );
+      }
+      if (options.detached) {
+        await pg!.query(`UPDATE deals SET bid_board_detached_at = now() WHERE id = $1`, [DEAL]);
+      }
+      const tdb: any = drizzle(pg as any);
+      if (options.env === undefined) delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      else process.env.BID_BOARD_DUE_DATE_READBACK = options.env;
+      try {
+        await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+      } finally {
+        delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      }
+      const jobs = (await pg!.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+      return jobs[0].payload.body.deal.dueDate;
+    }
+
+    it("flag OFF: the DEAL column wins over the lead — the legacy ordering, unchanged", async () => {
+      expect(await dueDateFor({})).toContain("2026-08-01");
+    });
+
+    it("flag OFF: a LANDED Bid Board date is ignored and the legacy ordering still holds", async () => {
+      // Both gated legs at once, on the fixture where the flag would otherwise change the answer.
+      expect(await dueDateFor({ landed: "2026-12-24" })).toContain("2026-12-24");
+      // (the landed column IS 2026-12-24, so the legacy deal-column-first rule returns it too — the
+      // meaningful flag-off assertion is the lead-masking one below)
+      expect(await dueDateFor({ mirror: "2026-12-24" })).toContain("2026-08-01");
+    });
+
+    it("flag ON: the precedence CORRECTION lands — the lead beats an un-landed deal column", async () => {
+      expect(await dueDateFor({ env: "true" })).toContain("2026-09-15");
+      expect(await dueDateFor({ env: "true", mirror: "2026-12-24" })).toContain("2026-09-15");
+    });
+
+    it("flag ON: once the board's date has LANDED in the column, that column beats the lead", async () => {
+      expect(await dueDateFor({ env: "true", landed: "2026-12-24" })).toContain("2026-12-24");
+    });
+
+    it("flag ON: a stamp earned on a RETIRED project refuses the override", async () => {
+      // Detached and re-linked elsewhere: dates and stamp preserved, but the stamp names a project this
+      // deal is no longer on. Falls back to the corrected legacy chain (lead-first).
+      expect(
+        await dueDateFor({ env: "true", landed: "2026-12-24", stampedProject: "TR-RETIRED" })
+      ).toContain("2026-09-15");
+    });
+
+    it("flag ON: a DETACHED deal refuses the override even with a landed column", async () => {
+      // Falls back to the corrected legacy chain (lead-first), never to the board's date.
+      expect(await dueDateFor({ env: "true", landed: "2026-12-24", detached: true })).toContain("2026-09-15");
+    });
+
+    // ★ THE LEAK. buildNormalizedRfpRequestBody computes
+    // `dueDate: cleanIso(bidDueDate) ?? cleanIso(bidBoardDueDate)`. With a CLEARED lead and an UNLANDED
+    // mirror the resolver returns null — the deal deliberately has no bid due date — and if the payload
+    // still carried the mirror, that fallback would send the board's REJECTED date to SyncHub, which types
+    // it into the Procore Bid Board project's Due Date field. The end of the chain is what this asserts:
+    // the job payload itself, not the resolver's return value.
+    it("flag ON: a rejected mirror does NOT reappear through the payload's dueDate fallback", async () => {
+      pg = await setup();
+      await pg!.query(
+        `UPDATE deals SET bid_board_due_date = '2026-12-24' WHERE id = $1`,
+        [DEAL]
+      );
+      // Clear the lead's value — the deal is lead-backed, so the lead owns the field and its clear wins.
+      await pg!.query(`UPDATE leads SET bid_due_date = NULL WHERE id = $1`, [LEAD]);
+      const tdb: any = drizzle(pg as any);
+      process.env.BID_BOARD_DUE_DATE_READBACK = "true";
+      try {
+        await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+      } finally {
+        delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      }
+
+      const jobs = (await pg!.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+      const deal = jobs[0].payload.body.deal;
+      expect(deal.dueDate).toBeNull();
+      // The value that must never have travelled.
+      expect(JSON.stringify(deal)).not.toContain("2026-12-24");
+    });
+
+    it("flag OFF: the SAME fixture keeps the legacy mirror fallback, byte-for-byte", async () => {
+      // Parity in the other direction: on main, a null deal column and a null lead DO fall through to the
+      // mirror. Flag-off must keep doing that, or this PR would be changing outbound RFP bodies while
+      // switched off.
+      pg = await setup();
+      await pg!.query(`UPDATE deals SET bid_board_due_date = '2026-12-24', bid_due_date = NULL WHERE id = $1`, [DEAL]);
+      await pg!.query(`UPDATE leads SET bid_due_date = NULL WHERE id = $1`, [LEAD]);
+      const tdb: any = drizzle(pg as any);
+      delete process.env.BID_BOARD_DUE_DATE_READBACK;
+
+      await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+
+      const jobs = (await pg!.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+      expect(jobs[0].payload.body.deal.dueDate).toContain("2026-12-24");
+    });
   });
 });

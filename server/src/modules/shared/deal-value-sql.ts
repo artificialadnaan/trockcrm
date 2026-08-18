@@ -322,12 +322,29 @@ export function aliasedDealBestEstimateSql(alias: string): SQL {
  * twin: `is_change_order` must exist at `alias`.
  */
 export function aliasedDealBestEstimateSqlText(alias: string): string {
+  return dealValueChainSqlText(alias, DEAL_VALUE_PRIORITY_CHAIN);
+}
+
+/**
+ * The 'estimating' stage chain (DD outranks bid) as plain SQL TEXT — the string twin of
+ * aliasedDealEstimatingValueSql, rendered from the same ESTIMATING_VALUE_CHAIN constant.
+ *
+ * Exists because a string caller reporting on estimating-stage deals otherwise has only the DEFAULT chain
+ * available and silently quotes bid-over-DD for exactly the population whose board and list show
+ * DD-over-bid. Same REQUIRED COLUMN as the drizzle twin: `is_change_order` must exist at `alias`.
+ */
+export function aliasedDealEstimatingValueSqlText(alias: string): string {
+  return dealValueChainSqlText(alias, ESTIMATING_VALUE_CHAIN);
+}
+
+/** Shared renderer for the two *SqlText builders, so the change-order branch cannot drift between them. */
+function dealValueChainSqlText(alias: string, chainColumns: readonly DealValueColumn[]): string {
   if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
     throw new Error(`Invalid SQL alias: ${alias}`);
   }
-  const chain = `COALESCE(${DEAL_VALUE_PRIORITY_CHAIN.map((column) =>
-    aliasedPositiveDealValueCandidateSql(alias, column)
-  ).join(", ")}, 0)`;
+  const chain = `COALESCE(${chainColumns
+    .map((column) => aliasedPositiveDealValueCandidateSql(alias, column))
+    .join(", ")}, 0)`;
   return `CASE WHEN COALESCE(${alias}.is_change_order, false) THEN COALESCE(${alias}.awarded_amount, 0) ELSE ${chain} END`;
 }
 
