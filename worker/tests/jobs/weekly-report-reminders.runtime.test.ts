@@ -904,6 +904,41 @@ describe("idempotency", () => {
     expect(await reminderLedger()).toHaveLength(1);
   });
 
+  it("releases the claim on an UNKNOWN outcome too — the commonest transport failure of all", async () => {
+    // The reminder twin of the digest bug this change exists to fix, and the case every other failure
+    // test here missed: they all inject `rejected`, so `unknown` reached only the digest path.
+    //
+    // `unknown` is what resend@6 returns for a 5xx, a 502/504, a socket hang-up and a 409 "still in
+    // flight" — by this job's own reasoning the MOST COMMON way a send fails. Narrow the release to
+    // rejections alone (`if (result.outcome === "rejected") throw ...`) and every one of those is counted
+    // as delivered: `tMinus2Sent` goes up, the claim stands, nothing is logged at ERROR, and no catch-up
+    // tick retries — the reminder is simply never sent, and the following day's tick is no retry because
+    // the due date has moved into a different bucket by then.
+    //
+    // Releasing is safe for the same reason the digest's release is: the key is fixed by
+    // (project, week, kind) and nothing can rotate it, so if Resend did accept the first attempt it
+    // dedups the retry.
+    const failed = await run(T_MINUS_2, { outcome: "unknown" });
+    expect(failed.sent).toHaveLength(1);
+    expect(failed.summary.failed).toBe(1);
+    // NOT counted as a delivery — an ambiguous send is not a send.
+    expect(failed.summary.tMinus2Sent).toBe(0);
+    expect(await reminderLedger()).toEqual([]);
+    // ...and an operator can see it happened. Silence here is how a missed nudge becomes invisible.
+    expect(
+      failed.logs.error.some((line) =>
+        line.includes("Reminder send failed - claim released for retry"),
+      ),
+    ).toBe(true);
+
+    // 09:00 catch-up: re-sent, under the IDENTICAL key, which is what makes the retry harmless.
+    const retried = await run(T_MINUS_2);
+    expect(retried.sent).toHaveLength(1);
+    expect(retried.sent[0]!.idempotencyKey).toBe(failed.sent[0]!.idempotencyKey);
+    expect(retried.summary.tMinus2Sent).toBe(1);
+    expect(await reminderLedger()).toHaveLength(1);
+  });
+
   it("scopes the provider idempotency key to the project, week and kind", async () => {
     const { sent } = await run(T_MINUS_2);
     expect(sent[0]!.idempotencyKey).toBe(
@@ -1384,6 +1419,85 @@ describe("due-date leadership digest", () => {
     expect(second.sent[0]!.subject.startsWith("Weekly reports due Thursday, Aug 13")).toBe(true);
   });
 
+  it("keeps the SAME key when Postgres hands the UNCHANGED cohort back in a DIFFERENT order", async () => {
+    // What pins the `.sort()` inside `digestCohortKey`. Drop it and the key becomes a hash of the ORDER
+    // Postgres happened to return the rows in — and the projects SELECT in `processOffice` has no
+    // `ORDER BY`, so that order is not a property of the data at all.
+    //
+    // Why it is load-bearing now: releasing the claims on an `unknown` outcome is priced on the catch-up
+    // tick re-sending under a BYTE-IDENTICAL key, so Resend dedups a digest it may already have accepted.
+    // An order-sensitive key breaks exactly that: 07:00 comes back `unknown` (accepted, response lost),
+    // the claims roll back, and a rotated key at 09:00 is one Resend has never seen — a second full
+    // digest, with no "Another digest — " prefix, since the ledger it reads was rolled back too. That is
+    // precisely the duplicate the release decision was priced against.
+    //
+    // DRIVEN THROUGH THE DATABASE, not by calling `digestCohortKey` with two hand-built arrays, because
+    // the real-world trigger is an ordinary write: an UPDATE writes a NEW heap tuple at the end of the
+    // table, so a seq scan returns the touched row LAST. A director reassigning a PM between two ticks
+    // is enough. PGlite reproduces that faithfully, so the whole causal chain is exercised rather than
+    // asserted about — and the reordering itself is asserted below, so if PGlite ever became
+    // order-stable this test would FAIL rather than quietly stop testing anything.
+
+    // The order in which the projects SELECT handed back its rows, per run. Matched on SHAPE rather than
+    // on SQL text: that read is the only one returning `property_display_name`, and a shape match cannot
+    // drift when the query is reworded.
+    const rowOrders: string[][] = [];
+    const orderRecordingQuery = async (text: string, params?: unknown[]) => {
+      const result = await query(text, params);
+      if (result.rows.length > 0 && "property_display_name" in (result.rows[0] as object)) {
+        rowOrders.push(result.rows.map((row) => String(row.id)));
+      }
+      return result;
+    };
+    const runRecording = async (behaviour: { outcome?: SendSystemEmailOutcome } = {}) => {
+      const spy = emailSpy(behaviour);
+      const { logs, logger } = loggerSpy();
+      const summary = await runWeeklyReportReminders({
+        query: orderRecordingQuery,
+        sendEmail: spy.sendEmail,
+        env: { FRONTEND_URL: "https://trockcrm.com" },
+        now: atNoonUtc(DUE),
+        logger,
+        acquireLock: async () => async () => {},
+      });
+      return { ...spy, summary, logs };
+    };
+
+    // Two projects due the same day — one row cannot be reordered.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [OTHER_PROJECT, OTHER_DEAL, SUPER],
+    );
+
+    // 07:00 — ambiguous outcome. Resend may be holding the digest; the claims are released regardless.
+    const first = await runRecording({ outcome: "unknown" });
+    expect(first.sent).toHaveLength(1);
+    expect(first.summary.failed).toBe(1);
+    expect(await reminderLedger()).toEqual([]);
+
+    // Between the ticks a director reassigns the PM on the FIRST-returned project. Nothing about the
+    // cohort changes; only where its tuple lives.
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects SET trock_pm_user_id = $1::uuid WHERE id = $2::uuid`,
+      [SUPER, rowOrders[0]![0]!],
+    );
+
+    // 09:00 — same cohort, same day.
+    const second = await runRecording();
+    expect(second.sent).toHaveLength(1);
+    expect(second.summary.digestsSent).toBe(1);
+
+    // The precondition, ASSERTED: the rows really did come back the other way round, over the same set.
+    expect(rowOrders).toHaveLength(2);
+    expect(rowOrders[1]).not.toEqual(rowOrders[0]);
+    expect([...rowOrders[1]!].sort()).toEqual([...rowOrders[0]!].sort());
+
+    // ...and the key did not move with them.
+    expect(second.sent[0]!.idempotencyKey).toBe(first.sent[0]!.idempotencyKey);
+  });
+
   it("reports the missing digest on EVERY tick of the day, never a clean run over an empty inbox", async () => {
     // The failure this replaced: one ambiguous send at 07:00 kept its claims, so 09:00 and 11:00 found
     // the day already digested, attempted nothing, logged nothing and returned `{digestsSent: 0,
@@ -1845,9 +1959,12 @@ describe("leadership digest — against the REAL email transport", () => {
     expect(retry.summary.digestsSent).toBe(1);
     // Same cohort, so the SAME key — a true duplicate would still be deduped by the provider.
     expect(retry.requests[0]!.idempotencyKey).toBe(first.requests[0]!.idempotencyKey);
-    // And it is the FIRST digest of the day, not an "Update".
+    // And it is the FIRST digest of the day, carrying no follow-up prefix. This is the case where the
+    // ledger is PROVABLY empty — a 422 creates nothing and its claims rolled back cleanly — so an
+    // "Another digest — " prefix here would be a real defect. The `toContain` above cannot see it, since
+    // a prefixed subject still contains the phrase; this is the assertion that can.
     expect(retry.requests[0]!.subject).toContain("Weekly reports due Thursday, Aug 13 — 0 filed, 1 outstanding");
-    expect(retry.requests[0]!.subject.startsWith("Update")).toBe(false);
+    expect(retry.requests[0]!.subject.startsWith("Another digest")).toBe(false);
   });
 });
 
@@ -1928,7 +2045,7 @@ describe("digest: the ledger read's scoping guards", () => {
     // error, no log line — the feature just stops.
     //
     // The prior week's t_minus_2 row is seeded too, because the SAME bound is what stops it inflating
-    // `remindersSent` and silencing this week's "never reminded" heading.
+    // `remindersSent` and silencing this week's "with no reminder on record" heading.
     const LAST_WEEK = "2026-08-06";
     for (const kind of ["due_digest", "t_minus_2"]) {
       await pg.query(
@@ -1953,8 +2070,8 @@ describe("digest: the ledger read's scoping guards", () => {
   it("does not let a project's OWN due_digest receipt count as having chased anybody", async () => {
     // On a follow-up digest every project already covered carries a `due_digest` row. Count all kinds
     // instead of the two CHASE kinds and that receipt reads as "somebody was chased" — which silences the
-    // `— N never reminded` heading and the `No reminder was sent for this week.` note for exactly the
-    // never-chased project the follow-up digest exists to re-surface.
+    // `— N with no reminder on record` heading and the `No reminder is on record for this week.` note for
+    // exactly the never-chased project the follow-up digest exists to re-surface.
     const first = await run(DUE);
     expect(first.sent).toHaveLength(1);
     expect(first.sent[0]!.html).toContain("Outstanding — 1 with no reminder on record");
