@@ -243,6 +243,42 @@ export const weeklyReportDismissals = pgTable(
 );
 
 /**
+ * The stretches a project was NOT reporting for. Migration 0223.
+ *
+ * `status` says only where the setup stands today, so it cannot answer "was this project reporting in
+ * the week of the 6th?" — and the dashboard regenerates its expected weeks from the cadence start on
+ * every read. Without this ledger a project paused for six weeks came back owing all six. The weeks
+ * missed BEFORE the pause are deliberately left alone: they were, and remain, missed.
+ *
+ * `resumed_on` NULL means still stopped; the partial unique index (0223) permits exactly one such row
+ * per project.
+ */
+export const weeklyReportPauses = pgTable(
+  "weekly_report_pauses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    weeklyReportProjectId: uuid("weekly_report_project_id")
+      .notNull()
+      .references(() => weeklyReportProjects.id, { onDelete: "cascade" }),
+    pausedFrom: date("paused_from").notNull(),
+    resumedOn: date("resumed_on"),
+    /** BARE uuids — the FK targets `public.users`, outside this tenant schema. Same convention as the
+     *  setup row's PM/superintendent columns. */
+    pausedBy: uuid("paused_by"),
+    resumedBy: uuid("resumed_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("weekly_report_pauses_project_idx").on(table.weeklyReportProjectId, table.pausedFrom),
+    check(
+      "weekly_report_pauses_range",
+      sql`${table.resumedOn} IS NULL OR ${table.resumedOn} >= ${table.pausedFrom}`,
+    ),
+  ],
+);
+
+/**
  * Reminder idempotency ledger.
  *
  * The reminder cron is not idempotent without it: the worker restarts routinely (deploys, OOM, Railway
