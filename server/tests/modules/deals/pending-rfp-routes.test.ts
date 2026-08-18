@@ -97,6 +97,12 @@ function makeRes() {
 }
 
 async function runRoute(method: "get" | "post", path: string, req: any, res: any) {
+  // Express ALWAYS provides req.query — an empty object when the URL carries no params. The hand-rolled
+  // requests in this file omitted it, which went unnoticed while no route here read a query param. The
+  // moment /pending-rfp started reading ?estimatorId, every test in this file threw
+  // "Cannot read properties of undefined". Defaulted once here so the mock matches real Express, rather
+  // than making the route defensive against a shape Express cannot actually produce.
+  const request = { query: {}, ...req };
   const routeLayer = (dealRoutes as any).stack.find(
     (e: any) => e.route?.path === path && e.route?.methods?.[method]
   );
@@ -111,7 +117,7 @@ async function runRoute(method: "get" | "post", path: string, req: any, res: any
       if (err) capturedErr = err;
       else advanced = true;
     };
-    await handler(req, res, next);
+    await handler(request, res, next);
     if (capturedErr) break;
     if (!advanced) break;
   }

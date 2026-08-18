@@ -139,8 +139,9 @@ beforeAll(async () => {
     `CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`,
   );
 
-  // The migration under test — DO-loop, public tables and TENANT_SCHEMA block, verbatim from disk.
+  // The migrations under test — DO-loop, public tables and TENANT_SCHEMA block, verbatim from disk.
   await pg.exec(migrationSql("0222_weekly_reports"));
+  await pg.exec(migrationSql("0223_weekly_report_pauses"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -168,6 +169,7 @@ beforeEach(async () => {
   await pg.exec(`
     DELETE FROM office_dallas.weekly_report_photos;
     DELETE FROM office_dallas.weekly_report_dismissals;
+    DELETE FROM office_dallas.weekly_report_pauses;
     DELETE FROM office_dallas.weekly_report_reminders_sent;
     DELETE FROM office_dallas.weekly_reports;
     DELETE FROM office_dallas.weekly_report_projects;
@@ -255,6 +257,41 @@ describe("migration 0222", () => {
   it("allows only one live setup per deal", async () => {
     await seedProject();
     await expectAppError(seedProject(), 409, /already has a weekly report setup/i);
+  });
+});
+
+describe("migration 0223", () => {
+  it("is replayable — running it a second time is a no-op, not an error", async () => {
+    await expect(pg.exec(migrationSql("0223_weekly_report_pauses"))).resolves.toBeDefined();
+  });
+
+  it("allows only ONE open pause per project", async () => {
+    // Two overlapping open intervals would leave the next Resume closing one and not the other, and the
+    // week generator would then treat a project that is demonstrably reporting again as still stopped.
+    const project = await seedProject();
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_pauses (weekly_report_project_id, paused_from)
+       VALUES ($1::uuid, '2026-08-03')`,
+      [project.id],
+    );
+    await expect(
+      pg.query(
+        `INSERT INTO office_dallas.weekly_report_pauses (weekly_report_project_id, paused_from)
+         VALUES ($1::uuid, '2026-08-10')`,
+        [project.id],
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("refuses a resume dated before the pause began", async () => {
+    const project = await seedProject();
+    await expect(
+      pg.query(
+        `INSERT INTO office_dallas.weekly_report_pauses (weekly_report_project_id, paused_from, resumed_on)
+         VALUES ($1::uuid, '2026-08-10', '2026-08-03')`,
+        [project.id],
+      ),
+    ).rejects.toThrow();
   });
 });
 
@@ -877,6 +914,142 @@ describe("dashboard", () => {
       lastSentWeekOf: PRIOR_WEEK,
       nextDueWeekOf: WEEK_OF,
     });
+  });
+});
+
+/**
+ * Pausing, and what a project owes when it comes back.
+ *
+ * The defect these close: `status` says only where a setup stands TODAY, while the board regenerates its
+ * expected weeks from `cadence_start_date` on every read. A project paused for three weeks therefore came
+ * back owing all three as "Not started" and late, with reminders chasing a superintendent for reports
+ * leadership had explicitly stood down — flatly contradicting the sentence the form shows when you pause
+ * one. Migration 0223 records the interval; the generator skips it.
+ */
+describe("paused reporting", () => {
+  // Cadence Thursdays from 2026-07-27, so the expected weeks are 07-30, 08-06, 08-13, 08-20, 08-27.
+  const PAUSED_ON = "2026-08-03";
+  const RESUMED_ON = "2026-08-24";
+  const LATER_WEEK = "2026-08-27";
+
+  async function setStatus(projectId: string, status: string, asOf: string) {
+    await updateWeeklyReportProject(db, projectId, { status } as any, OFFICE, {
+      asOf,
+      actorUserId: DIRECTOR,
+    });
+  }
+
+  async function pauseAndResume(projectId: string, pausedOn = PAUSED_ON, resumedOn = RESUMED_ON) {
+    await setStatus(projectId, "paused", pausedOn);
+    await setStatus(projectId, "active", resumedOn);
+  }
+
+  function pauseLedger(projectId: string) {
+    return pg.query<{ paused_from: string; resumed_on: string | null; paused_by: string; resumed_by: string }>(
+      `SELECT paused_from::text AS paused_from, resumed_on::text AS resumed_on, paused_by, resumed_by
+         FROM office_dallas.weekly_report_pauses
+        WHERE weekly_report_project_id = $1::uuid
+        ORDER BY paused_from`,
+      [projectId],
+    );
+  }
+
+  it("does not bill back the weeks a project spent paused", async () => {
+    const project = await seedProject();
+    await pauseAndResume(project.id);
+
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: LATER_WEEK });
+    // 07-30 was already missed when the pause began and is still owed. 08-06, 08-13 and 08-20 fell
+    // inside it and were never owed at all.
+    expect(dashboard.rows.map((row) => row.weekOf)).toEqual(["2026-07-30", LATER_WEEK]);
+  });
+
+  it("keeps the week missed before the pause aging rather than quietly clearing it", async () => {
+    const project = await seedProject();
+    await pauseAndResume(project.id);
+
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: LATER_WEEK });
+    expect(dashboard.rows.find((row) => row.weekOf === "2026-07-30")).toMatchObject({
+      state: "not_started",
+      daysLate: 28,
+    });
+  });
+
+  it("records the pause instead of moving the cadence start", async () => {
+    // Advancing cadence_start_date on resume is the one-line alternative, and it forgets twice: the miss
+    // above disappears, and so does the answer to "when did we start reporting to this client".
+    const project = await seedProject();
+    await pauseAndResume(project.id);
+
+    expect((await getWeeklyReportProject(db, project.id))!.cadenceStartDate).toBe("2026-07-27");
+    const ledger = await pauseLedger(project.id);
+    expect(ledger.rows).toHaveLength(1);
+    expect(ledger.rows[0]).toMatchObject({
+      paused_from: PAUSED_ON,
+      resumed_on: RESUMED_ON,
+      paused_by: DIRECTOR,
+      resumed_by: DIRECTOR,
+    });
+  });
+
+  it("keeps two pauses apart instead of merging them into one gap", async () => {
+    const project = await seedProject();
+    await pauseAndResume(project.id, "2026-08-03", "2026-08-10");
+    await pauseAndResume(project.id, "2026-08-17", "2026-08-24");
+
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: LATER_WEEK });
+    // The week between the two pauses was owed and stays owed.
+    expect(dashboard.rows.map((row) => row.weekOf)).toEqual(["2026-07-30", WEEK_OF, LATER_WEEK]);
+  });
+
+  it("treats completed as stopped too, and does not reopen the interval on the way through", async () => {
+    const project = await seedProject();
+    await setStatus(project.id, "paused", PAUSED_ON);
+    // paused -> completed is not a new boundary: reporting was already stopped.
+    await setStatus(project.id, "completed", "2026-08-10");
+    await setStatus(project.id, "active", RESUMED_ON);
+
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: LATER_WEEK });
+    expect(dashboard.rows.map((row) => row.weekOf)).toEqual(["2026-07-30", LATER_WEEK]);
+    expect((await pauseLedger(project.id)).rows).toHaveLength(1);
+  });
+
+  it("owes nothing for the stretch a project created paused spent switched off", async () => {
+    // Created paused, so there is no active -> paused transition to catch; the interval opens at the
+    // cadence start instead.
+    const project = await seedProject({ status: "paused" });
+    await setStatus(project.id, "active", RESUMED_ON);
+
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: LATER_WEEK });
+    expect(dashboard.rows.map((row) => row.weekOf)).toEqual([LATER_WEEK]);
+  });
+
+  it("does not restart the pause when the form is saved again unchanged", async () => {
+    // Re-saving the setup is not a new pause. Treating it as one would drag paused_from forward and
+    // write off the weeks the project had already been stopped for.
+    const project = await seedProject();
+    await setStatus(project.id, "paused", PAUSED_ON);
+    await updateWeeklyReportProject(
+      db,
+      project.id,
+      { status: "paused", clientName: "Mack Real Estate Group LLC" },
+      OFFICE,
+      { asOf: "2026-08-17", actorUserId: DIRECTOR },
+    );
+
+    const ledger = await pauseLedger(project.id);
+    expect(ledger.rows).toHaveLength(1);
+    expect(ledger.rows[0]).toMatchObject({ paused_from: PAUSED_ON, resumed_on: null });
+  });
+
+  it("still hides a project that is paused right now", async () => {
+    const project = await seedProject();
+    await setStatus(project.id, "paused", PAUSED_ON);
+
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: LATER_WEEK });
+    expect(dashboard.rows).toHaveLength(0);
+    // …and the open interval is what stops those same weeks reappearing later.
+    expect((await pauseLedger(project.id)).rows[0]).toMatchObject({ resumed_on: null });
   });
 });
 

@@ -1000,11 +1000,37 @@ export function dashboardRosterMembershipSql(officeId?: string): SQL {
  * visible on the board, they just stop being a thing you can filter BY. The stale-filter guard on the
  * deals dashboard already drops a saved rep who is no longer offered, so an unticked person cannot leave
  * a board silently narrowed to them.
+ *
+ * TWO GROUPS, AND A PERSON IS IN EXACTLY ONE.
+ *
+ * "sales" is the roster above. "estimator" is `users.estimates_jobs` (migration 0222) — the people an
+ * estimator filter may offer — and it exists because a rep filter means OWNS, so an estimator who owns
+ * nothing was unreachable: Sidney Gibson owns 0 deals and estimates 137, and picking her returned an
+ * empty board.
+ *
+ * SALES WINS WHEN BOTH FLAGS ARE TICKED. A dual-role person appears once, under Sales Reps, and the
+ * filter answers for what they OWN. Chosen knowingly with the numbers on the table: it makes Timothy
+ * Mitchell's 97 and Colby Burling's 54 estimated-for-others deals unreachable through this control. The
+ * alternative — listing them twice — was offered and declined in favour of a shorter list. If that is
+ * revisited, this is the single line to change, and the client already keys options by group.
+ *
+ * The estimator group is NOT derived from deals.estimator_user_id, and must not be: that column is
+ * dominated by reps estimating their OWN deals (167 of Colby's 221 rows), so deriving it would file most
+ * of the sales team as estimators. See migration 0222.
  */
+export type RepRosterGroup = "sales" | "estimator";
+
+export interface RepRosterOption {
+  id: string;
+  displayName: string;
+  group: RepRosterGroup;
+}
+
 export async function getRepRosterOptions(
   tenantDb: TenantDb,
   officeId?: string
-): Promise<Array<{ id: string; displayName: string }>> {
+): Promise<RepRosterOption[]> {
+  const officeMembership = officeId ? activeOfficeRepMembershipSql(officeId) : sql`TRUE`;
   const result = await tenantDb.execute(sql`
     WITH deal_owners AS (
       -- Verbatim from the funnel roster. deals is a TENANT table (search_path office_slug,public), so
@@ -1012,22 +1038,60 @@ export async function getRepRosterOptions(
       SELECT DISTINCT d.assigned_rep_id AS rep_id
       FROM deals d
       WHERE d.assigned_rep_id IS NOT NULL
+    ),
+    deal_estimators AS (
+      -- The estimator equivalent, and tenant-bounded for the same reason. Membership still comes from the
+      -- FLAG; this only widens office membership for someone estimating here without an office row,
+      -- mirroring how owner_rows widens it on the sales side.
+      SELECT DISTINCT d.estimator_user_id AS rep_id
+      FROM deals d
+      WHERE d.estimator_user_id IS NOT NULL
     )
-    SELECT u.id, u.display_name
-    FROM users u
-    LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
-    WHERE u.is_active = true
-      -- Matches the rep-card and funnel rosters: flagged smoke-test / duplicate accounts stay out.
-      AND COALESCE(u.is_test_data, false) = false
-      AND ${dashboardRosterMembershipSql(officeId)}
-    -- lower() so the order does not depend on capitalisation. Names are normalised on save now, but a
-    -- row written before that would otherwise sort into its own case-segregated block.
-    ORDER BY lower(u.display_name) ASC, u.id ASC
+    -- The UNION is wrapped in a subquery so the ORDER BY can use an EXPRESSION. Postgres restricts a
+    -- top-level ORDER BY on a UNION to bare result-column names — "ORDER BY grp DESC, lower(display_name)"
+    -- fails outright with "Only result column names can be used, not expressions or functions". Caught by
+    -- running this against the real database; neither tsc nor a mocked-execute unit test can see it.
+    SELECT id, display_name, grp FROM (
+      SELECT u.id, u.display_name, 'sales' AS grp
+      FROM users u
+      LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
+      WHERE u.is_active = true
+        -- Matches the rep-card and funnel rosters: flagged smoke-test / duplicate accounts stay out.
+        AND COALESCE(u.is_test_data, false) = false
+        AND ${dashboardRosterMembershipSql(officeId)}
+
+      UNION ALL
+
+      SELECT u.id, u.display_name, 'estimator' AS grp
+      FROM users u
+      LEFT JOIN deal_estimators est_rows ON est_rows.rep_id = u.id
+      -- Joined only so the Sales-wins test below can ask the SAME question the sales leg asks.
+      LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
+      WHERE u.is_active = true
+        AND COALESCE(u.is_test_data, false) = false
+        AND u.estimates_jobs = true
+        -- SALES WINS — but only over someone the SALES LEG ACTUALLY LISTS IN THIS OFFICE, which is why
+        -- this negates that leg's own predicate instead of testing the global flag. A bare
+        -- generates_sales = false is STRICTER than "appears under Sales here": the sales leg also
+        -- requires office membership or an owned deal in this tenant. A multi-office person flagged for
+        -- sales globally, with neither of those here but estimating a deal here, was excluded from the
+        -- sales leg for want of membership AND from this one for having the flag — landing in NEITHER
+        -- section, which is the opposite of the one-person-one-section rule this line exists to enforce.
+        -- Still enforced in SQL, so no caller can reassemble a double listing.
+        -- Both flags are NOT NULL, so this NOT cannot go three-valued and silently drop rows.
+        AND NOT (${dashboardRosterMembershipSql(officeId)})
+        AND (${officeMembership} OR est_rows.rep_id IS NOT NULL)
+    ) roster
+    -- Sales before estimators ('sales' > 'estimator' descending), then by name. lower() so the order does
+    -- not depend on capitalisation: names are normalised on save now, but a row written before that would
+    -- otherwise sort into its own case-segregated block.
+    ORDER BY grp DESC, lower(display_name) ASC, id ASC
   `);
 
   return ((result as any).rows ?? result).map((row: any) => ({
     id: String(row.id),
     displayName: String(row.display_name ?? ""),
+    group: row.grp === "estimator" ? "estimator" : "sales",
   }));
 }
 

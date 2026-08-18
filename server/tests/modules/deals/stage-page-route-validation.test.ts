@@ -66,6 +66,28 @@ describe("GET /api/deals/stages/:stageId — query validation", () => {
     expect(dealsServiceMocks.listDealStagePage).not.toHaveBeenCalled();
   });
 
+  it("rejects a repeated (array) estimatorId param with 400 (CodeRabbit #1067)", async () => {
+    // Express hands back an array for a repeated param, and `as string` is only an assertion — it does
+    // not convert. The uuid guard downstream already stops that reaching the column, but it would fail as
+    // a silent empty board; a malformed request deserves the same explicit 400 its sibling params give.
+    const app = createApp();
+    const res = await request(app).get("/api/deals/stages/stage-1?estimatorId=a&estimatorId=b");
+    expect(res.status).toBe(400);
+    expect(dealsServiceMocks.listDealStagePage).not.toHaveBeenCalled();
+  });
+
+  it("passes a single estimatorId through to the service", async () => {
+    const app = createApp();
+    const res = await request(app).get(
+      "/api/deals/stages/stage-1?estimatorId=3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+    );
+    expect(res.status).toBe(200);
+    expect(dealsServiceMocks.listDealStagePage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ estimatorId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301" })
+    );
+  });
+
   it("passes a single source and staleOnly through to the service", async () => {
     const app = createApp();
     const res = await request(app).get("/api/deals/stages/stage-1?source=referral&staleOnly=true");

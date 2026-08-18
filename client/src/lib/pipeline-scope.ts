@@ -105,6 +105,10 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
   const cleanedParams = new URLSearchParams(searchParams);
   if (requestedRawScope === "team" && allowedScope !== "team") {
     cleanedParams.delete("assignedRepId");
+    // The estimator sibling goes with it, for the same reason and now with the same consequence: the stage
+    // page feeds estimatorId into its list's base filters, so a retained one would narrow the coerced Mine
+    // view (and the redirect/back links built from these params) to another person's estimated deals.
+    cleanedParams.delete("estimatorId");
   }
   const nextParams = new URLSearchParams(cleanedParams);
   nextParams.set("scope", allowedScope);
