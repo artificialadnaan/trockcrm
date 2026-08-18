@@ -1468,17 +1468,21 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
 
   // THE RULE THE WHOLE EXPORT IS BUILT ON. A quantity exists only if a human said it out loud and
   // confirmed it, so trock-scope withholds rows that have none — but a receiver that TRUSTS that is
-  // one lost deploy away from pricing a guess. Downstream, `Number(extraction.quantity ?? 1)` (three
-  // sites in worker/src/jobs/estimate-generation.ts) turns a null into ONE UNIT and prices it, so a
-  // row that reached storage with no quantity does not surface as unpriceable — it surfaces as a
-  // confident line item on an estimate a human signs. Refused here instead.
+  // one lost deploy away from pricing a guess.
+  //
+  // The downstream hazard has CHANGED, and this comment used to name the old one as though it were
+  // still live. `Number(extraction.quantity ?? 1)` no longer exists in
+  // worker/src/jobs/estimate-generation.ts: the job now parks a quantity-less row at `needs_quantity`
+  // and skips pricing it, which is pinned by walkthrough-ingress-characterization.runtime.test.ts
+  // asserting ZERO occurrences of that expression. Refusing here is still right — a null exported into
+  // storage becomes a row somebody has to chase, on a document where nobody ever said a number — but
+  // the reason is a queue full of unanswerable work, not a fabricated price.
   if (row.quantity === null || row.quantity === undefined) {
     throw new AppError(
       400,
       `${at} has no spoken quantity. A walkthrough quantity exists only when it was spoken and ` +
-        `confirmed, and a row without one is priced as a single unit downstream ` +
-        `(Number(extraction.quantity ?? 1) in worker/src/jobs/estimate-generation.ts) — so it is ` +
-        `refused here rather than exported as a confident wrong number.`
+        `confirmed, so a row without one carries no measurement to price. It is refused here rather ` +
+        `than stored as an extraction nobody can complete.`
     );
   }
   const quantity = requireFiniteNumber(row.quantity, `${at}.quantity`);
@@ -1881,19 +1885,20 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
  *
  * WHY NO `estimate_generation` ENQUEUE (deliberate, not an omission — reviewers have asked):
  * ingesting a walkthrough leaves its rows PENDING for an estimator, and nothing auto-prices them.
- * Two known defects make auto-pricing these rows produce confident wrong numbers rather than a
- * visible failure, and both are pinned by walkthrough-ingress-characterization.runtime.test.ts:
- *   1. `Number(extraction.quantity ?? 1)` at three sites in worker/src/jobs/estimate-generation.ts
- *      prices a quantity-less row as ONE unit. The ingress now refuses null quantities outright, but
- *      the coercion is still live for every other producer, so the hazard is unrepaired.
- *   2. Spoken scope is PROSE. matching-service.ts:69 awards its 50 name points only for whole-string
- *      equality against a catalog item name, so a walkthrough row scores ~30 where an exactly-named
- *      row scores 80 — and at 30 the winner is decided by wherever the catalog happened to order the
- *      ties that `matches[0]` picks from.
+ * ONE of the two defects that motivated it is now REPAIRED, and the other is not — both are pinned by
+ * walkthrough-ingress-characterization.runtime.test.ts:
+ *   1. FIXED. `Number(extraction.quantity ?? 1)` priced a quantity-less row as ONE unit at three sites
+ *      in worker/src/jobs/estimate-generation.ts. The job now skips such a row before matching and
+ *      parks it at `needs_quantity` instead, and the characterization test asserts ZERO remaining
+ *      occurrences of that expression — so this is a resolved hazard, not a live one.
+ *   2. OPEN. Spoken scope is PROSE. matching-service.ts:69 awards its 50 name points only for
+ *      whole-string equality against a catalog item name, so a walkthrough row scores ~30 where an
+ *      exactly-named row scores 80 — and at 30 the winner is decided by wherever the catalog happened
+ *      to order the ties that `matches[0]` picks from.
  * WHAT MUST BE TRUE BEFORE THIS CHANGES: the matcher handles natural language (fuzzy/token/embedding
- * scoring, so prose competes on merit instead of by catalog ordering), AND the worker either skips or
- * flags quantity-less rows instead of coercing them. Until then an estimator triggers generation
- * knowingly, from the workbench, having seen the rows.
+ * scoring, so prose competes on merit instead of by catalog ordering). The quantity half of the bar is
+ * met. Until the matching half is, an estimator triggers generation knowingly, from the workbench,
+ * having seen the rows.
  */
 export async function ingestWalkthrough({
   tenantDb,

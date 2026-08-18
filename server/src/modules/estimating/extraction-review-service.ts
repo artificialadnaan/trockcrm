@@ -172,12 +172,29 @@ export async function updateEstimateExtraction(args: {
   const suppliesQuantity = isPriceable(nextQuantity);
 
   /** Numeric where both sides are numbers, so "700" and "700.000" are the same quantity rather than a
-   *  spurious edit; identity otherwise, which is what compares two nulls. */
+   *  spurious edit; identity otherwise, which is what compares two nulls.
+   *
+   *  ABSENCE IS HANDLED FIRST, and it has to be. `Number(null)` is 0 and `Number(undefined)` is NaN, so
+   *  going through the numeric branch made a NULL quantity compare EQUAL to a supplied 0: a PATCH
+   *  writing `quantity: 0` onto a null row reported `quantityChanged = false` while the stored value
+   *  genuinely changed. "There is no number" and "the number is zero" are different facts about a
+   *  quantity, and only the second is a measurement.
+   *
+   *  LATENT TODAY, AND FIXED ANYWAY. `quantityChanged` has exactly one consumer — `requeuesForPricing`,
+   *  which ANDs it with `suppliesQuantity` — and `suppliesQuantity` is false for 0, so the two
+   *  disagreeing cases (null->0 and 0->null) reach no branch that behaves differently. There is
+   *  therefore no test below that fails on the old comparison, because no observable behaviour changes.
+   *  It is corrected because the name states a fact that was untrue, and the next consumer to read it
+   *  would inherit the wrong answer silently. */
   const sameQuantity = (left: unknown, right: unknown): boolean => {
+    const leftMissing = left === null || left === undefined;
+    const rightMissing = right === null || right === undefined;
+    if (leftMissing || rightMissing) return leftMissing && rightMissing;
+
     const a = Number(left);
     const b = Number(right);
     if (Number.isFinite(a) && Number.isFinite(b)) return a === b;
-    return (left ?? null) === (right ?? null);
+    return left === right;
   };
 
   // A REAL CHANGE TO THE QUANTITY, which is not the same as the request carrying one.
@@ -236,11 +253,19 @@ export async function updateEstimateExtraction(args: {
   // `rejected` is excluded from both. It is a decision not to include this line at all, so it is not
   // stranded by staying put, and requeuing it would push a refused row back into pricing.
   //
+  // `unmatched` REQUEUES TOO, and its absence made this branch a ONE-WAY DOOR. The clearing branch
+  // above deliberately sends an `unmatched` row to `needs_quantity` — so the system already accepts
+  // that `unmatched` is a state a quantity edit may move a row out of. Leaving it off the usable-
+  // quantity list meant the return trip did not exist: a row the worker marked `unmatched` sits outside
+  // its `pending` candidate filter, so nothing re-prices it, and supplying or correcting the quantity
+  // left it exactly where it was. Both exits from that room were closed, which is precisely the
+  // stranding this whole branch exists to prevent, reached by the one status the list forgot.
+  //
   // Decided in SQL for the same reason the requeue is: `existing` is authoritative only until this
   // statement takes its own lock, and the CASE is evaluated when the row is held.
   const statusAfterEdit = becomesUnpriceable
     ? sql`case when ${estimateExtractions.status} in ('pending', 'needs_quantity', 'processed', 'unmatched') then 'needs_quantity' else ${estimateExtractions.status} end`
-    : sql`case when ${estimateExtractions.status} in ('needs_quantity', 'processed', 'approved') then 'pending' else ${estimateExtractions.status} end`;
+    : sql`case when ${estimateExtractions.status} in ('needs_quantity', 'processed', 'approved', 'unmatched') then 'pending' else ${estimateExtractions.status} end`;
 
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
