@@ -121,6 +121,23 @@ that the board and the sweep still read the same stall clock, which is the entir
 extraction — a sweep that announces a stall the board renders as "Sending…" is the drift it exists to
 prevent.
 
+## Third collision — B2 × B3 both claim migration 0227 (benign, do NOT renumber after deploy)
+
+Both branches independently took `0227`:
+
+- `0227_weekly_report_send_stall_alerted.sql` (B3, sweep) — adds `send_stall_alerted_at`
+- `0227_weekly_report_delivery_events.sql` (B2, webhook) — adds `send_delivery_status`,
+  `send_delivery_status_at`, `send_delivery_detail`, plus `public.weekly_report_send_deliveries`
+
+**This is fine.** The columns are disjoint, both files are idempotent (`ADD COLUMN IF NOT EXISTS`), both
+carry a `TENANT_SCHEMA_START/END` block, and the runner tracks applied migrations **by filename** and
+sorts alphabetically — so both run, `delivery_events` before `send_stall_alerted`. `main` already carries
+two `0224_*` files for the same reason.
+
+⚠️ **Do not "tidy" this by renumbering after either has been applied.** The ledger is keyed on the
+filename, so a renamed migration is an unseen migration and runs a second time. Before deploy, renumbering
+is free; after, it is not.
+
 ## Corrections to this plan, found during implementation
 
 - **`mobile/` runs jest, not vitest.** "`TZ=UTC npm run test:ci` per workspace" does not apply there —
@@ -132,6 +149,11 @@ prevent.
   it also lets tests assert the exact wire body.
 
 ## Standing rules for every PR here
+
+**Typecheck baseline is CONFIG-DEPENDENT.** In `server/`, `npm run typecheck` (the CI-relevant config)
+reports **0 errors**, while `npx tsc --noEmit -p tsconfig.json` reports **2 pre-existing TS6059**. Both
+numbers are real; quoting one as "the" baseline sends the next person hunting a regression that is a
+config difference. Say which command produced the number.
 
 **Verification** — `shared` must be built first or typecheck reports thousands of phantom errors. Run
 each workspace separately with `TZ=UTC npm run test:ci`; root `test:ci` exceeds the tool timeout and dies
