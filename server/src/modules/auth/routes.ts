@@ -422,15 +422,22 @@ router.post("/local/change-password", authMiddleware, async (req, res, next) => 
     // the caller a token at the new version so the device they just used stays signed in while all the
     // others die. Role/office come from the HOME values (baseRole, officeId) exactly as /local/login
     // mints them — the active-office override is request scoped and must never be baked into a token.
-    const token = signJwt({
-      userId: req.user!.id,
-      email: req.user!.email,
-      officeId: req.user!.officeId,
-      role: req.user!.baseRole ?? req.user!.role,
-      tokenVersion,
-      authMethod: req.user!.authMethod ?? "local",
-    });
-    refreshAuthTokenCookie(req, res, token);
+    //
+    // Only for a caller who actually presented a cookie. The native CRM app is Bearer-only and
+    // /mobile-login deliberately CLEARS every auth cookie so it stays outside the cookie-triggered
+    // CSRF gate; handing it one here would quietly put it back inside, and authMiddleware reads the
+    // cookie before the Authorization header.
+    if (req.cookies?.token) {
+      const token = signJwt({
+        userId: req.user!.id,
+        email: req.user!.email,
+        officeId: req.user!.officeId,
+        role: req.user!.baseRole ?? req.user!.role,
+        tokenVersion,
+        authMethod: req.user!.authMethod ?? "local",
+      });
+      refreshAuthTokenCookie(req, res, token);
+    }
 
     res.json(withCsrfToken(req, res, {
       user: await withOnboardingGate({
@@ -749,27 +756,30 @@ router.post("/procore/disconnect", authMiddleware, requireAdmin, async (_req, re
 // help a legitimate user, who needs exactly one instruction either way.
 const GENERIC_RESET_FAILURE = "This reset link is no longer valid. Request a new one.";
 
-router.post("/password-reset/request", authLimiter, async (req, res) => {
+router.post("/password-reset/request", authLimiter, (req, res) => {
   const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+  const requestedIp = req.ip ?? null;
 
-  let issued: Awaited<ReturnType<typeof issueResetToken>> = null;
-  try {
-    if (email) issued = await issueResetToken(dbClient, email, req.ip ?? null);
-  } catch (err) {
-    // Swallowed on purpose. Surfacing a 500 here would make a database blip -- or anything that only
-    // errors for rows that exist -- into an existence oracle.
-    console.error("[password-reset] issue failed", err);
-  }
-
-  // Respond BEFORE sending mail. SMTP latency is the one variable-cost step in this handler, so doing
-  // it after the response means response time cannot correlate with whether the account exists.
+  // Respond FIRST, before ANY database work.
+  //
+  // Deferring only the email was not enough. The number of round trips before the response still gave
+  // the account away: an unknown address costs one query (the eligibility lookup), an eligible one
+  // costs five, and an eligible one that has hit the per-account cap costs two. That is measurable
+  // WITHOUT absolute timing -- send four requests for the same address and watch the fourth get faster
+  // as the cap trips, which only happens for an account that exists. Doing everything after the
+  // response makes the handler's cost identical in every case, because nothing is left in it.
   res.status(200).json({ ok: true });
 
-  if (issued) {
-    deliverResetEmail(dbClient, issued).catch((err) => {
-      console.error("[password-reset] delivery failed", err);
-    });
-  }
+  if (!email) return;
+
+  void (async () => {
+    try {
+      const issued = await issueResetToken(dbClient, email, requestedIp);
+      if (issued) await deliverResetEmail(dbClient, issued);
+    } catch (err) {
+      console.error("[password-reset] request failed", err);
+    }
+  })();
 });
 
 router.post("/password-reset/validate", authLimiter, async (req, res, next) => {
@@ -810,14 +820,18 @@ router.post("/password-reset/complete", authLimiter, async (req, res, next) => {
     await applyPasswordReset(userId, password);
     res.json({ ok: true });
 
-    // Fired after the response and never awaited: this notice is what makes an unauthorized reset
-    // visible, but failing to send it must not fail a reset that already committed.
-    const account = await lookupUserContact(dbClient, userId);
-    if (account) {
-      notifyPasswordChanged(account.email, account.display_name).catch((err) => {
+    // Everything past the response lives in its own guarded chain, NOT in the try above. A throw from
+    // the lookup would otherwise reach the error handler, which has no headersSent guard and would try
+    // to write a 500 onto a finished response. The notice is what makes an unauthorized reset visible,
+    // but failing to send it must not fail a reset that already committed.
+    void (async () => {
+      try {
+        const account = await lookupUserContact(dbClient, userId);
+        if (account) await notifyPasswordChanged(account.email, account.display_name);
+      } catch (err) {
         console.error("[password-reset] change notice failed", err);
-      });
-    }
+      }
+    })();
   } catch (err) {
     next(err);
   }

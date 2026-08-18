@@ -103,6 +103,7 @@ describe("change-password session invalidation", () => {
   it("re-mints the caller's auth cookie at the NEW token version", async () => {
     const response = await request(createTestApp())
       .post("/api/auth/local/change-password")
+      .set("Cookie", "token=an-existing-session-cookie")
       .send({ currentPassword: CURRENT_SECRET, newPassword: NEXT_SECRET });
 
     expect(response.status).toBe(200);
@@ -122,6 +123,7 @@ describe("change-password session invalidation", () => {
   it("mints the token with the HOME role and HOME office, not the active office override", async () => {
     const response = await request(createTestApp())
       .post("/api/auth/local/change-password")
+      .set("Cookie", "token=an-existing-session-cookie")
       .send({ currentPassword: CURRENT_SECRET, newPassword: NEXT_SECRET });
 
     const claims = verifyJwt(tokenCookieFrom(response.headers["set-cookie"] as unknown as string[])!);
@@ -132,10 +134,24 @@ describe("change-password session invalidation", () => {
   it("still reports mustChangePassword false to the client", async () => {
     const response = await request(createTestApp())
       .post("/api/auth/local/change-password")
+      .set("Cookie", "token=an-existing-session-cookie")
       .send({ currentPassword: CURRENT_SECRET, newPassword: NEXT_SECRET });
 
     expect(response.status).toBe(200);
     expect(response.body.user.mustChangePassword).toBe(false);
+  });
+
+  it("does NOT hand a cookie to a Bearer-only caller that presented none", async () => {
+    // mobile-crm authenticates with a Bearer token and /mobile-login deliberately clears every auth
+    // cookie so the app stays outside the cookie-triggered CSRF gate. Setting one here would quietly
+    // put it back inside -- and authMiddleware reads the cookie before the Authorization header.
+    const response = await request(createTestApp())
+      .post("/api/auth/local/change-password")
+      .set("Authorization", "Bearer some-native-token")
+      .send({ currentPassword: CURRENT_SECRET, newPassword: NEXT_SECRET });
+
+    expect(response.status).toBe(200);
+    expect(tokenCookieFrom(response.headers["set-cookie"] as unknown as string[])).toBeUndefined();
   });
 
   it("does not set an auth cookie when the password change itself fails", async () => {
@@ -145,6 +161,7 @@ describe("change-password session invalidation", () => {
 
     const response = await request(createTestApp())
       .post("/api/auth/local/change-password")
+      .set("Cookie", "token=an-existing-session-cookie")
       .send({ currentPassword: "wrong", newPassword: NEXT_SECRET });
 
     expect(response.status).toBe(401);

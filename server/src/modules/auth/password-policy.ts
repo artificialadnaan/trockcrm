@@ -14,8 +14,15 @@ import { AppError } from "../../middleware/error-handler.js";
  */
 export const PASSWORD_MIN_LENGTH = 12;
 
+// Matches the field flow's PASSWORD_RESET_MAX_LENGTH. Without a ceiling, scrypt runs over whatever
+// arrives inside the 10 MB body limit; the omission here was an inconsistency rather than a decision.
+export const PASSWORD_MAX_LENGTH = 256;
+
 export function validatePasswordPolicy(password: string) {
   if (password.length < PASSWORD_MIN_LENGTH) {
     throw new AppError(400, `Password must be at least ${PASSWORD_MIN_LENGTH} characters`);
+  }
+  if (password.length > PASSWORD_MAX_LENGTH) {
+    throw new AppError(400, `Password must be at most ${PASSWORD_MAX_LENGTH} characters`);
   }
 }

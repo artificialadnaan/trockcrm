@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { userLocalAuth, users } from "@trock-crm/shared/schema";
-import { db, pool } from "../../db.js";
+import { db, pool, releasePooledClient } from "../../db.js";
+import { closeUserSseConnections } from "../notifications/sse-manager.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
 import { hashPassword, recordLocalAuthEvent } from "./local-auth-service.js";
 import { buildPasswordChangedEmail, buildPasswordResetEmail } from "./password-reset-emails.js";
@@ -37,6 +38,14 @@ const DEFAULT_RESET_BASE_URL = "https://trockcrm.com";
 
 export type QueryClient = {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
+  /**
+   * Runs fn against a SINGLE dedicated connection inside BEGIN/COMMIT.
+   *
+   * Required, not a convenience. `pool.query` hands out an arbitrary connection per call, so a
+   * read-then-write gate spread across several calls has no isolation at all -- and BEGIN issued
+   * through the pool would not even land on the same connection as the statements it is meant to wrap.
+   */
+  transaction: <T>(fn: (tx: QueryClient) => Promise<T>) => Promise<T>;
 };
 
 /**
@@ -48,6 +57,28 @@ export type QueryClient = {
  */
 export const dbClient: QueryClient = {
   query: (text: string, params?: unknown[]) => pool.query(text, params as unknown[]),
+  transaction: async (fn) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const scoped: QueryClient = {
+        query: (text: string, params?: unknown[]) => client.query(text, params as unknown[]),
+        // Already inside a transaction -- nesting would issue a second BEGIN, which Postgres warns
+        // about and ignores, so the inner "commit" would end the OUTER transaction early.
+        transaction: (inner) => inner(scoped),
+      };
+      const result = await fn(scoped);
+      await client.query("COMMIT");
+      client.release();
+      return result;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      // releasePooledClient discards a connection broken mid-transaction rather than returning a
+      // poisoned one to the pool.
+      releasePooledClient(client, err);
+      throw err;
+    }
+  },
 };
 
 export function resetExpiry(baseDate = new Date()): Date {
@@ -96,6 +127,13 @@ export async function selectEligibleUser(
         AND u.is_active = true
         AND la.is_enabled = true
         AND la.revoked_at IS NULL
+        -- Field contractors are excluded. They HAVE user_local_auth rows, so without this they would
+        -- be eligible here and a T-Rock Cam crew member could self-serve a reset from a CRM-branded
+        -- email -- rewriting their field password and, because field auth also checks token_version,
+        -- signing them out of the field app. The field flow is admin-initiated by design and filters
+        -- role on its own consume path; this is the complementary filter that makes the two flows
+        -- partition instead of overlap.
+        AND u.role <> 'field_contractor'
       LIMIT 1`,
     [email]
   );
@@ -137,33 +175,58 @@ export async function issueResetToken(
   const user = await selectEligibleUser(client, email);
   if (!user) return null;
 
-  if ((await countRecentResets(client, user.id, RATE_LIMIT_WINDOW_MINUTES)) >= RATE_LIMIT_MAX_REQUESTS) {
-    return null;
-  }
-
   const rawToken = generateResetToken();
   const tokenHash = hashResetToken(rawToken);
 
-  // One live link at a time: requesting a new link kills the previous one, so a forwarded or shoulder-
-  // surfed older email stops working the moment the real owner asks again.
-  await client.query(
-    `UPDATE public.user_password_resets
-        SET invalidated_at = now()
-      WHERE user_id = $1 AND used_at IS NULL AND invalidated_at IS NULL`,
-    [user.id]
-  );
-  await client.query(
-    `INSERT INTO public.user_password_resets (user_id, token_hash, requested_by_user_id, requested_ip, expires_at)
-     VALUES ($1, $2, NULL, $3, $4)`,
-    [user.id, tokenHash, requestedIp, resetExpiry()]
-  );
+  /**
+   * Count, invalidate and insert run in ONE transaction behind a per-account advisory lock.
+   *
+   * Spread across pooled connections this gate was bypassable: at READ COMMITTED an uncommitted INSERT
+   * is invisible to a concurrent count, so N simultaneous requests all read the same number and all
+   * insert. Measured at 6 accepted out of 6 against a cap of 3 -- six emails to one mailbox from one
+   * burst, which is precisely the flooding the limit exists to prevent. The IP limiter is no backstop
+   * because it is keyed by IP, not by account.
+   *
+   * The lock is taken BEFORE the count so the whole read-decide-write sequence is serialized per user;
+   * it releases at commit. Keyed by hashtext(user_id) -- collisions across different users are possible
+   * but harmless, costing at most brief serialization between two unrelated accounts.
+   */
+  const issued = await client.transaction(async (tx) => {
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [user.id]);
 
-  await recordLocalAuthEvent({
-    userId: user.id,
-    eventType: "password_reset_requested",
-    // The raw token is never logged, never stored here, and never put in audit metadata.
-    metadata: { expiresAt: resetExpiry().toISOString(), source: "self_service" },
+    const recent = await countRecentResets(tx, user.id, RATE_LIMIT_WINDOW_MINUTES);
+    if (recent >= RATE_LIMIT_MAX_REQUESTS) return false;
+
+    // One live link at a time: requesting a new link kills the previous one, so a forwarded or
+    // shoulder-surfed older email stops working the moment the real owner asks again.
+    await tx.query(
+      `UPDATE public.user_password_resets
+          SET invalidated_at = now()
+        WHERE user_id = $1 AND used_at IS NULL AND invalidated_at IS NULL`,
+      [user.id]
+    );
+    await tx.query(
+      `INSERT INTO public.user_password_resets (user_id, token_hash, requested_by_user_id, requested_ip, expires_at)
+       VALUES ($1, $2, NULL, $3, $4)`,
+      [user.id, tokenHash, requestedIp, resetExpiry()]
+    );
+    return true;
   });
+
+  if (!issued) return null;
+
+  // Outside the transaction and non-fatal: the link is already durably issued, and losing an audit row
+  // must not turn a successful request into a failure the user never hears about.
+  try {
+    await recordLocalAuthEvent({
+      userId: user.id,
+      eventType: "password_reset_requested",
+      // The raw token is never logged, never stored here, and never put in audit metadata.
+      metadata: { expiresAt: resetExpiry().toISOString(), source: "self_service" },
+    });
+  } catch (err) {
+    console.error("[password-reset] audit event failed", err);
+  }
 
   return { rawToken, user };
 }
@@ -299,7 +362,23 @@ export async function applyPasswordReset(userId: string, newPassword: string): P
     `);
   });
 
-  await recordLocalAuthEvent({ userId, eventType: "password_reset_completed" });
+  // Bumping token_version only stops NEW requests. An SSE stream authenticates once at connect and
+  // then stays open indefinitely, so without this an attacker's already-open notification stream keeps
+  // delivering the victim's payloads after the very reset performed to lock them out.
+  try {
+    closeUserSseConnections(userId);
+  } catch (err) {
+    console.error("[password-reset] sse teardown failed", err);
+  }
+
+  // Non-fatal, and outside the transaction on purpose. The password IS changed and every session IS
+  // dead by this point; letting a failed audit insert throw would report a committed reset as a 500,
+  // sending the user to request another link with a password they think does not work.
+  try {
+    await recordLocalAuthEvent({ userId, eventType: "password_reset_completed" });
+  } catch (err) {
+    console.error("[password-reset] audit event failed", err);
+  }
 }
 
 /**

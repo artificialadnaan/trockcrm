@@ -52,6 +52,17 @@ function createTestApp() {
 
 const GENERIC_FAILURE = "This reset link is no longer valid. Request a new one.";
 
+/**
+ * /request answers before it does ANY database work, so the issue+deliver chain is still in flight
+ * when supertest resolves. Drain the microtask queue before asserting on it.
+ *
+ * That ordering is the anti-enumeration property itself, not an implementation detail: leaving work in
+ * the handler makes response cost depend on whether the account exists.
+ */
+async function flushDeferredWork() {
+  for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   serviceMocks.lookupUserContact.mockResolvedValue({ email: "a@b.c", display_name: "A" });
@@ -66,11 +77,13 @@ describe("POST /api/auth/password-reset/request", () => {
     const hit = await request(createTestApp())
       .post("/api/auth/password-reset/request")
       .send({ email: "real@trockgc.com" });
+    await flushDeferredWork();
 
     serviceMocks.issueResetToken.mockResolvedValueOnce(null);
     const miss = await request(createTestApp())
       .post("/api/auth/password-reset/request")
       .send({ email: "nobody@trockgc.com" });
+    await flushDeferredWork();
 
     // Pin the status too: "both 404" is also byte-identical, so without this the assertion passes
     // vacuously against a route that does not exist yet.
@@ -85,6 +98,7 @@ describe("POST /api/auth/password-reset/request", () => {
     await request(createTestApp())
       .post("/api/auth/password-reset/request")
       .send({ email: "nobody@trockgc.com" });
+    await flushDeferredWork();
     expect(serviceMocks.deliverResetEmail).not.toHaveBeenCalled();
   });
 
@@ -94,6 +108,7 @@ describe("POST /api/auth/password-reset/request", () => {
     const res = await request(createTestApp())
       .post("/api/auth/password-reset/request")
       .send({ email: "real@trockgc.com" });
+    await flushDeferredWork();
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
   });
@@ -111,6 +126,7 @@ describe("POST /api/auth/password-reset/request", () => {
     await request(createTestApp())
       .post("/api/auth/password-reset/request")
       .send({ email: "real@trockgc.com" });
+    await flushDeferredWork();
     expect(serviceMocks.deliverResetEmail).toHaveBeenCalledWith(expect.anything(), issued);
   });
 });

@@ -20,7 +20,7 @@ import {
 } from "../field/cross-office.js";
 import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
 import { validatePasswordPolicy, PASSWORD_MIN_LENGTH } from "./password-policy.js";
-import { incrementTokenVersion } from "./session-invalidation.js";
+import { closeUserSseConnections, incrementTokenVersion } from "./session-invalidation.js";
 
 const scryptAsync = promisify(crypto.scrypt);
 const TEMP_PASSWORD_LENGTH = 18;
@@ -707,10 +707,26 @@ export async function changeLocalPassword(input: {
     return bumped.tokenVersion;
   });
 
-  await recordLocalAuthEvent({
-    userId: input.userId,
-    eventType: "password_changed",
-  });
+  // Bumping token_version only stops NEW requests. An SSE stream authenticates once at connect and
+  // then stays open indefinitely, so without this the stolen session someone just changed their
+  // password to kill keeps receiving their notifications.
+  try {
+    closeUserSseConnections(input.userId);
+  } catch (err) {
+    console.error("[change-password] sse teardown failed", err);
+  }
+
+  // Non-fatal. The password IS changed and every session IS dead by this point; letting a failed audit
+  // insert throw would report a committed change as a 500 AND skip the cookie re-mint below, silently
+  // signing the user out of the device they just used while telling them nothing happened.
+  try {
+    await recordLocalAuthEvent({
+      userId: input.userId,
+      eventType: "password_changed",
+    });
+  } catch (err) {
+    console.error("[change-password] audit event failed", err);
+  }
 
   // The caller re-mints THIS session's cookie at the returned version; see /local/change-password.
   return { tokenVersion };
