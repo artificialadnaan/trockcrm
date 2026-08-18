@@ -276,38 +276,60 @@ describe("cadence scheduling helpers", () => {
 });
 
 describe("email links", () => {
-  it("gates the deep link behind an explicit flag, defaulting OFF", () => {
-    // The mobile `reports/` route does not exist yet, and mobile/src/wearables/pairing-callback.ts uses a
-    // DENY-list (APP_OWN_ROUTES = accept-invite, scorecards) — so an unrecognised trockcam:// link is
-    // retained as a possible Meta pairing callback and evicts a real held one. Off until both land.
+  it("gates the deep link behind an explicit flag, and only the literal string `true` opens it", () => {
+    // The flag guards a DESTRUCTIVE failure, not a cosmetic one: mobile/src/wearables/pairing-callback.ts
+    // holds any trockcam:// URL whose route key is not in APP_OWN_ROUTES as a possible Meta pairing
+    // callback, evicting a real held one. `"reports"` is listed there now, so the link is ours — but the
+    // parse stays strict, because a truthy-looking "1" silently emitting the link would be the same bug
+    // if that entry were ever removed.
     expect(weeklyReportAppDeepLinksEnabled({})).toBe(false);
     expect(weeklyReportAppDeepLinksEnabled({ WEEKLY_REPORT_APP_DEEP_LINKS: "false" })).toBe(false);
     expect(weeklyReportAppDeepLinksEnabled({ WEEKLY_REPORT_APP_DEEP_LINKS: "1" })).toBe(false);
+    expect(weeklyReportAppDeepLinksEnabled({ WEEKLY_REPORT_APP_DEEP_LINKS: "yes" })).toBe(false);
     expect(weeklyReportAppDeepLinksEnabled({ WEEKLY_REPORT_APP_DEEP_LINKS: " TRUE " })).toBe(true);
+  });
+
+  it("emits the app link when the flag is ON and null when it is OFF", () => {
+    // Both arms built from the SAME inputs, so the flag is the only difference between them. The expected
+    // URL is written out in full rather than derived from the builder's own constant — a fixture computed
+    // from the thing under test cannot fail when that thing changes.
+    const on = weeklyReportReminderLinks({
+      frontendUrl: "https://trockcrm.com/",
+      officeId: OFFICE,
+      appDeepLinksEnabled: true,
+    });
+    expect(on.appUrl).toBe("trockcam://reports");
+    expect(on.webUrl).toContain("https://trockcrm.com/projects/weekly-reports?");
+    // Office context is URL-driven in the CRM; dropping officeId lands the recipient on their home office.
+    expect(on.webUrl).toContain(`officeId=${OFFICE}`);
 
     const off = weeklyReportReminderLinks({
-      frontendUrl: "https://trockcrm.com",
+      frontendUrl: "https://trockcrm.com/",
       officeId: OFFICE,
-      weeklyReportProjectId: PROJECT,
-      weekOf: DUE,
       appDeepLinksEnabled: false,
     });
     expect(off.appUrl).toBeNull();
-    expect(off.webUrl).toContain("/projects/weekly-reports?");
+    // The web fallback is identical either way: the flag governs the app link and nothing else.
+    expect(off.webUrl).toBe(on.webUrl);
   });
 
-  it("offers the trockcam:// deep link plus an https CRM fallback carrying officeId", () => {
+  it("routes the app link at the reports HUB, never at a week the app cannot resolve", () => {
+    // mobile/app/(app)/reports/weekly/[draftId].tsx keys on a LOCAL DRAFT id (newClientUploadId(), read
+    // back via loadWeeklyReportDraft) — not a weeklyReportProjectId. This used to emit
+    // `trockcam://reports/weekly/<projectId>?weekOf=…`, which file-system-routes straight to that screen
+    // with a server id in the draft slot: it matches no draft on the device and renders "Draft not found.
+    // It may have been submitted or discarded." to a super whose report is neither. `weekOf` was never
+    // read there at all. Resolving a server-held week is an async decision only the hub makes
+    // (mobile/src/weekly-reports/hub.ts), so the hub is the deepest link that actually lands.
     const links = weeklyReportReminderLinks({
-      frontendUrl: "https://trockcrm.com/",
-      officeId: OFFICE,
-      weeklyReportProjectId: PROJECT,
-      weekOf: DUE,
+      frontendUrl: "https://trockcrm.com",
+      officeId: null,
       appDeepLinksEnabled: true,
     });
-    expect(links.appUrl).toBe(`trockcam://reports/weekly/${PROJECT}?weekOf=2026-08-13`);
-    expect(links.webUrl).toContain("https://trockcrm.com/projects/weekly-reports?");
-    // Office context is URL-driven in the CRM; dropping officeId lands the recipient on their home office.
-    expect(links.webUrl).toContain(`officeId=${OFFICE}`);
+    expect(links.appUrl).toBe("trockcam://reports");
+    expect(links.appUrl).not.toContain("/weekly/");
+    expect(links.appUrl).not.toContain("weekOf=");
+    expect(links.webUrl).toBe("https://trockcrm.com/projects/weekly-reports");
   });
 
   it("emits NO query parameters the weekly-reports board does not read", () => {
@@ -319,23 +341,11 @@ describe("email links", () => {
     const links = weeklyReportReminderLinks({
       frontendUrl: "https://trockcrm.com",
       officeId: OFFICE,
-      weeklyReportProjectId: PROJECT,
-      weekOf: DUE,
       appDeepLinksEnabled: false,
     });
     expect(links.webUrl).toBe(`https://trockcrm.com/projects/weekly-reports?officeId=${OFFICE}`);
     expect(links.webUrl).not.toContain("projectId=");
     expect(links.webUrl).not.toContain("weekOf=");
-    // ...and the deep link, which DOES route by project and week, keeps both.
-    const deepLinked = weeklyReportReminderLinks({
-      frontendUrl: "https://trockcrm.com",
-      officeId: null,
-      weeklyReportProjectId: PROJECT,
-      weekOf: DUE,
-      appDeepLinksEnabled: true,
-    });
-    expect(deepLinked.appUrl).toContain(`weekly/${PROJECT}?weekOf=2026-08-13`);
-    expect(deepLinked.webUrl).toBe("https://trockcrm.com/projects/weekly-reports");
   });
 
   it("keeps the dashboard URL usable without an office id", () => {
@@ -351,7 +361,9 @@ describe("buildWeeklyReportReminderEmail", () => {
     projectNumber: "DFW-10432",
     clientName: "Mack Real Estate Group",
     weekOf: DUE,
-    appUrl: `trockcam://reports/weekly/${PROJECT}?weekOf=2026-08-13`,
+    // The URL weeklyReportReminderLinks actually emits, so this fixture cannot drift into asserting the
+    // composer against a link shape the app no longer resolves.
+    appUrl: "trockcam://reports",
     webUrl: "https://trockcrm.com/projects/weekly-reports",
   };
 
