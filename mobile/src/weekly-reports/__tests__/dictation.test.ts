@@ -121,14 +121,35 @@ describe("weeklyReportDictationText", () => {
 
   it("returns nothing for an empty transcript, without calling the server", async () => {
     const port = jest.fn(serverPort);
+    // `emptyReason: "empty"` is the half of the distinction that says nothing was said. The other half
+    // ("full") is what lets the screen tell a super their words had nowhere to go instead of dropping
+    // them in silence, so the two must not collapse back into a bare `text: ""`.
     expect(await weeklyReportDictationText({ transcript: "  \n ", existingChars: 0 }, port)).toEqual({
       text: "",
       source: "local",
+      emptyReason: "empty",
     });
     expect(port).not.toHaveBeenCalled();
   });
 
   // ── The cap. Absolute fixtures only ─────────────────────────────────────────────────────────────
+
+  it("says the section is FULL rather than returning a bare empty string", async () => {
+    // The distinction the screen needs. A full section and an empty transcript both produce text: "",
+    // and the caller used to drop both with `if (!outcome.text) return;` — so a super who dictated a
+    // paragraph into a section already at the cap watched "Transcribing…", then "Tidying up…", then
+    // saw nothing appear, with no error and no reason. Words WERE spoken here, so the only honest
+    // explanation is that there was no room.
+    //
+    // 20000 literal, not the constant: a fixture derived from the value it tests can never detect that
+    // value changing.
+    const outcome = await weeklyReportDictationText(
+      { transcript: TRANSCRIPT, existingChars: 20_000 },
+      async () => ({ text: "- poured the north slab" }),
+    );
+    expect(outcome.text).toBe("");
+    expect(outcome.emptyReason).toBe("full");
+  });
 
   it("caps the addition at 20000 characters however long the server's answer is", async () => {
     const outcome = await weeklyReportDictationText(

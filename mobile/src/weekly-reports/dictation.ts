@@ -30,6 +30,17 @@ export type WeeklyReportDictationOutcome = {
   /** The text to APPEND. "" only when there was nothing to say, or no room left in the section. */
   text: string;
   /**
+   * WHY `text` is empty, when it is. `"empty"` means nothing was said; `"full"` means words were spoken
+   * and the section had no room for them.
+   *
+   * These used to be indistinguishable, and the caller dropped both on the floor with `if (!outcome.text)
+   * return;`. A superintendent whose section was already at the cap watched "Transcribing…" then
+   * "Tidying up…" and then saw NOTHING appear, with no error and no explanation — the exact "silent
+   * no-op for a paragraph they just spoke" this file calls the worst outcome available, reached by the
+   * one path neither layer treated as a failure. `undefined` whenever `text` is non-empty.
+   */
+  emptyReason?: "empty" | "full";
+  /**
    * Where the text came from. `"server"` when the server pass answered, `"local"` when this device
    * produced it — which covers being offline, the request failing, and the server itself falling back.
    */
@@ -59,10 +70,15 @@ export async function weeklyReportDictationText(
   port: WeeklyReportDictationPort | null,
 ): Promise<WeeklyReportDictationOutcome> {
   const transcript = input.transcript.trim();
-  if (!transcript) return { text: "", source: "local" };
+  if (!transcript) return { text: "", source: "local", emptyReason: "empty" };
+
+  // Words WERE spoken from here on, so an empty result can only mean the section had no room — which the
+  // caller has to be able to say out loud rather than silently discard.
+  const settle = (text: string, source: "server" | "local"): WeeklyReportDictationOutcome =>
+    text ? { text, source } : { text: "", source, emptyReason: "full" };
 
   const local = formatDictationAsBullets(transcript);
-  if (!port) return { text: clampToRemaining(local, input.existingChars), source: "local" };
+  if (!port) return settle(clampToRemaining(local, input.existingChars), "local");
 
   try {
     const response = await port({ transcript, existingChars: input.existingChars });
@@ -70,13 +86,13 @@ export async function weeklyReportDictationText(
     // An empty or non-string `text` is treated exactly like a failed request. Answering "" would hand the
     // superintendent a silent no-op for a paragraph they just spoke — the worst outcome available here,
     // and the one a naive `response.text ?? ""` produces on any API drift.
-    if (!text) return { text: clampToRemaining(local, input.existingChars), source: "local" };
-    return { text: clampToRemaining(text, input.existingChars), source: "server" };
+    if (!text) return settle(clampToRemaining(local, input.existingChars), "local");
+    return settle(clampToRemaining(text, input.existingChars), "server");
   } catch {
     // Deliberately swallowed, including a 4xx. There is no error worth showing: the local split already
     // holds every word that was said, it lands in the same editable box, and the alternative is an alert
     // over a report the user can simply carry on writing.
-    return { text: clampToRemaining(local, input.existingChars), source: "local" };
+    return settle(clampToRemaining(local, input.existingChars), "local");
   }
 }
 

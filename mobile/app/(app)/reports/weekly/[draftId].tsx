@@ -247,6 +247,21 @@ function Wizard({
   // Each recorder is tracked independently: a transcript arrives asynchronously AFTER recording stops, so
   // leaving or submitting in that window would silently discard what was said.
   const voiceBusyHandlers = useRef<Map<string, (busy: boolean) => void>>(new Map());
+  /**
+   * A dictation produced words and the section had no room for them.
+   *
+   * Passed down rather than reached for: the recorder lives in `SectionStep`, which has no notice state,
+   * and the alternative was to keep dropping the outcome silently. That was the real failure — the super
+   * watched "Transcribing…", then "Tidying up…", then nothing appeared, with no error and no reason to
+   * look for one.
+   */
+  const notifySectionFull = useCallback(() => {
+    setNotice({
+      tone: "error",
+      text: "That section is already full, so the dictation could not be added. Shorten it and try again.",
+    });
+  }, []);
+
   const getVoiceBusyHandler = useCallback((key: string) => {
     let handler = voiceBusyHandlers.current.get(key);
     if (!handler) {
@@ -727,6 +742,7 @@ function Wizard({
                 value={draft.workCompleted}
                 voiceEnabled={voiceEnabled}
                 onBusyChange={getVoiceBusyHandler("workCompleted")}
+                onSectionFull={notifySectionFull}
                 dictationPort={dictationPort}
                 dispatch={dispatch}
               />
@@ -741,6 +757,7 @@ function Wizard({
                 value={draft.nextWeekLookAhead}
                 voiceEnabled={voiceEnabled}
                 onBusyChange={getVoiceBusyHandler("nextWeekLookAhead")}
+                onSectionFull={notifySectionFull}
                 dictationPort={dictationPort}
                 dispatch={dispatch}
               />
@@ -755,6 +772,7 @@ function Wizard({
                 value={draft.issuesConcerns}
                 voiceEnabled={voiceEnabled}
                 onBusyChange={getVoiceBusyHandler("issuesConcerns")}
+                onSectionFull={notifySectionFull}
                 dictationPort={dictationPort}
                 dispatch={dispatch}
               />
@@ -842,6 +860,7 @@ function SectionStep({
   value,
   voiceEnabled,
   onBusyChange,
+  onSectionFull,
   dictationPort,
   dispatch,
 }: {
@@ -852,6 +871,8 @@ function SectionStep({
   value: string;
   voiceEnabled: boolean;
   onBusyChange: (busy: boolean) => void;
+  /** Raised when a dictation produced words but the section had no room for them. */
+  onSectionFull: () => void;
   dictationPort: WeeklyReportDictationPort;
   dispatch: React.Dispatch<WeeklyReportDraftAction>;
 }) {
@@ -887,7 +908,13 @@ function SectionStep({
               { transcript: text, existingChars: value.length },
               dictationPort,
             );
-            if (!outcome.text) return;
+            if (!outcome.text) {
+              // A full section used to be indistinguishable from nothing-was-said, and both were dropped
+              // here in silence. The super watched "Transcribing…" then "Tidying up…", saw nothing
+              // appear, and had no way to know their words went nowhere or why.
+              if (outcome.emptyReason === "full") onSectionFull();
+              return;
+            }
             dispatch({ type: "appendSection", key: sectionKey, text: outcome.text });
           }}
         />

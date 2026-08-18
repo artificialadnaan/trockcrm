@@ -62,7 +62,7 @@ describe("VoiceRecorder busy window", () => {
     const onTranscript = jest.fn(() => format.promise);
     const onBusyChange = jest.fn();
 
-    const { getByLabelText } = render(
+    const { getByLabelText, getByText } = render(
       <VoiceRecorder onTranscript={onTranscript} onBusyChange={onBusyChange} />,
     );
 
@@ -84,7 +84,13 @@ describe("VoiceRecorder busy window", () => {
     // Not one `false` since the recorder went busy — so the parent's guard is continuously armed.
     expect(duringRoundTrip.slice(firstBusy)).not.toContain(false);
     // And the button says so, rather than looking idle and tappable.
-    getByLabelText("Record voice note");
+    //
+    // Assert what actually CHANGES. This was `getByLabelText("Record voice note")`, which could not
+    // fail: `accessibilityLabel` is keyed on `recording` alone, so it reads "Record voice note" in the
+    // idle state and the formatting state alike, and the line passed whether or not the button was
+    // busy. `disabled` and the "Tidying up…" caption are the two things that distinguish them.
+    expect(getByLabelText("Record voice note").props.accessibilityState?.disabled).toBe(true);
+    getByText("Tidying up…");
 
     // Only once the round trip settles does it report idle.
     await act(async () => {
