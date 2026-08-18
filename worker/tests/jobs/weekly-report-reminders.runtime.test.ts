@@ -162,6 +162,8 @@ beforeAll(async () => {
   await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   await pg.exec(migrationSql("0222_weekly_reports"));
+  // 0223 adds weekly_report_pauses, which the cadence regeneration reads to skip paused stretches.
+  await pg.exec(migrationSql("0223_weekly_report_pauses"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -296,7 +298,14 @@ describe("buildWeeklyReportReminderEmail", () => {
     expect(email.html).not.toContain("Open in T-Rock Cam");
     expect(email.html).toContain("Open the weekly reports board");
     expect(email.html).toContain(base.webUrl);
-    expect(email.text).toContain(`Open it in the CRM: ${base.webUrl}`);
+    expect(email.text).toContain(base.webUrl);
+    // ...and it names where the work actually happens. The recipients are the assigned super and PM,
+    // usually `construction` / `field_contractor` accounts — roles /projects/weekly-reports refuses,
+    // and a field_contractor cannot sign into the web app at all. Without this the only instruction in
+    // the email is a destination most of them bounce off.
+    expect(email.html).toContain("T-Rock Cam");
+    expect(email.text).toContain("Write it in T-Rock Cam on your phone");
+    expect(email.text).toContain("needs CRM access");
   });
 
   it("carries both links and escapes the project name", () => {
@@ -416,6 +425,23 @@ describe("buildBacklog", () => {
       new Set(),
     );
     expect(backlog).toEqual([]);
+  });
+
+  it("does not bill a resumed project for the weeks it was paused", async () => {
+    // The digest regenerated the cadence without the pause ledger, so a project paused for six weeks
+    // came back with six never-owed reports in the backlog — telling leadership to chase work nobody
+    // ever asked for, and disagreeing with the board the same email links to.
+    const paused = { ...project, cadenceStartDate: "2026-07-23" };
+    const backlog = buildBacklog(
+      [{ ...paused, pausedIntervals: [{ from: "2026-07-27", to: "2026-08-13" }] }],
+      DUE,
+      new Set(),
+      new Set(),
+    );
+    // 07-23 was owed before the pause and stays owed; 07-30 and 08-06 fell inside it.
+    expect(backlog).toHaveLength(1);
+    expect(backlog[0]!.outstandingWeeks).toBe(1);
+    expect(backlog[0]!.oldestWeekOf).toBe("2026-07-23");
   });
 
   it("COUNTS weeks beyond the lookback window instead of dropping them", () => {

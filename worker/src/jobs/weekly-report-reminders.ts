@@ -9,6 +9,7 @@ import {
   WEEKLY_REPORT_REMINDER_OFFSET_DAYS,
   daysBetweenIsoDates,
   weeklyReportExpectedWeeks,
+  type WeeklyReportPauseInterval,
   weeklyReportWeekOf,
   weeklyReportWeekStateLabel,
   type WeeklyReportReminderKind,
@@ -327,12 +328,24 @@ export function buildWeeklyReportReminderEmail(input: WeeklyReportReminderEmailI
     ["Week of", dueDay],
   ] as const;
 
-  // With the app route live the deep link is the primary button and the CRM is the fallback beneath it;
-  // without it there is exactly one link and it must be the button, not a footnote nobody taps.
+  // WHO THIS GOES TO decides the copy. The recipients are the assigned superintendent and PM, and those
+  // are `construction` / `field_contractor` accounts far more often than not — roles that
+  // /projects/weekly-reports refuses (the route is admin/director/rep on both the client guard and the
+  // server router), and a field_contractor cannot sign into the web app at all.
+  //
+  // So with the deep link off, leading with a CRM button would hand most recipients a destination that
+  // bounces them. The report is written in T-Rock Cam; the email says so in words, and the CRM link is
+  // offered as the secondary for whoever does have dashboard access. Once the deep link is enabled the
+  // app becomes a real button and this reduces to the obvious thing.
+  const writeItHere = input.appUrl
+    ? ""
+    : `<p style="margin:16px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#333333;">` +
+      `Write it in <strong>T-Rock Cam</strong> on your phone — the <strong>Reports</strong> tab.</p>`;
+
   const html = renderBrandedEmail({
     title: isTomorrow ? "Weekly report due tomorrow" : "Weekly report due soon",
     preheader,
-    bodyHtml: renderDetailRows(rows),
+    bodyHtml: renderDetailRows(rows) + writeItHere,
     primaryLabel: input.appUrl ? "Open in T-Rock Cam" : "Open the weekly reports board",
     primaryUrl: input.appUrl ?? input.webUrl,
     ...(input.appUrl
@@ -343,7 +356,9 @@ export function buildWeeklyReportReminderEmail(input: WeeklyReportReminderEmailI
   const text =
     `${preheader}\n\n` +
     rows.map(([rowLabel, value]) => `${rowLabel}: ${value}`).join("\n") +
-    (input.appUrl ? `\n\nOpen in T-Rock Cam: ${input.appUrl}\nOr open it in the CRM: ${input.webUrl}` : `\n\nOpen it in the CRM: ${input.webUrl}`);
+    (input.appUrl
+      ? `\n\nOpen in T-Rock Cam: ${input.appUrl}\nOr open it in the CRM: ${input.webUrl}`
+      : `\n\nWrite it in T-Rock Cam on your phone — the Reports tab.\nCRM dashboard (needs CRM access): ${input.webUrl}`);
 
   return { subject, html, text };
 }
@@ -519,6 +534,8 @@ interface ProjectRow {
   cadenceWeekday: number;
   cadenceStartDate: string;
   cadenceEndDate: string | null;
+  /** Stretches this project was not reporting for. Excluded from every cadence regeneration. */
+  pausedIntervals: WeeklyReportPauseInterval[] | null;
   superName: string | null;
   superEmail: string | null;
   pmName: string | null;
@@ -632,6 +649,23 @@ async function processOffice(args: OfficeRunArgs): Promise<void> {
   );
   if (projectsResult.rows.length === 0) return;
 
+  // The pause ledger (0223), loaded exactly as dashboard-service does. Every project here is
+  // `status = 'active'`, so nothing is paused right now — these are the stretches it was stopped for and
+  // has since come back from. Without them a project paused for six weeks returns with six never-owed
+  // reports in the leadership digest, contradicting the board those same recipients click through to.
+  const pausesResult = await query(
+    `SELECT weekly_report_project_id, paused_from, resumed_on
+       FROM ${tenantSchema}.weekly_report_pauses
+      ORDER BY weekly_report_project_id, paused_from`,
+  );
+  const pausesByProject = new Map<string, WeeklyReportPauseInterval[]>();
+  for (const row of pausesResult.rows) {
+    const key = String(row.weekly_report_project_id);
+    const intervals = pausesByProject.get(key) ?? [];
+    intervals.push({ from: toIsoDate(row.paused_from)!, to: toIsoDate(row.resumed_on) });
+    pausesByProject.set(key, intervals);
+  }
+
   const projects: ProjectRow[] = projectsResult.rows.map((row) => {
     const cadenceWeekday = Number(row.cadence_weekday);
     const cadenceStartDate = toIsoDate(row.cadence_start_date)!;
@@ -641,11 +675,13 @@ async function processOffice(args: OfficeRunArgs): Promise<void> {
     // date, or after `cadence_end_date`, `weeklyReportWeekOf` still returns the next matching weekday.
     // Asking the shared generator (rather than re-deriving the bounds here) is what keeps the reminder
     // and the dashboard agreeing about which weeks exist.
+    const pausedIntervals = pausesByProject.get(String(row.id)) ?? null;
     const expected = weeklyReportExpectedWeeks({
       cadenceWeekday,
       cadenceStartDate,
       cadenceEndDate,
       throughDate: candidate,
+      pausedIntervals,
     });
     return {
       id: String(row.id),
@@ -656,6 +692,7 @@ async function processOffice(args: OfficeRunArgs): Promise<void> {
       cadenceWeekday,
       cadenceStartDate,
       cadenceEndDate,
+      pausedIntervals,
       superName: normalizeText(row.super_name),
       superEmail: row.super_is_active === false ? null : normalizeText(row.super_email),
       pmName: normalizeText(row.pm_name),
@@ -970,6 +1007,9 @@ export function buildBacklog(
       cadenceStartDate: project.cadenceStartDate,
       cadenceEndDate: project.cadenceEndDate,
       throughDate: currentWeek,
+      // Same ledger the board uses. A digest that bills a resumed project for its paused weeks tells
+      // leadership to chase reports nobody ever owed.
+      pausedIntervals: project.pausedIntervals,
     });
     // A COUNT cutoff over the expected weeks, byte-for-byte the dashboard's `expected.length - lookback`.
     // A date range instead would drift a week away from the board at the window edge.
