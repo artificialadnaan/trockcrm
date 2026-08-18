@@ -839,7 +839,8 @@ export async function transitionWeeklyReport(
   // Re-checked at EVERY forward gate, not just the first submit. PM-authorised users may edit a report
   // in pending_review or approved, so a check that ran only on draft submission let the work-completed
   // section be cleared afterwards and the empty report approved and sent to the client.
-  if ((to === "pending_review" || to === "approved" || to === "sent") && !reportRow.work_completed) {
+  const isForwardGate = to === "pending_review" || to === "approved" || to === "sent";
+  if (isForwardGate && !reportRow.work_completed) {
     throw new AppError(400, "Add the work completed before this report can move forward");
   }
 
@@ -895,9 +896,19 @@ export async function transitionWeeklyReport(
   // after it had already gone to the client.
   // RETURNING id rather than trusting `rowCount`: the check is then driver-independent, and the test
   // harness cannot accidentally report a different number of affected rows than production does.
+  //
+  // AND ON THE CONTENT, for the same reason and against the same window. Status is not the only thing
+  // the validation above read: the work-completed gate tested `reportRow.work_completed` from that same
+  // earlier statement, and clearing that section does NOT move `status`. So an authorised content edit
+  // landing between the read and this write slipped past a status-only condition, and the report went
+  // `approved` — or `sent`, to the client — with the section the gate exists to require left empty.
+  // Re-testing it here closes the window the gate's own comment describes.
+  const contentGate = isForwardGate
+    ? " AND work_completed IS NOT NULL AND btrim(work_completed) <> ''"
+    : "";
   const result = await client.query(
     `UPDATE weekly_reports SET ${assignments.join(", ")}, updated_at = now()
-      WHERE id = $${idParam}::uuid AND is_active AND status = $${params.length}
+      WHERE id = $${idParam}::uuid AND is_active AND status = $${params.length}${contentGate}
       RETURNING id`,
     params,
   );

@@ -108,6 +108,30 @@ function racingDb(reportId: string, trigger: string) {
 }
 
 /**
+ * A `db` that clears the work-completed section mid-call, at the transition's own write.
+ *
+ * The sibling above races a STATUS change; this races a CONTENT change, which is the harder case
+ * precisely because it leaves `status` untouched. `updateWeeklyReport` authorises a PM to edit an
+ * `approved` report, so this stands in for that edit committing between the forward gate's read and the
+ * write it guards — the window a status-only condition cannot see.
+ */
+function racingContentClear(reportId: string) {
+  let fired = false;
+  return {
+    query: async (text: string, params?: unknown[]) => {
+      if (!fired && text.includes("UPDATE weekly_reports SET status")) {
+        fired = true;
+        await pg.query(
+          `UPDATE office_dallas.weekly_reports SET work_completed = NULL WHERE id = $1::uuid`,
+          [reportId],
+        );
+      }
+      return db.query(text, params);
+    },
+  } as typeof db;
+}
+
+/**
  * Assert a call fails with a specific AppError status.
  *
  * Deliberately awaits ONCE and fails loudly when the promise resolves — a helper that only asserts
@@ -1434,6 +1458,53 @@ describe("review findings, round two", () => {
       409,
       /changed while you were working/i,
     );
+  });
+
+  it("does not approve a report whose work-completed was cleared while the approval was in flight", async () => {
+    // The forward gate reads `work_completed` from loadReportWithProject, one statement earlier. Clearing
+    // that section does NOT move `status`, so a status-only CAS still matched and the report reached
+    // `approved` — and then `sent`, to the client — with the section the gate exists to require empty.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+
+    await expectAppError(
+      transitionWeeklyReport(racingContentClear(id), id, "approved", PM_ACTOR),
+      409,
+      /changed while you were working/i,
+    );
+    const after = await pg.query(`SELECT status FROM office_dallas.weekly_reports WHERE id = $1::uuid`, [id]);
+    expect(after.rows[0].status).toBe("pending_review");
+  });
+
+  it("does not send a report whose work-completed was cleared while the send was in flight", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+
+    await expectAppError(
+      transitionWeeklyReport(racingContentClear(id), id, "sent", PM_ACTOR),
+      409,
+      /changed while you were working/i,
+    );
+    // Nothing reached the client: still approved, and no send stamps were written.
+    const after = await pg.query(
+      `SELECT status, sent_at, sent_by FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+      [id],
+    );
+    expect(after.rows[0]).toMatchObject({ status: "approved", sent_at: null, sent_by: null });
+  });
+
+  it("still lets a BACKWARD move off an empty report, so a bounce-back is never trapped", async () => {
+    // The content condition is scoped to forward gates on purpose. A report whose work-completed is
+    // empty must still be able to go back to draft, or clearing the section would strand it.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await pg.query(`UPDATE office_dallas.weekly_reports SET work_completed = NULL WHERE id = $1::uuid`, [id]);
+
+    await expect(transitionWeeklyReport(db, id, "draft", PM_ACTOR)).resolves.toMatchObject({ status: "draft" });
   });
 
   it("does not let a photo swap land on a report that has since been sent", async () => {
