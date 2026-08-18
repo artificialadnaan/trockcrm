@@ -130,6 +130,26 @@ const UNPRICEABLE_REVIEW_STATUSES = new Set(["rejected", "needs_quantity"]);
  */
 const REVIEW_DECIDED_STATUSES = new Set(["needs_quantity", "rejected", "approved"]);
 
+/**
+ * Statuses the two `unmatched` exits must leave alone, and it is a SUPERSET of
+ * {@link REVIEW_DECIDED_STATUSES} for a reason those exits do not share with the quantityless claim.
+ *
+ * The decided half is the same hole, in the same shape: the claim pins `status` to the SNAPSHOT's,
+ * which defends against a decision taken after the select and is no defence at all when the snapshot
+ * IS the decision. The candidate filter admits a measurement candidate on `extraction_type` ALONE, so
+ * a human's `rejected` arrives here as `extraction.status`, satisfies its own equality test, and is
+ * overwritten with `unmatched` — a committed review decision destroyed, and by a status that is
+ * outside the worker's `pending` candidate filter, so nothing revisits the row afterwards either.
+ *
+ * `unmatched` ITSELF is the extra member, and it is not a human decision — it is this run agreeing
+ * with the last one. The claim-before-event ordering is what makes the event idempotent, but only if
+ * the claim can fail: pinned to the snapshot status, a row ALREADY at `unmatched` matches its own pin
+ * on every subsequent run, so the claim wins again and the announcement is re-emitted. One duplicate
+ * `unmatched` event per generation run, forever, on a row whose state never changed. Skipping the
+ * write is what actually makes the second run a no-op.
+ */
+const UNMATCHED_CLAIM_PROTECTED_STATUSES = new Set([...REVIEW_DECIDED_STATUSES, "unmatched"]);
+
 async function stillPriceable(
   db: any,
   extractionId: string,
@@ -558,6 +578,16 @@ export async function runEstimateGeneration(
         //
         // `stillPriceable` guards the persistence path further down, but it is only reached when
         // there IS a recommendation to persist — these two unmatched exits return before it.
+        //
+        // ALREADY DECIDED, OR ALREADY UNMATCHED ⇒ write nothing. The pin above is a defence against a
+        // decision made AFTER the select; it cannot defend against one the snapshot already carries.
+        // A measurement candidate is admitted on `extraction_type` alone, so a human's `rejected`
+        // reaches this line as `extraction.status`, matches its own pin, and is stamped `unmatched` —
+        // the identical hole the quantityless branch closes 150 lines above, on a path that reaches it
+        // with a perfectly good quantity. See UNMATCHED_CLAIM_PROTECTED_STATUSES for why `unmatched`
+        // is on the list too.
+        if (UNMATCHED_CLAIM_PROTECTED_STATUSES.has(String(extraction.status))) continue;
+
         const claimed = await tenantDb
           .update(estimateExtractions)
           .set({ status: "unmatched" })
@@ -657,8 +687,13 @@ export async function runEstimateGeneration(
           dependencySupportCount: Number.isFinite(dependencySupportCount) ? dependencySupportCount : 0,
         })
       ) {
-        // Same pin as the no-match exit above: this one is reached later still, so it has had even
-        // longer for a reviewer's edit to land underneath it.
+        // Same pin as the no-match exit above, and the same skip in front of it: this one is reached
+        // later still, so it has had even longer for a reviewer's edit to land underneath it — and the
+        // pin is just as blind to a decision the snapshot already carried. An `inferred` row can be a
+        // measurement candidate too (`metadataJson.sourceType === 'inferred'` is set independently of
+        // `extractionType`), which is exactly the admission that makes a decided status reachable here.
+        if (UNMATCHED_CLAIM_PROTECTED_STATUSES.has(String(extraction.status))) continue;
+
         await tenantDb
           .update(estimateExtractions)
           .set({ status: "unmatched" })
