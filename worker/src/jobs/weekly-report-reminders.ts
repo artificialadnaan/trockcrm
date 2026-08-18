@@ -432,11 +432,17 @@ export interface WeeklyReportDigestEntry {
    * if the rollback itself fails, or the process dies between the INSERT and it, the row outlives a
    * reminder that was never delivered. Rare, but it is a real state and the digest cannot detect it.
    *
-   * So the two directions are NOT symmetric, and the rendering leans on that:
+   * So NEITHER direction is a delivery fact, and the rendering says only what each one supports:
    *
-   *   • ZERO rows is a strong negative. Nothing was claimed, so nothing was even attempted, and the digest
-   *     says plainly that no reminder was sent. This is the direction the "never reminded" heading and the
-   *     note both hang on, and it is the case they exist for.
+   *   • ZERO rows means nothing is ON RECORD — which is weaker than "nothing was attempted", and the
+   *     wording no longer claims otherwise. A claim is written before EVERY attempt and DELETED again when
+   *     the send fails, including on an `unknown` outcome that the rollback's own comment says may well
+   *     have been delivered. So a project whose t−2 and t−1 both came back `unknown` on all three ticks of
+   *     both days reaches this digest with an empty ledger and up to six emails already in the super's
+   *     inbox. Rare — it needs the send to fail after Resend accepted it, repeatedly — but the asymmetry
+   *     the old wording rested on ("nothing was claimed, so nothing was even attempted") is simply not
+   *     true of a ledger its own writer rolls back. The heading and the note therefore say NO REMINDER IS
+   *     ON RECORD, which is exactly the fact in hand, and never that none was sent.
    *   • A NON-ZERO count only attests that the job took the slot and handed the message to the provider.
    *     The digest reports it as reminders LOGGED, never as reminders delivered — see reminderNote. Making
    *     it a delivery assertion would print "1 reminder was sent" to leadership over a nudge that provably
@@ -510,8 +516,12 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   backlog: WeeklyReportDigestBacklogEntry[];
   dashboardUrl: string;
   /**
-   * Names of the projects that were NOT in an earlier digest for this same due date, when one already
-   * went out. Empty or absent for the day's first digest — see the cohort note in sendLeadershipDigest.
+   * Names of the projects that were NOT covered by an earlier digest LOGGED for this same due date. Empty
+   * or absent for the day's first digest — see the cohort note in sendLeadershipDigest.
+   *
+   * "Logged", not "sent", and the copy this drives says so. The caller derives it from `due_digest` claim
+   * rows, which are written before the send; a send that failed and could not roll its claims back leaves
+   * rows behind with nothing in anybody's inbox.
    */
   followUpForProjects?: string[] | null;
 }): { subject: string; html: string; text: string } {
@@ -534,11 +544,19 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   // outstanding" with nothing else said would be true and unreadable; "1 filed" would be false.
   const dismissedClause = dismissed.length ? `${dismissed.length} dismissed` : null;
 
-  // A second digest for a cohort that GREW mid-morning re-lists the first email's projects, under a
-  // subject that otherwise differs only in its counts. Saying which email this is costs one word and is
-  // the difference between "leadership got an update" and "the cron sent it twice".
+  // A second digest for a cohort that GREW mid-morning re-lists the earlier one's projects, under a
+  // subject that otherwise differs only in its counts. Saying which email this is costs two words and is
+  // the difference between "here is a revised list" and "the cron sent it twice".
+  //
+  // "ANOTHER DIGEST", not "Update". The flag behind it is `alreadyDigested`, read off `due_digest` CLAIM
+  // rows that are written BEFORE the send and survive a send that failed to roll them back — so the
+  // strongest fact available is that an earlier digest was LOGGED, not that leadership received one.
+  // "Update — " asserts the recipient is holding the thing being updated, and both paths that reach here
+  // with nothing delivered are live: a `rejected` send whose rollback throws (provably nothing went out),
+  // and an `unknown` send whose rollback throws (nobody knows). Same correction, and for the same reason,
+  // as the "logged" wording in reminderNote.
   const subject =
-    `${isFollowUp ? "Update — " : ""}Weekly reports due ${dueDay} — ` +
+    `${isFollowUp ? "Another digest — " : ""}Weekly reports due ${dueDay} — ` +
     `${input.filed.length} filed, ${input.outstanding.length} outstanding` +
     (dismissedClause ? `, ${dismissedClause}` : "") +
     (backlogClause ? `, ${backlogClause}` : "");
@@ -555,9 +573,14 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
         `.`;
   const preheader = backlogClause ? `${duePreheader} Earlier weeks: ${backlogClause}.` : duePreheader;
 
+  // Same correction as the subject prefix, in the one place a reader will actually stop and read it. The
+  // sentence used to open "This updates the digest sent earlier today", which claims a delivery the ledger
+  // cannot support — and reads at its most confident in exactly the case where nothing went out at all.
+  // What is true: an earlier digest was logged, these projects were not in it, and this email is complete
+  // on its own, so a recipient holding nothing else has lost nothing.
   const followUpLine = isFollowUp
-    ? `This updates the digest sent earlier today — ${listNames(followUpProjects)} became due after it went out. ` +
-      `Everything due ${dueDay} is listed below, including what the first email already covered.`
+    ? `An earlier digest for ${dueDay} was already logged today — ${listNames(followUpProjects)} became due after it. ` +
+      `Everything due ${dueDay} is listed below, so this email stands on its own whether or not that earlier one reached you.`
     : null;
   const followUpHtml = followUpLine
     ? `
@@ -569,16 +592,21 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
   // who ignored two reminders and a project the job has never been able to notify at all.
   //
   // The heading's count comes from the LEDGER (`remindersSent === 0`), not from reachability. "Nobody to
-  // remind" described the present and was printed as a claim about the past — see reminderNote.
+  // remind" described the present and was printed as a claim about the past — see reminderNote. It is
+  // phrased at the strength the ledger supports, ON RECORD rather than "never reminded", for the same
+  // reason the note under it is: the claim behind that zero is rolled back on every failed send, so an
+  // empty ledger is an absence of evidence and not evidence of absence.
   const section = (
     heading: string,
     entries: WeeklyReportDigestEntry[],
     emptyNote: string,
     flagUnreachable = false,
   ) => {
-    const neverReminded = flagUnreachable ? entries.filter((entry) => entry.remindersSent === 0).length : 0;
+    const noReminderOnRecord = flagUnreachable
+      ? entries.filter((entry) => entry.remindersSent === 0).length
+      : 0;
     const fullHeading =
-      neverReminded > 0 ? `${heading} — ${neverReminded} never reminded` : heading;
+      noReminderOnRecord > 0 ? `${heading} — ${noReminderOnRecord} with no reminder on record` : heading;
     const items = entries.length
       ? entries
           .map((entry) => {
@@ -635,7 +663,11 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
     : "Filed";
 
   const html = renderBrandedEmail({
-    title: isFollowUp ? `Weekly reports due ${dueDay} (update)` : `Weekly reports due ${dueDay}`,
+    // "(another digest today)", not "(update)" — see the subject prefix. The heading is read by someone
+    // who may be holding this email and nothing else.
+    title: isFollowUp
+      ? `Weekly reports due ${dueDay} (another digest today)`
+      : `Weekly reports due ${dueDay}`,
     preheader,
     bodyHtml:
       followUpHtml +
@@ -656,13 +688,13 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
     const note = noteText ? `\n      ${noteText}` : "";
     return `  - ${name} (${entry.stateLabel}) — ${people}${note}`;
   };
-  const outstandingNeverReminded = input.outstanding.filter((entry) => entry.remindersSent === 0).length;
+  const outstandingNoReminderOnRecord = input.outstanding.filter((entry) => entry.remindersSent === 0).length;
   const text =
     (followUpLine ? `${followUpLine}\n\n` : "") +
     `${preheader}\n\n` +
     `Filed (${input.filed.length}${dismissed.length ? `, plus ${dismissed.length} dismissed` : ""}):\n` +
     `${accountedFor.map((entry) => textEntry(entry)).join("\n") || "  - none"}\n\n` +
-    `Outstanding (${input.outstanding.length}${outstandingNeverReminded > 0 ? `, ${outstandingNeverReminded} never reminded` : ""}):\n` +
+    `Outstanding (${input.outstanding.length}${outstandingNoReminderOnRecord > 0 ? `, ${outstandingNoReminderOnRecord} with no reminder on record` : ""}):\n` +
     `${input.outstanding.map((entry) => textEntry(entry, true)).join("\n") || "  - none"}\n` +
     (input.backlog.length
       ? `\nStill outstanding from earlier weeks:\n${input.backlog
@@ -691,18 +723,20 @@ export function buildWeeklyReportLeadershipDigestEmail(input: {
  *
  * So the past comes from the ledger and the future from reachability, and neither sentence claims the other.
  *
- * The two sentences are deliberately NOT parallel in strength, because the underlying rows are not. An
- * ABSENT row proves nothing was attempted, so the zero case states it flatly. A PRESENT row only proves
- * the job took the slot, so the non-zero case says LOGGED, not sent — a reminder whose claim survived a
- * failed rollback never reached anyone, and "1 reminder was sent" over that tells leadership a
- * superintendent ignored a nudge he was never sent.
+ * NEITHER sentence is a delivery claim, because no row here can carry one in either direction. A PRESENT
+ * row only proves the job took the slot, so the non-zero case says LOGGED, not sent — a reminder whose
+ * claim survived a failed rollback never reached anyone, and "1 reminder was sent" over that tells
+ * leadership a superintendent ignored a nudge he was never sent. An ABSENT row is no stronger: the claim
+ * is deleted again whenever the send fails, `unknown` included, so the zero case says NO REMINDER IS ON
+ * RECORD rather than "none was sent" — see the field's own doc for the run of failures that produces an
+ * empty ledger over a full inbox.
  */
 function reminderNote(entry: WeeklyReportDigestEntry): string | null {
   const reachable = isRemindable(entry);
   if (entry.remindersSent === 0) {
     return reachable
-      ? "No reminder was sent for this week."
-      : "No reminder was sent for this week — and with no reachable super or PM email, none can be sent now either.";
+      ? "No reminder is on record for this week."
+      : "No reminder is on record for this week — and with no reachable super or PM email, none can be sent now either.";
   }
   if (!reachable) {
     return `${entry.remindersSent} reminder${entry.remindersSent === 1 ? " was" : "s were"} logged for this week, but there is no reachable super or PM email now.`;
@@ -776,7 +810,7 @@ export interface WeeklyReportReminderRunSummary {
   offices: number;
   tMinus2Sent: number;
   tMinus1Sent: number;
-  /** t−1 reminders deliberately withheld because the week was already filed. */
+  /** t−1 reminders deliberately withheld because the week was already filed, or was dismissed. */
   tMinus1Suppressed: number;
   digestsSent: number;
   /** Reminders that were due but could not be addressed (no active super/PM email, empty digest roster). */
@@ -1058,10 +1092,28 @@ async function processOffice(args: OfficeRunArgs): Promise<void> {
   }
 
   for (const project of tMinus1) {
-    if (filedWeeks.has(`${project.id}|${project.dueDate}`)) {
-      // Silence is the feature. A super who filed on time is not chased, so a reminder that DOES arrive
-      // is always genuine — and no ledger row is written, because nothing was sent and the ledger is a
-      // record of deliveries, not of decisions.
+    const weekKey = `${project.id}|${project.dueDate}`;
+    // FILED or DISMISSED. Silence is the feature: a super who filed on time is not chased, so a reminder
+    // that DOES arrive is always genuine — and no ledger row is written, because nothing was sent and the
+    // ledger is a record of deliveries, not of decisions.
+    //
+    // A DISMISSED week is the same case reached from the other side. Somebody with the board open decided
+    // this week is not owed, and the digest tomorrow morning will print it under Filed and call it
+    // "neither filed nor chaseable" — while this loop was still emailing the super tonight that "this
+    // week's report has not been submitted yet". One of the two is wrong about the same week on the same
+    // day, and it is not the digest: chasing a report the office has written off is how a reminder stops
+    // meaning anything.
+    //
+    // `dismissedWeeks` is already loaded whenever this loop can run at all (`needsState`), so this costs
+    // no extra read.
+    //
+    // Reachable today because the server's own guard is thin: dismissWeeklyReportWeek rejects
+    // `weekOf > asOf` (server/src/modules/weekly-reports/dashboard-service.ts), but `asOf` is
+    // client-supplied and validated only as a well-formed date (`asOfFrom` in that module's routes.ts),
+    // never against the clock — so tomorrow's week can be dismissed today. That hole is PRE-EXISTING and
+    // is deliberately NOT fixed here; the worker must not be inconsistent with itself regardless of how
+    // the row got there, and a dismissal can equally arrive from a backfill or a repaired cadence.
+    if (filedWeeks.has(weekKey) || dismissedWeeks.has(weekKey)) {
       summary.tMinus1Suppressed += 1;
       continue;
     }
@@ -1160,10 +1212,11 @@ async function sendProjectReminder(
     // double-email; the cost of that ordering is this rollback, and a crash between the two leaves the
     // slot claimed, erring toward one missed nudge rather than a second copy of every reminder.
     //
-    // Released on an UNKNOWN outcome too, unlike the digest. The distinction the digest turns on does not
-    // arise here: this key is fixed by (project, week, kind), so if the send really was accepted before the
-    // socket died, the catch-up re-send presents the SAME key with the SAME payload and Resend dedups it.
-    // Nothing can rotate it, so a retry cannot produce a second copy.
+    // Released on an UNKNOWN outcome too: this key is fixed by (project, week, kind), so if the send
+    // really was accepted before the socket died, the catch-up re-send presents the SAME key with the SAME
+    // payload and Resend dedups it. Nothing can rotate it, so a retry cannot produce a second copy. The
+    // digest releases on `unknown` for the same reason, with the one caveat that its key tracks the due
+    // cohort rather than a single project — see the outcome handling in sendLeadershipDigest.
     //
     // A rollback that itself FAILS is logged as such. The row then outlives a reminder that may never have
     // gone out, and the digest reads that row — so an operator must not be told the slot was freed when it
@@ -1280,7 +1333,7 @@ async function sendLeadershipDigest(
       //
       // CHASE kinds only. `due_digest` is this project's own receipt for the email being composed right
       // now — counting it would make every project on a FOLLOW-UP digest look chased, which silences the
-      // "never reminded" heading and the "No reminder was sent" note for exactly the never-chased project
+      // "with no reminder on record" heading and the note beneath it for exactly the never-chased project
       // they exist to surface.
       remindersSent: CHASE_REMINDER_KINDS.filter((kind) => kinds?.has(kind)).length,
     };
@@ -1331,6 +1384,11 @@ async function sendLeadershipDigest(
       // deliberately treats as already-delivered. The run would stamp `digestsSent`, keep the claims, and
       // deliver nothing. Hashing the projects covered rotates the key exactly when the payload changes,
       // while a true duplicate (same cohort, same day) still dedups.
+      //
+      // That dedup is now LOAD-BEARING, not merely tidy: it is what makes a catch-up tick's re-send of an
+      // ambiguous digest safe, and therefore what lets an `unknown` outcome release its claims instead of
+      // costing leadership the day's digest. `input.dueToday` — not `newlyDue` — is what is hashed, so the
+      // key is stable for a stable cohort across all three of the day's ticks.
       idempotencyKey: `weekly-report-digest-${tenantSchema}-${input.today}-${digestCohortKey(input.dueToday.map((project) => project.id))}`,
     });
     outcome = result.outcome;
@@ -1349,47 +1407,76 @@ async function sendLeadershipDigest(
     return;
   }
 
-  if (outcome === "unknown") {
-    // We do not know whether leadership has this digest. Resend may have accepted it before the socket
-    // died, or an identical request may still be in flight.
-    //
-    // Treated as DELIVERED, deliberately, and the claims STAY. Releasing them looks like the safe retry
-    // and is precisely how leadership gets two unlabelled copies: rolling the ledger back empties
-    // `alreadyDigested`, so when a project becomes due later in the morning the next tick's cohort HASH
-    // ROTATES (Resend cannot dedup a key it has never seen) AND the `Update — ` prefix, which is gated on
-    // that same ledger, disappears. Two full digests, neither admitting the other exists.
-    //
-    // Keeping them means the cost of the ambiguity is a possibly-missed digest — logged, and visible in
-    // `summary.failed` — instead of a silent duplicate, and any later digest for this due date correctly
-    // announces itself as an update to one leadership may already have. The per-project reminders need no
-    // equivalent rule: their idempotency key is fixed by (project, week, kind), so a catch-up re-send of
-    // an accepted-but-unconfirmed reminder is deduped by the provider.
-    logger.error("[WeeklyReportReminders] Digest send outcome UNKNOWN - claims kept, no retry", {
-      tenantSchema,
-      err: sendError,
-    });
-    summary.failed += 1;
-    return;
-  }
-
-  // `rejected`: the provider refused the request outright — a validation error, a bad key, a rate limit —
-  // so no email exists and a catch-up tick can safely re-send under the same key. Release ONLY the rows
-  // this run claimed: deleting every due_digest row for the day would also erase an earlier run's
-  // successful send and re-digest leadership about projects it already reported on.
+  // NEITHER remaining outcome keeps its claims. `rejected` is provably undelivered; `unknown` may have
+  // been delivered, and is released anyway — for the reason set out below, which is the same one the
+  // per-project reminder path already gives for its own `unknown` release.
+  //
+  // WHY `unknown` RELEASES, having previously been kept.
+  //
+  // The case for keeping it was that releasing "is precisely how leadership gets two unlabelled copies":
+  // roll the ledger back, and when a project becomes due later in the morning the next tick's cohort hash
+  // rotates so Resend cannot dedup, while the follow-up prefix — gated on that same ledger — disappears
+  // with it. The second half of that is true. The first half is not, and it is what the trade was priced
+  // on: the idempotency key hashes `dueToday`, the WHOLE due cohort, not the rows this run claimed. So
+  // when the cohort grows, the key rotates and a second email goes out WHETHER OR NOT the claims were
+  // kept — as the follow-up path immediately above this one exists to do. Keeping them never prevented an
+  // email; it only decided whether that email admitted an earlier one had been logged.
+  //
+  // What keeping them DID prevent is the retry, and the two cases split cleanly:
+  //
+  //   • COHORT UNCHANGED — overwhelmingly the common shape. The catch-up tick re-sends under the SAME
+  //     idempotency key (same schema, same day, same cohort hash). If the first request reached Resend,
+  //     Resend answers the repeat from the original — a plain dedup when the payload is identical, and
+  //     `invalid_idempotent_request` when a report was filed at 08:00 and the counts moved, which
+  //     sendSystemEmailWithMetadata deliberately reads as already-delivered. If it never reached Resend,
+  //     the key is unseen and the digest is finally delivered. There is no third answer, so this retry
+  //     cannot produce a second copy. It is the same argument, on the same mechanism, that the reminder
+  //     rollback makes for `unknown` sends of the t−2/t−1 nudges.
+  //   • COHORT GREW — rare, and it needs the ambiguous send AND a project becoming due between two ticks
+  //     of one morning. The next tick sends the same email it would have sent anyway; the only thing lost
+  //     is the "Another digest — " prefix on it, because the ledger it is read from is now empty.
+  //
+  // So the price of keeping was an unconditional, silent, unrecoverable loss of the day's digest on the
+  // MOST COMMON transport failure there is — a Resend 5xx, a 502/504 from a gateway, a pool blip, all of
+  // which classify `unknown` — bought with a label on a rare second email. That is the wrong way round for
+  // a digest whose whole purpose is that leadership can trust the number in it, and it contradicted the
+  // catch-up ticks' own reason for existing (see the cron registration in worker/src/index.ts).
+  //
+  // It also fixes what the day looked like from outside: with the claims kept, 09:00 and 11:00 found
+  // everything already claimed, sent nothing, logged nothing and returned `{digestsSent: 0, failed: 0}` —
+  // a clean run over a digest nobody had. Now every tick re-attempts, so a digest that never lands is
+  // reported as a failure with an error line at 07:00, 09:00 AND 11:00 until it does.
+  //
+  // Release ONLY the rows this run claimed: deleting every due_digest row for the day would also erase an
+  // earlier run's successful send and re-digest leadership about projects it already reported on.
   //
   // The rollback's own failure is REPORTED, not swallowed. A DELETE that never lands (the saturated pool
   // this job already guards against elsewhere) leaves the claims standing, which means no catch-up tick
   // will retry — and a log line asserting "claims released for retry" over that is how an operator comes
-  // to believe a retry is coming when none is.
+  // to believe a retry is coming when none is. That is also the one path that still leaves a digest
+  // stranded silently, and the only signal it has is this line; it is the reason the follow-up copy may
+  // not say a previous digest was SENT.
+  let released = true;
+  let rollbackError: unknown = null;
   try {
     await releaseDigestClaims(query, tenantSchema, claimed, input.today);
-    logger.error("[WeeklyReportReminders] Digest send REJECTED - claims released for retry", { tenantSchema });
   } catch (err) {
-    logger.error(
-      "[WeeklyReportReminders] Digest send REJECTED and the claim rollback FAILED - claims stand, so no catch-up tick will re-send this digest",
-      { tenantSchema, err },
-    );
+    released = false;
+    rollbackError = err;
   }
+  const label = outcome === "rejected" ? "REJECTED" : "outcome UNKNOWN";
+  logger.error(
+    released
+      ? `[WeeklyReportReminders] Digest send ${label} - claims released for retry`
+      : `[WeeklyReportReminders] Digest send ${label} and the claim rollback FAILED - claims stand, so no catch-up tick will re-send this digest`,
+    // `sendError` is null for every provider failure — the transport returns rather than throwing — so it
+    // is only carried when something actually threw, which is the case worth seeing a stack for.
+    {
+      tenantSchema,
+      ...(sendError == null ? {} : { err: sendError }),
+      ...(released ? {} : { rollbackErr: rollbackError }),
+    },
+  );
   summary.failed += 1;
 }
 

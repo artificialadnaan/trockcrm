@@ -91,8 +91,9 @@ interface SentEmail {
  * "application_error", statusCode: null } } }`, so a socket hang-up, a DNS failure, a 504 and a 409
  * "still in flight" ALL return `{success:false}` — the production stack cannot raise the exception the
  * old stub raised. Every test that "proved" the double-digest protection rode on that, and the protection
- * was in fact unreachable. `real-transport.test.ts` in this directory drives the actual sender with
- * `fetch` stubbed and asserts these shapes, so this stub cannot drift back into fiction.
+ * was in fact unreachable. `weekly-report-reminders-transport.runtime.test.ts` in this directory drives
+ * the actual sender with `fetch` stubbed and asserts these shapes, so this stub cannot drift back into
+ * fiction.
  *
  * `throws` is kept for the one thing a throw still models — a bug in the send path, not a transport
  * failure — and is used by exactly one test that says so.
@@ -549,15 +550,19 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       backlog: [],
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
-    expect(email.html).toContain("Outstanding — 1 never reminded");
+    expect(email.html).toContain("Outstanding — 1 with no reminder on record");
     expect(email.html).toContain("Super: Gone Fishing (unreachable) · PM: unassigned");
     expect(email.html).toContain(
-      "No reminder was sent for this week — and with no reachable super or PM email, none can be sent now either.",
+      "No reminder is on record for this week — and with no reachable super or PM email, none can be sent now either.",
     );
-    expect(email.text).toContain("Outstanding (2, 1 never reminded)");
+    expect(email.text).toContain("Outstanding (2, 1 with no reminder on record)");
     // The project that WAS reminded carries neither the annotation nor the note.
     expect(email.html).toContain("Super: Steve Sanchez · PM: Adam Sherwood");
-    expect(email.text.match(/No reminder was sent/g)).toHaveLength(1);
+    expect(email.text.match(/No reminder is on record/g)).toHaveLength(1);
+    // ON RECORD, never "was sent": the claim behind an empty ledger is rolled back on every failed send,
+    // `unknown` included, so zero rows is an absence of evidence and not evidence of absence.
+    expect(email.text).not.toContain("No reminder was sent");
+    expect(email.text).not.toContain("never reminded");
   });
 
   it("says a reminder went out, and only that the NEXT one cannot, when the ledger and reachability disagree", () => {
@@ -581,19 +586,19 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       backlog: [],
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
-    // Exactly ONE project was never reminded, and it is the reachable one.
-    expect(email.html).toContain("Outstanding — 1 never reminded");
-    expect(email.text).toContain("Outstanding (2, 1 never reminded)");
+    // Exactly ONE project has no reminder on record, and it is the reachable one.
+    expect(email.html).toContain("Outstanding — 1 with no reminder on record");
+    expect(email.text).toContain("Outstanding (2, 1 with no reminder on record)");
     expect(email.text).toContain(
       "  - Cedar Springs (Not started) — Super: Steve Sanchez, PM: Adam Sherwood\n" +
-        "      No reminder was sent for this week.",
+        "      No reminder is on record for this week.",
     );
     // The chased-then-departed project must NOT be told it was never emailed. "logged", not "sent": the
     // row it comes from is a claim, taken BEFORE the send — see the claim-vs-delivery suite.
     expect(email.text).toContain(
       "2 reminders were logged for this week, but there is no reachable super or PM email now.",
     );
-    expect(email.text.match(/No reminder was sent/g)).toHaveLength(1);
+    expect(email.text.match(/No reminder is on record/g)).toHaveLength(1);
     // Singular reads correctly when only the t-2 landed.
     const one = buildWeeklyReportLeadershipDigestEmail({
       dueDate: DUE,
@@ -605,10 +610,12 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
     expect(one.text).toContain("1 reminder was logged for this week, but there is no reachable super or PM email now.");
-    expect(one.html).not.toContain("never reminded");
-    // The zero case keeps the flat past-tense claim, and deliberately so: an ABSENT row proves nothing was
-    // attempted, while a PRESENT one proves only that the slot was taken. The asymmetry is the point.
-    expect(email.text).toContain("No reminder was sent for this week.");
+    expect(one.html).not.toContain("no reminder on record");
+    // NEITHER direction is a delivery claim now. A PRESENT row proves only that the slot was taken; an
+    // ABSENT one proves only that no slot is held, because the claim is deleted again on every failed
+    // send — so the zero case says ON RECORD and never "was sent".
+    expect(email.text).toContain("No reminder is on record for this week.");
+    expect(email.text).not.toContain("No reminder was sent");
   });
 
   it("counts dismissed weeks apart from filed ones in the subject and the preheader", () => {
@@ -650,13 +657,17 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       backlog: [],
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
-    expect(email.html).not.toContain("never reminded");
-    expect(email.html).not.toContain("No reminder was sent");
+    expect(email.html).not.toContain("no reminder on record");
+    expect(email.html).not.toContain("No reminder is on record");
     expect(email.html).not.toContain("(unreachable)");
     expect(email.html).toContain("Super: Steve Sanchez · PM: Adam Sherwood");
   });
 
-  it("says it is an UPDATE when a second digest re-lists the first one's projects", () => {
+  it("says an earlier digest was LOGGED, not delivered, when a second digest re-lists its projects", () => {
+    // `followUpForProjects` is derived from `due_digest` CLAIM rows, written before the send and left
+    // standing by a rollback that fails. So none of these three surfaces — subject prefix, body sentence,
+    // HTML title — may assert that leadership is holding the earlier email. The same correction the
+    // per-row note got when it stopped saying "sent".
     const email = buildWeeklyReportLeadershipDigestEmail({
       dueDate: DUE,
       filed: [entry("Cedar Springs", "Sent")],
@@ -665,10 +676,24 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
       followUpForProjects: ["Katy Freeway", "Preston Hollow"],
     });
-    expect(email.subject).toBe("Update — Weekly reports due Thursday, Aug 13 — 1 filed, 2 outstanding");
-    expect(email.html).toContain("This updates the digest sent earlier today");
-    expect(email.html).toContain("Katy Freeway and Preston Hollow became due after it went out");
-    expect(email.text.startsWith("This updates the digest sent earlier today")).toBe(true);
+    expect(email.subject).toBe("Another digest — Weekly reports due Thursday, Aug 13 — 1 filed, 2 outstanding");
+    expect(email.html).toContain("An earlier digest for Thursday, Aug 13 was already logged today");
+    expect(email.html).toContain("Katy Freeway and Preston Hollow became due after it.");
+    expect(email.html).toContain(
+      "so this email stands on its own whether or not that earlier one reached you",
+    );
+    expect(email.html).toContain("Weekly reports due Thursday, Aug 13 (another digest today)");
+    expect(email.text.startsWith("An earlier digest for Thursday, Aug 13 was already logged today")).toBe(
+      true,
+    );
+    // The delivery assertions are gone from every surface.
+    for (const rendering of [email.subject, email.html, email.text]) {
+      expect(rendering).not.toContain("Update — ");
+      expect(rendering).not.toContain("This updates the digest sent earlier today");
+      expect(rendering).not.toContain("went out");
+      expect(rendering).not.toContain("the first email");
+      expect(rendering).not.toContain("(update)");
+    }
   });
 });
 
@@ -949,6 +974,49 @@ describe("t-1 chase", () => {
     const { sent } = await run(T_MINUS_1);
     expect(sent).toHaveLength(1);
   });
+
+  it("is silent for a week the office DISMISSED — the digest calls it unchaseable, so this cannot chase it", async () => {
+    // The worker used to contradict itself about the same week on the same day: tomorrow morning's digest
+    // files a dismissed week under Filed and describes it as "neither filed nor chaseable", while this
+    // loop emailed the super tonight that "this week's report has not been submitted yet". A reminder that
+    // arrives for a week the office has written off is a reminder that stops meaning anything.
+    //
+    // No report row exists — a dismissal is what you record INSTEAD of a report — so `filedWeeks` cannot
+    // suppress this one. Drop the dismissal check and the email goes out.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_dismissals (weekly_report_project_id, week_of, reason)
+       VALUES ($1::uuid, $2::date, 'Owner paused the job')`,
+      [PROJECT, DUE],
+    );
+
+    const { sent, summary } = await run(T_MINUS_1);
+    expect(sent).toHaveLength(0);
+    expect(summary.tMinus1Sent).toBe(0);
+    expect(summary.tMinus1Suppressed).toBe(1);
+    // Nothing was delivered, so nothing is recorded — the same rule the filed case follows.
+    expect(await reminderLedger()).toEqual([]);
+  });
+
+  it("still chases a week dismissed on a DIFFERENT project or a different week", async () => {
+    // The suppression must key on (project, week), not on "a dismissal exists". Both of these rows would
+    // silence tomorrow's chase if the check were sloppy, and neither has anything to do with it.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [OTHER_PROJECT, OTHER_DEAL, SUPER],
+    );
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_dismissals (weekly_report_project_id, week_of, reason)
+       VALUES ($1::uuid, $2::date, 'other project, same week'),
+              ($3::uuid, $4::date, 'same project, earlier week')`,
+      [OTHER_PROJECT, DUE, PROJECT, "2026-08-06"],
+    );
+
+    const { summary } = await run(T_MINUS_1);
+    expect(summary.tMinus1Sent).toBe(1);
+    expect(summary.tMinus1Suppressed).toBe(1); // the other project's own dismissed week
+  });
 });
 
 describe("due-date leadership digest", () => {
@@ -1039,6 +1107,20 @@ describe("due-date leadership digest", () => {
     expect(logs.log.some((line) => line.includes("No leadership recipients configured"))).toBe(false);
   });
 
+  it("addresses a director ONCE when the roster spells the same mailbox two ways", async () => {
+    // `leadership_recipient_emails` is a free-text array a human types into the settings page, and email
+    // local parts are case-insensitive in practice at every mailbox provider T Rock uses. Two spellings of
+    // one address therefore put the SAME director on the `to:` line twice — which is a second copy of the
+    // digest in one inbox, from the feature whose entire premise is that leadership can trust what it
+    // says. The per-project reminder path dedupes for the same reason (`reminderRecipients`); this one had
+    // nothing asserting it did.
+    await setLeadershipRecipients(["takashi@example.com", "TAKASHI@Example.com", "shaw@example.com"]);
+    const { sent } = await run(DUE);
+    expect(sent).toHaveLength(1);
+    // The FIRST spelling survives, and the duplicate is gone — not merely "fewer than three".
+    expect(sent[0]!.to).toEqual(["takashi@example.com", "shaw@example.com"]);
+  });
+
   it("keeps the SAME idempotency key when a failed digest is retried", async () => {
     // The key is what stops a double send when the failure was at the transport layer AFTER Resend
     // accepted the message: the catch-up tick re-sends, and only a key that hashes the same cohort makes
@@ -1069,14 +1151,14 @@ describe("due-date leadership digest", () => {
 
     const { sent } = await run(DUE);
     expect(sent[0]!.subject).toContain("0 filed, 1 outstanding");
-    expect(sent[0]!.html).toContain("Outstanding — 1 never reminded");
+    expect(sent[0]!.html).toContain("Outstanding — 1 with no reminder on record");
     expect(sent[0]!.text).toContain("Super: Gone Fishing (unreachable)");
     expect(sent[0]!.text).toContain(
-      "No reminder was sent for this week — and with no reachable super or PM email, none can be sent now either.",
+      "No reminder is on record for this week — and with no reachable super or PM email, none can be sent now either.",
     );
   });
 
-  it("says NO REMINDER WAS SENT for a project whose super was assigned after both nudges had skipped it", async () => {
+  it("reports NO REMINDER ON RECORD for a project whose super was assigned after both nudges had skipped it", async () => {
     // The common setup pattern: a project is created without a super and gets one later in the week. The
     // digest used to decide "was anybody reminded" from reachability AT DIGEST TIME, so this project — a
     // fresh, valid address by Thursday morning — printed as ordinary Outstanding beside a name that had
@@ -1099,10 +1181,10 @@ describe("due-date leadership digest", () => {
 
     const { sent } = await run(DUE);
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.html).toContain("Outstanding — 1 never reminded");
+    expect(sent[0]!.html).toContain("Outstanding — 1 with no reminder on record");
     expect(sent[0]!.text).toContain(
       "  - DFW-10432 — 4123 Cedar Springs (Not started) — Super: Steve Sanchez, PM: unassigned\n" +
-        "      No reminder was sent for this week.",
+        "      No reminder is on record for this week.",
     );
     // Steve IS reachable — the next reminder can land. The note is about the past, and says only that.
     expect(sent[0]!.text).not.toContain("(unreachable)");
@@ -1120,8 +1202,8 @@ describe("due-date leadership digest", () => {
     try {
       const { sent } = await run(DUE);
       expect(sent).toHaveLength(1);
-      expect(sent[0]!.text).not.toContain("No reminder was sent");
-      expect(sent[0]!.html).not.toContain("never reminded");
+      expect(sent[0]!.text).not.toContain("No reminder is on record");
+      expect(sent[0]!.html).not.toContain("no reminder on record");
       // Both facts, each said as itself: two reminders went out, and the next one cannot. "logged", not
       // "sent", because the ledger row is a CLAIM — see the claim-vs-delivery tests below.
       expect(sent[0]!.text).toContain(
@@ -1133,9 +1215,14 @@ describe("due-date leadership digest", () => {
     }
   });
 
-  it("labels the SECOND digest of a day as an update, not a near-identical repeat", async () => {
+  it("labels the SECOND digest of a day as another digest, not a near-identical repeat", async () => {
+    // Here the first digest genuinely WAS delivered — that is what left its claims standing — so this is
+    // the case where "Update" would have been accurate. The wording is still the ledger's, because the
+    // ledger cannot tell this case apart from the one where the first send failed and its rollback did
+    // too, and the digest has to be right in both.
     const first = await run(DUE);
-    expect(first.sent[0]!.subject.startsWith("Update")).toBe(false);
+    expect(first.summary.digestsSent).toBe(1);
+    expect(first.sent[0]!.subject.startsWith("Another digest")).toBe(false);
 
     // A project that becomes due today between ticks — a setup created this morning, a cadence weekday
     // changed, a project un-paused. It claims its own row and triggers a second, FULL digest.
@@ -1147,9 +1234,9 @@ describe("due-date leadership digest", () => {
     );
     const second = await run(DUE);
     expect(second.sent).toHaveLength(1);
-    expect(second.sent[0]!.subject).toContain("Update — Weekly reports due Thursday, Aug 13");
-    expect(second.sent[0]!.text).toContain("Katy Freeway Shops became due after it went out");
-    // It re-lists the first email's project, which is exactly why it has to say what it is.
+    expect(second.sent[0]!.subject).toContain("Another digest — Weekly reports due Thursday, Aug 13");
+    expect(second.sent[0]!.text).toContain("Katy Freeway Shops became due after it.");
+    // It re-lists the earlier digest's project, which is exactly why it has to say what it is.
     expect(second.sent[0]!.text).toContain("4123 Cedar Springs");
   });
 
@@ -1264,29 +1351,71 @@ describe("due-date leadership digest", () => {
     expect(text.indexOf("(Dismissed)")).toBeLessThan(text.indexOf("Outstanding (0):"));
   });
 
-  it("does not send a second, unlabelled digest after a send whose outcome is unknown", async () => {
+  it("releases the claims after an UNKNOWN outcome and re-sends under the SAME key", async () => {
     // 07:00. The send comes back `{success:false, outcome:"unknown"}` — the REAL shape of a socket
-    // hang-up, a 504 or a 409 "still in flight", every one of which resend@6 swallows into an ordinary
-    // error result rather than an exception (see real-transport.test.ts). Resend may have accepted and
-    // delivered the digest before the connection died. Releasing the claims here (the old behaviour) is
-    // what turns one ambiguous send into two unlabelled digests: the rollback empties the very ledger
-    // `alreadyDigested` is read from.
+    // hang-up, a 5xx, a 502/504 or a 409 "still in flight", every one of which resend@6 swallows into an
+    // ordinary error result rather than an exception (see
+    // weekly-report-reminders-transport.runtime.test.ts). Resend MAY have accepted and delivered the
+    // digest before the connection died, and may equally never have seen it.
     //
-    // This test previously drove a THROWN error, which the production transport cannot produce — so it
-    // passed against a guard no real failure could ever reach.
+    // The claims are rolled back, exactly as a rejection's are. What makes that safe is the idempotency
+    // key: it hashes the whole DUE COHORT and the day, so an unchanged cohort presents the SAME key on
+    // the catch-up tick. Resend answers a repeat of a key it has seen from the original (or with
+    // `invalid_idempotent_request`, which the transport reads as already-delivered) and delivers a key it
+    // has not. There is no third answer, so this retry cannot put a second digest in anybody's inbox.
     const first = await run(DUE, { outcome: "unknown" });
     expect(first.sent).toHaveLength(1);
     expect(first.summary.digestsSent).toBe(0);
     expect(first.summary.failed).toBe(1);
-    // Claims KEPT — an unknown outcome is treated as delivered, and the log says so in those terms.
-    expect(await reminderLedger()).toEqual([
-      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
-    ]);
+    expect(await reminderLedger()).toEqual([]);
     expect(first.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
+    expect(
+      first.logs.error.some((line) => line.includes("outcome UNKNOWN - claims released for retry")),
+    ).toBe(true);
 
-    // 09:00. A second project becomes due, so the cohort — and therefore the idempotency key — changes.
-    // Resend cannot dedup a key it has never seen, so the ONLY thing that can stop leadership reading this
-    // as an independent second report is the subject.
+    // 09:00, same cohort. The digest is attempted again — and the key is IDENTICAL, which is the entire
+    // safety argument. (The injected transport cannot dedup; the real one is driven against a stubbed
+    // `fetch` in the REAL-transport block below, where the same key is asserted end to end.)
+    const second = await run(DUE);
+    expect(second.sent).toHaveLength(1);
+    expect(second.sent[0]!.idempotencyKey).toBe(first.sent[0]!.idempotencyKey);
+    expect(second.summary.digestsSent).toBe(1);
+    // ...and it is the day's FIRST digest as far as the ledger knows, because the ledger was rolled back.
+    expect(second.sent[0]!.subject.startsWith("Weekly reports due Thursday, Aug 13")).toBe(true);
+  });
+
+  it("reports the missing digest on EVERY tick of the day, never a clean run over an empty inbox", async () => {
+    // The failure this replaced: one ambiguous send at 07:00 kept its claims, so 09:00 and 11:00 found
+    // the day already digested, attempted nothing, logged nothing and returned `{digestsSent: 0,
+    // failed: 0, skipped: 0}`. A human reading the 11:00 summary saw a healthy morning over a digest
+    // leadership did not have. A day whose digest never lands must look wrong at every tick that could
+    // have saved it.
+    for (const tick of ["07:00", "09:00", "11:00"]) {
+      const result = await run(DUE, { outcome: "unknown" });
+      expect(result.sent, `tick ${tick} must re-attempt`).toHaveLength(1);
+      expect(result.summary.failed, `tick ${tick} must report the failure`).toBe(1);
+      expect(result.summary.digestsSent, `tick ${tick} delivered nothing`).toBe(0);
+      expect(
+        result.logs.error.some((line) => line.includes("outcome UNKNOWN")),
+        `tick ${tick} must log at ERROR`,
+      ).toBe(true);
+    }
+    // Nothing was ever confirmed, so nothing is left claiming it was.
+    expect(await reminderLedger()).toEqual([]);
+  });
+
+  it("still sends ONE further digest when the cohort grows after an unknown outcome", async () => {
+    // The honest record of what releasing on `unknown` costs, and of what it does not.
+    //
+    // The key hashes `dueToday`, so a cohort that GROWS rotates it whether or not the claims were kept:
+    // the second email goes out either way, and keeping the claims only decided whether it carried the
+    // "Another digest — " prefix. That is the whole delta, and it is why this path was re-priced — an
+    // unconditional silent loss of the day's digest is a far worse trade than a missing prefix on a
+    // second email in a case that needs an ambiguous send AND a project falling due between two ticks.
+    const first = await run(DUE, { outcome: "unknown" });
+    expect(first.sent).toHaveLength(1);
+    expect(await reminderLedger()).toEqual([]);
+
     await pg.query(
       `INSERT INTO office_dallas.weekly_report_projects
          (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
@@ -1294,26 +1423,16 @@ describe("due-date leadership digest", () => {
       [OTHER_PROJECT, OTHER_DEAL, SUPER],
     );
     const second = await run(DUE);
+    // ONE further digest, not two, and the key rotated with the cohort exactly as it would have done with
+    // the claims kept.
     expect(second.sent).toHaveLength(1);
     expect(second.sent[0]!.idempotencyKey).not.toBe(first.sent[0]!.idempotencyKey);
-    expect(second.sent[0]!.subject.startsWith("Update — Weekly reports due Thursday, Aug 13")).toBe(true);
-    expect(second.sent[0]!.text.startsWith("This updates the digest sent earlier today")).toBe(true);
-    // Still a FULL digest, so nothing is lost if the first email never arrived.
+    // A FULL digest: whichever of the two emails leadership is holding, it lists everything due today.
     expect(second.sent[0]!.text).toContain("4123 Cedar Springs");
     expect(second.sent[0]!.text).toContain("Katy Freeway Shops");
-  });
-
-  it("does not re-send at all after an unknown outcome when the cohort has not changed", async () => {
-    // The deliberate cost of treating "accepted, then the connection died" as delivered: if the message
-    // really was lost, the day's digest is lost with it. That is logged and counted (`summary.failed`),
-    // and it is the trade the alternative cannot make — a blind retry cannot be labelled as a repeat,
-    // because at 09:00 nothing distinguishes a lost send from a delivered one.
-    const first = await run(DUE, { outcome: "unknown" });
-    expect(first.summary.failed).toBe(1);
-
-    const second = await run(DUE);
-    expect(second.sent).toHaveLength(0);
-    expect(second.summary.digestsSent).toBe(0);
+    // The priced cost, asserted rather than described: no follow-up prefix, because the ledger it reads
+    // was rolled back.
+    expect(second.sent[0]!.subject.startsWith("Another digest — ")).toBe(false);
   });
 
   it("surfaces earlier unfiled weeks as a backlog block", async () => {
@@ -1330,30 +1449,38 @@ describe("due-date leadership digest", () => {
     expect((await reminderLedger()).every((row) => row.kind !== "due_digest")).toBe(true);
   });
 
-  it("treats a REJECTED digest differently from an UNKNOWN one — one retries, the other does not", async () => {
-    // The whole point of widening the transport. Both are `{success:false}`; only the outcome separates
-    // "the address was malformed, nothing exists, re-send it" from "the socket died, leadership may
-    // already have this". Collapsing them means choosing which bug to ship.
+  it("names REJECTED and UNKNOWN apart in the log, though both release for retry", async () => {
+    // Both are `{success:false}` and both are now retried, because the cohort key makes a repeat safe
+    // either way. What the outcome still decides is what the ERROR line tells the person reading it at
+    // 07:05: after a rejection leadership provably has nothing and a manual send is safe; after an
+    // ambiguous one they may be holding the digest already, and a manual send is how they get two. One
+    // undifferentiated "digest send failed" makes that call for them, wrongly, half the time.
     const rejected = await run(DUE, { outcome: "rejected" });
     expect(rejected.summary.failed).toBe(1);
     expect(await reminderLedger()).toEqual([]); // rolled back — a catch-up tick will retry
     expect(rejected.logs.error.some((line) => line.includes("REJECTED - claims released for retry"))).toBe(true);
+    expect(rejected.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(false);
 
     const retry = await run(DUE, { outcome: "unknown" });
-    expect(retry.sent).toHaveLength(1); // the retry the rejected path exists to allow
+    expect(retry.sent).toHaveLength(1); // the retry the release exists to allow
     expect(retry.summary.failed).toBe(1);
-    // ...and now the claims STAY, because this time we do not know what happened.
+    expect(await reminderLedger()).toEqual([]);
+    expect(retry.logs.error.some((line) => line.includes("outcome UNKNOWN - claims released for retry"))).toBe(
+      true,
+    );
+    expect(retry.logs.error.some((line) => line.includes("REJECTED"))).toBe(false);
+
+    // And a delivered send is the one that keeps its claims.
+    const delivered = await run(DUE);
+    expect(delivered.summary.digestsSent).toBe(1);
     expect(await reminderLedger()).toEqual([
       { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
     ]);
-    expect(retry.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
   });
 
-  it("does not claim it released the digest claims when the rollback itself failed", async () => {
-    // The saturated pool this job already guards against elsewhere. A DELETE that never lands leaves the
-    // claims standing and no catch-up tick will retry — so the log must not say "released for retry",
-    // which is what an operator reads to decide whether to intervene.
-    const spy = emailSpy({ outcome: "rejected" });
+  /** The saturated-pool case: the send fails AND the compensating DELETE never lands. */
+  async function runWithFailedRollback(outcome: SendSystemEmailOutcome) {
+    const spy = emailSpy({ outcome });
     const { logs, logger } = loggerSpy();
     const summary = await runWeeklyReportReminders({
       query: async (text: string, params?: unknown[]) => {
@@ -1368,6 +1495,16 @@ describe("due-date leadership digest", () => {
       logger,
       acquireLock: async () => async () => {},
     });
+    return { ...spy, summary, logs };
+  }
+
+  it("does not claim it released the digest claims when the rollback itself failed", async () => {
+    // The saturated pool this job already guards against elsewhere. A DELETE that never lands leaves the
+    // claims standing and no catch-up tick will retry — so the log must not say "released for retry",
+    // which is what an operator reads to decide whether to intervene. This is the ONE path that can still
+    // strand a digest silently, which is also why a later digest may not tell leadership the earlier one
+    // was SENT.
+    const { summary, logs } = await runWithFailedRollback("rejected");
 
     expect(summary.failed).toBe(1);
     // The row survived the failed rollback — that is the state the log has to describe.
@@ -1378,16 +1515,66 @@ describe("due-date leadership digest", () => {
     expect(logs.error.some((line) => line.includes("claims released for retry"))).toBe(false);
   });
 
-  it("treats a THROWN send as unknown too — defence in depth, not the transport's failure path", async () => {
-    // Kept deliberately small and labelled for what it is. `sendSystemEmailWithMetadata` does not throw
-    // for ANY provider or network failure (real-transport suite), so nothing here models production; it
-    // models a bug in the send path. The previous round's protection was tested ONLY through this door,
-    // which is why it looked verified while the real failure walked straight past it.
-    const first = await run(DUE, { throws: true });
-    expect(first.summary.failed).toBe(1);
+  it("does not tell leadership an earlier digest was SENT when the ledger only says it was logged", async () => {
+    // The reviewer's reproduction, rendered. 07:00: the provider REJECTS the digest — a 422, so provably
+    // no email exists anywhere — and the compensating DELETE then throws on a saturated pool, so the
+    // `due_digest` claims stand over a send that definitively never happened.
+    const first = await runWithFailedRollback("rejected");
+    expect(first.sent).toHaveLength(1);
     expect(await reminderLedger()).toEqual([
       { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
     ]);
+
+    // 09:00: a project falls due, so a second digest goes out and reads that same ledger. Every sentence
+    // in it about the earlier digest is a sentence about a claim row, and there is NOTHING in leadership's
+    // inbox for it to be about.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [OTHER_PROJECT, OTHER_DEAL, SUPER],
+    );
+    const second = await run(DUE);
+    expect(second.sent).toHaveLength(1);
+    const digest = second.sent[0]!;
+
+    // 1. The subject prefix.
+    expect(digest.subject).toBe(
+      "Another digest — Weekly reports due Thursday, Aug 13 — 0 filed, 2 outstanding, 4 weeks behind on 2 projects",
+    );
+    expect(digest.subject.startsWith("Update — ")).toBe(false);
+
+    // 2. The follow-up sentence, in both renderings.
+    const followUp =
+      "An earlier digest for Thursday, Aug 13 was already logged today — Katy Freeway Shops became due " +
+      "after it. Everything due Thursday, Aug 13 is listed below, so this email stands on its own whether " +
+      "or not that earlier one reached you.";
+    expect(digest.text.startsWith(followUp)).toBe(true);
+    expect(digest.html).toContain(followUp);
+    expect(digest.text).not.toContain("This updates the digest sent earlier today");
+    expect(digest.text).not.toContain("went out");
+    expect(digest.text).not.toContain("the first email");
+
+    // 3. The HTML title.
+    expect(digest.html).toContain("Weekly reports due Thursday, Aug 13 (another digest today)");
+    expect(digest.html).not.toContain("Weekly reports due Thursday, Aug 13 (update)");
+
+    // Still a FULL digest — the honest wording is not an excuse to send less.
+    expect(digest.text).toContain("4123 Cedar Springs");
+    expect(digest.text).toContain("Katy Freeway Shops");
+  });
+
+  it("treats a THROWN send as unknown too — defence in depth, not the transport's failure path", async () => {
+    // Kept deliberately small and labelled for what it is. `sendSystemEmailWithMetadata` does not throw
+    // for ANY provider or network failure (weekly-report-reminders-transport.runtime.test.ts), so nothing
+    // here models production; it models a bug in the send path. An earlier round's protection was tested
+    // ONLY through this door, which is why it looked verified while the real failure walked straight
+    // past it.
+    const first = await run(DUE, { throws: true });
+    expect(first.summary.failed).toBe(1);
+    // Classified with the ambiguous cases, and therefore released for a catch-up tick like every other
+    // ambiguous send: we learned nothing about delivery, and the cohort key makes the retry safe.
+    expect(await reminderLedger()).toEqual([]);
     expect(first.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
   });
 });
@@ -1438,13 +1625,96 @@ describe("leadership digest — against the REAL email transport", () => {
     return { requests, summary, logs };
   }
 
-  it("sends ONE digest when the socket hangs up mid-send, even after the cohort grows", async () => {
-    // Verbatim the reviewer's reproduction. 07:00: `fetch` rejects. resend@6 swallows it into
-    // `{success:false}` — no exception — so the previous round's protection, which hung off a `catch`,
-    // never ran: the claims were rolled back, `alreadyDigested` emptied, and when a project became due at
-    // 09:00 the cohort hash rotated (so Resend could not dedup) and the `Update — ` prefix vanished with
-    // the ledger it is gated on. Two full unlabelled digests.
+  /**
+   * A Resend that HONOURS the idempotency key, because that is the mechanism the retry's safety rests on
+   * and a stub that ignores it cannot tell a safe re-send from a duplicate.
+   *
+   * Mirrors the documented behaviour: a key never seen creates an email; a key already seen creates
+   * NOTHING and answers from the original — with the stored response when the payload matches, and with
+   * `invalid_idempotent_request` when it does not (which sendSystemEmailWithMetadata reads as
+   * already-delivered). `emailsCreated` is the artifact under assertion: what is sitting in leadership's
+   * inbox, not how many HTTP requests were made.
+   */
+  function fakeResend() {
+    const byKey = new Map<string, { id: string; html: string }>();
+    const emailsCreated: string[] = [];
+    /** Set to make the NEXT create succeed at Resend but die before the caller sees the response. */
+    let hangUpAfterCreate = false;
+    const handler = async (init?: RequestInit): Promise<Response> => {
+      const key = new Headers(init?.headers).get("Idempotency-Key") ?? "";
+      const html = String(JSON.parse(String(init?.body ?? "{}")).html ?? "");
+      const existing = byKey.get(key);
+      if (existing) {
+        if (existing.html === html) {
+          return new Response(JSON.stringify({ id: existing.id }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            name: "invalid_idempotent_request",
+            message: "Same idempotency key with a different payload",
+            statusCode: 409,
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      const id = `msg-${emailsCreated.length + 1}`;
+      byKey.set(key, { id, html });
+      emailsCreated.push(id);
+      if (hangUpAfterCreate) {
+        hangUpAfterCreate = false;
+        // Created at Resend, then the connection died on the way back. resend@6 swallows this into
+        // `{application_error, statusCode: null}` — the `unknown` outcome, in its most dangerous form.
+        throw new Error("socket hang up");
+      }
+      return new Response(JSON.stringify({ id }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    return {
+      emailsCreated,
+      hangUpAfterNextCreate: () => {
+        hangUpAfterCreate = true;
+      },
+      handler,
+    };
+  }
+
+  /** `runAgainstRealTransport` for a stub that needs the request to decide its answer. */
+  async function runAgainstFakeResend(resend: ReturnType<typeof fakeResend>) {
+    const requests: Array<{ subject: string; idempotencyKey: string | null; html: string }> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      requests.push({
+        subject: String(body.subject ?? ""),
+        idempotencyKey: new Headers(init?.headers).get("Idempotency-Key"),
+        html: String(body.html ?? ""),
+      });
+      return resend.handler(init);
+    }) as typeof fetch;
+
+    const { logs, logger } = loggerSpy();
+    const summary = await runWeeklyReportReminders({
+      query,
+      env: { FRONTEND_URL: "https://trockcrm.com" },
+      now: atNoonUtc(DUE),
+      logger,
+      acquireLock: async () => async () => {},
+    });
+    return { requests, summary, logs };
+  }
+
+  it("RECOVERS the day's digest when the socket hangs up before Resend ever saw it", async () => {
+    // The delivery regression this replaced, driven through the code that ships. 07:00: `fetch` rejects.
+    // resend@6 swallows it into `{success:false, outcome:"unknown"}` — no exception. Under the previous
+    // round's rule the claims were KEPT, so 09:00 and 11:00 found the day digested, sent nothing and
+    // reported a clean run: one 5xx, one 502, one pool blip at 07:00 and leadership simply never got the
+    // email, with no line anywhere afterwards saying so.
     vi.stubEnv("RESEND_API_KEY", "re_test_e2e_key");
+    const resend = fakeResend();
 
     const first = await runAgainstRealTransport(async () => {
       throw new Error("socket hang up");
@@ -1452,40 +1722,72 @@ describe("leadership digest — against the REAL email transport", () => {
     expect(first.requests).toHaveLength(1);
     expect(first.summary.digestsSent).toBe(0);
     expect(first.summary.failed).toBe(1);
-    // The claim SURVIVES an unknown outcome. This is the assertion the old test could not make, because
-    // its stub raised an exception the transport cannot raise.
+    expect(await reminderLedger()).toEqual([]); // released for the catch-up tick
+    expect(first.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
+
+    // 09:00, same cohort. The digest is re-attempted under the IDENTICAL key against a Resend that
+    // honours it — and since the first request never reached the provider, this one creates the email.
+    const second = await runAgainstFakeResend(resend);
+    expect(second.requests).toHaveLength(1);
+    expect(second.requests[0]!.idempotencyKey).toBe(first.requests[0]!.idempotencyKey);
+    expect(second.summary.digestsSent).toBe(1);
+    expect(resend.emailsCreated).toHaveLength(1);
+    // Not an "Another digest" — as far as anything can tell, this IS leadership's first digest today.
+    expect(second.requests[0]!.subject.startsWith("Another digest")).toBe(false);
+  });
+
+  it("creates NO second email when the digest was accepted and only the response was lost", async () => {
+    // The other half of `unknown`, and the one the retry has to be safe against: Resend DID create the
+    // email at 07:00 and the connection died on the way back, so the job cannot tell this apart from the
+    // test above. The idempotency key is what makes both safe — the catch-up tick presents the same key,
+    // and a key Resend has already seen creates nothing.
+    //
+    // The assertion is on emails CREATED, not on requests made: two requests are expected and are not the
+    // artifact. What leadership is holding is.
+    vi.stubEnv("RESEND_API_KEY", "re_test_e2e_key");
+    const resend = fakeResend();
+    resend.hangUpAfterNextCreate();
+
+    const first = await runAgainstFakeResend(resend);
+    expect(first.requests).toHaveLength(1);
+    expect(resend.emailsCreated).toHaveLength(1); // it IS in the inbox
+    expect(first.summary.failed).toBe(1); // ...and the job has no way to know that
+    expect(await reminderLedger()).toEqual([]);
+
+    const second = await runAgainstFakeResend(resend);
+    expect(second.requests).toHaveLength(1);
+    expect(second.requests[0]!.idempotencyKey).toBe(first.requests[0]!.idempotencyKey);
+    // The provider answered from the original. Still ONE email.
+    expect(resend.emailsCreated).toHaveLength(1);
+    expect(second.summary.digestsSent).toBe(1);
     expect(await reminderLedger()).toEqual([
       { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
     ]);
-    expect(first.logs.error.some((line) => line.includes("outcome UNKNOWN"))).toBe(true);
-
-    // 09:00: a second project becomes due, so the cohort — and the idempotency key — changes.
-    await pg.query(
-      `INSERT INTO office_dallas.weekly_report_projects
-         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
-       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
-      [OTHER_PROJECT, OTHER_DEAL, SUPER],
-    );
-    const second = await runAgainstRealTransport(
-      async () =>
-        new Response(JSON.stringify({ id: "msg-1" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-    );
-
-    expect(second.requests).toHaveLength(1);
-    const digest = second.requests[0]!;
-    // The key DID rotate — Resend cannot dedup this — so the subject is the only thing that can stop
-    // leadership reading it as an independent second report. Before the fix it read "0 filed, 2
-    // outstanding" with no prefix at all.
-    expect(digest.idempotencyKey).not.toBe(first.requests[0]!.idempotencyKey);
-    expect(digest.subject).toContain("Update — Weekly reports due Thursday, Aug 13 — 0 filed, 2 outstanding");
-    expect(digest.html).toContain("This updates the digest sent earlier today");
-    expect(digest.html).toContain("Katy Freeway Shops became due after it went out");
   });
 
-  it("sends ONE digest on a 409 concurrent_idempotent_requests — an in-flight original is not a rejection", async () => {
+  it("creates NO second email when the counts moved between ticks under the same key", async () => {
+    // Same as above, except a super files at 08:00 so the retry's payload differs under the same key.
+    // Resend answers `invalid_idempotent_request`, which sendSystemEmailWithMetadata reads as
+    // already-delivered — correctly, since only a key it has already seen can produce that answer.
+    vi.stubEnv("RESEND_API_KEY", "re_test_e2e_key");
+    const resend = fakeResend();
+    resend.hangUpAfterNextCreate();
+
+    const first = await runAgainstFakeResend(resend);
+    expect(resend.emailsCreated).toHaveLength(1);
+    expect(first.summary.failed).toBe(1);
+
+    await seedReport({ status: "pending_review" });
+    const second = await runAgainstFakeResend(resend);
+    expect(second.requests).toHaveLength(1);
+    expect(second.requests[0]!.idempotencyKey).toBe(first.requests[0]!.idempotencyKey);
+    // Different body — same key. Nothing new is created.
+    expect(second.requests[0]!.html).not.toBe(first.requests[0]!.html);
+    expect(resend.emailsCreated).toHaveLength(1);
+    expect(second.summary.digestsSent).toBe(1);
+  });
+
+  it("retries a 409 concurrent_idempotent_requests under the same key", async () => {
     vi.stubEnv("RESEND_API_KEY", "re_test_e2e_key");
 
     const first = await runAgainstRealTransport(
@@ -1500,11 +1802,10 @@ describe("leadership digest — against the REAL email transport", () => {
         ),
     );
     expect(first.summary.failed).toBe(1);
-    expect(await reminderLedger()).toEqual([
-      { weekly_report_project_id: PROJECT, week_of: DUE, kind: "due_digest" },
-    ]);
+    expect(await reminderLedger()).toEqual([]);
 
-    // Same cohort at 09:00: no second attempt at all.
+    // Same cohort at 09:00, so the retry presents the same key the original is in flight under — which is
+    // exactly how the provider settles which of the two counts.
     const second = await runAgainstRealTransport(
       async () =>
         new Response(JSON.stringify({ id: "msg-1" }), {
@@ -1512,8 +1813,9 @@ describe("leadership digest — against the REAL email transport", () => {
           headers: { "content-type": "application/json" },
         }),
     );
-    expect(second.requests).toEqual([]);
-    expect(second.summary.digestsSent).toBe(0);
+    expect(second.requests).toHaveLength(1);
+    expect(second.requests[0]!.idempotencyKey).toBe(first.requests[0]!.idempotencyKey);
+    expect(second.summary.digestsSent).toBe(1);
   });
 
   it("DOES retry a 422 validation error — the case that must not be stranded", async () => {
@@ -1642,10 +1944,10 @@ describe("digest: the ledger read's scoping guards", () => {
     expect(sent).toHaveLength(1);
     expect(summary.digestsSent).toBe(1);
     expect(sent[0]!.subject).toContain("Weekly reports due Thursday, Aug 13 — 0 filed, 1 outstanding");
-    expect(sent[0]!.subject.startsWith("Update")).toBe(false);
+    expect(sent[0]!.subject.startsWith("Another digest")).toBe(false);
     // Consumer 2 — `remindersSent`: last week's chase says nothing about this week.
-    expect(sent[0]!.html).toContain("Outstanding — 1 never reminded");
-    expect(sent[0]!.text).toContain("No reminder was sent for this week.");
+    expect(sent[0]!.html).toContain("Outstanding — 1 with no reminder on record");
+    expect(sent[0]!.text).toContain("No reminder is on record for this week.");
   });
 
   it("does not let a project's OWN due_digest receipt count as having chased anybody", async () => {
@@ -1655,7 +1957,7 @@ describe("digest: the ledger read's scoping guards", () => {
     // never-chased project the follow-up digest exists to re-surface.
     const first = await run(DUE);
     expect(first.sent).toHaveLength(1);
-    expect(first.sent[0]!.html).toContain("Outstanding — 1 never reminded");
+    expect(first.sent[0]!.html).toContain("Outstanding — 1 with no reminder on record");
 
     // A second project becomes due mid-morning, triggering a follow-up digest. Neither project has ever
     // been chased: no t-2 or t-1 ran on either.
@@ -1672,21 +1974,21 @@ describe("digest: the ledger read's scoping guards", () => {
     const second = await run(DUE);
     expect(second.sent).toHaveLength(1);
     expect(second.sent[0]!.subject).toContain(
-      "Update — Weekly reports due Thursday, Aug 13 — 0 filed, 2 outstanding",
+      "Another digest — Weekly reports due Thursday, Aug 13 — 0 filed, 2 outstanding",
     );
-    // BOTH are still never-reminded. Counting the due_digest receipt drops this to 1.
-    expect(second.sent[0]!.html).toContain("Outstanding — 2 never reminded");
+    // BOTH still have nothing on record. Counting the due_digest receipt drops this to 1.
+    expect(second.sent[0]!.html).toContain("Outstanding — 2 with no reminder on record");
     // ...and the note survives on the project that carries its own receipt.
     expect(second.sent[0]!.text).toContain(
       "  - DFW-10432 — 4123 Cedar Springs (Not started) — Super: Steve Sanchez, PM: Adam Sherwood\n" +
-        "      No reminder was sent for this week.",
+        "      No reminder is on record for this week.",
     );
     expect(second.sent[0]!.text).toContain(
       "  - DFW-10433 — Katy Freeway Shops (Not started) — Super: Steve Sanchez, PM: unassigned\n" +
-        "      No reminder was sent for this week.",
+        "      No reminder is on record for this week.",
     );
     // Both notes present — the mutation removes the one on the project holding the due_digest receipt.
-    expect(second.sent[0]!.text.match(/No reminder was sent for this week\./g)).toHaveLength(2);
+    expect(second.sent[0]!.text.match(/No reminder is on record for this week\./g)).toHaveLength(2);
   });
 });
 

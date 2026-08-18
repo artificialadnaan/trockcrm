@@ -63,6 +63,13 @@ export interface SendSystemEmailOptions {
  */
 export type SendSystemEmailOutcome = "delivered" | "rejected" | "unknown";
 
+/**
+ * NOTE for anyone adding a send stub in a test: the compiler will NOT tell you this type has three fields.
+ * `worker/tsconfig.typecheck.json` builds a program of `src/**` only, so nothing under `worker/tests/**`
+ * is type-checked at all (see the note at the top of that file), and ~93 stubs there still return
+ * `{success, messageId}`. They compile, they run, and they cannot express the ambiguous outcome their
+ * callers branch on. Give a new stub the `outcome` by hand until that config is widened.
+ */
 export interface SendSystemEmailResult {
   success: boolean;
   messageId: string | null;
