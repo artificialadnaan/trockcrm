@@ -287,6 +287,20 @@ function ThisWeekTable({
   if (loading) return <PanelMessage icon="spinner">Loading the board…</PanelMessage>;
   if (error) return <PanelMessage icon="error">{error}</PanelMessage>;
   if (rows.length === 0) {
+    // "Nothing is due" ONLY when nothing is owed. The older-outstanding banner below this table cannot
+    // render on an empty board — this return fires first — so a board whose every outstanding week sits
+    // beyond the lookback window used to read as all-caught-up, which is the precise misreading that
+    // banner exists to prevent. Undelivered sends on a stopped setup land in this tally too, so an empty
+    // in-window board with a client still owed their report is reachable, not hypothetical.
+    if (olderTotal > 0) {
+      return (
+        <PanelMessage icon="calendar">
+          {olderTotal} outstanding week{olderTotal === 1 ? " is" : "s are"} older than the last {lookbackWeeks} weeks,
+          so {olderTotal === 1 ? "it is" : "they are"} not shown here. Open a project&rsquo;s History to see{" "}
+          {olderTotal === 1 ? "it" : "them"}.
+        </PanelMessage>
+      );
+    }
     return (
       <PanelMessage icon="calendar">
         Nothing is due. Add a project on the Projects tab to start tracking weekly updates.

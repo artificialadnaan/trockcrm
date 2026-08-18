@@ -382,6 +382,16 @@ describe("This Week board", () => {
     expect(text).toContain("Nothing is due");
   });
 
+  it("does NOT say nothing is due when every outstanding week is older than the window", () => {
+    // The banner that declares hidden weeks sits under the table, so an empty board returned before it and
+    // reported "Nothing is due" over weeks that are genuinely owed — the exact all-caught-up misreading the
+    // banner exists to prevent. Reachable: an undelivered send on a stopped setup lands only in this tally.
+    mockDashboard([], { olderOutstandingCounts: { p1: 3 } });
+    const text = renderPage();
+    expect(text).not.toContain("Nothing is due");
+    expect(text).toContain("3 outstanding weeks are older");
+  });
+
   it("marks a backlog week so it is not mistaken for this week's", () => {
     mockDashboard([dashboardRow({ isCurrentWeek: false, weekOf: "2026-08-06", daysLate: 7 })]);
     expect(renderPage()).toContain("backlog");
