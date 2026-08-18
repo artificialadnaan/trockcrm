@@ -189,8 +189,19 @@ export function WeeklyReportHistoryPanel({
                           retrying, not a correction. Offered first, and prominently, because the obvious
                           button to reach for on a failed send used to be "Send correction" — which
                           creates a v2, takes the failure off the board, and leaves the client with
-                          nothing at all if the PM is pulled away before finishing it. */}
-                      {report.status === "sent" && !report.sendDeliveredAt && (
+                          nothing at all if the PM is pulled away before finishing it.
+
+                          `!report.supersededById` is the same predicate the board's undelivered query
+                          uses, and it is load-bearing rather than cosmetic. v1 sent Monday and undelivered,
+                          corrected, v2 sent and DELIVERED Tuesday leaves v1 `sent`, superseded, with
+                          `send_delivered_at` still null and its stored request — share URL and all — still
+                          on the row. Retrying it emails the client the version they were already told was
+                          replaced, with `isCorrection: false` so nothing in the message says so, linking
+                          to a page that then tells them their copy is out of date. The board is silent on
+                          that row by construction; History was the one surface that offered the action.
+                          The server and the worker each refuse it independently — this only stops the CRM
+                          inviting it. */}
+                      {report.status === "sent" && !report.sendDeliveredAt && !report.supersededById && (
                         <RetryButton reportId={report.id} sentAt={report.sentAt} onRetried={onChanged} />
                       )}
                       {/* Only on the LIVE, NEWEST version. A report already superseded by a correction has

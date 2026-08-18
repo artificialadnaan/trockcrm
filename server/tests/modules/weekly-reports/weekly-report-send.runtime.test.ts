@@ -37,7 +37,6 @@ import {
   sendWeeklyReport,
 } from "../../../src/modules/weekly-reports/send-service.js";
 import {
-  WEEKLY_REPORT_SEND_STALL_MINUTES,
   getWeeklyReportDashboard,
   listWeeklyReportProjectSummaries,
 } from "../../../src/modules/weekly-reports/dashboard-service.js";
@@ -81,6 +80,26 @@ const OFFICE_CONTEXT = { tenantId: OFFICE, slug: "dallas" };
 const THURSDAY = 4;
 const WEEK_OF = "2026-08-13";
 const PRIOR_WEEK = "2026-08-06";
+
+/**
+ * ABSOLUTE AGES, DELIBERATELY NOT DERIVED FROM `WEEKLY_REPORT_SEND_STALL_MINUTES`.
+ *
+ * The threshold is 30 minutes. This suite used to write `ageSend(id, WEEKLY_REPORT_SEND_STALL_MINUTES + 5)`
+ * — importing the constant and ageing relative to it — which cannot detect a change to the constant at
+ * all: raising it to 30000 moves the fixture with it and the whole suite stays green while the signal it
+ * exists for is switched off. That is not hypothetical. With the mutant in place a send committed three
+ * weeks ago with no error and no delivery reports `sendStalled: false, sendPending: true`: the board
+ * renders "Sending…" forever, the row is excluded from the "Send failures" card and NO Retry is offered.
+ *
+ * Two absolute fixtures instead, one on each side of the threshold, so a move in either direction fails a
+ * test. They are numbers rather than an import ON PURPOSE — if the product decides 30 minutes is wrong,
+ * these are supposed to break and be re-chosen, not silently follow.
+ *
+ * (The sibling `WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS` is pinned the same way, by the CRM
+ * suite's hard-coded `sentAt: "2026-08-01T10:00:00.000Z"`.)
+ */
+const STALLED_MINUTES = 35;
+const IN_FLIGHT_MINUTES = 5;
 
 let pg: PGlite;
 
@@ -302,11 +321,32 @@ async function markDelivered(reportId: string): Promise<void> {
   );
 }
 
-/** Age a send so the provider's idempotency window, or the board's stall threshold, has passed. */
+/** Age the COMMIT, which is what the provider's 24-hour idempotency window is measured against. */
 async function ageSend(reportId: string, minutes: number): Promise<void> {
   await pg.query(
     `UPDATE office_dallas.weekly_reports
         SET sent_at = now() - make_interval(mins => $2)
+      WHERE id = $1::uuid`,
+    [reportId, minutes],
+  );
+}
+
+/**
+ * Age the whole DELIVERY — both clocks the board's stall threshold reads.
+ *
+ * Separate from `ageSend` because the two answer different questions. The stall is measured against the
+ * LATER of `sent_at` and `send_last_attempt_at`, so a row whose worker attempt is stamped `now()` is not
+ * stale however far back its commit is pushed. Anything asserting a stall on a row that has been attempted
+ * has to move both, or it is asserting against a clock that never advanced.
+ */
+async function ageDelivery(reportId: string, minutes: number): Promise<void> {
+  await pg.query(
+    `UPDATE office_dallas.weekly_reports
+        SET sent_at = now() - make_interval(mins => $2),
+            send_last_attempt_at = CASE
+              WHEN send_last_attempt_at IS NULL THEN NULL
+              ELSE now() - make_interval(mins => $2)
+            END
       WHERE id = $1::uuid`,
     [reportId, minutes],
   );
@@ -1138,6 +1178,64 @@ describe("retrying a failed send", () => {
       /project manager/i,
     );
   });
+
+  it("REFUSES a version a correction has already replaced, whatever the caller acknowledges", async () => {
+    // THE ONE OUTCOME THIS FEATURE MUST NEVER PRODUCE, and every other predicate on this path waves it
+    // through. v1 is sent and its delivery fails; the PM issues a correction; v2 is sent and DELIVERED.
+    // v1 is then `sent`, `superseded_by_id` = v2, `send_delivered_at` still NULL, its stored request
+    // still carrying the live share URL — that is only dropped on delivery — and `sent_at` recent enough
+    // that even the duplicate-risk gate is satisfied.
+    //
+    // Replaying it emails a paying client the version they were already told was replaced, with
+    // `isCorrection: false` so nothing in the message explains it, pointing at a page that then shows
+    // them a superseded notice. Irreversible, and invisible: the board's undelivered query already
+    // carries `superseded_by_id IS NULL`, so nothing on any dashboard would ever mention it.
+    const v1 = await failedSend();
+    const correction = await createWeeklyReportCorrection(db, v1, SENDER);
+    await sendWeeklyReport(db, {
+      reportId: correction.id,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await markDelivered(correction.id);
+    // Precisely the row shape that used to pass: sent, undelivered, superseded, request intact.
+    const row = await reportRow(v1);
+    expect(row.status).toBe("sent");
+    expect(row.send_delivered_at).toBeNull();
+    expect(row.superseded_by_id).toBe(correction.id);
+    expect(row.send_request.shareUrl).toBeTruthy();
+    await pg.query(`DELETE FROM public.job_queue`);
+
+    await expectAppError(
+      retryWeeklyReportSend(db, v1, SENDER, OFFICE_CONTEXT),
+      409,
+      /newer version/i,
+    );
+    // Acknowledging the duplicate risk is not a way past it. This is not a duplicate-risk question at
+    // all — that message is about sending the SAME report twice, and this would send the WRONG one.
+    await expectAppError(
+      retryWeeklyReportSend(db, v1, SENDER, OFFICE_CONTEXT, { acknowledgeDuplicateRisk: true }),
+      409,
+      /newer version/i,
+    );
+    expect(await sendJobs()).toHaveLength(0);
+  });
+
+  it("still retries an undelivered version nothing has replaced yet", async () => {
+    // The other direction, and why the predicate is `superseded_by_id` rather than "a later version
+    // exists": superseding happens at SEND, so a v1 with a v2 merely DRAFTED beside it is still the
+    // version the client is owed. The board points its own Retry at v1 in exactly this state.
+    const v1 = await failedSend();
+    await createWeeklyReportCorrection(db, v1, SENDER);
+    expect((await reportRow(v1)).superseded_by_id).toBeNull();
+
+    await retryWeeklyReportSend(db, v1, SENDER, OFFICE_CONTEXT);
+    const jobs = await sendJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.payload.reportId).toBe(v1);
+  });
 });
 
 describe("the dashboard's view of a send", () => {
@@ -1239,13 +1337,17 @@ describe("the dashboard's view of a send", () => {
     expect(before.send_error).toBeNull();
     expect(Number(before.send_attempts)).toBe(0);
 
-    await ageSend(reportId, WEEKLY_REPORT_SEND_STALL_MINUTES + 5);
+    // THIRTY-FIVE MINUTES, an absolute fixture — see STALLED_MINUTES. Ageing by
+    // `WEEKLY_REPORT_SEND_STALL_MINUTES + 5` let the threshold be raised to 30000 with this test still
+    // green, which restores the exact failure the test is named for.
+    await ageSend(reportId, STALLED_MINUTES);
 
     const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
     expect(row).toBeDefined();
     expect(row!.sendStalled).toBe(true);
     expect(row!.sendFailed).toBe(false);
+    expect(row!.sendPending).toBe(false);
     // And it names somebody to chase, and points Retry at the report that actually needs one.
     expect(row!.waitingOn).toBe("Adam Sherwood");
     expect(row!.sendRetryReportId).toBe(reportId);
@@ -1259,6 +1361,106 @@ describe("the dashboard's view of a send", () => {
     const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
     expect(row!.sendStalled).toBe(false);
     expect(row!.sendPending).toBe(true);
+  });
+
+  it("still calls a send five minutes old in flight — the lower edge, pinned absolutely", async () => {
+    // The companion to the 35-minute fixture above, and the reason BOTH are absolute: with only one of
+    // them the threshold could be moved in the untested direction and the suite would not notice. Five
+    // minutes is under any plausible value of the threshold and over zero, so lowering it towards zero
+    // fails here and raising it fails the test above.
+    const reportId = await sentWeek(PRIOR_WEEK);
+    await ageSend(reportId, IN_FLIGHT_MINUTES);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
+    expect(row!.sendStalled).toBe(false);
+    expect(row!.sendPending).toBe(true);
+  });
+
+  it("never reports a failed send as stuck as well, however old it is", async () => {
+    // `sendStalled`'s `send_error == null` conjunct, pinned. The CRM happens to mask a break here — it
+    // renders the `sendFailed` branch first — but `sendStalled` is a PUBLISHED field the deferred T-Rock
+    // Cam surface reads directly, and deriving all three verdicts on the server exists precisely so the
+    // two surfaces cannot disagree about what the chip means. Without the conjunct an old failed send
+    // reports BOTH, and the app says "Send stuck" — no error to show, nothing to act on — for a delivery
+    // that recorded exactly why it failed.
+    //
+    // Aged on BOTH clocks, so the row really is past the threshold and only the conjunct is holding
+    // `sendStalled` false.
+    const reportId = await sentWeek(PRIOR_WEEK);
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports
+          SET send_error = 'Resend timed out', send_attempts = 3, send_last_attempt_at = now()
+        WHERE id = $1::uuid`,
+      [reportId],
+    );
+    await ageDelivery(reportId, STALLED_MINUTES);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
+    expect(row!.sendFailed).toBe(true);
+    expect(row!.sendStalled).toBe(false);
+    expect(row!.sendPending).toBe(false);
+  });
+
+  it("reads a retried send as back in flight, not as stuck", async () => {
+    // A LEGITIMATE RETRY MUST NOT BE FLAGGED "Send stuck". The stall was aged off `sent_at`, which is
+    // stamped once when the PM commits and never moves, while `retryWeeklyReportSend` cleared the error
+    // and wrote no timestamp at all. So a send committed ninety minutes ago and retried a moment ago went
+    // straight from "Send failed · 3 attempts" to "Send stuck", whose title told the PM no delivery had
+    // ever been recorded — for a delivery that had recorded three attempts and an error which this very
+    // call had just erased. The PM got no signal that their click did anything.
+    //
+    // Worse past the provider's dedupe window: they acknowledge the duplicate risk, see the row unchanged
+    // and click again, and a second acknowledged replay is a second real copy in the client's inbox.
+    const reportId = await sentWeek(PRIOR_WEEK);
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports
+          SET send_error = 'Resend timed out', send_attempts = 3, send_last_attempt_at = now()
+        WHERE id = $1::uuid`,
+      [reportId],
+    );
+    await ageDelivery(reportId, 90);
+
+    const failing = (await getWeeklyReportDashboard(db, { asOf: WEEK_OF })).rows.find(
+      (entry) => entry.weekOf === PRIOR_WEEK,
+    );
+    expect(failing!.sendFailed).toBe(true);
+    expect(failing!.sendStalled).toBe(false);
+
+    // Ninety minutes is well inside the provider's 24-hour window, so no acknowledgement is needed —
+    // this is the ordinary retry, not the risky one.
+    await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
+    expect(row!.sendFailed).toBe(false);
+    expect(row!.sendStalled).toBe(false);
+    // The positive feedback the PM never used to get. "Sending…", and no second Retry to double-click.
+    expect(row!.sendPending).toBe(true);
+    // And the history of the trouble is still there — the retry clears the error, never the count.
+    expect(row!.sendAttempts).toBe(3);
+  });
+
+  it("calls a retried send stuck again once IT has gone quiet for the threshold", async () => {
+    // The clock restarts; it is not switched off. A retry that itself produces nothing must come back as
+    // a problem, or "Sending…" becomes permanent for any report a PM has ever pressed Retry on.
+    const reportId = await sentWeek(PRIOR_WEEK);
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports
+          SET send_error = 'Resend timed out', send_attempts = 3, send_last_attempt_at = now()
+        WHERE id = $1::uuid`,
+      [reportId],
+    );
+    await ageDelivery(reportId, 90);
+    await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
+    await ageDelivery(reportId, STALLED_MINUTES);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
+    expect(row!.sendStalled).toBe(true);
+    expect(row!.sendPending).toBe(false);
+    expect(row!.sendRetryReportId).toBe(reportId);
   });
 
   it("counts an undelivered past send in the older-outstanding tally, not as settled", async () => {
@@ -1421,6 +1623,117 @@ describe("the per-project counters", () => {
     // And the board agrees — the whole point of matching the predicate.
     const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     expect(board.rows.find((entry) => entry.weekOf === WEEK_OF)!.sendFailed).toBe(false);
+  });
+});
+
+/**
+ * "Two surfaces, one definition of still-owed" — for a setup that has STOPPED reporting.
+ *
+ * This is the common end state, not an edge case: the last report of a job fails to send, the job
+ * finishes, somebody marks the setup completed or paused. The board scoped its projects to
+ * `wrp.status = 'active'` and the Projects tab's counters to `wrp.is_active` alone, so the tab showed a
+ * permanent red "1 not delivered" for which the board had no row at all — not in This Week, not in the
+ * "and N older" tally — and therefore no Retry beside the number that demanded one.
+ */
+describe("a setup that has stopped reporting can still owe the client an email", () => {
+  async function undeliveredThenStopped(status: "paused" | "completed") {
+    const { projectId, reportId } = await seedApprovedReport();
+    await sendWeeklyReport(db, {
+      reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out', send_attempts = 3
+        WHERE id = $1::uuid`,
+      [reportId],
+    );
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET status = $2 WHERE id = $1::uuid`, [
+      projectId,
+      status,
+    ]);
+    return { projectId, reportId };
+  }
+
+  it("keeps the undelivered send on the board after the project is paused", async () => {
+    const { reportId } = await undeliveredThenStopped("paused");
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === WEEK_OF);
+    expect(row).toBeDefined();
+    expect(row!.sendFailed).toBe(true);
+    expect(row!.sendError).toBe("Resend timed out");
+    expect(row!.sendAttempts).toBe(3);
+    // The Retry the Projects tab's counter implies actually exists here, pointed at the right report.
+    expect(row!.sendRetryReportId).toBe(reportId);
+    expect(row!.sendRetrySentAt).not.toBeNull();
+    // Somebody to chase. Nobody is waiting on the superintendent for a project that has stopped.
+    expect(row!.waitingOn).toBe("Adam Sherwood");
+    // Never LATE, though: lateness measures a report the cadence still expects, and it expects none.
+    expect(row!.daysLate).toBe(0);
+  });
+
+  it("keeps it after the project is marked completed, which is how this usually ends", async () => {
+    const { reportId } = await undeliveredThenStopped("completed");
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(board.rows.map((entry) => entry.sendRetryReportId)).toContain(reportId);
+  });
+
+  it("agrees with the Projects tab, which is the whole claim", async () => {
+    // The tab's number and the board's rows, read together — the reconciliation the commit message
+    // asserts. One undelivered send, one row, one counter.
+    await undeliveredThenStopped("paused");
+    const summary = (await listWeeklyReportProjectSummaries(db, WEEK_OF))[0]!;
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const boardOutstanding = board.rows.filter((entry) => entry.sendRetryReportId != null).length;
+
+    expect(summary.undeliveredSends).toBe(1);
+    expect(boardOutstanding).toBe(1);
+    expect(summary.reportsSent).toBe(0);
+    // And the tab still says the setup owes no NEW report, which is what pausing it meant.
+    expect(summary.nextDueWeekOf).toBeNull();
+  });
+
+  it("does not double an ACTIVE project's failed week, which the cadence loop already emitted", async () => {
+    // The stopped-setup pass reads the same undelivered set the cadence loop does. Without its skip on
+    // `status = 'active'` every failed send in the office would appear on the board twice — the "Send
+    // failures" card counts rows, so the number a director acts on would be exactly doubled.
+    const { projectId, reportId } = await seedApprovedReport();
+    await sendWeeklyReport(db, {
+      reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out' WHERE id = $1::uuid`,
+      [reportId],
+    );
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const forThisWeek = board.rows.filter(
+      (entry) => entry.weeklyReportProjectId === projectId && entry.weekOf === WEEK_OF,
+    );
+    expect(forThisWeek).toHaveLength(1);
+    expect(forThisWeek[0]!.sendFailed).toBe(true);
+  });
+
+  it("generates no cadence weeks for it — a stopped project owes no new reports", async () => {
+    // The scope widened for undelivered sends ONLY. If the stopped project were simply folded into the
+    // cadence loop it would return every week since its start date as outstanding, which is the opposite
+    // of what the CRM told whoever stopped it — and a completed setup often has no cadence end date, so
+    // the generator would keep producing weeks forever.
+    const { projectId } = await seedApprovedReport({ weekOf: PRIOR_WEEK });
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET status = 'paused' WHERE id = $1::uuid`, [
+      projectId,
+    ]);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(board.rows).toHaveLength(0);
+    expect(board.olderOutstandingCounts[projectId] ?? 0).toBe(0);
   });
 });
 

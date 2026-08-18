@@ -29,10 +29,12 @@
 --     (a new report row) gets its own and can genuinely go out, while a retry of the same request reuses
 --     it and cannot double-send.
 --
---   • `send_last_attempt_at` — when the last delivery attempt ran. `send_attempts` alone cannot
+--   • `send_last_attempt_at` — when the delivery was last attempted. `send_attempts` alone cannot
 --     distinguish "failed twice an hour ago and gave up" from "failed twice in the last minute and is
 --     still retrying", which is the difference between a chip somebody must act on and one they should
---     leave alone.
+--     leave alone. Written by the worker when an attempt FINISHES and by the API's retry route when one
+--     is re-queued, so it is the clock the board ages a stalled send against: `sent_at` is stamped once
+--     when the PM commits and never moves, which made every legitimate retry read as "Send stuck".
 --
 -- Per-office, like every weekly-report table bar the public share token. Skips any office without
 -- `weekly_reports` — 0222 itself skips offices lacking `deals`/`files`, and an ALTER against a table that

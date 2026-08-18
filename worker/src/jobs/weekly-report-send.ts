@@ -351,6 +351,7 @@ export async function handleWeeklyReportSend(
   const query = deps.query ?? pool.query.bind(pool);
   const existing = await query(
     `SELECT status, week_of, version, send_request, send_delivery_key, send_delivered_at, send_attempts,
+            superseded_by_id,
             snapshot ->> 'propertyDisplayName' AS property_display_name
        FROM ${tenantSchema}.weekly_reports
       WHERE id = $1::uuid AND is_active
@@ -370,6 +371,27 @@ export async function handleWeeklyReportSend(
     // Unreachable through the API — `sent` is terminal — but a job whose report is not in that state has
     // no send to perform, and inventing one would email a client a report no PM released.
     logger.warn("[WeeklyReportSend] Report is not in `sent` - skipping", { reportId, status: row.status });
+    return;
+  }
+  if (row.superseded_by_id) {
+    // A VERSION THE CLIENT HAS ALREADY BEEN TOLD IS REPLACED MUST NOT BE DELIVERED.
+    //
+    // `superseded_by_id` is stamped when a LATER version is actually sent, so this row's content is not
+    // what the client is owed — and the message it would send carries `isCorrection: false`, so nothing
+    // in it would explain why an older report arrived after the newer one. It also links to a page that
+    // renders the "a newer version was issued" notice, which is a worse first impression than no email.
+    //
+    // Checked here as well as in the API's retry route because this job is enqueued from more than one
+    // place and can outlive the state it was queued for: a delivery queued for v1 that is still sitting
+    // in job_queue when the PM sends v2 arrives here perfectly well-formed — the delivery key still
+    // matches, the status is still `sent`, nothing has been delivered. Only this predicate stops it.
+    //
+    // Skipped rather than thrown: no amount of retrying makes a superseded report the right thing to
+    // send, so burning three attempts and a dead-letter would only be noise.
+    logger.warn("[WeeklyReportSend] Report has been superseded by a newer version - skipping", {
+      reportId,
+      supersededById: row.superseded_by_id,
+    });
     return;
   }
   if (normalizeText(row.send_delivery_key) !== deliveryKey) {
