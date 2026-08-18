@@ -5,6 +5,7 @@ import {
   NORMAL_DEAL_STAGE_SLUGS,
   SERVICE_DEAL_STAGE_SLUGS,
 } from "./sales-workflow";
+import { normalizeDealBoardStageSlug } from "@trock-crm/shared/types";
 
 const LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS = [
   "estimate_in_progress",
@@ -122,52 +123,20 @@ export function isBidBoardMirroredStageSlug(stageSlug: string | null | undefined
   );
 }
 
+/**
+ * Which canonical board column a raw stage slug belongs to.
+ *
+ * Thin delegate to the SHARED implementation (`normalizeDealBoardStageSlug`). The server needs the same
+ * grouping to bucket its board-wide aggregates — the At-Risk KPI counts and the Pending RFP column — into
+ * the columns this client renders them in, and two copies of that rule would eventually disagree, which
+ * shows up as a KPI number that does not match the list it links to. The name and signature here are
+ * unchanged so no call site had to move.
+ */
 export function normalizeDealStageSlug(
   stageSlug: string | null | undefined,
   workflowRoute: WorkflowRouteLike
 ): CanonicalDealBoardStageSlug | null {
-  if (!stageSlug) return null;
-
-  switch (stageSlug) {
-    case "dd":
-      return "opportunity";
-    case "opportunity":
-    case "contract":
-    case "won":
-    case "lost":
-      return stageSlug;
-    case "estimating":
-    case "estimate_in_progress":
-      return normalizeWorkflowRoute(workflowRoute) === "service" ? "service_estimating" : "estimating";
-    case "service_estimating":
-    case "estimate_under_review":
-    case "estimate_sent_to_client":
-      return stageSlug;
-    case "bid_sent":
-      return "estimate_sent_to_client";
-    case "service_estimate_under_review":
-      return "estimate_under_review";
-    case "service_estimate_sent_to_client":
-      return "estimate_sent_to_client";
-    case "contract_signed":
-    case "service_contract_signed":
-      return "contract";
-    case "sent_to_production":
-    case "service_sent_to_production":
-    case "service_scheduled":
-    case "in_production":
-    case "close_out":
-    case "closed_won":
-    case "service_complete":
-      return "won";
-    case "deal_canceled":
-    case "production_lost":
-    case "service_lost":
-    case "closed_lost":
-      return "lost";
-    default:
-      return null;
-  }
+  return normalizeDealBoardStageSlug(stageSlug, normalizeWorkflowRoute(workflowRoute));
 }
 
 export function getCanonicalDealStageSlugs(workflowRoute: WorkflowRouteLike) {

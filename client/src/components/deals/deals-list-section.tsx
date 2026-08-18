@@ -75,6 +75,13 @@ type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
   scope?: "mine" | "team" | "all" | "watched" | "on_hold";
+  /**
+   * The assignable-account list, when the mounting page already loaded it. Used ONLY to resolve owner
+   * names for rows that arrive without `assignedRepName` and for the CSV export — never to populate the
+   * owner FILTER, which is the sales roster (see the two-feed note at the hook call below). Omit it and
+   * the section fetches its own copy.
+   */
+  assignees?: Array<{ id: string; displayName: string }>;
   workflowFamily?: Parameters<typeof usePipelineStages>[0];
   enableDateFilter?: boolean;
   enableExport?: boolean;
@@ -700,6 +707,7 @@ export function buildFilterBarCsvRows(
 
 export function DealsListSection({
   scope,
+  assignees: assigneesFromParent,
   workflowFamily = "deal",
   enableDateFilter = false,
   enableExport = false,
@@ -773,7 +781,13 @@ export function DealsListSection({
     () => rosterAllGroups.filter((rep) => rep.group !== "estimator"),
     [rosterAllGroups]
   );
-  const { assignees } = useTaskAssignees();
+  // The assignee feed is likewise GATED when the mounting page already has it: /deals loads
+  // /tasks/assignees for its own header Rep control and hands the result down, so the page no longer
+  // issues the same request twice on every load. Un-passed mounts fetch it themselves, unchanged — and
+  // that is also the FALLBACK path: /deals passes `undefined` when its own load errored, so a failed
+  // parent request hands the fetch back here instead of silently leaving every owner name unresolved.
+  const { assignees: fetchedAssignees } = useTaskAssignees({ enabled: assigneesFromParent == null });
+  const assignees = assigneesFromParent ?? fetchedAssignees;
 
   const stageFilterOptions = useMemo(() => {
     const sourceStages = visibleStages ?? stages.filter((stage) => stage.isActivePipeline !== false);

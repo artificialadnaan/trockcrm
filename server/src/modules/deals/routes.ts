@@ -1064,6 +1064,12 @@ router.get("/pipeline", async (req, res, next) => {
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       previewLimit: Number.isFinite(parsedPreviewLimit) ? parsedPreviewLimit : undefined,
+      // Opt-in: `boardSummary` + `pendingRfpDeals`, and the Opportunity card exclusion that goes with
+      // them. Default OFF so an older web bundle (which builds its Pending RFP column by carving cards
+      // out of pipelineColumns, and cannot start sending a flag) and mobile-crm (which never reads the
+      // summary, and would otherwise pay to materialize the whole open pipeline for 15 cards) both get
+      // exactly the response they got before. See getDealsForPipeline's includeBoardAggregates.
+      includeBoardAggregates: req.query.boardAggregates === "true",
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,
       wonAllTime: req.query.won_all_time === "true",
@@ -1082,18 +1088,46 @@ router.get("/pipeline", async (req, res, next) => {
     );
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
-    res.json({
-      ...result,
+    /**
+     * Built by CONSTRUCTION, never by spreading the service result and subtracting.
+     *
+     * `...result` used to lead this object, and it copied `boardSummary: null` in for a caller that did
+     * not opt in — the conditional spread below only ADDS a key, it cannot remove one already present.
+     * So a legacy client received `"boardSummary": null` on the wire: a determination ("there is no
+     * at-risk data") where the contract promised an absence ("this response does not carry that"). The
+     * two are not interchangeable — the client's fallbacks branch on the field being missing.
+     *
+     * `pendingRfpDeals` survived only because `res.json` drops undefined-valued keys, which is luck
+     * rather than design. Listing the response keys explicitly means a field added to the service's
+     * return type in future cannot ride along into the payload unreviewed.
+     */
+    const redactDeal = (deal: unknown) =>
+      stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+        isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+      });
+    const body: Record<string, unknown> = {
       pipelineColumns: result.pipelineColumns.map((column) => ({
         ...column,
-        deals: redactDealList(column.deals, { includeHubspotId }).map((deal) =>
-          stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
-            isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
-          })
-        ),
+        deals: redactDealList(column.deals, { includeHubspotId }).map(redactDeal),
       })),
       terminalStages: result.terminalStages,
-    });
+    };
+    // Board-wide aggregates computed over EVERY matching row, not the per-column card slice: the three
+    // At-Risk KPI counts and the synthetic Pending RFP column's count/$. Present ONLY for a caller that
+    // opted in via ?boardAggregates=true — see getDealsForPipeline's includeBoardAggregates for why the
+    // default has to be off in both deploy directions.
+    if (result.boardSummary) {
+      body.boardSummary = result.boardSummary;
+    }
+    if (result.pendingRfpDeals) {
+      // The synthetic Pending RFP column's OWN cards. Carving them out of the Opportunity slice on the
+      // client silently lost every pending deal ranked below the cap. Redacted on the same path as the
+      // column cards — these are full deal rows.
+      body.pendingRfpDeals = redactDealList(result.pendingRfpDeals as never, { includeHubspotId }).map(
+        redactDeal
+      );
+    }
+    res.json(body);
   } catch (err) {
     next(err);
   }
@@ -1101,7 +1135,9 @@ router.get("/pipeline", async (req, res, next) => {
 
 router.get("/stages", async (req, res, next) => {
   try {
-    const stages = await getAllStages("deal");
+    // On the request's tenant client, not the global pool — see getAllStages. This route runs inside the
+    // tenant transaction, so reading through `db` made it hold two pool slots at once.
+    const stages = await getAllStages("deal", req.tenantDb);
     await req.commitTransaction!();
     res.json({ stages });
   } catch (err) {

@@ -342,6 +342,187 @@ async function renderStageResultProbe() {
   return root;
 }
 
+/**
+ * A board probe whose `enabled` gate is controlled from the test. /deals holds its first fetch until the
+ * saved Rep/timeframe restore has decided, because that restore rewrites the URL — i.e. the board's own
+ * parameters — and fetching first meant issuing the 1.6-2.5s pipeline query twice per cold load.
+ */
+let hookBoardEnabled = true;
+let latestGatedResult: ReturnType<typeof useDealBoard> | null = null;
+function GatedBoardProbe() {
+  // Positional args: scope, includeDd, terminalDateFilters, previewLimit, wonPeriodRange,
+  // assignedRepId, estimateSentDateRange, estimatorId, options.
+  latestGatedResult = useDealBoard("mine", false, undefined, 50, null, undefined, undefined, undefined, {
+    enabled: hookBoardEnabled,
+  });
+  return null;
+}
+
+
+describe("normalizeDealBoardResponse — absent vs empty across the deploy window", () => {
+  /**
+   * The whole point: a client and a server ship in one PR but deploy as two services at different
+   * moments. Every field this PR added has to answer "does an API that predates it produce a WRONG
+   * board, or merely a degraded one?" — and anything that silently reads as a real value gets the
+   * absent-vs-empty treatment, because during the window it is shown to someone as if it were true.
+   */
+  const legacyPayload = () => ({
+    pipelineColumns: [
+      {
+        stage: { id: "stage-1", name: "Opportunity", slug: "opportunity" },
+        count: 45,
+        totalValue: 1000,
+        deals: [],
+      },
+    ],
+    terminalStages: [],
+  });
+
+  it("keeps an ABSENT pendingRfpDeals undefined so the carve-out fallback can fire", () => {
+    const normalized = normalizeDealBoardResponse(legacyPayload() as never);
+    expect(normalized.pendingRfpCards).toBeUndefined();
+  });
+
+  it("keeps an EXPLICITLY EMPTY pendingRfpDeals as an empty array", () => {
+    const normalized = normalizeDealBoardResponse({
+      ...legacyPayload(),
+      pendingRfpDeals: [],
+    } as never);
+    expect(normalized.pendingRfpCards).toEqual([]);
+    expect(normalized.pendingRfpCards).not.toBeUndefined();
+  });
+
+  it("keeps an ABSENT column totalCount undefined instead of substituting the ACTIVE count", () => {
+    const normalized = normalizeDealBoardResponse(legacyPayload() as never);
+    // `count` is the non-on-hold figure while `cards` includes held rows, so quoting it as a row total
+    // is what let a truncated column look complete.
+    expect(normalized.columns[0]!.totalCount).toBeUndefined();
+    expect(normalized.columns[0]!.count).toBe(45);
+  });
+
+  it("nulls an ABSENT or MALFORMED boardSummary so consumers take their card-derived fallback", () => {
+    expect(normalizeDealBoardResponse(legacyPayload() as never).summary).toBeNull();
+    // A summary missing the totalCount this PR added is not usable either — better to fall back wholly
+    // than to read a missing field as zero.
+    expect(
+      normalizeDealBoardResponse({
+        ...legacyPayload(),
+        boardSummary: { atRiskByStageSlug: {}, pendingRfp: { count: 1, totalValue: 2 } },
+      } as never).summary
+    ).toBeNull();
+  });
+
+  it("passes a COMPLETE boardSummary through untouched", () => {
+    const summary = {
+      atRiskByStageSlug: { opportunity: { service: 1, nonService: 2 } },
+      pendingRfp: { count: 3, totalCount: 4, totalValue: 5 },
+    };
+    expect(normalizeDealBoardResponse({ ...legacyPayload(), boardSummary: summary } as never).summary).toEqual(
+      summary
+    );
+  });
+});
+
+describe("useDealBoard — the enabled gate", () => {
+  beforeEach(() => {
+    latestGatedResult = null;
+    hookBoardEnabled = true;
+    vi.mocked(api).mockReset();
+  });
+
+  it("issues NO request while disabled, and keeps reporting loading so the page shows its spinner", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = false;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock).not.toHaveBeenCalled();
+    // NOT settled to false: an empty board rendered as "loaded" is a flash of "no deals".
+    expect(latestGatedResult?.loading).toBe(true);
+    expect(latestGatedResult?.board).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("OPTS IN to the board-aggregates contract on the request URL", async () => {
+    /**
+     * The one line this asserts is `boardAggregates: "true"` in useDealBoard's param builder, and its
+     * absence is completely SILENT — which is why it needs a test rather than a comment.
+     *
+     * Drop it and the server (default OFF) omits `boardSummary`; the page's serverOmitsBoardSummary latch
+     * then sees a summary-less response and reverts the board to 1000-card requests, where every
+     * card-derived fallback is correct again. So every number on the page stays RIGHT, nothing looks
+     * broken, and the entire point of this work — the small card slice and the server-side aggregates —
+     * just stops happening. Nothing else in the client suite references the flag.
+     *
+     * It also lives in use-deals.ts, one of the files that conflicted when main was merged in, i.e.
+     * exactly where a future conflict resolution could drop it without anything going red.
+     */
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+
+    const url = String(apiMock.mock.calls[0]![0]);
+    expect(url).toContain("boardAggregates=true");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("issues exactly ONE request once enabled", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(String(apiMock.mock.calls[0]![0])).toContain("/deals/pipeline?");
+    expect(String(apiMock.mock.calls[0]![0])).toContain("previewLimit=50");
+    expect(String(apiMock.mock.calls[0]![0])).toContain("boardAggregates=true");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("normalizeDealBoardResponse", () => {
   beforeEach(() => {
     latestResult = null;

@@ -14,6 +14,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const dbState = vi.hoisted(() => ({ stages: [] as any[] }));
 
+/** Drizzle's own name symbol — usable inside a hoisted `vi.mock` factory without importing the schema. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
 function createChainableMock() {
   const chain: any = {
     select: vi.fn(),
@@ -25,7 +31,15 @@ function createChainableMock() {
     then: vi.fn((resolve: (value: any[]) => unknown) => resolve(dbState.stages)),
   };
   chain.select.mockReturnValue(chain);
-  chain.from.mockReturnValue(chain);
+  // The board reads pipeline_stage_config through the REQUEST's tenant client now, not the global `db`
+  // pool (one request used to hold TWO pool slots). Serve the stage list at `.from()` time, which
+  // production reaches AFTER the tenantDb mock installed its own `then`, so this wins for that one query.
+  chain.from.mockImplementation((table: unknown) => {
+    if (isPipelineStageConfigTable(table)) {
+      chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(dbState.stages));
+    }
+    return chain;
+  });
   chain.where.mockReturnValue(chain);
   chain.leftJoin.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);

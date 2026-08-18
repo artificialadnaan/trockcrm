@@ -101,11 +101,35 @@ function awardedFirstValueForRow(row: {
   return value ?? 0;
 }
 
+// resolveActiveOfficeScope now runs its `public.offices` lookup on the REQUEST's tenant client instead of
+// the global `db` pool (it used to make one request hold TWO pool slots at once — see the comment on
+// resolveActiveOfficeScope). That lookup ends in `.limit(1)`, so this mock's `where()` has to be both
+// awaitable (for resolveActiveOfficeUserIds) and chainable into `.limit()`.
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
 function createOfficeScopeSelectMock(rows: any[] = [{ id: "rep-1" }]) {
-  return vi.fn(() => ({
-    from: vi.fn().mockReturnThis(),
-    where: vi.fn().mockResolvedValue(rows),
-  }));
+  return vi.fn(() => {
+    let servesStageConfig = false;
+    const chain: any = {
+      // listDealStages() reads pipeline_stage_config on the REQUEST's tenant client now — it used to
+      // take a SECOND pool slot from the global `db` pool while the tenant middleware already held one,
+      // which is the deadlock this branch exists to close. Serve the stage list here.
+      from: vi.fn((table: unknown) => {
+        servesStageConfig = isPipelineStageConfigTable(table);
+        return chain;
+      }),
+      where: vi.fn(() => chain),
+      limit: vi.fn(() => chain),
+      orderBy: vi.fn(() => chain),
+      then: (resolve: (value: any[]) => unknown) =>
+        resolve(servesStageConfig ? dbState.responses.shift() ?? [] : rows),
+    };
+    return chain;
+  });
 }
 
 describe("listDealStagePage", () => {
@@ -947,9 +971,19 @@ describe("listDealStagePage", () => {
     ];
 
     const teamRows = [{ id: "rep-team-1" }, { id: "rep-team-2" }];
-    const teamQuery = {
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockResolvedValue(teamRows),
+    // Awaitable AND chainable into `.limit(1)`: the office lookup in resolveActiveOfficeScope runs on the
+    // tenant client now (see createOfficeScopeSelectMock above).
+    let teamServesStageConfig = false;
+    const teamQuery: any = {
+      from: vi.fn((table: unknown) => {
+        teamServesStageConfig = isPipelineStageConfigTable(table);
+        return teamQuery;
+      }),
+      where: vi.fn(() => teamQuery),
+      limit: vi.fn(() => teamQuery),
+      orderBy: vi.fn(() => teamQuery),
+      then: (resolve: (value: any[]) => unknown) =>
+        resolve(teamServesStageConfig ? dbState.responses.shift() ?? [] : teamRows),
     };
     const tenantDb = {
       select: vi.fn().mockReturnValue(teamQuery),

@@ -20,29 +20,45 @@ import { readListScope as readLeadsListScope } from "../../../src/modules/leads/
 const dialect = new PgDialect();
 const render = (v: unknown) => dialect.sqlToQuery(v as never).sql.toLowerCase();
 
-// The module-level db is read for the stage list (getDealsForPipeline + listDealStages). Return a
-// Won + Opportunity stage so getDealsForPipeline issues per-stage queries we can capture.
-vi.mock("../../../src/db.js", () => {
-  const stages = [
+const stageState = vi.hoisted(() => ({
+  stages: [
     { id: "00000000-0000-0000-0000-0000000057a2", slug: "opportunity", name: "Opportunity", workflowFamily: "standard_deal", displayOrder: 1, isActivePipeline: true, isTerminal: false },
     { id: "00000000-0000-0000-0000-0000000057a1", slug: "won", name: "Won", workflowFamily: "standard_deal", displayOrder: 9, isActivePipeline: true, isTerminal: true },
-  ];
+  ] as unknown[],
+}));
+
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
+// listDealStages() still reads the module-level db. getDealsForPipeline's OWN stage read moved to the
+// REQUEST's tenant client (it used to take a SECOND pool slot from this global pool while the tenant
+// middleware already held one for the whole request), so capturingTenantDb below answers it as well.
+vi.mock("../../../src/db.js", () => {
   const chain: Record<string, unknown> = {};
   chain.select = () => chain;
   chain.from = () => chain;
   chain.where = () => chain;
-  chain.orderBy = () => Promise.resolve(stages);
-  (chain as { then: unknown }).then = (resolve: (v: unknown) => unknown) => resolve(stages);
+  chain.orderBy = () => Promise.resolve(stageState.stages);
+  (chain as { then: unknown }).then = (resolve: (v: unknown) => unknown) => resolve(stageState.stages);
   return { db: chain, pool: {} };
 });
 
 function capturingTenantDb() {
   const wheres: unknown[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fromTable: unknown = null;
   const chain: any = new Proxy(function () {}, {
     apply: () => chain,
     get(_t, prop) {
-      if (prop === "then") return (resolve: (rows: unknown[]) => unknown) => resolve([]);
+      // The board's pipeline_stage_config read runs on the tenant client now; answer it with the stage
+      // list so the per-stage queries this test captures are still issued.
+      if (prop === "then")
+        return (resolve: (rows: unknown[]) => unknown) =>
+          resolve(isPipelineStageConfigTable(fromTable) ? stageState.stages : []);
+      if (prop === "from") return (table: unknown) => { fromTable = table; return chain; };
       if (prop === "where") return (arg: unknown) => { wheres.push(arg); return chain; };
       if (prop === "offset") return () => Promise.resolve([]);
       return () => chain;
