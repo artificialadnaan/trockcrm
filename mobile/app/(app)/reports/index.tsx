@@ -64,6 +64,16 @@ export default function ReportsHubScreen() {
 
   const [drafts, setDrafts] = useState<WeeklyReportDraft[]>([]);
   const [opening, setOpening] = useState<string | null>(null);
+  // `opening` drives the SPINNER and the disabled states; this ref is what actually bars a second door.
+  //
+  // Same hazard and same fix as `importInFlight` in reports/weekly/[draftId].tsx: React state does not
+  // update before a second Pressable in the SAME native event batch re-reads it, so `if (opening) return`
+  // sees null in both handlers and both proceed. `disabled={busyKey !== null && busyKey !== ownKey}` closes
+  // the same-button case and nothing else — at rest every week button on this screen is enabled, so a
+  // two-finger tap on two DIFFERENT weeks (or on a queue row and a Resume row) starts two doors: two
+  // reads, two writes, and up to two conflict dialogs stacked on each other and answered in an order
+  // nobody chose.
+  const openInFlight = useRef(false);
   // Local draft reads are asynchronous and can outlive a focus session or a signed-in identity. A
   // monotonically increasing generation plus the current identity prevents an older read from
   // repopulating the list after blur, sign-out or an office switch.
@@ -138,8 +148,9 @@ export default function ReportsHubScreen() {
     weekOf: string,
     mode: "author" | "review" = "author",
   ) {
-    if (!ownerKey || opening) return;
+    if (!ownerKey || openInFlight.current) return;
     const key = `${project.weeklyReportProjectId}:${weekOf}`;
+    openInFlight.current = true;
     setOpening(key);
     try {
       const target = weeklyReportOpenTarget({ project, weekOf, drafts });
@@ -186,17 +197,20 @@ export default function ReportsHubScreen() {
     } catch {
       Alert.alert("Couldn’t open that report", "Check your connection and try again.");
     } finally {
+      openInFlight.current = false;
       setOpening(null);
     }
   }
 
   /** A PM opening a submitted report: the same wizard, everything editable, ending in Approve. */
   async function openForReview(item: WeeklyReportReviewItem) {
-    if (!ownerKey || opening) return;
+    if (!ownerKey || openInFlight.current) return;
+    openInFlight.current = true;
     setOpening(item.reportId);
     try {
       await openReconciled({ reportId: item.reportId, projectName: item.projectName, mode: "review" });
     } finally {
+      openInFlight.current = false;
       setOpening(null);
     }
   }
@@ -302,7 +316,8 @@ export default function ReportsHubScreen() {
       openDraft(draft);
       return;
     }
-    if (opening) return;
+    if (openInFlight.current) return;
+    openInFlight.current = true;
     setOpening(draft.id);
     try {
       await openReconciled({
@@ -312,6 +327,7 @@ export default function ReportsHubScreen() {
         localDraftId: draft.id,
       });
     } finally {
+      openInFlight.current = false;
       setOpening(null);
     }
   }

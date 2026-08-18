@@ -7,12 +7,27 @@
 //
 // The phone below runs the REAL reducer for everything the wizard would dispatch, so "the marker reached
 // state" is a claim about storage rather than about a policy re-stated in the test.
+//
+// KNOWN GAPS, named rather than quietly left (deferred, not refuted):
+//
+//   • `ensureReport` is STUBBED here — it just returns "rep-1". Its real body lives in
+//     app/(app)/reports/weekly/[draftId].tsx (~:287): the idempotent create on `clientSubmissionId`, the
+//     week-taken 409 and the hand-off to `adoptWeeklyReportWeekRow`. So is the tail of the submit
+//     (~:632): stop autosaves, drain `saveChain`, delete the draft, invalidate the assignments query —
+//     an ordering with the same shape as the one this file exists to pin down, and with the same cost
+//     (a save queued behind the delete resurrects a report that has already been filed).
+//   • Neither is untestable from here. Screens in `app/(app)/` ARE rendered by tests in this repo —
+//     src/__tests__/walk-screen-unqueued-walks.test.tsx, src/__tests__/profile-recovery-project-picker
+//     .test.tsx, and src/__tests__/reports-hub-concurrent-open.test.tsx, which renders the reports hub
+//     itself. Extracting them the way door.ts and submit.ts were extracted is the cheaper route; the
+//     render technique is there either way.
 
 import {
   weeklyReportDraftReducer,
   weeklyReportDraftSignature,
   weeklyReportDraftToPatch,
   weeklyReportSeedStateFromDetail,
+  type WeeklyReportContentPatch,
   type WeeklyReportDraft,
   type WeeklyReportSeedableReport,
 } from "../draft";
@@ -22,6 +37,7 @@ import {
   WeeklyReportWeekTakenError,
   weeklyReportReconcile,
 } from "../reconcile";
+import { weeklyReportFinalAction } from "../status";
 import { WeeklyReportOvertakenError } from "../transition";
 import { adoptWeeklyReportWeekRow, runWeeklyReportSubmit, type WeeklyReportSubmitPort } from "../submit";
 import { ALL_ALLOWED, doorServer, emptyRow, fakeDoorHub, seed, serverReport } from "./fixtures";
@@ -71,25 +87,42 @@ function fakeServer(initial: WeeklyReportSeedableReport) {
 type Failure = { at: "patch" | "photos" | "transition"; error: unknown };
 
 /**
+ * What each write asked the server for, kept alongside the call order.
+ *
+ * The order was covered and the ARGUMENTS were not, which is half of what submit.ts exists to pin down.
+ * A fake that destructures its port arguments to `_id` cannot tell a submit that writes to the report
+ * `ensureReport` returned from one that writes to a different row, cannot tell "Submit for PM review"
+ * from a silent `approved`, and cannot see a photo payload arrive stripped of its captions or in the
+ * wrong order — four mutations that changed nothing in a green run.
+ */
+type Write =
+  | { op: "patch"; reportId: string; patch: WeeklyReportContentPatch }
+  | { op: "photos"; reportId: string; photos: Array<{ fileId: string; caption: string | null }> }
+  | { op: "transition"; reportId: string; to: WeeklyReportStatusValue };
+
+/**
  * The wizard, reduced to the effects the submit asks it for — with the REAL reducer behind every dispatch,
  * so the marker and the provenance really do have to survive the reducer to be read by the next attempt.
  */
 function phone(initial: WeeklyReportDraft, server: ReturnType<typeof fakeServer>) {
   let draft = initial;
   const calls: string[] = [];
+  const writes: Write[] = [];
   let failure: Failure | null = null;
   const port: WeeklyReportSubmitPort = {
     ensureReport: async () => {
       calls.push("ensureReport");
       return "rep-1";
     },
-    updateContent: async (_id, patch) => {
+    updateContent: async (reportId, patch) => {
       calls.push("patch");
+      writes.push({ op: "patch", reportId, patch });
       if (failure?.at === "patch") throw failure.error;
       return server.patch(patch as never);
     },
-    replacePhotos: async (_id, photos) => {
+    replacePhotos: async (reportId, photos) => {
       calls.push("photos");
+      writes.push({ op: "photos", reportId, photos });
       if (failure?.at === "photos") throw failure.error;
       return server.replacePhotos(photos);
     },
@@ -101,8 +134,9 @@ function phone(initial: WeeklyReportDraft, server: ReturnType<typeof fakeServer>
       calls.push(`mark:${to ?? "null"}`);
       draft = weeklyReportDraftReducer(draft, { type: "setPendingTransition", to });
     },
-    transition: async (_id, to) => {
+    transition: async (reportId, to) => {
       calls.push("transition");
+      writes.push({ op: "transition", reportId, to });
       if (failure?.at === "transition") throw failure.error;
       return server.transition(to);
     },
@@ -117,6 +151,7 @@ function phone(initial: WeeklyReportDraft, server: ReturnType<typeof fakeServer>
   };
   return {
     calls,
+    writes,
     get draft() {
       return draft;
     },
@@ -238,6 +273,77 @@ describe("a submit that only half landed", () => {
   });
 });
 
+describe("the arguments each write carries, not only the order they go in", () => {
+  // submit.ts exists to pin down that the wizard calls these ports IN THIS ORDER, WITH THESE ARGUMENTS.
+  // The order was held; the arguments were not, and four independent mutations to them changed nothing in
+  // a green run. Each one is a silent wrong-write on a document a client keeps as the record of the week,
+  // and `mobile/` is neither compiled nor run by CI, so nothing else would have caught any of them.
+
+  it("aims every write at the report ensureReport resolved, and asks for the move the button offered", async () => {
+    const server = fakeServer(emptyRow());
+    const wizard = phone(supersDraft(), server);
+    const outcome = await wizard.submit("pending_review");
+
+    expect(wizard.writes.map((write) => write.op)).toEqual(["patch", "photos", "transition"]);
+    // ONE row, and it is the one `ensureReport` resolved — which is the only thing on this path that knows
+    // which report this draft is filing. A write aimed anywhere else lands on another week, or another
+    // project's week, and the PATCH and the whole-set photo PUT both take it silently.
+    expect(wizard.writes.map((write) => write.reportId)).toEqual([
+      outcome.reportId,
+      outcome.reportId,
+      outcome.reportId,
+    ]);
+    // …and the content really is the draft's, not an empty patch the server would accept just as quietly.
+    expect(wizard.writes[0]).toMatchObject({
+      op: "patch",
+      patch: { workCompleted: "Framed levels 3 and 4." },
+    });
+
+    // The move the FINAL BUTTON asked for. A super's "Submit for PM review" that sent `approved` instead
+    // is refused for a plain superintendent — but ACCEPTED where the same person is both the assigned
+    // super and the PM, and there the week skips review entirely and reaches the client unread by anyone.
+    expect(wizard.writes[2]).toEqual({
+      op: "transition",
+      reportId: outcome.reportId,
+      to: "pending_review",
+    });
+    expect(outcome.status).toBe("pending_review");
+    expect(server.row.status).toBe("pending_review");
+  });
+
+  it("sends the captions the super typed, in the order they arranged them", async () => {
+    // Both halves of the photo payload are client-facing and neither is recoverable from the phone once
+    // the whole-set PUT has replaced the set: captions are the only text under each photo on the report
+    // the client reads, and the arrangement is the order those photos print in. A payload built from
+    // anything but this draft's photos — captions dropped, order reversed — files a report that looks
+    // finished and is wrong, and the super has no way to see it from here.
+    let draft = supersDraft();
+    // The super dragged the balcony shot to the front, so the ARRANGED order is deliberately not the
+    // order the photos were picked in — otherwise "in order" and "as they happened to be added" are the
+    // same assertion and neither is being tested.
+    draft = weeklyReportDraftReducer(draft, { type: "movePhoto", key: "file-b", direction: -1 });
+    expect(draft.photos.map((photo) => photo.fileId)).toEqual(["file-b", "file-a"]);
+
+    const server = fakeServer(emptyRow());
+    const wizard = phone(draft, server);
+    await wizard.submit("pending_review");
+
+    expect(wizard.writes[1]).toEqual({
+      op: "photos",
+      reportId: "rep-1",
+      photos: [
+        { fileId: "file-b", caption: "Balcony mock-up" },
+        { fileId: "file-a", caption: "North slab" },
+      ],
+    });
+    // And the row the server is left holding says the same thing, which is what the client sees.
+    expect(server.row.photos.map((photo) => [photo.fileId, photo.caption])).toEqual([
+      ["file-b", "Balcony mock-up"],
+      ["file-a", "North slab"],
+    ]);
+  });
+});
+
 describe("the lost-reply marker", () => {
   it("reaches storage BEFORE the transition is fired", async () => {
     // The two attempts it connects are normally separated by a dead connection or an app kill, so a marker
@@ -292,6 +398,40 @@ describe("the lost-reply marker", () => {
     await expect(wizard.submit("pending_review")).rejects.toMatchObject({ status: 403 });
     expect(wizard.calls).toContain("mark:null");
     expect(wizard.draft.pendingTransitionTo).toBeNull();
+  });
+
+  it("records where the report LANDED, never where it was asked to go", async () => {
+    // THE ORDERING CLAIM IN submit.ts, as the only thing that can hold it: `recordStatus` runs AFTER the
+    // transition resolves, and stamping it any earlier is TERMINAL rather than merely premature.
+    //
+    // `serverStatus` is the single input `weeklyReportFinalAction` reads. Stamp it with the status this
+    // attempt ASKED for and a super whose transition 403s — reassigned off the project mid-draft — or
+    // whose transition dies on LTE comes back to a draft that believes it is already in the PM's queue.
+    // The final button becomes "Save changes" with `transitionTo: null`, so the retry re-PATCHes the
+    // content and never re-fires the move: the report can never be filed from this phone again and the
+    // only control left is Discard, which deletes the week for good.
+    //
+    // Both failure shapes, because they leave by different doors — a definite refusal disarms the marker
+    // and an unknown outcome deliberately does not, and neither may leave a status behind.
+    for (const error of [
+      apiError(403, "You are not assigned to this project"),
+      apiError(0, "Network request failed"),
+    ]) {
+      const server = fakeServer(emptyRow());
+      const wizard = phone(supersDraft(), server);
+      wizard.failAt({ at: "transition", error });
+      await expect(wizard.submit("pending_review")).rejects.toBe(error);
+
+      expect(wizard.calls).not.toContain("recordStatus");
+      // Not the asked-for status, and not a guess: the row never moved.
+      expect(wizard.draft.serverStatus).toBe("draft");
+      expect(server.row.status).toBe("draft");
+      // Which is the part that matters: the button the super comes back to still FIRES the transition.
+      expect(weeklyReportFinalAction(wizard.draft)).toEqual({
+        label: "Submit for PM review",
+        transitionTo: "pending_review",
+      });
+    }
   });
 
   it("does not arm or fire anything when the report is already where the button would send it", async () => {
@@ -362,6 +502,12 @@ describe("adopting the row another device created for this week", () => {
   });
 
   it("sends the user to the week when the hub names it and this attempt simply could not read it", async () => {
+    // KNOWN GAP (deferred, copy-only). `/open that week/i` cannot separate `unreadable` from `has-work`
+    // — both sentences contain it — so swapping the outcome at submit.ts:82 survives. The distinction is
+    // real (one says a choice is waiting, the other that this attempt could not read the row) but nothing
+    // downstream branches on it. Same shape at reconcile.ts:247, where the switch ends in `default:`
+    // rather than `case "unlisted":`, so a fourth outcome added later would silently inherit the
+    // unlisted copy — which is the one sentence that promises NO route.
     const { port } = adoptPort({ findServerReportId: async () => "rep-ipad" });
     await expect(adoptWeeklyReportWeekRow({ weekLabel: "Aug 13" }, port)).rejects.toThrow(
       /open that week/i,

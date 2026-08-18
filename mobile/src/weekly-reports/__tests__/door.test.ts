@@ -10,6 +10,7 @@
 
 import { WEEKLY_REPORT_EMPTY_SIGNATURE, weeklyReportDraftReducer } from "../draft";
 import { WEEKLY_REPORT_REFUSAL_READ_PATH, openWeeklyReportDoor } from "../door";
+import { weeklyReportFinalAction } from "../status";
 import {
   doorServer as ok,
   emptyRow,
@@ -99,6 +100,42 @@ describe("the refusal gate, as the screen applies it", () => {
     expect(state.refusal!.message).not.toContain(WEEKLY_REPORT_REFUSAL_READ_PATH);
     expect(state.opened).toBeNull();
     expect(state.committed).toBeNull();
+  });
+
+  it("gates on the mode THIS DOOR was opened in, not the one the local draft was saved in", async () => {
+    // THE HOLE THE GATE ABOVE CANNOT SEE ON ITS OWN. Every other case here hands the door either no local
+    // draft or one whose mode already equals the requested mode, so reading `input.local.mode` instead of
+    // `input.mode` passes all of them — and that substitution silently switches the gate off exactly where
+    // it is load-bearing.
+    //
+    // The sequence, all of it ordinary. The PM taps "Open week of Aug 13" while the report is still
+    // `draft`; `weeklyReportProjectAction` returns `{kind:"resume", mode:"author"}`, so an AUTHOR-mode
+    // draft naming this report is committed to disk. The superintendent submits it, it lands in the PM's
+    // queue, the PM sends it back for changes. The PM then taps the STALE queue row, which routes through
+    // `openForReview` → mode "review" with no `localDraftId`, so `local` resolves by reportId to that
+    // author draft. Reconcile the review door against "author" and `weeklyReportOpenRefusal`'s
+    // review + draft clause never fires: the report opens in review mode on a button reading "Approve
+    // report", whose tap PATCHes the content and REPLACES the whole photo set over the superintendent's
+    // rewrite before the illegal draft → approved 409s. The transition fails; the mutations stick.
+    const authorDraft = weeklyReportDraftReducer(seed(serverReport({ status: "draft" }), "author"), {
+      type: "setSection",
+      key: "workCompleted",
+      value: "Poured the north slab. Stripped forms Friday.",
+    });
+    expect(authorDraft.mode).toBe("author");
+    const { port, state } = hub({
+      // Bounced back: still `draft`, and a PM keeps `canEdit` here — which is the whole reason an
+      // edit-rights check alone is not the gate.
+      server: ok(serverReport({ status: "draft" }), { canEdit: true, canApprove: false }),
+    });
+    await openWeeklyReportDoor(
+      { reportId: "rep-1", projectName: "4123 Cedar Springs", mode: "review", local: authorDraft },
+      port,
+    );
+    expect(state.events).toEqual(["read", "refuse"]);
+    expect(state.refusal!.message).toMatch(/back to the superintendent/i);
+    expect(state.committed).toBeNull();
+    expect(state.opened).toBeNull();
   });
 
   it("offers no read path when the local copy holds nothing the server has not got", async () => {
@@ -226,6 +263,49 @@ describe("what the door writes", () => {
       status: "draft",
       signature: WEEKLY_REPORT_EMPTY_SIGNATURE,
     });
+  });
+
+  it("re-stamps the kept draft's MODE and STATUS from this door and this read, not from itself", async () => {
+    // The companion to the gate above, and the case the EMPTY-row test cannot express: there `input.local`
+    // already holds the same mode and the same status the door would stamp, so `toMatchObject` cannot tell
+    // which of the two sources produced them. Here they differ on both axes.
+    //
+    // A one-person job — the assignment payload marks the same user `isSuper` AND `isPm`. They typed the
+    // week on their phone (AUTHOR draft, seeded while the row was still `draft`), submitted it from the
+    // iPad, then came back to the phone and opened the report from their own review queue. Keep my version
+    // must leave a draft that knows it is now a REVIEW of a report sitting in `pending_review`: carry the
+    // draft's own `mode` forward and the final button reads "Submit for PM review" on a report already in
+    // review, which the ladder has no self-transition for — it 409s, for the rest of that draft's life.
+    const local = weeklyReportDraftReducer(seed(serverReport({ status: "draft" }), "author"), {
+      type: "setSection",
+      key: "issuesConcerns",
+      value: "Permit for the east elevation is still with the city.",
+    });
+    expect(local.mode).toBe("author");
+    expect(local.serverStatus).toBe("draft");
+
+    const submitted = serverReport({
+      status: "pending_review",
+      workCompleted: "Poured the north slab. Stripped forms Friday.",
+    });
+    const { port, state } = hub({ server: ok(submitted), answer: "keep-local" });
+    await openWeeklyReportDoor(
+      { reportId: "rep-1", projectName: "4123 Cedar Springs", mode: "review", local },
+      port,
+    );
+
+    const kept = state.committed!;
+    expect(kept.issuesConcerns).toBe("Permit for the east elevation is still with the city.");
+    expect(kept.mode).toBe("review");
+    expect(kept.serverStatus).toBe("pending_review");
+    // Which is the whole point of both re-stamps: the button at the end of the wizard.
+    expect(weeklyReportFinalAction(kept)).toEqual({
+      label: "Approve report",
+      transitionTo: "approved",
+    });
+    // And the question they were asked was the REVIEWER's question, because this door is a review door
+    // whatever mode the draft on disk was saved in.
+    expect(state.prompt!.message).toMatch(/since you started reviewing it/i);
   });
 
   it("reseeds from the server when the local draft holds nothing of its own", async () => {
