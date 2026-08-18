@@ -148,6 +148,62 @@ function sqlStringList(values: readonly string[]): string {
 }
 
 /**
+ * MATCHER MODEL — how this census predicts which rows ingestBidBoardRows will actually write.
+ *
+ * Kept here rather than inside buildCensusSql's template literal: prose belongs outside a template string,
+ * where a backtick is just punctuation. (It cost five separate parse failures to learn that.)
+ *
+ * TIER PRIORITY. resolveDealMatches walks its identity tiers in order and STOPS at the first that matches
+ * anything: a tier returning exactly one deal resolves the row; a tier returning more than one refuses it
+ * as a multi-match. So whether a lower-tier collision matters depends entirely on whether a higher tier
+ * already answered.
+ *
+ * THE CASCADE IS MODELLED, not approximated. An earlier version of this comment claimed it could not be
+ * ("tier priority is control flow, not a predicate") and excluded any row with a project-number collision
+ * — which DROPPED rows the ingest writes, understating wouldWrite, the page-change count and the dollar
+ * delta. Understating the blast radius is the one direction a census must never err in, since the flag
+ * flip is approved on these numbers. It is expressible because this query evaluates ONE CANDIDATE ROW AT A
+ * TIME, so "which tier resolves THIS deal" is a priority CASE over per-candidate predicates, not iteration
+ * over a result set. The decision itself lives in summarizeCensus.
+ *
+ * TIER-1 AVAILABILITY IS INFERRED, and the inference has a known blind spot. Tier 1 runs when the EXPORT
+ * ROW carries a Bid Board Project ID; `has_procore_bid_id` infers that from the DEAL. It is only ever used
+ * to ask "can tier 1 resolve to ME", never "does tier 1 run at all". The case that distinction hides is an
+ * export row supplying a Bid Board Project ID belonging to ANOTHER deal, so tier 1 resolves there and this
+ * candidate is never written. Two shapes:
+ *
+ *   (a) the other deal SHARES this candidate's canonical project number. ALREADY EXCLUDED, by construction
+ *       rather than by luck: the tier-2 EXISTS is that same predicate WITHOUT the
+ *       `o.procore_bid_id IS NOT NULL` narrowing, so its exclusions are a strict superset. The outcome
+ *       holds whichever way the export goes — carrying the ID, tier 1 resolves to the other deal; not
+ *       carrying it, tier 2 sees both deals and refuses the multi-match. Not written either way, which is
+ *       why one counter covers both and why no third predicate is warranted. A test pins the superset
+ *       relationship so narrowing tier 2 cannot silently shrink coverage.
+ *   (b) the other deal shares NO identity with this candidate. NOT inferable — nothing in the deal columns
+ *       links them.
+ *
+ * TIER 3 (name + bid_board_created_at) is not modelled and provably need not be: it requires a NULL
+ * bid_board_project_number, while every cohort member carries a mirrored due date, which the ingest only
+ * writes in the same statement that sets bid_board_project_number from a row it refused to process without
+ * a Project #. No cohort member can reach it.
+ *
+ * WHAT REMAINS APPROXIMATE, AND IN WHICH DIRECTION — the asymmetry is what a reader needs to judge these
+ * numbers, because the two directions are not equally safe. Nothing about the cascade is left unmodelled;
+ * what is left is the export's CONTENT, which no deal-column query can see.
+ *
+ *   OVER-states wouldWrite (counts a row that will NOT be written) — the safer direction, since it makes a
+ *   reviewer look harder rather than approve on thin numbers:
+ *     - case (b) above, un-inferable;
+ *     - the project has been REMOVED from the board, so no export row matches this deal at all. The cohort
+ *       is "deals carrying a mirrored due date", a proxy for "matched by the most recent export";
+ *     - no active admin/director exists, in which case the write-through refuses EVERY row — all-or-
+ *       nothing and run-wide, so it is not modelled per row.
+ *
+ *   UNDER-states wouldWrite (misses a row that WILL be written) — the dangerous direction, and the reason
+ *   the tier-priority CASE exists at all. No known case remains; if one is found it should be treated as
+ *   the higher-severity class of the two.
+ */
+/**
  * The census query for one tenant schema. One statement, so every number below comes from ONE snapshot.
  *
  * `cur` and `nxt` are deliberately narrow projections carrying exactly the columns
@@ -203,54 +259,14 @@ export function buildCensusSql(schemaName: string): string {
              -- See the is_test_data predicate below: TR-DEMO-* rows bypass the flag, so they are FLAGGED
              -- rather than silently trusted or silently dropped.
              (COALESCE(d.deal_number, '') LIKE 'TR-DEMO-%' OR COALESCE(d.project_number, '') LIKE 'TR-DEMO-%') AS demo_shaped,
-             -- AMBIGUITY, WITH TIER PRIORITY. resolveDealMatches walks its identity tiers in order and
-             -- STOPS at the first that matches anything: a tier returning exactly one deal resolves the
-             -- row, and a tier returning more than one refuses it as a multi-match. So whether a
-             -- lower-tier collision matters depends entirely on whether a higher tier already answered.
-             --
-             -- THE CASCADE IS MODELLED HERE, not approximated. An earlier version of this comment claimed
-             -- it could not be ("tier priority is control flow, not a predicate") and excluded any row with
-             -- a project-number collision — which DROPPED rows the ingest writes, understating wouldWrite,
-             -- the page-change count and the dollar delta. Understating the blast radius is the one
-             -- direction a census must never err in, since the flag flip is approved on these numbers.
-             --
-             -- Why it is expressible: this query evaluates ONE CANDIDATE ROW AT A TIME. "Which tier
-             -- resolves THIS deal" is therefore a priority CASE over per-candidate predicates, not
-             -- iteration over a result set. The decision is made in summarizeCensus from the two flags
-             -- below plus has_procore_bid_id; see there for the three-way rule.
-             --
-             -- Both flags run over the matcher's own base population (active, non-change-order), with
-             -- detached deals deliberately INCLUDED — they count toward ambiguity there too, and a
-             -- detached deal retaining its identity is the commonest real collision.
-             --
-             -- TIER 1 — the Bid Board's own key, and the tier that runs FIRST. A unique non-null
-             -- procore_bid_id resolves the row outright (any tier-2 collision is then irrelevant); a
-             -- SHARED one refuses it.
-             EXISTS (
-               SELECT 1
-                 FROM ${schemaName}.deals o
-                WHERE o.id <> d.id
-                  AND o.is_active = true
-                  AND COALESCE(o.is_change_order, false) = false
+             -- AMBIGUITY, WITH TIER PRIORITY — see MATCHER MODEL above buildCensusSql for the
+             -- full rule, why the cascade is expressible here, and which residues over- vs under-state.
+             -- TIER 1 (runs first): a SHARED procore_bid_id refuses the row outright.
                   AND d.procore_bid_id IS NOT NULL
                   AND o.procore_bid_id = d.procore_bid_id
              ) AS is_ambiguous_procore_bid_id,
-             -- TIER 2 — project_number / deal_number / bid_board_project_number, using the matcher's OWN
-             -- canonicalizer rather than a lookalike. CONSULTED ONLY when tier 1 did not resolve the row,
-             -- i.e. when procore_bid_id IS NULL.
-             --
-             -- TIER 3 (name + bid_board_created_at) is not modelled, and provably need not be: it requires
-             -- a NULL d.bid_board_project_number, while every member of this cohort carries a mirrored
-             -- due date — which the ingest only ever writes in the same UPDATE that sets
-             -- bid_board_project_number from a row it refused to process without a Project #. So no cohort
-             -- member can reach tier 3.
-             --
-             -- WHAT GENUINELY REMAINS APPROXIMATE, precisely: this models the matcher against the
-             -- identities the DEAL already carries, on the assumption that the next export row for this
-             -- project carries the same ones. That is an assumption about the export's CONTENT (e.g. a row
-             -- that stops populating its Bid Board Project ID column would fall to tier 2 where this
-             -- predicts tier 1), not about the matcher's control flow. Nothing about the cascade itself is
-             -- left unmodelled.
+             -- TIER 2 (only when tier 1 cannot resolve this candidate), on the matcher's OWN canonicalizer.
+             -- MUST stay free of any procore_bid_id narrowing — see MATCHER MODEL case (a).
              EXISTS (
                SELECT 1
                  FROM ${schemaName}.deals o
@@ -264,8 +280,8 @@ export function buildCensusSql(schemaName: string): string {
                     OR ${canonicalProjectNumberSql("o.bid_board_project_number")} = ${canonicalProjectNumberSql("d.bid_board_project_number")}
                   )
              ) AS is_ambiguous_project_number,
-             -- Which tier gets to answer at all. Tier 1 only runs when the row carries a Bid Board Project
-             -- ID; the deal's own procore_bid_id is the CRM's record of that key.
+             -- Whether tier 1 can resolve THIS candidate. An inference from the deal about the EXPORT;
+             -- see MATCHER MODEL cases (a)/(b) for exactly what it does and does not cover.
              (d.procore_bid_id IS NOT NULL) AS has_procore_bid_id,
              COALESCE(${value}, 0) AS deal_value
         FROM ${schemaName}.deals d

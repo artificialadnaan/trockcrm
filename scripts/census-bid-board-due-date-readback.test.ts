@@ -202,6 +202,17 @@ describe("census-bid-board-due-date-readback — SQL", () => {
 
   // TIER 1 is the Bid Board's own key and runs FIRST, so a collision there always refuses the row —
   // exact, unlike the tier-2 approximation.
+  // The tier-2 EXISTS must stay a SUPERSET of "another deal carries a procore_bid_id and shares this
+  // candidate's project number". That subset relationship is what makes the export-supplies-another-
+  // deal's-bid-id case covered by construction; narrowing tier 2 with a bid-id condition would silently
+  // shrink coverage and start counting those rows as writes again.
+  it("keeps the tier-2 identity test free of any procore_bid_id narrowing", () => {
+    const tier2 = sql.slice(sql.indexOf("-- TIER 2 "), sql.indexOf("AS is_ambiguous_project_number"));
+    expect(tier2.length, "tier-2 block must be locatable").toBeGreaterThan(0);
+    expect(tier2).toContain("o.is_active = true");
+    expect(tier2).not.toMatch(/o\.procore_bid_id/);
+  });
+
   it("also flags tier-1 (procore_bid_id) collisions, over the same base population", () => {
     expect(sql).toContain("AS is_ambiguous_procore_bid_id");
     expect(sql).toContain("o.procore_bid_id = d.procore_bid_id");
@@ -584,6 +595,39 @@ describe("census-bid-board-due-date-readback — summary", () => {
     // goes looking for the collision.
     expect(summary.ambiguousByProcoreBidId).toBe(1);
     expect(summary.ambiguousByProjectNumber).toBe(0);
+  });
+
+  // ★ THE EXPORT-SUPPLIES-ANOTHER-DEAL'S-BID-ID SHAPE. Candidate carries no procore_bid_id; another deal
+  // carries one AND shares the candidate's canonical project number. The export row for that project
+  // plausibly supplies that Bid Board Project ID, so tier 1 resolves to the OTHER deal and this candidate
+  // is never written — and if the export does NOT supply it, tier 2 sees both deals and refuses the
+  // multi-match. Not written either way, so it must not be counted as a write.
+  //
+  // Pinned as a REGRESSION guard on the outcome, not on a dedicated predicate: the tier-2 EXISTS is this
+  // same shape without the bid-id narrowing, so it already covers it (see the SQL comment). The point of
+  // the test is that the outcome must survive whatever restructuring happens above it.
+  it("excludes a candidate whose project number is shared by a deal carrying a procore_bid_id", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [
+        row({
+          has_procore_bid_id: false,
+          // The other deal's identity collision — the only part of this shape deal columns can see.
+          is_ambiguous_project_number: true,
+          deal_value: "310000",
+          currently_far_out: false,
+          next_far_out: true,
+        }),
+      ],
+      10
+    );
+
+    expect(summary.ambiguousRowsExcluded).toBe(1);
+    expect(summary.wouldWrite).toBe(0);
+    expect(summary.touchedRows).toBe(0);
+    // Its value must not reach the figure the flip is approved on.
+    expect(summary.wouldPark).toBe(0);
+    expect(summary.netValueDelta).toBe(0);
   });
 
   it("falls through to tier 2 only when the deal carries no procore_bid_id", () => {
