@@ -172,8 +172,10 @@ describe("renderFieldPhotoReportPdf page count", () => {
       sections: [{ title: "Doors", photos: [photo(1), photo(2)] }],
     });
     const streams = inflateStreams(buffer);
-    // A rounded rect's path opens at (left + radius), not at left, so these coordinates are offset by the
-    // 8pt corner radius — the arithmetic below carries it rather than pretending it isn't there.
+    // A rounded rect's path opens at (left + radius) and draws its top edge to (left + width - radius), so
+    // BOTH coordinates are offset by the 8pt corner radius — the arithmetic below carries it rather than
+    // pretending it isn't there. Verified against pdfkit directly: `roundedRect(32, 72, 256, 560, 8)` emits
+    // `40 72 m` then `280 72 l`, i.e. 32+8 and 32+256-8.
     const RADIUS = 8;
     const tileLefts = [...streams.matchAll(/([\d.]+) 72 m/g)].map((m) => Number(m[1]) - RADIUS);
     const distinct = [...new Set(tileLefts)].sort((a, b) => a - b);
@@ -181,9 +183,20 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // Left column starts at the page margin; the right column is a full column + gutter across.
     expect(distinct[0]).toBeCloseTo(32, 1);
     expect(distinct[1]).toBeCloseTo(32 + 264 + 20, 1);
-    // ...and the right-hand cell's tile still ends inside the right margin.
-    // 316 + 256 = 572, inside the 580pt right margin with 8pt to spare.
-    expect(distinct[1] + 256).toBeLessThanOrEqual(612 - 32);
+
+    // ...and the tiles as RENDERED stay inside the right margin and do not overlap each other.
+    //
+    // This half used to read `expect(distinct[1] + 256).toBeLessThanOrEqual(612 - 32)` — a literal added to
+    // a literal, which is a tautology at every tile width. Widening PHOTO_TILE_WIDTH to 300 put the left
+    // tile 16pt into the right column and the right tile 4pt off the page edge, and all 41 tests still
+    // passed. The fix is to take the right edge from the PDF too, not from arithmetic the test supplies.
+    const tileRights = [...streams.matchAll(/([\d.]+) 72 l/g)].map((m) => Number(m[1]) + RADIUS);
+    const rightEdges = [...new Set(tileRights)].sort((a, b) => a - b);
+    expect(rightEdges.length).toBe(2);
+    // Nothing may cross the right margin (612 - 32 = 580).
+    expect(Math.max(...rightEdges)).toBeLessThanOrEqual(612 - 32);
+    // ...and the left tile must end before the right tile begins, or the two photographs overlap.
+    expect(rightEdges[0]).toBeLessThanOrEqual(distinct[1]);
   });
 
   it("draws the caption BELOW its tile, not beside it", async () => {
@@ -220,6 +233,17 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // (The 8pt "Image unavailable" placeholder is centred in the tile at x=124.5, so it is not in this set;
     // should it ever be left-aligned it would land inside the tile and correctly fail this assertion.)
     expect(Math.max(...cellRuns.map((run) => run.y))).toBeLessThan(TILE_BOTTOM_PDF_Y);
+
+    // ...and inside the band, the description comes FIRST and the metadata below it — they must not
+    // collide. The band is drawn with a running `cursor` that the description advances by its own measured
+    // height; if that advance is ever dropped, the metadata is drawn on top of the description. Both
+    // footer-clearance tests are blind to that, because the collision moves text UP, away from the footer —
+    // sabotage confirmed they stay green through it. Ordering is the only thing that sees it.
+    const descriptionYs = cellRuns.filter((run) => Math.abs(run.size - 8) < 0.01).map((run) => run.y);
+    const metadataYs = cellRuns.filter((run) => Math.abs(run.size - 7.5) < 0.01).map((run) => run.y);
+    expect(descriptionYs.length).toBeGreaterThan(0);
+    expect(metadataYs.length).toBe(2); // this fixture's date + uploader; project matches the cover's
+    expect(Math.max(...metadataYs)).toBeLessThan(Math.min(...descriptionYs));
   });
 
   it("keeps the caption band clear of the page footer", async () => {
@@ -253,22 +277,37 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // project differs from the report's) plus an over-long description, i.e. the composite that gets
     // closest to the footer.
     //
-    // WHAT THIS DOES AND DOES NOT PIN, measured rather than assumed. Two independent guards keep the band
-    // in bounds, and EITHER ONE ALONE is sufficient:
-    //   1. clampText(..., 200) — 200 chars of unbreakable text measures 53.7pt at 8pt/256pt wide
-    //   2. descriptionAvailable = band(98) - metaBlock(30) - 4 = 64pt, which ellipsises anything longer
-    // 53.7 < 64, so guard 2 is never actually reached at today's clamp; it is a backstop for if the clamp
-    // is ever raised. Verified by sabotage: removing either guard on its own leaves this test PASSING, and
-    // it only fails when BOTH are removed together. So this is a composite regression guard on "max content
-    // stays off the footer", NOT a tight discriminator for either guard individually — recorded plainly so
-    // nobody later reads a green run here as proof that one of them still works.
+    // THE FIXTURE IS THE WHOLE TEST. This previously used `"N".repeat(400)`, on the reasoning that 400
+    // unbreakable chars must be the worst case. It is the opposite: an unbroken run char-wraps to fill every
+    // line completely, so it is the DENSEST way to spend 200 characters and therefore close to the SHORTEST
+    // rendered height. Measured against the real Geist face at 8pt / 256pt wide / lineGap 1.5:
+    //
+    //     "N" x 200 (the old fixture)      59.5pt
+    //     ordinary English prose           35.7pt
+    //     "W" x 200                        71.4pt
+    //     words of 17 "W" (below)         130.9pt   <- 2.2x the old fixture
+    //
+    // `descriptionAvailable` is 64pt with three metadata lines. The old fixture's 59.5pt never reached that
+    // cap, so it could not detect a change to it, and four separate sabotages walked straight past this
+    // test: PHOTO_ROWS_BOTTOM 740->770, dropping the two gap terms from captionBandHeight, and removing the
+    // ellipsis/height options from either the description or the metadata draw — each left 12/12 green while
+    // cell text printed UNDER the footer and off the page.
+    //
+    // Word-structured text is what maximises height: each ~17-char word is too wide to share a line's
+    // remainder, so every line ends early and the block needs more of them. This fixture reaches the cap,
+    // which is what makes the clamp a live guard rather than a backstop.
     const worstCase = {
       ...photo(1),
-      // Differs from cover.projectName, so metaLines gets its third entry.
-      projectName: "A Different Project Entirely",
-      // Longer than the 200-char clamp, so the description is capped at its maximum height, not its
-      // natural one.
-      description: "N".repeat(400),
+      // Differs from cover.projectName, so metaLines gets its third entry — AND long enough that it needs
+      // the single-line ellipsis cap to stay on one line. A short name here (the previous fixture used
+      // "A Different Project Entirely") fits on one line whether or not the cap exists, so removing
+      // `lineBreak: false` / `height` / `ellipsis` from the metadata draw changed nothing and the test
+      // stayed green while metadata wrapped down onto the footer. The deal schema allows ~500 chars.
+      projectName:
+        "Denton Student Housing Exterior Envelope and Door Hardware Punchlist Walkthrough Report Building C Phase 2 Northwest Quadrant Units 300 through 360",
+      // Longer than the 200-char clamp AND word-structured, so the description is capped at its maximum
+      // height. Natural height 130.9pt against a 64pt allowance — it is genuinely ellipsised.
+      description: Array.from({ length: 40 }, () => "W".repeat(17)).join(" "),
     };
     const buffer = await renderFieldPhotoReportPdf({
       cover,

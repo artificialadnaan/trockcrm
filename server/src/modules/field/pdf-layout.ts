@@ -111,6 +111,24 @@ if (CAPTION_WIDTH <= 0) {
     `[field-photo-report] CAPTION_WIDTH must be positive, got ${CAPTION_WIDTH} — check PHOTO_TILE_WIDTH against COLUMN_WIDTH`,
   );
 }
+/**
+ * The check the error above NAMES but does not perform.
+ *
+ * Since the caption moved below the tile, `CAPTION_WIDTH` is just `PHOTO_TILE_WIDTH` — a literal — so the
+ * guard above compares 256 against 0 and can never fire. It reads as though it covers the tile-vs-column
+ * relationship. It does not, and a reviewer would reasonably assume otherwise.
+ *
+ * A tile wider than its column is silent in every other way: the left tile runs into the right column and
+ * the right tile runs off the page edge, and both still produce a perfectly valid PDF. Widening
+ * PHOTO_TILE_WIDTH to 300 was caught by nothing at all until the side-by-side test learned to read the
+ * tiles' RENDERED right edges. Checked at module load because there is no later point where it is cheaper.
+ */
+if (PHOTO_TILE_WIDTH > COLUMN_WIDTH) {
+  throw new Error(
+    `[field-photo-report] PHOTO_TILE_WIDTH (${PHOTO_TILE_WIDTH}) exceeds COLUMN_WIDTH (${COLUMN_WIDTH}) — ` +
+      `the tile would overlap the next column and run past the page margin`,
+  );
+}
 const IMAGE_BOX_WIDTH = PHOTO_TILE_WIDTH;
 const IMAGE_BOX_HEIGHT = PHOTO_TILE_HEIGHT;
 
@@ -329,9 +347,10 @@ function formatPhotoDate(value: string | null, fallback: string): string {
  * carry historical photos or straddle a year boundary, and "Jul 31, 4:52 PM" then reads identically for a
  * 2025 and a 2026 capture, which for an evidence document is a real loss.
  *
- * It fits: measured against Geist at META_FONT_SIZE, the long form is 74.7pt (82.4pt worst case) inside a
- * ~106pt column. The width worry that prompted the short form came from the one-up grid's 8.5pt text and
- * did not survive the move to 7.5pt.
+ * It fits, with room to spare: measured against Geist at META_FONT_SIZE, the long form is 74.7pt (82.4pt
+ * worst case) — and since the caption moved BELOW the tile it now has the tile's full 256pt to sit in,
+ * rather than the ~106pt side column that measurement was originally taken against. The width worry that
+ * prompted the short form came from the one-up grid's 8.5pt text and did not survive the move to 7.5pt.
  */
 function formatPhotoDateCompact(value: string | null, fallback: string): string {
   const date = new Date(value ?? fallback);
@@ -1003,7 +1022,7 @@ function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
 
 /**
  * How per-photo entries are laid out.
- * - `grid` (default): three photos per page with a compact side caption — the human photo-report look.
+ * - `grid` (default): two photos per page, caption below each tile — the human photo-report look.
  * - `findings`: one photo per page with a subject caption and bulleted findings below — the AI condition
  *   assessment look. Callers that omit this keep byte-identical output to before the option existed.
  */
