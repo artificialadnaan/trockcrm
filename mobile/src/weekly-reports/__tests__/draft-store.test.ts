@@ -68,6 +68,8 @@ function draft(id: string, photos: WeeklyReportDraftPhoto[] = []): WeeklyReportD
     weekOf: "2026-08-13",
     mode: "author",
     serverStatus: null,
+    seededFrom: null,
+    pendingTransitionTo: null,
     step: "work",
     workCompleted: "",
     nextWeekLookAhead: "",

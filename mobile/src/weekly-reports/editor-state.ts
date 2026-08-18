@@ -37,6 +37,12 @@ export function weeklyReportSubmitErrorMessage(error: unknown): string {
 
   // ApiError(0) is a transport failure and ApiError(408) a timeout; both carry a message about the socket,
   // not about the report, so neither is worth showing to someone standing on a jobsite.
+  //
+  // "YOUR REPORT IS SAVED ON THIS PHONE" IS A PROMISE, and for a while it was a false one: the draft did
+  // survive the failed save, and then the Resume link that led back to it reseeded from the server and
+  // deleted every un-submitted edit. What keeps this sentence true is weekly-reports/reconcile.ts — no
+  // door reseeds a draft that holds local edits without the user choosing it. If that ever changes, this
+  // copy has to change with it.
   if (status === 0 || status === 408) {
     return "No connection — your report is saved on this phone. Try again once you have a signal.";
   }

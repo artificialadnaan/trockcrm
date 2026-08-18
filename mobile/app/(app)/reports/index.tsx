@@ -14,6 +14,7 @@ import {
   createWeeklyReportDraft,
   weeklyReportDraftFromDetail,
   weeklyReportDraftSectionsFilled,
+  weeklyReportDraftSignature,
   type WeeklyReportDraft,
 } from "../../../src/weekly-reports/draft";
 import {
@@ -22,6 +23,10 @@ import {
   saveWeeklyReportDraft,
 } from "../../../src/weekly-reports/draft-store";
 import { weeklyReportOpenTarget } from "../../../src/weekly-reports/hub";
+import {
+  weeklyReportDiscardWarning,
+  weeklyReportReconcile,
+} from "../../../src/weekly-reports/reconcile";
 import {
   formatWeekOf,
   weeklyReportDueLabel,
@@ -115,8 +120,8 @@ export default function ReportsHubScreen() {
    * Open a week: resume the local draft if there is one, else start from whatever the server holds.
    *
    * Which of those applies is decided by `weeklyReportOpenTarget`, where the reasoning lives — the rules
-   * are order-sensitive (a review draft must be re-read, an authoring draft must NOT be) and belong
-   * somewhere a test can reach them.
+   * are freshness-sensitive (anything the server has a row for must be reconciled first, a purely local
+   * draft must NOT be) and belong somewhere a test can reach them.
    */
   async function openWeek(
     project: WeeklyReportAssignment,
@@ -128,8 +133,13 @@ export default function ReportsHubScreen() {
     setOpening(key);
     try {
       const target = weeklyReportOpenTarget({ project, weekOf, drafts });
-      if (target.kind === "review-fresh") {
-        await openReviewFresh(target.reportId, project.projectName);
+      if (target.kind === "reconcile") {
+        await openReconciled({
+          reportId: target.reportId,
+          projectName: project.projectName,
+          mode,
+          localDraftId: target.draftId,
+        });
         return;
       }
       if (target.kind === "resume-local") {
@@ -142,48 +152,24 @@ export default function ReportsHubScreen() {
         }
       }
 
-      let draft: WeeklyReportDraft;
-      if (target.kind === "resume-server") {
-        const detail = await getWeeklyReport(fetcher, target.reportId);
-        // The SERVER's answer to "may this person still write this?", not a guess from the hub row —
-        // which can be minutes stale. A report approved (or sent) while this list sat on screen is no
-        // longer the superintendent's, and opening it would walk them into a 403 several steps in, after
-        // they had already retyped a section.
-        if (!detail.permissions.canEdit) {
-          Alert.alert(
-            "This report has moved on",
-            "Somebody has already reviewed or sent it. Pull down to refresh.",
-          );
-          return;
-        }
-        draft = weeklyReportDraftFromDetail({
-          id: newClientUploadId(),
-          clientSubmissionId: newSubmissionId(),
-          projectName: project.projectName,
-          mode,
-          report: detail.report,
-          now: Date.now(),
-        });
-      } else {
-        draft = createWeeklyReportDraft({
-          id: newClientUploadId(),
-          clientSubmissionId: newSubmissionId(),
-          weeklyReportProjectId: project.weeklyReportProjectId,
-          dealId: project.dealId,
-          projectName: project.projectName,
-          weekOf,
-          // The predecessor OF THIS WEEK, so step 5 is a nudge rather than re-entry.
-          //
-          // Keyed by weekOf rather than taking the project-level value: completion % and weather
-          // delays are cumulative, so filling a missed July week after August was filed would
-          // otherwise seed July with August's figures — overstating that week's progress on a
-          // document the client keeps as the record of it. Absent when no earlier week was filed,
-          // which correctly leaves the fields blank rather than guessing.
-          completionPercent: project.previousByWeekOf?.[weekOf]?.completionPercent ?? null,
-          weatherDelayDays: project.previousByWeekOf?.[weekOf]?.weatherDelayDays ?? null,
-          now: Date.now(),
-        });
-      }
+      const draft = createWeeklyReportDraft({
+        id: newClientUploadId(),
+        clientSubmissionId: newSubmissionId(),
+        weeklyReportProjectId: project.weeklyReportProjectId,
+        dealId: project.dealId,
+        projectName: project.projectName,
+        weekOf,
+        // The predecessor OF THIS WEEK, so step 5 is a nudge rather than re-entry.
+        //
+        // Keyed by weekOf rather than taking the project-level value: completion % and weather
+        // delays are cumulative, so filling a missed July week after August was filed would
+        // otherwise seed July with August's figures — overstating that week's progress on a
+        // document the client keeps as the record of it. Absent when no earlier week was filed,
+        // which correctly leaves the fields blank rather than guessing.
+        completionPercent: project.previousByWeekOf?.[weekOf]?.completionPercent ?? null,
+        weatherDelayDays: project.previousByWeekOf?.[weekOf]?.weatherDelayDays ?? null,
+        now: Date.now(),
+      });
       await saveWeeklyReportDraft(ownerKey, draft, Date.now());
       setDrafts((current) => [draft, ...current]);
       openDraft(draft);
@@ -194,84 +180,102 @@ export default function ReportsHubScreen() {
     }
   }
 
-  /**
-   * A PM opening a submitted report: the same wizard, everything editable, ending in Approve.
-   *
-   * Unlike authoring, this ALWAYS reseeds from the server. The local-draft-wins rule protects a
-   * superintendent's own offline work; in review mode the authoritative copy belongs to somebody else,
-   * and a stale review draft is a live data-loss bug — the PM bounces a report back, the super rewrites
-   * it and resubmits, the PM taps their day-old card, and Approve replays a `PATCH` of explicit nulls
-   * plus a whole-set photo `PUT` over the super's new work while the status still reads "approved".
-   *
-   * The local copy is used only when the fetch fails, so a PM with no signal still sees what they had
-   * rather than being locked out.
-   */
+  /** A PM opening a submitted report: the same wizard, everything editable, ending in Approve. */
   async function openForReview(item: WeeklyReportReviewItem) {
     if (!ownerKey || opening) return;
     setOpening(item.reportId);
     try {
-      await openReviewFresh(item.reportId, item.projectName);
+      await openReconciled({ reportId: item.reportId, projectName: item.projectName, mode: "review" });
     } finally {
       setOpening(null);
     }
   }
 
-  /**
-   * Open a REVIEW draft only after re-reading the report from the server.
-   *
-   * Every entry point to a review draft must come through here. The freshness check used to live inside
-   * openForReview alone, but the same report is reachable from the project card (which routes into
-   * `openWeek` with mode "review") and from the In-progress list's Resume — and both of those opened the
-   * LOCAL draft outright. A day-old review draft then replays a PATCH of explicit nulls plus a whole-set
-   * photo PUT over work the superintendent rewrote in the meantime, and the PM approves, in good faith,
-   * something other than what they just read. Two of the three doors were unlocked.
-   */
-  async function openReviewFresh(reportId: string, projectName: string) {
+  /** Persist a resolved draft, put it at the top of the In-progress list, and open it. */
+  async function commitDraft(draft: WeeklyReportDraft) {
     if (!ownerKey) return;
-    const local = drafts.find((draft) => draft.reportId === reportId && draft.mode === "review");
     try {
-      const detail = await getWeeklyReport(fetcher, reportId);
-      // The gate is "can this row's FINAL ACTION complete", which is not one permission flag.
-      //
-      //   pending_review -> the action is Approve, so it needs canApprove.
-      //   approved       -> the action is Save changes, so it needs canEdit. canApprove is FALSE here,
-      //                     because the ladder has no approved -> approved self-transition — gating on
-      //                     canApprove alone locked the PM out of approved-but-unsent reports, which
-      //                     this queue deliberately carries and which are only reachable from here for
-      //                     a prior week.
-      //   draft          -> bounced back to the super. A PM still has canEdit, so an edit-only check
-      //                     would open review mode, walk them through captions and photos, and the
-      //                     final tap would PATCH content and REPLACE the photo set before the illegal
-      //                     draft -> approved transition 409'd. The mutations land; only the
-      //                     transition fails.
-      //
-      // So: refuse when the report cannot be written at all, and refuse a review row that has gone
-      // back to draft. Everything else opens.
-      const { canEdit, canApprove } = detail.permissions;
-      const wentBackToDraft = detail.report.status === "draft";
-      if (!canEdit || (wentBackToDraft && !canApprove)) {
-        Alert.alert(
-          "This report has moved on",
-          wentBackToDraft
-            ? "It went back to the superintendent for changes. Pull down to refresh."
-            : "It has already been sent, or somebody else reviewed it. Pull down to refresh.",
-        );
-        return;
-      }
-      const report = detail.report;
-      const draft = weeklyReportDraftFromDetail({
+      // Reuses the local draft's id wherever there was one, so this OVERWRITES it rather than leaving
+      // two drafts for one report sitting in the In-progress list.
+      await saveWeeklyReportDraft(ownerKey, draft, Date.now());
+    } catch {
+      Alert.alert("Couldn’t open that report", "Check your connection and try again.");
+      return;
+    }
+    setDrafts((current) => [draft, ...current.filter((d) => d.id !== draft.id)]);
+    openDraft(draft);
+  }
+
+  /**
+   * THE ONE DOOR onto a report the server knows about — the review queue, the project card, the
+   * In-progress Resume link, and a local draft whose week turns out to have a row from another device.
+   *
+   * Re-reads the report and hands both sides to `weeklyReportReconcile`, which owns the decision. What
+   * this function must not do is guess: reseeding unconditionally is how a PM's un-submitted rewrite of
+   * Issues and six captions disappeared under the very "Resume" link that promised to bring it back, and
+   * opening the local copy unconditionally is how a superintendent's submitted report got reverted to a
+   * PM's older snapshot with every surface reporting success.
+   *
+   * The local copy is used as-is only when the READ fails, so somebody with no signal still sees what
+   * they had rather than being locked out.
+   */
+  async function openReconciled(input: {
+    reportId: string;
+    projectName: string;
+    mode: "author" | "review";
+    localDraftId?: string | null;
+  }) {
+    if (!ownerKey) return;
+    const local =
+      (input.localDraftId ? drafts.find((draft) => draft.id === input.localDraftId) : undefined) ??
+      drafts.find((draft) => draft.reportId === input.reportId);
+    try {
+      const detail = await getWeeklyReport(fetcher, input.reportId);
+      const seeded = weeklyReportDraftFromDetail({
         id: local?.id ?? newClientUploadId(),
         clientSubmissionId: local?.clientSubmissionId ?? newSubmissionId(),
-        projectName,
-        mode: "review",
-        report,
+        projectName: input.projectName,
+        mode: input.mode,
+        report: detail.report,
         now: Date.now(),
       });
-      // Reuses the stale draft's id, so this OVERWRITES it rather than leaving two review drafts for one
-      // report sitting in the In-progress list.
-      await saveWeeklyReportDraft(ownerKey, draft, Date.now());
-      setDrafts((current) => [draft, ...current.filter((d) => d.id !== draft.id)]);
-      openDraft(draft);
+      const serverSeed = { status: detail.report.status, signature: weeklyReportDraftSignature(seeded) };
+      const decision = weeklyReportReconcile({
+        mode: input.mode,
+        server: { ...serverSeed, permissions: detail.permissions },
+        local: local
+          ? { seededFrom: local.seededFrom, signature: weeklyReportDraftSignature(local) }
+          : null,
+      });
+
+      if (decision.kind === "refuse") {
+        Alert.alert(decision.title, decision.message);
+        return;
+      }
+      if (decision.kind === "reseed" || !local) {
+        await commitDraft(seeded);
+        return;
+      }
+      // Keeping the local CONTENT, but taking the server's identity: the draft now names the row it was
+      // reconciled against, knows where that row stands (so the final button asks for the right
+      // transition), and records what it has been shown (so the next open compares against that, not
+      // against a baseline the user has never seen).
+      const kept: WeeklyReportDraft = {
+        ...local,
+        reportId: detail.report.id,
+        mode: input.mode,
+        serverStatus: detail.report.status,
+        seededFrom: serverSeed,
+      };
+      if (decision.kind === "keep-local") {
+        await commitDraft(kept);
+        return;
+      }
+      Alert.alert(decision.title, decision.message, [
+        { text: "Cancel", style: "cancel" },
+        { text: decision.keepLocalLabel, onPress: () => void commitDraft(kept) },
+        { text: decision.useServerLabel, style: "destructive", onPress: () => void commitDraft(seeded) },
+      ]);
     } catch {
       if (local) {
         openDraft(local);
@@ -282,12 +286,18 @@ export default function ReportsHubScreen() {
   }
 
   function confirmDiscard(draft: WeeklyReportDraft) {
+    // Says what Discard actually destroys. It is the only destructive action on this screen and, for a
+    // draft holding writing the server has never seen, the sentence below is the only warning anyone gets.
+    const unsent = weeklyReportDiscardWarning({
+      seededFrom: draft.seededFrom,
+      signature: weeklyReportDraftSignature(draft),
+    });
     Alert.alert(
       "Discard this weekly report?",
       // Deliberately specific about what survives. Photos imported from the device have already been
       // uploaded into the project gallery by the time they appear on a draft, and discarding here does
       // not remove them — saying so beats a user discovering it later.
-      `This removes the in-progress weekly report for ${draft.projectName}, week of ${formatWeekOf(draft.weekOf)}. Photos already imported into the project stay in the gallery.`,
+      `This removes the in-progress weekly report for ${draft.projectName}, week of ${formatWeekOf(draft.weekOf)}.${unsent ? ` ${unsent}` : ""} Photos already imported into the project stay in the gallery.`,
       [
         { text: "Keep editing", style: "cancel" },
         {
@@ -387,9 +397,16 @@ export default function ReportsHubScreen() {
               <View key={draft.id} style={styles.card}>
                 <Pressable
                   onPress={() =>
-                    // Same rule as the card: a review draft is re-read before it is opened.
-                    draft.mode === "review" && draft.reportId
-                      ? void openReviewFresh(draft.reportId, draft.projectName)
+                    // Same rule as the card, and NOT keyed on mode: any draft that names a server row is
+                    // reconciled against it before it opens. Only a draft the server has never seen goes
+                    // straight to disk.
+                    draft.reportId
+                      ? void openReconciled({
+                          reportId: draft.reportId,
+                          projectName: draft.projectName,
+                          mode: draft.mode,
+                          localDraftId: draft.id,
+                        })
                       : openDraft(draft)
                   }
                   style={styles.cardBody}

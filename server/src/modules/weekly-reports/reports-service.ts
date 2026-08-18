@@ -358,6 +358,16 @@ export interface CreateWeeklyReportInput {
 }
 
 /**
+ * Machine-readable tag on "this week already has a row, started by somebody else".
+ *
+ * The phone has to tell this 409 apart from the other one `POST /reports` can answer ("Weekly reporting is
+ * paused for this project"), because the two want opposite handling: the first is recoverable by adopting
+ * the existing row for the week, the second is not recoverable at all. Matching on the prose would break
+ * the moment the copy is improved.
+ */
+export const WEEKLY_REPORT_WEEK_EXISTS_CODE = "WEEKLY_REPORT_WEEK_EXISTS";
+
+/**
  * Create (or return) the draft for a project/week.
  *
  * IDEMPOTENT on `clientSubmissionId`: a phone retrying over flaky jobsite LTE must not produce a second
@@ -405,7 +415,7 @@ export async function createWeeklyReportDraft(
     [input.weeklyReportProjectId, input.weekOf],
   );
   if (existingForWeek.rows[0]) {
-    throw new AppError(409, "A report already exists for this week");
+    throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
 
   // ON CONFLICT DO NOTHING rather than trusting the pre-flight SELECTs. Those two lookups do not
@@ -441,7 +451,7 @@ export async function createWeeklyReportDraft(
       if (!report) throw new AppError(404, "Weekly report not found");
       return { report, created: false };
     }
-    throw new AppError(409, "A report already exists for this week");
+    throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
 
   const report = await getWeeklyReportDetail(client, result.rows[0].id);

@@ -22,19 +22,30 @@ import {
   createWeeklyReport,
   getTranscriptionConfig,
   getWeeklyReport,
+  getWeeklyReportAssignments,
   getWeeklyReportPhotoCandidates,
   replaceWeeklyReportPhotos,
   transitionWeeklyReport,
   updateWeeklyReport,
 } from "../../../../src/api/endpoints";
-import type { WeeklyReportPhotoCandidate } from "../../../../src/api/types";
+import type { WeeklyReportPhotoCandidate, WeeklyReportStatusValue } from "../../../../src/api/types";
 import { qk } from "../../../../src/query/keys";
 import { newClientUploadId, uploadOwnerKey } from "../../../../src/capture/upload-queue";
 import { uploadCapture } from "../../../../src/capture/upload";
 import { getLiveGps } from "../../../../src/capture/metadata";
 import { formatDictationAsBullets } from "../../../../src/dictation/bullets";
 import { retryWeeklyReportPhotoUploads } from "../../../../src/weekly-reports/photo-import";
-import { transitionWeeklyReportIdempotently } from "../../../../src/weekly-reports/transition";
+import {
+  transitionWeeklyReportIdempotently,
+  weeklyReportTransitionOutcomeUnknown,
+} from "../../../../src/weekly-reports/transition";
+import { weeklyReportServerReportId } from "../../../../src/weekly-reports/hub";
+import {
+  WeeklyReportWeekTakenError,
+  isWeeklyReportWeekTakenError,
+  weeklyReportWeekRowIsUntouched,
+  weeklyReportWeekTakenMessage,
+} from "../../../../src/weekly-reports/reconcile";
 import {
   MAX_WEEKLY_REPORT_CAPTION_CHARS,
   MAX_WEEKLY_REPORT_PHOTOS,
@@ -48,6 +59,7 @@ import {
   weeklyReportDraftToPhotoPayload,
   weeklyReportPhotoPreviewUri,
   weeklyReportPickerCandidates,
+  weeklyReportSeedStateFromDetail,
   weeklyReportStepAt,
   weeklyReportStepIndex,
   type WeeklyReportDraft,
@@ -241,6 +253,52 @@ function Wizard({
   }, []);
 
   /**
+   * The week already has a row, created under a DIFFERENT submission id — i.e. started on another device.
+   *
+   * Adopting it is the only way forward: without this the create 409s identically on every retry, the
+   * wizard has no path to that row, and everything the super typed here dies with a Discard whose copy
+   * never says so.
+   *
+   * Adoption is silent only while the existing row is UNTOUCHED, which is the ordinary case — the row is
+   * created empty on the photos step and stays empty until somebody submits, so there is nothing on it to
+   * lose. A row that already has content is somebody's writing, and blindly PATCHing this phone's copy
+   * over it is the same silent revert being fixed elsewhere in this file; that case is handed back with an
+   * explanation and a real next step (the hub reconciles it and offers the choice).
+   */
+  const adoptExistingWeekRow = useCallback(async (): Promise<string> => {
+    const weekLabel = formatWeekOf(draft.weekOf);
+    // The assignment payload already names the row for every week this hub can open — the current week's
+    // id, plus `outstandingWeekReportIds` for the missed ones, which is exactly what a week sitting at
+    // `draft` on another device looks like. No new endpoint needed.
+    let existingId: string | null = null;
+    try {
+      const assignments = await getWeeklyReportAssignments(fetcher);
+      const project = assignments.projects.find(
+        (candidate) => candidate.weeklyReportProjectId === draft.weeklyReportProjectId,
+      );
+      existingId = project ? weeklyReportServerReportId(project, draft.weekOf) : null;
+    } catch {
+      existingId = null;
+    }
+    if (existingId) {
+      try {
+        const detail = await getWeeklyReport(fetcher, existingId);
+        const seededFrom = weeklyReportSeedStateFromDetail(detail.report);
+        if (weeklyReportWeekRowIsUntouched(seededFrom)) {
+          dispatch({ type: "setReportId", reportId: existingId, seededFrom });
+          return existingId;
+        }
+        throw new WeeklyReportWeekTakenError(weeklyReportWeekTakenMessage(weekLabel, true));
+      } catch (error) {
+        if (error instanceof WeeklyReportWeekTakenError) throw error;
+        // The row is there and this phone could not read it. The 409 already proved the week is taken, so
+        // that — not "check your connection" — is the useful thing to say.
+      }
+    }
+    throw new WeeklyReportWeekTakenError(weeklyReportWeekTakenMessage(weekLabel, false));
+  }, [draft.weekOf, draft.weeklyReportProjectId, fetcher]);
+
+  /**
    * Make sure a server report exists, returning its id.
    *
    * Idempotent on `clientSubmissionId`, which was stamped once when the local draft was created — so a
@@ -249,14 +307,34 @@ function Wizard({
    */
   const ensureReport = useCallback(async (): Promise<string> => {
     if (draft.reportId) return draft.reportId;
-    const { report } = await createWeeklyReport(fetcher, {
-      clientSubmissionId: draft.clientSubmissionId,
-      weeklyReportProjectId: draft.weeklyReportProjectId,
-      weekOf: draft.weekOf,
+    let created;
+    try {
+      created = await createWeeklyReport(fetcher, {
+        clientSubmissionId: draft.clientSubmissionId,
+        weeklyReportProjectId: draft.weeklyReportProjectId,
+        weekOf: draft.weekOf,
+      });
+    } catch (error) {
+      if (!isWeeklyReportWeekTakenError(error)) throw error;
+      return await adoptExistingWeekRow();
+    }
+    // Stamp what the server actually handed back rather than assuming an empty row: the create is
+    // idempotent, so this can be a row that already exists, and the provenance every later freshness
+    // check reads has to describe the row that is really there.
+    dispatch({
+      type: "setReportId",
+      reportId: created.report.id,
+      seededFrom: weeklyReportSeedStateFromDetail(created.report),
     });
-    dispatch({ type: "setReportId", reportId: report.id });
-    return report.id;
-  }, [draft.reportId, draft.clientSubmissionId, draft.weeklyReportProjectId, draft.weekOf, fetcher]);
+    return created.report.id;
+  }, [
+    draft.reportId,
+    draft.clientSubmissionId,
+    draft.weeklyReportProjectId,
+    draft.weekOf,
+    fetcher,
+    adoptExistingWeekRow,
+  ]);
 
   // The report row has to exist before the picker can ask what photos fall in its window, so create it
   // when the user reaches the photos step rather than at submit. Failure is left silent here: the step
@@ -508,6 +586,31 @@ function Wizard({
 
   const finalAction = weeklyReportFinalAction(draft);
 
+  /**
+   * Arm (or disarm) the "I fired this transition and never heard back" marker, DURABLY.
+   *
+   * It has to reach disk before the request leaves the phone, because the two attempts it connects are
+   * normally separated by a dead connection or an app kill. Written through the same save chain as the
+   * autosave so a slower earlier write cannot land on top of it.
+   *
+   * READ-MODIFY-WRITE of the one field, rather than persisting the render's `draft` with the marker
+   * merged in. `ensureReport` has just dispatched the report id, and this closure was built before that —
+   * writing the whole snapshot back would erase the draft's identity on disk until the next autosave put
+   * it back. Touching one field can only ever lose the marker, never anything else.
+   */
+  async function markPendingTransition(to: WeeklyReportStatusValue | null) {
+    dispatch({ type: "setPendingTransition", to });
+    saveChain.current = saveChain.current
+      .then(async () => {
+        if (finalized.current) return;
+        const stored = await loadWeeklyReportDraft(ownerKey, draftId);
+        if (!stored) return;
+        await saveWeeklyReportDraft(ownerKey, { ...stored, pendingTransitionTo: to }, Date.now());
+      })
+      .catch(() => undefined);
+    await saveChain.current;
+  }
+
   async function submit() {
     if (submitting) return;
     const blocker = weeklyReportDraftBlocker(draft);
@@ -541,24 +644,40 @@ function Wizard({
       // fixing a caption on an approved report. The ladder has no self-transition, so asking anyway would
       // 409 on work that saved perfectly well.
       if (finalAction.transitionTo) {
-        const outcome = await transitionWeeklyReportIdempotently({
-          to: finalAction.transitionTo,
-          transition: async () => {
-            const { report } = await transitionWeeklyReport(fetcher, reportId, finalAction.transitionTo!);
-            return report.status;
-          },
-          // Only reached on a 409. A transition that COMMITTED and then lost its response leaves the
-          // phone certain it failed: `serverStatus` was never recorded, so the retry asks for the same
-          // move and is refused for the rest of the draft's life. Asking the server where the report
-          // actually is turns that into the success it was.
-          readStatus: async () => (await getWeeklyReport(fetcher, reportId)).report.status,
-        });
-        // Record where the report landed BEFORE anything that can still fail. Everything after this point
-        // is local cleanup, and if the disk delete throws the user is left holding a draft whose report
-        // has already moved. This covers the IN-SESSION retry — the reducer state survives it — and the
-        // 409 recovery above covers the case it cannot: a phone restarted, or a draft reloaded from disk,
-        // after a response was lost in transit.
-        dispatch({ type: "setServerStatus", status: outcome.status });
+        const to = finalAction.transitionTo;
+        // Read BEFORE the marker is armed, so it answers "did a PREVIOUS attempt of mine go unanswered?"
+        // rather than "did I just arm this?". That distinction is the whole guard: reaching the target
+        // status is only evidence of MY commit if I have a move outstanding. Without it, a report somebody
+        // else advanced answers 409, the re-read confirms the target, and a submit that reverted their
+        // work reports success.
+        const mayHaveCommitted = draft.pendingTransitionTo === to;
+        if (!mayHaveCommitted) await markPendingTransition(to);
+        try {
+          const outcome = await transitionWeeklyReportIdempotently({
+            to,
+            mayHaveCommitted,
+            transition: async () => {
+              const { report } = await transitionWeeklyReport(fetcher, reportId, to);
+              return report.status;
+            },
+            // Only reached on a 409. A transition that COMMITTED and then lost its response leaves the
+            // phone certain it failed: `serverStatus` was never recorded, so the retry asks for the same
+            // move and is refused for the rest of the draft's life. Asking the server where the report
+            // actually is turns that into the success it was.
+            readStatus: async () => (await getWeeklyReport(fetcher, reportId)).report.status,
+          });
+          // Record where the report landed BEFORE anything that can still fail. Everything after this
+          // point is local cleanup, and if the disk delete throws the user is left holding a draft whose
+          // report has already moved. This covers the IN-SESSION retry — the reducer state survives it —
+          // and the 409 recovery above covers the case it cannot: a phone restarted, or a draft reloaded
+          // from disk, after a response was lost in transit.
+          dispatch({ type: "setServerStatus", status: outcome.status });
+        } catch (error) {
+          // Disarm on a DEFINITE refusal. The move did not land, so a later 409 can only be somebody
+          // else's — and leaving the marker armed would let that be read as a lost reply of my own.
+          if (!weeklyReportTransitionOutcomeUnknown(error)) await markPendingTransition(null);
+          throw error;
+        }
       }
 
       // Stop autosaves BEFORE the delete, or a save already queued behind this one resurrects the draft.

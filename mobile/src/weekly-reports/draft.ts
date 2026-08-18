@@ -50,6 +50,25 @@ export type WeeklyReportDraftPhoto = {
   addressSource?: "exif" | "live_gps";
 };
 
+/**
+ * The server state a local draft was last RECONCILED against.
+ *
+ * Provenance, not a cache. Without it the app cannot tell "the server has not moved since I seeded this
+ * draft" from "somebody rewrote the report while I held it", and every re-read has to guess — reseeding
+ * blindly throws away un-submitted local edits, and NOT reseeding files a stale snapshot over somebody
+ * else's work. Both of those shipped. Holding the status AND a content fingerprint answers both questions:
+ *
+ *   local edits  ⟺ signature(draft)  ≠ seededFrom.signature
+ *   server moved ⟺ signature(server) ≠ seededFrom.signature  or  status differs
+ *
+ * Updated whenever the draft is seeded from a read, adopts a server row, or the user resolves a conflict —
+ * i.e. it always names the server state the user has actually been shown.
+ */
+export interface WeeklyReportSeedState {
+  status: WeeklyReportStatusValue;
+  signature: string;
+}
+
 export interface WeeklyReportDraft {
   /** Local draft id. Also names the draft's photo directory, so it must never be reused. */
   id: string;
@@ -76,6 +95,21 @@ export interface WeeklyReportDraft {
    * is seeded from a server read; a local draft never advances it on its own.
    */
   serverStatus: WeeklyReportStatusValue | null;
+  /**
+   * The server state this draft was last reconciled against, or null when it has never corresponded to a
+   * server row. Null is read as "an empty report in `draft`", which is exactly what a row created by
+   * `POST /reports` holds — so a purely local draft and a freshly created row compare equal.
+   */
+  seededFrom: WeeklyReportSeedState | null;
+  /**
+   * A transition this client FIRED and never learned the outcome of.
+   *
+   * The only thing that can tell "my own move committed and the reply was lost" (a success) apart from
+   * "somebody else advanced this report" (emphatically not one — this client's PATCH and photo PUT just
+   * landed on top of their work). Persisted with the draft because the two attempts are usually separated
+   * by a lost connection, an app kill, or both.
+   */
+  pendingTransitionTo: WeeklyReportStatusValue | null;
   step: WeeklyReportStep;
   workCompleted: string;
   nextWeekLookAhead: string;
@@ -91,6 +125,63 @@ export interface WeeklyReportDraft {
   updatedAt: number;
 }
 
+/** The subset of a draft that a submit actually WRITES — everything the fingerprint is taken over. */
+export interface WeeklyReportSignableContent {
+  workCompleted: string;
+  nextWeekLookAhead: string;
+  issuesConcerns: string;
+  completionPercent: string;
+  weatherDelayDays: string;
+  photos: readonly Pick<WeeklyReportDraftPhoto, "key" | "fileId" | "caption">[];
+}
+
+/**
+ * A stable fingerprint of everything a submit would send: the three sections, the two numbers, and the
+ * photo set IN ORDER with its captions. Order is part of it because order is the print order.
+ *
+ * `remoteUrl` is deliberately excluded. Presigned previews are re-issued on every read, so folding them in
+ * would make an untouched report look changed on every single re-read and turn the conflict prompt into
+ * noise nobody reads. `step`, `updatedAt`, `originalDescription` and the ids are out for the same reason:
+ * none of them is content, and none of them reaches the PATCH or the photo PUT.
+ *
+ * Numbers go through the same parsers the PATCH uses, so "12.50" and "12.5" are one value rather than a
+ * phantom edit. An unparseable number falls back to its trimmed text, which keeps the function total.
+ *
+ * A photo still uploading has no fileId, so it is keyed by its local key — an imported photo IS a local
+ * edit even before it has a server identity.
+ */
+export function weeklyReportContentSignature(content: WeeklyReportSignableContent): string {
+  const percent = parseWeeklyReportPercent(content.completionPercent);
+  const delay = parseWeeklyReportDelayDays(content.weatherDelayDays);
+  return JSON.stringify([
+    content.workCompleted.trim(),
+    content.nextWeekLookAhead.trim(),
+    content.issuesConcerns.trim(),
+    percent === undefined ? content.completionPercent.trim() : percent,
+    delay === undefined ? content.weatherDelayDays.trim() : delay,
+    content.photos.map((photo) => [photo.fileId ?? `local:${photo.key}`, photo.caption.trim()]),
+  ]);
+}
+
+export function weeklyReportDraftSignature(draft: WeeklyReportDraft): string {
+  return weeklyReportContentSignature(draft);
+}
+
+/**
+ * What a report holds the moment `POST /reports` creates its row: nothing.
+ *
+ * This is the baseline a draft with no `seededFrom` is compared against — a local draft that has never
+ * been near the server, and a row just created for it, are the same empty report.
+ */
+export const WEEKLY_REPORT_EMPTY_SIGNATURE = weeklyReportContentSignature({
+  workCompleted: "",
+  nextWeekLookAhead: "",
+  issuesConcerns: "",
+  completionPercent: "",
+  weatherDelayDays: "",
+  photos: [],
+});
+
 /**
  * Seed a local draft from a report that already exists on the server.
  *
@@ -102,34 +193,37 @@ export interface WeeklyReportDraft {
  * Photos arrive already ordered by `sort_order`, and their `caption` is the REPORT's caption — the server
  * seeded it from the capture description on first selection and has not written back to the file since.
  */
+/** The server payload a draft can be seeded from — `WeeklyReportDetailView`, reduced to what is read. */
+export interface WeeklyReportSeedableReport {
+  id: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  weekOf: string;
+  status: WeeklyReportStatusValue;
+  workCompleted: string | null;
+  nextWeekLookAhead: string | null;
+  issuesConcerns: string | null;
+  completionPercent: number | null;
+  weatherDelayDays: number | null;
+  photos: Array<{
+    fileId: string;
+    caption: string | null;
+    originalDescription: string | null;
+    takenAt: string | null;
+    thumbnailUrl: string | null;
+  }>;
+}
+
 export function weeklyReportDraftFromDetail(input: {
   id: string;
   clientSubmissionId: string;
   projectName: string;
   mode: "author" | "review";
-  report: {
-    id: string;
-    weeklyReportProjectId: string;
-    dealId: string;
-    weekOf: string;
-    status: WeeklyReportStatusValue;
-    workCompleted: string | null;
-    nextWeekLookAhead: string | null;
-    issuesConcerns: string | null;
-    completionPercent: number | null;
-    weatherDelayDays: number | null;
-    photos: Array<{
-      fileId: string;
-      caption: string | null;
-      originalDescription: string | null;
-      takenAt: string | null;
-      thumbnailUrl: string | null;
-    }>;
-  };
+  report: WeeklyReportSeedableReport;
   now: number;
 }): WeeklyReportDraft {
   const { report } = input;
-  return {
+  const seeded: WeeklyReportDraft = {
     id: input.id,
     clientSubmissionId: input.clientSubmissionId,
     weeklyReportProjectId: report.weeklyReportProjectId,
@@ -139,6 +233,8 @@ export function weeklyReportDraftFromDetail(input: {
     weekOf: report.weekOf,
     mode: input.mode,
     serverStatus: report.status,
+    seededFrom: null,
+    pendingTransitionTo: null,
     step: "work",
     workCompleted: report.workCompleted ?? "",
     nextWeekLookAhead: report.nextWeekLookAhead ?? "",
@@ -157,6 +253,31 @@ export function weeklyReportDraftFromDetail(input: {
     createdAt: input.now,
     updatedAt: input.now,
   };
+  // Signed from the SEEDED DRAFT rather than from the payload, so the "what the server holds" fingerprint
+  // and the "what I hold" fingerprint can never be computed by two functions that drift apart.
+  return {
+    ...seeded,
+    seededFrom: { status: report.status, signature: weeklyReportDraftSignature(seeded) },
+  };
+}
+
+/**
+ * The provenance stamp for a report the server just handed back, without building a whole draft.
+ *
+ * Routed through `weeklyReportDraftFromDetail` rather than reading the payload a second time, so the
+ * "what the server holds" fingerprint is produced by exactly one mapping. A second copy of that mapping
+ * would drift the first time a field is added, and the symptom would be a conflict prompt on every open.
+ */
+export function weeklyReportSeedStateFromDetail(report: WeeklyReportSeedableReport): WeeklyReportSeedState {
+  const seeded = weeklyReportDraftFromDetail({
+    id: "",
+    clientSubmissionId: "",
+    projectName: "",
+    mode: "author",
+    report,
+    now: 0,
+  });
+  return { status: report.status, signature: weeklyReportDraftSignature(seeded) };
 }
 
 export type WeeklyReportDraftAction =
@@ -165,9 +286,15 @@ export type WeeklyReportDraftAction =
   | { type: "appendSection"; key: WeeklyReportSectionKey; text: string }
   | { type: "setNumber"; key: "completionPercent" | "weatherDelayDays"; value: string }
   | { type: "setStep"; step: WeeklyReportStep }
-  | { type: "setReportId"; reportId: string }
+  /**
+   * A server row now backs this draft. `seededFrom` travels with it: a row this draft CREATED is empty,
+   * a row it ADOPTED is not, and the difference is what every later freshness check reads.
+   */
+  | { type: "setReportId"; reportId: string; seededFrom?: WeeklyReportSeedState | null }
   /** The server moved the report; record it so the final button stops asking for a transition it made. */
   | { type: "setServerStatus"; status: WeeklyReportStatusValue }
+  /** Arm (or disarm) the "I fired this transition and never heard back" marker. */
+  | { type: "setPendingTransition"; to: WeeklyReportStatusValue | null }
   | { type: "addPhoto"; photo: WeeklyReportDraftPhoto }
   | { type: "removePhoto"; key: string }
   | { type: "setPhotoCaption"; key: string; caption: string }
@@ -203,6 +330,9 @@ export function createWeeklyReportDraft(input: {
     weekOf: input.weekOf,
     mode: input.mode ?? "author",
     serverStatus: null,
+    // Never been near the server. Read as "an empty report in `draft`" wherever a baseline is needed.
+    seededFrom: null,
+    pendingTransitionTo: null,
     step: "work",
     workCompleted: "",
     nextWeekLookAhead: "",
@@ -255,9 +385,16 @@ export function weeklyReportDraftReducer(
     case "setStep":
       return { ...draft, step: action.step };
     case "setReportId":
-      return { ...draft, reportId: action.reportId };
+      return {
+        ...draft,
+        reportId: action.reportId,
+        // `undefined` means "leave the provenance alone"; an explicit null clears it.
+        seededFrom: action.seededFrom === undefined ? draft.seededFrom : action.seededFrom,
+      };
     case "setServerStatus":
       return { ...draft, serverStatus: action.status };
+    case "setPendingTransition":
+      return { ...draft, pendingTransitionTo: action.to };
     case "addPhoto":
       // Idempotent on key so a double-tap on a candidate tile cannot add it twice — the server rejects a
       // duplicated fileId outright, which would surface as a failed submit long after the tap.

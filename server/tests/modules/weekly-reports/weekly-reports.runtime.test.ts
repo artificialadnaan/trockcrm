@@ -27,6 +27,7 @@ import {
 } from "../../../src/modules/weekly-reports/projects-service.js";
 import {
   MAX_PHOTO_CANDIDATES,
+  WEEKLY_REPORT_WEEK_EXISTS_CODE,
   canEditWeeklyReport,
   canTransitionAs,
   createWeeklyReportDraft,
@@ -499,6 +500,47 @@ describe("draft creation", () => {
       409,
       /already exists/i,
     );
+  });
+
+  it("TAGS that conflict, so the phone can tell it from the other 409 this call can answer", async () => {
+    // The app recovers from this one by ADOPTING the row that already exists for the week — without that
+    // the phone's draft is unfilable: the create 409s identically on every retry and Discard is the only
+    // exit. It must not attempt the same recovery for "Weekly reporting is paused for this project",
+    // which is also a 409 and has no row to adopt. Matching on the prose would break the moment the copy
+    // is improved, so the discriminator is the code.
+    const project = await seedProject();
+    await createWeeklyReportDraft(
+      db,
+      { clientSubmissionId: U("bbbb8"), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+      SUPER_ACTOR,
+    );
+    let caught: unknown;
+    try {
+      await createWeeklyReportDraft(
+        db,
+        { clientSubmissionId: U("bbbb9"), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+        PM_ACTOR,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AppError);
+    expect((caught as AppError).code).toBe(WEEKLY_REPORT_WEEK_EXISTS_CODE);
+
+    // The paused answer is a 409 too, and carries no such tag.
+    await db.query(`UPDATE weekly_report_projects SET status = 'paused' WHERE id = $1::uuid`, [project.id]);
+    let paused: unknown;
+    try {
+      await createWeeklyReportDraft(
+        db,
+        { clientSubmissionId: U("bbba0"), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+        SUPER_ACTOR,
+      );
+    } catch (error) {
+      paused = error;
+    }
+    expect((paused as AppError).statusCode).toBe(409);
+    expect((paused as AppError).code).toBeUndefined();
   });
 
   it("refuses a stranger who is neither the super nor the PM", async () => {

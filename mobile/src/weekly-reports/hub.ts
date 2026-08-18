@@ -1,18 +1,21 @@
 // What "open this week" resolves to, kept out of the hub screen so the ordering rules are testable.
 //
-// There are four ways into the wizard and they are NOT interchangeable — picking the wrong one is a
-// data-loss bug in one direction and a duplicate report in the other:
+// The discriminator is WHETHER A SERVER ROW IS INVOLVED, and nothing else:
 //
-//   • A REVIEW draft must never be opened from the local copy. The authoritative report belongs to the
-//     superintendent; a day-old review draft replays a PATCH of explicit nulls and a whole-set photo PUT
-//     over work they rewrote in the meantime, and the PM approves, in good faith, something other than
-//     what they just read.
-//   • An AUTHORING draft is the exact opposite. It is the durability unit, it may hold text typed with no
-//     signal that the server has never seen, and reseeding it from the server would discard precisely the
-//     work the local store exists to protect.
-//   • A week that already has a report ROW on the server must resume THAT row rather than start a new
-//     one, or the wizard posts a second create for the same week.
-//   • Only a week with neither gets a fresh local draft.
+//   • Any draft that names a report on the server is RECONCILED against it before a byte of it is opened
+//     or written — see reconcile.ts, which owns that decision for every door. This used to key on
+//     `mode === "review"`, and an author-mode draft therefore skipped the read entirely. The chain that
+//     made that a silent revert: a PM taps "Open week of Aug 13" on a `draft` report, which seeds an
+//     AUTHOR draft and saves it; they back out; the superintendent finishes the week and submits; the PM
+//     taps "Review week of Aug 13", the local draft is found, its mode is `author`, so it opens with no
+//     server read — and its submit PATCHes the PM's stale text and PUTs the PM's stale photo set over the
+//     super's submitted report. Mode was never a freshness property.
+//   • A LOCAL-ONLY draft — no report id anywhere — is the durability unit. It may hold text typed with no
+//     signal that the server has never seen, so it opens straight from disk.
+//   • …unless the week has since acquired a row from ANOTHER DEVICE, in which case it is reconciled too.
+//     Without this the phone's draft is unfilable: its create 409s on "A report already exists for this
+//     week" forever, and the only exit is Discard.
+//   • Only a week with nothing on either side gets a fresh local draft.
 
 /** The local drafts the hub is holding, reduced to what the decision actually reads. */
 export interface WeeklyReportHubDraft {
@@ -33,12 +36,14 @@ export interface WeeklyReportHubProject {
 }
 
 export type WeeklyReportOpenTarget =
-  /** Re-read from the server before opening — every door onto a review draft goes through this. */
-  | { kind: "review-fresh"; reportId: string }
-  /** Resume the local authoring draft as it stands. */
+  /**
+   * Re-read the report and reconcile before opening. The one door onto anything the server knows about,
+   * whichever mode the draft is in and whether or not there is a local draft at all (`draftId: null` is
+   * the case that used to be a separate `resume-server` branch — same read, same gate, one code path).
+   */
+  | { kind: "reconcile"; reportId: string; draftId: string | null }
+  /** Resume a purely local draft as it stands: no server row exists, so there is nothing to reconcile. */
   | { kind: "resume-local"; draftId: string }
-  /** No local draft, but the server has a row for this week: seed from it. */
-  | { kind: "resume-server"; reportId: string }
   /** Nothing anywhere: a fresh local draft. */
   | { kind: "create-local" };
 
@@ -68,12 +73,20 @@ export function weeklyReportOpenTarget(input: {
     (draft) =>
       draft.weeklyReportProjectId === project.weeklyReportProjectId && draft.weekOf === weekOf,
   );
-  if (local?.mode === "review" && local.reportId) {
-    return { kind: "review-fresh", reportId: local.reportId };
+  // A draft that names a report is reconciled against it. NOT keyed on mode — see the header.
+  if (local?.reportId) {
+    return { kind: "reconcile", reportId: local.reportId, draftId: local.id };
+  }
+
+  const serverReportId = weeklyReportServerReportId(project, weekOf);
+  // The server has a row this local draft has never heard of, i.e. the week was started somewhere else.
+  // Reconciling adopts that row (keeping whatever is on this phone when the row is still empty, asking
+  // when it is not); resuming the draft as-is would leave it posting a create that 409s for ever.
+  if (local && serverReportId) {
+    return { kind: "reconcile", reportId: serverReportId, draftId: local.id };
   }
   if (local) return { kind: "resume-local", draftId: local.id };
 
-  const serverReportId = weeklyReportServerReportId(project, weekOf);
-  if (serverReportId) return { kind: "resume-server", reportId: serverReportId };
+  if (serverReportId) return { kind: "reconcile", reportId: serverReportId, draftId: null };
   return { kind: "create-local" };
 }
