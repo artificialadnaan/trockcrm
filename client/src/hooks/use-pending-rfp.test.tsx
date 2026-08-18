@@ -62,6 +62,23 @@ describe("usePendingRfp", () => {
     expect(apiMock).toHaveBeenCalledTimes(2);
   });
 
+  it("forwards ?estimatorId so the queue matches the column that opened it (Codex #1067 P1)", async () => {
+    // openStage hands the board's whole query string to /deals/pending-rfp. The column IS estimator-scoped
+    // (the predicate is ANDed into getDealsForPipeline), so requesting the bare path listed every pending
+    // RFP under a count scoped to one person.
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/deals/pending-rfp?officeId=A&estimatorId=est-1"] },
+          createElement(Harness)
+        )
+      );
+    });
+    expect(apiMock).toHaveBeenCalledWith("/deals/pending-rfp?estimatorId=est-1");
+  });
+
   it("ignores a stale out-of-order response from an overlapping refetch (latest wins)", async () => {
     // Generic overlapping-refetch guard (same office): three overlapping fetches, only the latest may
     // write state. The A→B office-switch path is covered by the navigation test below.

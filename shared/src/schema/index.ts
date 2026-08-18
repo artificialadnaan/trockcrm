@@ -175,6 +175,7 @@ export {
   weeklyReports,
   weeklyReportPhotos,
   weeklyReportDismissals,
+  weeklyReportPauses,
   weeklyReportRemindersSent,
   weeklyReportSettings,
 } from "./tenant/weekly-reports.js";

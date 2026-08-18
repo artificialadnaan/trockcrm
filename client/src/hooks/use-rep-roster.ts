@@ -3,9 +3,19 @@ import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 
+/**
+ * Which question this person can be filtered BY.
+ *
+ * "sales" → their OWNED deals (?assignedRepId). "estimator" → the deals they are ESTIMATING
+ * (?estimatorId). A person is in exactly one group; the server decides, and Sales wins when both flags
+ * are ticked. Callers must not infer the group from the id.
+ */
+export type RepRosterGroup = "sales" | "estimator";
+
 export interface RepRosterOption {
   id: string;
   displayName: string;
+  group: RepRosterGroup;
 }
 
 /**
@@ -77,7 +87,14 @@ export function useRepRoster(options: UseRepRosterOptions = {}) {
       // undefined turns the very next render into `undefined.map(...)`, i.e. a white screen on the whole
       // deals dashboard rather than an empty dropdown on it. An empty roster is a degraded filter; a
       // thrown render is a dead page.
-      setReps(Array.isArray(data?.users) ? data.users : []);
+      // Group defaulted rather than trusted: an older server (or a cached response) predates the field,
+      // and an undefined group would silently drop people out of both dropdown sections. Sales is the
+      // safe default — it is the historical meaning of every entry in this list.
+      setReps(
+        Array.isArray(data?.users)
+          ? data.users.map((user) => ({ ...user, group: user.group === "estimator" ? "estimator" : "sales" }))
+          : []
+      );
     } catch (err: unknown) {
       if (requestId !== requestRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load reps");

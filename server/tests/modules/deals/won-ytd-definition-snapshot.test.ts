@@ -104,6 +104,19 @@ describe("main Deals Dashboard Won YTD definition snapshot", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("does not let an ESTIMATOR-filtered board overwrite the global metric definition", async () => {
+    // Codex #1067 round-2 P1. The snapshot is the PUBLISHED all-reps baseline, so every narrowing
+    // dimension has to disqualify it — not just the owner one. Gating on assignedRepId alone meant a
+    // scope=all YTD board with an estimator selected still qualified, writing that person's subset over
+    // deals_dashboard.won_ytd and holding it there until the next unfiltered YTD request happened by.
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { estimatorId: "user-est-1" });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("only ignores the migration-not-yet-present PostgreSQL error", async () => {
     const missingFunction = vi.fn().mockRejectedValue({ code: "42883" });
     await expect(getGlobalYtdBoard(buildTenantDb(missingFunction))).resolves.toBeDefined();
