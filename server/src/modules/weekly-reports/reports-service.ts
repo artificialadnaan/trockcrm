@@ -903,6 +903,11 @@ export async function transitionWeeklyReport(
   // landing between the read and this write slipped past a status-only condition, and the report went
   // `approved` — or `sent`, to the client — with the section the gate exists to require left empty.
   // Re-testing it here closes the window the gate's own comment describes.
+  // `btrim(...) <> ''` is deliberately STRICTER than the `!reportRow.work_completed` check above, which a
+  // whitespace-only string would pass. normalizeBody trims and returns null, so the column never holds
+  // whitespace through the API and the two agree in practice; the difference only shows for a row written
+  // by something else (a direct SQL edit, a backfill). There it fails safe — an effectively-empty report
+  // is refused rather than sent to a client, at the cost of a 409 where a 400 would read better.
   const contentGate = isForwardGate
     ? " AND work_completed IS NOT NULL AND btrim(work_completed) <> ''"
     : "";
