@@ -490,7 +490,10 @@ describe("project number first-set notification email", () => {
         "christy@example.com",
         "Subject",
         "<p>Body</p>"
-      )).resolves.toEqual({ success: false, messageId: null });
+      // outcome MUST be "rejected", not "unknown": no request ever left the process, so nothing was
+      // delivered. The leadership digest treats "unknown" as delivered and keeps its claims, so a
+      // missing RESEND_API_KEY reported as "unknown" would silently never retry and never send.
+      )).resolves.toEqual({ success: false, messageId: null, outcome: "rejected" });
       expect(errorSpy).toHaveBeenCalledWith("[Email] RESEND_API_KEY is not configured in production");
     } finally {
       if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
