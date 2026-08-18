@@ -266,14 +266,25 @@ export default function WeeklyReportSendScreen() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={8}
       >
+        {/* OUTSIDE the ScrollView, like the sibling wizard's noticeWrap. `notice` is this screen's only
+            error channel, and the Send button sits at the very bottom of a scroll that holds the whole
+            recipient list, subject, message body and preview — so a banner rendered inline was never on
+            the same screen as the button that triggers it. The PM taps Send, gets a 409 because a
+            director sent it from the CRM thirty seconds earlier, and from where they are looking nothing
+            happened, so they tap again. That includes the offline copy, which exists precisely to stop a
+            second tap. */}
+        {notice ? (
+          <View style={styles.noticeWrap}>
+            <Banner message={notice} />
+          </View>
+        ) : null}
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
           <Text style={styles.subhead}>
             {draft.propertyName ?? projectName ?? "Weekly report"} · week of {formatWeekOf(draft.weekOf)}
           </Text>
-          {/* Informational, not a failure: a correction is an ordinary act. `notice` below is the error
-              channel and keeps the red banner, so the two cannot be mistaken for each other. */}
+          {/* Informational, not a failure: a correction is an ordinary act, so it stays inline with the
+              content it describes and keeps the info tone. The error banner above is pinned. */}
           {versionNote ? <Banner message={versionNote} tone="info" /> : null}
-          {notice ? <Banner message={notice} /> : null}
 
           <SectionLabel>To</SectionLabel>
           {recipients.length === 0 ? (
@@ -380,9 +391,13 @@ export default function WeeklyReportSendScreen() {
           />
           {/* Stated before the tap, not after it. The transition is terminal: the only way to change a
               sent report is a correction, which is a new version the client is told about. */}
+          {/* Says who can do it, not just that it is possible. The correction and retry ROUTES exist on
+              this mount, but no screen calls them yet: a sent week leaves the PM's queue, so T-Rock Cam
+              shows nothing afterwards. Promising "issue a correction" to a `construction` PM who has no
+              control here, and whom the CRM also refuses, is a promise the product does not keep. */}
           <Text style={styles.hint}>
-            Once this goes out the report is final. Fixing it afterwards means issuing a correction, which
-            the client is told about.
+            Once this goes out the report is final. A mistake has to be fixed by issuing a correction —
+            ask an admin or director, since that is not yet something you can do in the app.
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -393,6 +408,8 @@ export default function WeeklyReportSendScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: theme.color.surfaceApp },
   body: { padding: theme.space.lg, gap: theme.space.sm, paddingBottom: theme.space.xxl },
+  // Same shape as the wizard's, so the two screens' error banners sit identically.
+  noticeWrap: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm },
   subhead: {
     fontFamily: theme.font.medium,
     fontSize: 14,

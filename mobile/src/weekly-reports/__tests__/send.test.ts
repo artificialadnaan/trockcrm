@@ -393,10 +393,20 @@ describe("the send screen structurally cannot leak the client link", () => {
     // The screen holds `shareUrl` in component state that dies with the screen. This is the guard that
     // keeps it that way: `mobile/` is not in CI and the app has no OTA, so a persisted token would ship
     // to phones and live there for days, and nothing would ever revoke it because nothing would know.
+    // MATCH THE SPECIFIER, NOT THE BINDING. This list originally carried `SecureStore`, which is the
+    // local binding in `import * as SecureStore from "expo-secure-store"` — the string actually tested
+    // is the specifier, `expo-secure-store`, lowercase and hyphenated, so that alternative could never
+    // fire. `expo-secure-store` is already a dependency and already imported exactly that way in
+    // `mobile/src/settings/camera-roll-setting.ts`, i.e. it is the NATURAL way to persist something
+    // here and the one the guard was blindest to. Writing the link to the keychain left all 27 tests
+    // green. Case-insensitive now, and matching real module names, so a binding/specifier mismatch
+    // cannot silently retire an alternative again.
+    const STORAGE_MODULES =
+      /draft-store|async-storage|expo-secure-store|expo-file-system|expo-sqlite|react-native-mmkv|@react-native-community\/cookies/i;
     for (const file of [SEND_MODULE, SEND_SCREEN]) {
       const specifiers = importSpecifiers(parse(file));
       for (const specifier of specifiers) {
-        expect(specifier).not.toMatch(/draft-store|async-storage|AsyncStorage|SecureStore|expo-file-system/);
+        expect(specifier).not.toMatch(STORAGE_MODULES);
       }
     }
   });

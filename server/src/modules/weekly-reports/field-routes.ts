@@ -412,8 +412,14 @@ router.post("/reports/:id/send", async (req, res, next) => {
  *
  * `acknowledgeDuplicateRisk` is the caller confirming they understand that past the provider's 24-hour
  * idempotency window a replay is a genuinely second email, not a no-op. Default false: silence must mean
- * the safe answer, on this surface as much as on the CRM's, because the app is where a PM staring at a
- * "Send failed" chip is most likely to press the biggest button on the row.
+ * the safe answer, on this surface as much as on the CRM's.
+ *
+ * ⚠️ NO SCREEN CALLS THIS YET. The route and its client wrapper exist; the UI does not. A sent week
+ * leaves the PM's review queue (`assignments-service.ts` selects only `pending_review`/`approved`) and
+ * `WeeklyReportDetailView` omits `sendError`/`sendAttempts`/`sendDeliveredAt`/`sendLastAttemptAt`, which
+ * the server does return — so there is currently nothing in T-Rock Cam that could show a failed send,
+ * let alone offer a retry. Wiring that is a follow-up. Do not read this docblock as a description of
+ * shipped behaviour.
  */
 router.post("/reports/:id/send/retry", async (req, res, next) => {
   try {
@@ -440,8 +446,14 @@ router.post("/reports/:id/send/retry", async (req, res, next) => {
  * — a correction the PM abandons half-written must not put "a newer version was issued" in front of a
  * client with nothing behind it.
  *
- * This is what makes `sent` survivable from the app. Without it a PM who spotted a wrong figure after
- * sending had no move at all: a sent report is immutable for everyone, leadership included.
+ * This is what will make `sent` survivable from the app — a sent report is immutable for everyone,
+ * leadership included, so a correction is the only move after a wrong figure goes out.
+ *
+ * ⚠️ NO SCREEN CALLS THIS YET, same as the retry above. The route exists and is tested; the app has no
+ * correction control, and a `construction` PM cannot reach the CRM's either (that router is
+ * `admin|director`). So today the honest answer for a PM who spots a mistake is "ask an admin or
+ * director", which is what the send screen now says. Wiring it is a follow-up, and this docblock
+ * describes the route, not shipped product behaviour.
  */
 router.post("/reports/:id/correction", async (req, res, next) => {
   try {
