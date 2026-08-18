@@ -1,5 +1,5 @@
 import PDFDocument from "pdfkit";
-import { WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
+import { WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS, WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
 import { TROCK_LOGO_PNG_BASE64 } from "../field/pdf-logo.js";
 import {
   loadPhotoBuffer,
@@ -96,9 +96,31 @@ const PHOTO_CELL_WIDTH = (CONTENT_WIDTH - PHOTO_COLUMN_GAP * (PHOTO_COLUMNS - 1)
 const PHOTO_CELL_HEIGHT =
   (PHOTO_GRID_BOTTOM - PHOTO_GRID_TOP - PHOTO_ROW_GAP * (PHOTO_ROWS_PER_PAGE - 1)) / PHOTO_ROWS_PER_PAGE;
 const PHOTO_CELL_PAD = 6;
-/** Two lines at CAPTION_FONT_SIZE plus the gap above them. A caption longer than that ellipsises. */
-const PHOTO_CAPTION_HEIGHT = 24;
 const PHOTO_CAPTION_FONT_SIZE = 8;
+const PHOTO_CAPTION_LINE_GAP = 1;
+/**
+ * Ceiling on the caption band, in points — never reached by a caption the API accepts.
+ *
+ * The band is MEASURED per cell (see photoCaptionBandHeight) rather than fixed, so the photograph gets
+ * whatever the caption does not need. It used to be a flat 24pt with `ellipsis: true`, which is what made
+ * the PDF print less of a caption than the web page did.
+ *
+ * Measured, in the shipped Geist at 8pt across the 218pt cell: WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS
+ * characters of "W" — the widest glyph in the font — occupy 102.6pt, nine lines of 11.4. 108 clears that
+ * with the band's own 2pt of slack, so every caption that reaches the renderer fits and the two surfaces
+ * print the same words. Ordinary prose at that length is 57pt, and a normal one-line caption is 11.4pt,
+ * which leaves the photograph MORE room than the old fixed 24pt band did.
+ */
+export const PHOTO_CAPTION_MAX_HEIGHT = 108;
+
+/**
+ * Filler for the ReportRenderablePhoto fields the loader does not read.
+ *
+ * A CONSTANT rather than `new Date().toISOString()`: the render is content-addressed, so nothing inside it
+ * may come from the clock. This particular field never reaches the document — loadPhotoBuffer only looks at
+ * the storage keys and the mime type — but the rule is worth keeping unbroken.
+ */
+const EPOCH_ISO = new Date(0).toISOString();
 
 const BODY_FONT_SIZE = 8.5;
 const BODY_LINE_GAP = 1.5;
@@ -285,6 +307,22 @@ export function boundWeeklyReportSectionText(value: string | null | undefined): 
   const text = typeof value === "string" ? value.trim() : "";
   if (text.length <= MAX_SECTION_RENDER_CHARS) return text;
   return `${text.slice(0, MAX_SECTION_RENDER_CHARS).trimEnd()}\n${TRUNCATION_NOTICE}`;
+}
+
+/**
+ * The exact caption BOTH surfaces print for one photo.
+ *
+ * The section helper's twin, and it should have been written at the same time. The API's own limit, so for
+ * anything written through it this is the trimmed caption unchanged; the slice only ever fires for a row
+ * that predates the limit or was written some other way, and when it does the PDF and the page truncate at
+ * the same character. Returns null, not "", so callers can tell "no caption" from "a caption" — the page
+ * omits the <figcaption> entirely rather than emitting an empty one.
+ */
+export function boundWeeklyReportPhotoCaption(value: string | null | undefined): string | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return null;
+  if (text.length <= WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS) return text;
+  return `${text.slice(0, WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS).trimEnd()}…`;
 }
 
 // --- Primitives ----------------------------------------------------------------------------------
@@ -709,47 +747,72 @@ function drawOverflowPages(
 
 // --- Photo sheets --------------------------------------------------------------------------------
 
-async function drawPhotoCell(
+/**
+ * How much of the cell this caption needs, measured in the font it will actually be drawn in.
+ *
+ * Measured, not assumed, because the alternative is the defect this replaces: a fixed band plus
+ * `ellipsis: true` silently prints less than the web page does, and neither the superintendent who wrote
+ * the caption nor the client reading both surfaces can see that it happened. A photo with no caption gives
+ * the whole cell to the photograph.
+ *
+ * Exported for test: that a BOUNDED caption always fits inside PHOTO_CAPTION_MAX_HEIGHT is the property
+ * that makes the PDF and the page agree, it depends on the shipped font's real metrics, and it cannot be
+ * read off the rendered bytes — the fonts are embedded as subsets, so the drawn text is glyph indices.
+ */
+export function photoCaptionBandHeight(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  caption: string | null,
+): number {
+  if (!caption) return 0;
+  doc.save();
+  doc.font(fonts.regular).fontSize(PHOTO_CAPTION_FONT_SIZE);
+  const needed = doc.heightOfString(caption, {
+    width: PHOTO_CELL_WIDTH - PHOTO_CELL_PAD * 2,
+    lineGap: PHOTO_CAPTION_LINE_GAP,
+    align: "center",
+  });
+  doc.restore();
+  // The clamp cannot bind for a caption bounded by boundWeeklyReportPhotoCaption — see
+  // PHOTO_CAPTION_MAX_HEIGHT — and exists so a caller reaching this function directly still cannot push the
+  // caption through the bottom of the cell.
+  return Math.min(needed + 2, PHOTO_CAPTION_MAX_HEIGHT);
+}
+
+/**
+ * One photo cell, drawn from bytes that have ALREADY been fetched.
+ *
+ * The load moved out to loadPhotoBuffers so the fetches can overlap; the draw stays serial because pdfkit
+ * has one cursor. `buffer` being null means the photo is genuinely unusable — no R2 copy, an oversized
+ * original, or a permanent decode failure — and draws the placeholder. A TRANSIENT failure never reaches
+ * here: loadPhotoBuffers asks for strict handling and the whole render fails instead.
+ *
+ * Why strictness matters on this surface: the artifact is content-addressed and, for a sent report, treated
+ * as frozen — so an R2 timeout or a HEIC decode that fell over under memory pressure would be PUBLISHED as
+ * that report's PDF, served for every later download and attached to the client's email, permanently. The
+ * photos are most of what a client reads a progress report for. Failing loudly means the next download
+ * simply re-renders once the process recovers; a permanent, photo-specific failure still degrades to the
+ * placeholder, which is the case the placeholder is actually for.
+ */
+function drawPhotoCell(
   doc: PDFKit.PDFDocument,
   fonts: ReportFontSet,
   photo: WeeklyReportPdfPhoto,
   x: number,
   y: number,
-  signal: AbortSignal | undefined,
+  buffer: Buffer | null,
 ) {
   doc.save();
   doc.rect(x, y, PHOTO_CELL_WIDTH, PHOTO_CELL_HEIGHT).lineWidth(0.8).strokeColor(BRAND_BORDER).stroke();
   doc.restore();
 
+  // Bounded through the SAME helper the web page uses, and measured before the image is placed so the
+  // photograph gets exactly the room the caption leaves.
+  const caption = boundWeeklyReportPhotoCaption(photo.caption);
+  const captionHeight = photoCaptionBandHeight(doc, fonts, caption);
   const imageWidth = PHOTO_CELL_WIDTH - PHOTO_CELL_PAD * 2;
-  const imageHeight = PHOTO_CELL_HEIGHT - PHOTO_CAPTION_HEIGHT - PHOTO_CELL_PAD * 2;
+  const imageHeight = PHOTO_CELL_HEIGHT - captionHeight - PHOTO_CELL_PAD * 2;
 
-  const buffer = await loadPhotoBuffer(
-    {
-      id: photo.fileId,
-      displayName: photo.fileId,
-      description: photo.caption,
-      takenAt: null,
-      createdAt: new Date().toISOString(),
-      uploaderName: "",
-      projectName: "",
-      tags: [],
-      r2Key: photo.r2Key,
-      externalUrl: photo.externalUrl,
-      externalThumbnailUrl: photo.externalThumbnailUrl,
-      mimeType: photo.mimeType,
-    },
-    signal,
-    // strictStorage: a TRANSIENT storage failure must fail the render, not degrade to a placeholder.
-    //
-    // This artifact is content-addressed and, for a sent report, treated as frozen — so an R2 timeout
-    // that quietly produced "Image unavailable" would be PUBLISHED as that report's PDF and then
-    // served for every later download, and attached to the client's email, permanently. The photos are
-    // most of what a client reads a progress report for. Failing loudly means the next download simply
-    // re-renders once R2 is healthy; a permanent, photo-specific failure still degrades to the
-    // placeholder, which is the case the placeholder is actually for.
-    true,
-  );
   const opened = buffer ? openImageForLayout(doc, buffer, { id: photo.fileId, displayName: photo.fileId }) : null;
 
   let drew = false;
@@ -789,15 +852,16 @@ async function drawPhotoCell(
     doc.restore();
   }
 
-  const caption = photo.caption?.trim();
   if (caption) {
     doc.save();
     doc.font(fonts.regular).fontSize(PHOTO_CAPTION_FONT_SIZE).fillColor(BRAND_BLACK);
-    doc.text(caption, x + PHOTO_CELL_PAD, y + PHOTO_CELL_HEIGHT - PHOTO_CAPTION_HEIGHT - 2, {
+    doc.text(caption, x + PHOTO_CELL_PAD, y + PHOTO_CELL_HEIGHT - captionHeight - PHOTO_CELL_PAD, {
       width: imageWidth,
       align: "center",
-      height: PHOTO_CAPTION_HEIGHT,
-      lineGap: 1,
+      // The band was measured FROM this string, so `ellipsis` is unreachable for it. Both stay as the
+      // backstop that keeps a caption inside its own cell whatever it is handed.
+      height: captionHeight,
+      lineGap: PHOTO_CAPTION_LINE_GAP,
       ellipsis: true,
     });
     doc.restore();
@@ -831,15 +895,111 @@ export function weeklyReportPhotoPageCount(photoCount: number): number {
  * generation onto ONE promise, so a render that never settles means every later request for that report
  * on this process joins the same permanent wait, while each stalled read holds its R2 socket open.
  * A deadline turns "this process slowly stops serving PDFs" into "this download failed, try again".
+ *
+ * SCALED BY THE PHOTO COUNT, because a render is all-or-nothing: the deadline firing on photo 50 throws
+ * away the 49 already fetched and transcoded, nothing is stored, and the next request starts again from
+ * zero. A flat budget therefore does not degrade a big report, it makes it PERMANENTLY undownloadable —
+ * and reports run to MAX_REPORT_PHOTOS (60).
+ *
+ * The numbers are measured rather than guessed. A 12-megapixel phone JPEG costs ~370 ms to transcode
+ * serially (sharp, maxEdge 2000, q82) and ~0.2 ms to embed, so 60 of them is ~22 s of CPU BEFORE any
+ * network — and each original is also a separate R2 GET. loadPhotoBuffers overlaps those (below), which is
+ * what makes the common case comfortable; the per-photo allowance is sized for the case it cannot help,
+ * a HEIC original, whose WASM decode is serialised process-wide on a single permit shared with the field
+ * scorecard and AI-report renders. That decode cost is NOT measured here — heic-convert decodes but
+ * nothing in this repo can produce a HEIC fixture to time it against — so the allowance is deliberately
+ * generous rather than fitted.
  */
-export const WEEKLY_REPORT_RENDER_TIMEOUT_MS = 60_000;
+export const WEEKLY_REPORT_RENDER_BASE_TIMEOUT_MS = 20_000;
+export const WEEKLY_REPORT_RENDER_PER_PHOTO_MS = 3_000;
+/** Hard ceiling. The request is coalesced and IP rate-limited, but it is still an anonymous socket. */
+export const WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS = 240_000;
+
+export function weeklyReportRenderTimeoutMs(photoCount: number): number {
+  const photos = Number.isFinite(photoCount) ? Math.max(0, Math.trunc(photoCount)) : 0;
+  return Math.min(
+    WEEKLY_REPORT_RENDER_BASE_TIMEOUT_MS + photos * WEEKLY_REPORT_RENDER_PER_PHOTO_MS,
+    WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS,
+  );
+}
+
+/**
+ * How many photo originals may be in flight at once.
+ *
+ * The loop below draws serially — pdfkit is a single cursor — but it used to FETCH serially too, so a
+ * 60-photo report paid 60 round trips to R2 end to end with nothing overlapping. Prefetching turns that
+ * into 60/CONCURRENCY, and lets sharp use the libvips thread pool it already has: measured on a 12MP
+ * JPEG, 370 ms/photo serial against ~125 ms/photo effective at this concurrency.
+ *
+ * THREE, not more, because each in-flight photo can hold an original up to MAX_RENDER_SOURCE_BYTES
+ * (40 MB) — and a HEIC one holds it while queuing on the process-wide decode permit, which is exactly the
+ * pile-up the public photo route takes the permit early to avoid. Three bounds it at 120 MB worst case
+ * while removing most of the serial latency.
+ */
+const PHOTO_PREFETCH_CONCURRENCY = 3;
+
+/**
+ * Load every photo's bytes with bounded concurrency, preserving order.
+ *
+ * A rejection propagates: `loadPhotoBuffer` in strict mode throws for a transient storage or transcode
+ * failure, and the render must fail rather than freeze a degraded artifact. Results are held as buffers
+ * only until the draw loop consumes them, which is the same peak pdfkit reaches anyway — it retains every
+ * embedded image for the life of the document.
+ */
+async function loadPhotoBuffers(
+  photos: WeeklyReportPdfPhoto[],
+  signal: AbortSignal | undefined,
+): Promise<Array<Buffer | null>> {
+  const buffers = new Array<Buffer | null>(photos.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= photos.length) return;
+      // Checked per photograph, the way the AI report checks its own budget. The deadline is otherwise only
+      // observed by the layers that accept a signal — an R2 read, a transcode race — so a report whose
+      // photos all resolve from something faster could run right past it and hand back a document nobody is
+      // waiting for any more.
+      signal?.throwIfAborted();
+      const photo = photos[index]!;
+      buffers[index] = await loadPhotoBuffer(
+        {
+          id: photo.fileId,
+          displayName: photo.fileId,
+          description: photo.caption,
+          takenAt: null,
+          createdAt: EPOCH_ISO,
+          uploaderName: "",
+          projectName: "",
+          tags: [],
+          r2Key: photo.r2Key,
+          externalUrl: photo.externalUrl,
+          externalThumbnailUrl: photo.externalThumbnailUrl,
+          mimeType: photo.mimeType,
+        },
+        signal,
+        // strictTransient — see drawPhotoCell for why this artifact may not be allowed to degrade.
+        true,
+      );
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(PHOTO_PREFETCH_CONCURRENCY, photos.length) }, () => worker()),
+  );
+  // And once at the end, for the last photo — which has no next iteration to be checked at the top of.
+  // Without it a render that spent its whole budget on a single slow original still went on to assemble and
+  // publish a document, and the caller could not tell the deadline had been missed at all.
+  signal?.throwIfAborted();
+  return buffers;
+}
 
 export async function renderWeeklyReportPdf(
   data: WeeklyReportPdfData,
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<Buffer> {
   // A caller-supplied signal still applies; the deadline is an additional upper bound, not a replacement.
-  const deadline = AbortSignal.timeout(options.timeoutMs ?? WEEKLY_REPORT_RENDER_TIMEOUT_MS);
+  const deadline = AbortSignal.timeout(options.timeoutMs ?? weeklyReportRenderTimeoutMs(data.photos.length));
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
 
   const doc = new PDFDocument({
@@ -862,20 +1022,26 @@ export async function renderWeeklyReportPdf(
   const overflow = drawSummaryPage(doc, fonts, data);
   drawOverflowPages(doc, fonts, data, overflow);
 
+  // Every original fetched and transcoded FIRST, with bounded concurrency, then drawn. Fetching inside the
+  // draw loop made the two serial together: 60 photos meant 60 round trips end to end, and the render
+  // deadline firing on the last of them threw away the other 59.
+  const photoBuffers = await loadPhotoBuffers(data.photos, signal);
+  let photoIndex = 0;
   for (const pagePhotos of chunkPhotos(data.photos)) {
     doc.addPage();
     drawHeaderBand(doc, fonts, "Weekly Progress Photos", data);
     for (const [cellIndex, photo] of pagePhotos.entries()) {
       const column = cellIndex % PHOTO_COLUMNS;
       const row = Math.floor(cellIndex / PHOTO_COLUMNS);
-      await drawPhotoCell(
+      drawPhotoCell(
         doc,
         fonts,
         photo,
         CONTENT_LEFT + column * (PHOTO_CELL_WIDTH + PHOTO_COLUMN_GAP),
         PHOTO_GRID_TOP + row * (PHOTO_CELL_HEIGHT + PHOTO_ROW_GAP),
-        signal,
+        photoBuffers[photoIndex] ?? null,
       );
+      photoIndex += 1;
     }
   }
 

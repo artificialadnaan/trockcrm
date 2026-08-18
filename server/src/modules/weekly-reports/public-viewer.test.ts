@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
-import { boundWeeklyReportSectionText } from "./pdf.js";
+import {
+  WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
+  WEEKLY_REPORT_SECTION_MAX_CHARS,
+} from "@trock-crm/shared/types";
+import { boundWeeklyReportPhotoCaption, boundWeeklyReportSectionText } from "./pdf.js";
 import {
   escapeHtml,
   renderWeeklyReportUnavailableHtml,
@@ -104,6 +107,29 @@ describe("the client-facing report page", () => {
     const html = render({ workCompleted: long });
     expect(html).toContain(boundWeeklyReportSectionText(long));
     expect(html).not.toContain(long);
+  });
+
+  it("prints a CAPTION through the SAME bound the PDF uses", () => {
+    // The half that was missed when the sections were fixed. The API took 500 characters and the picker
+    // pre-fills a caption from the file's description, while the PDF drew it into a fixed two-line box
+    // with `ellipsis: true` — so a long caption appeared here in full and truncated in the attachment.
+    const long = "q".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS + 120);
+    const html = render({
+      photos: [
+        {
+          fileId: "file-1",
+          caption: long,
+          r2Key: null,
+          externalUrl: null,
+          externalThumbnailUrl: null,
+          mimeType: null,
+        },
+      ],
+    });
+    expect(html).toContain(`<figcaption>${boundWeeklyReportPhotoCaption(long)}</figcaption>`);
+    expect(html).not.toContain(long);
+    // The alt text is the caption too, and must be bounded with it rather than left as the raw value.
+    expect(html).not.toMatch(new RegExp(`alt="q{${WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS + 1},}"`));
   });
 
   it("offers the PDF and loads photos through the token, never from R2 directly", () => {

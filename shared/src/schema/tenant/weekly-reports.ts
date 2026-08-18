@@ -155,6 +155,12 @@ export const weeklyReports = pgTable(
     pdfR2Key: text("pdf_r2_key"),
     pdfR2Bucket: text("pdf_r2_bucket"),
     pdfGeneratedAt: timestamp("pdf_generated_at", { withTimezone: true }),
+    /** The CONTENT GENERATION the stored bytes were rendered from, captured before the render started —
+     *  not when they finished. Staleness is decided against this, never against pdfGeneratedAt: before send
+     *  the generation covers rows (the setup row, the named users, the selected files) that move without
+     *  touching updatedAt, so a wall-clock stamp taken after the render silently swallows anything that
+     *  changed while it ran. Added by 0224; see pdf-artifact.ts. */
+    pdfContentGeneration: timestamp("pdf_content_generation", { withTimezone: true }),
     pdfRenderVersion: integer("pdf_render_version").default(0).notNull(),
     /** Surfaced as a "Send failed" chip with retry. The scorecard email path is fire-and-forget; here a
      *  silent failure means a client never received their report and nobody finds out. */

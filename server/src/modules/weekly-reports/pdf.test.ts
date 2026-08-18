@@ -1,15 +1,24 @@
 import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
+import PDFDocument from "pdfkit";
 import {
+  WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
+  WEEKLY_REPORT_SECTION_MAX_CHARS,
+} from "@trock-crm/shared/types";
+import { registerReportFonts } from "../field/pdf-layout.js";
+import {
+  PHOTO_CAPTION_MAX_HEIGHT,
   WEEKLY_REPORT_PHOTOS_PER_PAGE,
   WEEKLY_REPORT_SUPERSEDED_NOTICE,
+  boundWeeklyReportPhotoCaption,
   boundWeeklyReportSectionText,
   formatWeeklyReportDate,
+  photoCaptionBandHeight,
   renderWeeklyReportPdf,
   splitTextAtHeight,
   weeklyReportPhotoPageCount,
+  weeklyReportRenderTimeoutMs,
   weeklyReportScheduleValue,
   type WeeklyReportPdfData,
 } from "./pdf.js";
@@ -311,5 +320,86 @@ describe("renderWeeklyReportPdf", () => {
     // Single-line + ellipsis everywhere it is printed, so it can never push the black header box down the
     // page or spawn an overflow sheet of its own.
     expect(pdfPageCount(pdf)).toBe(1);
+  });
+});
+
+describe("photo captions", () => {
+  /** A real document with the shipped Geist registered — the only way to measure what will be drawn. */
+  function measuringDoc() {
+    const doc = new PDFDocument({ size: [792, 612], margin: 0 });
+    doc.on("data", () => {});
+    return { doc, fonts: registerReportFonts(doc) };
+  }
+
+  it("bounds both surfaces at exactly the limit the API enforces", () => {
+    // The section helper's twin, and the gap this closes: the API accepted 500 characters while the PDF
+    // drew the caption into a fixed two-line box with `ellipsis: true`, so a long caption printed in full
+    // on the client's web page and truncated in the PDF attached to the same email.
+    const atLimit = "x".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS);
+    expect(boundWeeklyReportPhotoCaption(atLimit)).toBe(atLimit);
+
+    const overLimit = "y".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS + 40);
+    const bounded = boundWeeklyReportPhotoCaption(overLimit)!;
+    expect(bounded.length).toBeLessThanOrEqual(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS + 1);
+    expect(bounded.endsWith("…")).toBe(true);
+
+    // "No caption" stays distinguishable from "an empty caption": the page omits the <figcaption> entirely.
+    expect(boundWeeklyReportPhotoCaption("   ")).toBeNull();
+    expect(boundWeeklyReportPhotoCaption(null)).toBeNull();
+  });
+
+  it("gives every bounded caption room to print IN FULL, worst case included", () => {
+    // THE property that makes the two surfaces agree, measured against the shipped font rather than
+    // assumed. The band is min(measured, PHOTO_CAPTION_MAX_HEIGHT); if the measurement could exceed the
+    // ceiling the clamp would bind, `ellipsis: true` would fire, and the PDF would once again say less
+    // than the page. "W" is the widest glyph Geist has at this size, so this is the true upper bound —
+    // it fails if the character limit is raised or the band is shrunk without the other moving.
+    const { doc, fonts } = measuringDoc();
+    const worstCase = boundWeeklyReportPhotoCaption("W".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS))!;
+    expect(photoCaptionBandHeight(doc, fonts, worstCase)).toBeLessThan(PHOTO_CAPTION_MAX_HEIGHT);
+    doc.end();
+  });
+
+  it("takes only the room the caption needs, so a short one leaves the photograph the cell", () => {
+    // The band used to be a flat 24pt whatever the caption said. Adapting it is what buys the space a
+    // long caption needs without charging every other photo for it.
+    const { doc, fonts } = measuringDoc();
+    const none = photoCaptionBandHeight(doc, fonts, null);
+    const short = photoCaptionBandHeight(doc, fonts, "Balcony mock-up complete");
+    const long = photoCaptionBandHeight(doc, fonts, "W".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS));
+    expect(none).toBe(0);
+    expect(short).toBeLessThan(24);
+    expect(long).toBeGreaterThan(short);
+    doc.end();
+  });
+
+  it("prints more of a long caption than the old two-line box could hold", async () => {
+    // Read off the CONTENT STREAMS rather than the page count: a caption never changes how many pages a
+    // photo sheet is, so a page-count assertion here would pass with the truncation still in place.
+    const long = "Balcony mock-up complete on the north elevation, waterproofing membrane inspected and signed off by the third-party consultant ahead of tile.";
+    const withLongCaption = await renderWeeklyReportPdf(
+      data({ photos: [{ ...photos(1)[0]!, caption: long }] }),
+    );
+    const withShortCaption = await renderWeeklyReportPdf(
+      data({ photos: [{ ...photos(1)[0]!, caption: "Balcony" }] }),
+    );
+    // Each drawn line is its own text run, so a caption printed over several lines shows up as several.
+    expect(pdfTextRuns(withLongCaption)).toBeGreaterThan(pdfTextRuns(withShortCaption) + 1);
+  });
+});
+
+describe("the render budget", () => {
+  it("scales with the photo count instead of giving sixty photos what one gets", () => {
+    // A render is all-or-nothing: the deadline firing on photo 50 throws away the 49 already fetched and
+    // transcoded and stores nothing, so a flat budget does not degrade a big report, it makes it
+    // permanently undownloadable. Measured at ~370ms of transcode per 12MP original before any network.
+    expect(weeklyReportRenderTimeoutMs(60)).toBeGreaterThan(weeklyReportRenderTimeoutMs(1));
+    expect(weeklyReportRenderTimeoutMs(60)).toBeGreaterThan(60_000);
+    // …and is still bounded, because the socket on the other end is anonymous.
+    expect(weeklyReportRenderTimeoutMs(10_000)).toBe(weeklyReportRenderTimeoutMs(60_000));
+    // Degenerate inputs cannot produce a zero or negative deadline, which would abort instantly.
+    expect(weeklyReportRenderTimeoutMs(0)).toBeGreaterThan(0);
+    expect(weeklyReportRenderTimeoutMs(-5)).toBeGreaterThan(0);
+    expect(weeklyReportRenderTimeoutMs(Number.NaN)).toBeGreaterThan(0);
   });
 });

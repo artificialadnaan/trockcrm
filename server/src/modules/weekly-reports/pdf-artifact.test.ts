@@ -13,13 +13,14 @@ import {
 
 const DIGEST = "a".repeat(64);
 const V = CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION;
+/** The content generation the stored bytes were rendered FROM — not a clock reading of when. */
 const RENDERED_AT = new Date("2026-08-14T10:00:00.000Z");
 
 function state(overrides: Partial<WeeklyReportPdfArtifactState> = {}): WeeklyReportPdfArtifactState {
   return {
     pdfR2Key: weeklyReportPdfR2Key("dallas", "DFW-10432", "deal-1", "report-1", V, DIGEST),
     pdfRenderVersion: V,
-    pdfGeneratedAt: RENDERED_AT,
+    pdfContentGeneration: RENDERED_AT,
     updatedAt: RENDERED_AT,
     liveInputGeneration: new Date(RENDERED_AT.getTime() - 60_000),
     // The default is a SENT report.
@@ -103,8 +104,10 @@ describe("needsWeeklyReportPdfRegeneration", () => {
     ).toBe(true);
   });
 
-  it("regenerates when nothing was ever rendered but a key exists", () => {
-    expect(needsWeeklyReportPdfRegeneration(state({ pdfGeneratedAt: null }))).toBe(true);
+  it("regenerates when a key exists but records no generation", () => {
+    // Never rendered, or rendered by an instance that predates the pdf_content_generation column (0224).
+    // Either way nothing vouches for those bytes, so they are re-made once rather than trusted.
+    expect(needsWeeklyReportPdfRegeneration(state({ pdfContentGeneration: null }))).toBe(true);
   });
 
   it("repairs a key/version mismatch left by a mid-deploy write", () => {

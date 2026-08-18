@@ -1,4 +1,8 @@
-import { boundWeeklyReportSectionText, type WeeklyReportPdfContact } from "./pdf.js";
+import {
+  boundWeeklyReportPhotoCaption,
+  boundWeeklyReportSectionText,
+  type WeeklyReportPdfContact,
+} from "./pdf.js";
 import type { WeeklyReportView } from "./report-view.js";
 
 // The page behind the client's link: server-rendered HTML, no JavaScript, no build step.
@@ -207,14 +211,16 @@ export function renderWeeklyReportViewerHtml(input: WeeklyReportViewerHtmlInput)
 
   const photos = pdf.photos.length
     ? `<section class="card"><h2>Weekly Progress Photos</h2><div class="photos">${pdf.photos
-        .map(
-          (photo) =>
-            `<figure class="photo"><img src="${escapeHtml(input.photoUrl(photo.fileId))}" alt="${escapeHtml(
-              photo.caption ?? "Progress photo",
-            )}" loading="lazy">${
-              photo.caption?.trim() ? `<figcaption>${escapeHtml(photo.caption.trim())}</figcaption>` : ""
-            }</figure>`,
-        )
+        .map((photo) => {
+          // Bounded through the SAME helper the PDF uses, for the reason `section` above is: the API took
+          // 500 characters while the renderer drew the caption into a two-line box and ellipsised it, so a
+          // long caption printed in full here and truncated in the attachment — on the one surface a client
+          // compares side by side.
+          const caption = boundWeeklyReportPhotoCaption(photo.caption);
+          return `<figure class="photo"><img src="${escapeHtml(input.photoUrl(photo.fileId))}" alt="${escapeHtml(
+            caption ?? "Progress photo",
+          )}" loading="lazy">${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ""}</figure>`;
+        })
         .join("")}</div></section>`
     : "";
 

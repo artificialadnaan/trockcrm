@@ -8,13 +8,18 @@
 //     key also carries the SHA-256 of the finished bytes. A loser leaves an orphan object; it can never
 //     overwrite the object the winner published.
 //
-// The one deliberate difference is the staleness check. field_scorecards carries a dedicated
-// `pdf_content_generation` column; weekly_reports (0222) does not, so the comparison is a CONTENT
-// GENERATION — `updated_at`, widened before send to cover the rows the render reads live — against
-// `pdf_generated_at`. That works because the persist statement stamps ONLY pdf_generated_at and is
-// conditioned on updated_at not having moved, so an edit after a render leaves the generation later and the
-// artifact reads stale. See isRenderedGenerationCurrent for the one narrow interleaving where Postgres's
-// transaction-start `now()` defeats that, and why it is tolerated.
+// Staleness is decided by comparing two CONTENT GENERATIONS, never a generation against a clock. The
+// report's current generation is `updated_at`, widened before send to cover the rows the render reads live;
+// the stored artifact's is `pdf_content_generation` (0224), which records the generation the bytes were
+// rendered FROM — captured before the render starts, not stamped when it finishes.
+//
+// That distinction is the whole point, and getting it wrong is not a millisecond race. A render takes as
+// long as it takes to download and transcode every photo; a photo soft-deleted or a superintendent swapped
+// while it runs moves none of the timestamps a report-row CAS can see. Stamping wall-clock time on
+// completion therefore records an instant LATER than a change the bytes do not contain, and every later
+// read calls the artifact current — permanently, because `approved` is where a shared report sits and
+// nothing moves `updated_at` again. Recording what was rendered instead leaves the live generation ahead of
+// the stored one, so the next read classifies it stale and re-renders. See 0224.
 
 import { createHash } from "node:crypto";
 
@@ -27,8 +32,10 @@ import { createHash } from "node:crypto";
  *
  * v2: long sections flow onto continuation pages instead of stopping at 6,000 characters, and a superseded
  * report prints its notice.
+ * v3: a photo's caption band is MEASURED rather than fixed at two lines, so the PDF prints the same caption
+ * the web page does; the photograph takes whatever the caption leaves.
  */
-export const CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION = 2;
+export const CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION = 3;
 
 /** The key segment that records a render made while the report was already superseded. */
 const SUPERSEDED_KEY_MARKER = ".superseded";
@@ -82,8 +89,16 @@ export function weeklyReportPdfDigest(pdf: Buffer): string {
 export interface WeeklyReportPdfArtifactState {
   pdfR2Key: string | null;
   pdfRenderVersion: number;
-  /** When the stored bytes were rendered. Null for a report that has never been rendered. */
-  pdfGeneratedAt: Date | string | null;
+  /**
+   * The content generation the stored bytes were rendered FROM, read back off the row. Null for a report
+   * that has never been rendered — and for one whose key predates 0224, which reads stale and re-renders
+   * once.
+   *
+   * NOT "when the render finished". The publisher captures this before the render begins and writes that
+   * value verbatim, so a change landing mid-render stays visible as a generation the artifact does not
+   * cover. See the file header.
+   */
+  pdfContentGeneration: Date | string | null;
   /** The report's current `updated_at`. Null only when the row could not be read. */
   updatedAt: Date | string | null;
   /**
@@ -165,8 +180,12 @@ export function classifyWeeklyReportArtifact(
  *
  * `weekly_reports.updated_at` alone before send, widened by the generations of every other row the render
  * reads live — see WeeklyReportPdfArtifactState.liveInputGeneration for why they have to count and why they
- * stop counting once the report is frozen. Exported because the render coalescer keys on it too: two
- * requests either side of a header edit want different documents and must not share one in-flight render.
+ * stop counting once the report is frozen.
+ *
+ * The ONE definition of a generation, used three ways so they cannot drift: the render coalescer keys on it
+ * (two requests either side of a header edit want different documents and must not share one in-flight
+ * render), the publisher WRITES the value it read into pdf_content_generation, and the comparison above
+ * reads it back. Anything that changes what the render sees must move this, or a cached PDF outlives it.
  */
 export function weeklyReportContentGeneration(state: WeeklyReportPdfArtifactState): Date | string | null {
   if (state.updatedAt == null) return null;
@@ -179,30 +198,24 @@ export function weeklyReportContentGeneration(state: WeeklyReportPdfArtifactStat
 /**
  * Was the stored artifact rendered from the report's current content?
  *
+ * BOTH SIDES ARE CONTENT GENERATIONS. The left is what the report says now, the right is what the stored
+ * bytes were rendered from; neither is a wall-clock reading of when any work happened. That is what makes
+ * the comparison total rather than approximate — every input the render reads either moves the current
+ * generation or is frozen, so an artifact that does not cover a change cannot read as covering it.
+ *
  * A null CURRENT generation means the row could not be read — treated as current so an unreadable report
  * cannot spin a download in an endless regenerate loop; the caller's own 404 handling owns that case.
  *
  * Compared at MILLISECOND precision, because node-postgres materialises timestamps as millisecond Date
- * objects while Postgres retains microseconds. `<=` rather than `<`: the publish transaction can begin
- * inside the same millisecond as the edit it rendered, and a strict comparison would then call a
- * freshly-published artifact stale on the very next read and re-render on every download forever.
- *
- * KNOWN NARROW RACE, tolerated deliberately. Postgres `now()` is TRANSACTION-START time, so an edit
- * transaction that began before the publish transaction but commits after the publication CAS stamps an
- * `updated_at` earlier than the `pdf_generated_at` just written — and this then reads as current though the
- * content moved. It requires an edit request to span the publish transaction's few milliseconds exactly;
- * any earlier commit fails the CAS cleanly instead. It also self-heals: moving the report to `sent` writes
- * `updated_at` again in a later transaction, so the PDF the client actually receives is re-rendered from
- * current content. A live-header edit racing the publish the same way is not even covered by the CAS, which
- * conditions on the report row alone — the same few-millisecond window, and the same self-heal at send.
- * Closing either properly would mean a dedicated content-generation column (as field_scorecards has),
- * which 0222 does not carry.
+ * objects while Postgres retains microseconds. `<=` rather than `<`: the publisher writes the generation it
+ * read, so a quiet report compares exactly EQUAL on every subsequent read, and a strict comparison would
+ * call every freshly-published artifact stale and re-render on every download forever.
  */
 function isRenderedGenerationCurrent(state: WeeklyReportPdfArtifactState): boolean {
   const generation = weeklyReportContentGeneration(state);
   if (generation == null) return true;
-  if (state.pdfGeneratedAt == null) return false;
-  const rendered = toEpochMillis(state.pdfGeneratedAt);
+  if (state.pdfContentGeneration == null) return false;
+  const rendered = toEpochMillis(state.pdfContentGeneration);
   const current = toEpochMillis(generation);
   if (Number.isNaN(rendered) || Number.isNaN(current)) return false;
   return current <= rendered;

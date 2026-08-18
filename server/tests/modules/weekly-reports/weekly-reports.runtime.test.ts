@@ -11,7 +11,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
-import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import { WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../../src/middleware/error-handler.js";
@@ -142,6 +142,7 @@ beforeAll(async () => {
   // The migrations under test — DO-loop, public tables and TENANT_SCHEMA block, verbatim from disk.
   await pg.exec(migrationSql("0222_weekly_reports"));
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
+  await pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -257,6 +258,28 @@ describe("migration 0222", () => {
   it("allows only one live setup per deal", async () => {
     await seedProject();
     await expectAppError(seedProject(), 409, /already has a weekly report setup/i);
+  });
+});
+
+describe("migration 0224", () => {
+  it("is replayable — running it a second time is a no-op, not an error", async () => {
+    await expect(
+      pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation")),
+    ).resolves.toBeDefined();
+  });
+
+  it("adds pdf_content_generation, which the artifact classifier reads on every download", async () => {
+    // Not decoration: staleness is decided by comparing this against the report's live content generation.
+    // A schema without it makes every PDF read fail on a missing column, and a schema where only ONE of the
+    // DO-loop and the TENANT_SCHEMA block carries it gives new offices a different answer than Dallas.
+    const result = await pg.query<{ data_type: string }>(
+      `SELECT data_type FROM information_schema.columns
+        WHERE table_schema = 'office_dallas'
+          AND table_name = 'weekly_reports'
+          AND column_name = 'pdf_content_generation'`,
+    );
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]!.data_type).toBe("timestamp with time zone");
   });
 });
 
@@ -761,6 +784,41 @@ describe("photos", () => {
     // Falling back to the description here would silently revert the user's edit on every reload.
     expect(after[0]!.caption).toBe("edited for the client");
     expect(after[0]!.selected).toBe(true);
+  });
+
+  it("bounds a caption at the limit BOTH renderers honour, and pre-fills within it", async () => {
+    // The API took 500 characters while the PDF drew the caption into a fixed two-line box and ellipsised
+    // the rest, so the client's page and the PDF attached to the same email disagreed about what the
+    // superintendent wrote. One shared limit now, enforced here as well as in both renderers.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    const photo = await seedPhoto({ takenAt: "2026-08-11" });
+
+    await expectAppError(
+      replaceWeeklyReportPhotos(
+        db,
+        id,
+        [{ fileId: photo, caption: "x".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS + 1) }],
+        SUPER_ACTOR,
+      ),
+      400,
+      /limited to/i,
+    );
+    // Exactly at the limit is accepted — an off-by-one here would reject a caption both renderers can print.
+    await replaceWeeklyReportPhotos(
+      db,
+      id,
+      [{ fileId: photo, caption: "y".repeat(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS) }],
+      SUPER_ACTOR,
+    );
+
+    // And the DEFAULT the picker offers is cut to fit. files.description has no such limit, so a photo
+    // captured with a long one used to pre-fill the form with a value that 400s the moment it is saved.
+    const wordy = await seedPhoto({ takenAt: "2026-08-11", description: "z".repeat(600) });
+    const candidate = (await listWeeklyReportPhotoCandidates(db, id)).find((c) => c.fileId === wordy);
+    expect(candidate!.caption!.length).toBe(WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS);
+    // The untouched capture description is still reported in full — only the suggested caption is cut.
+    expect(candidate!.originalDescription).toHaveLength(600);
   });
 
   it("flags a photo already used on an earlier report", async () => {

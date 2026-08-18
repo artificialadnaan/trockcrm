@@ -32,6 +32,14 @@ const harness = vi.hoisted(() => ({
   puts: 0,
   /** The options getObjectStream was called with, so the PDF route's deadline is observable. */
   streamOptions: [] as Array<{ signal?: AbortSignal } | undefined>,
+  /**
+   * Run INSIDE a photo read, i.e. in the middle of a render.
+   *
+   * The only way to test the window that matters: a change landing between the read that starts a render
+   * and the publish that ends it moves none of the timestamps the report row carries, and a test that
+   * mutates between two complete request cycles never reaches it.
+   */
+  duringPhotoRead: null as null | (() => Promise<void>),
 }));
 
 // The pool, pointed at PGlite. `connect()` hands back the same underlying connection every time, which is
@@ -65,6 +73,9 @@ vi.mock("../../../src/lib/r2-client.js", async (importOriginal) => {
     },
     getObjectBuffer: async (key: string) => {
       harness.trace.push("read-original");
+      // The interleave point. A render spends its whole life here — one read and transcode per photo — so
+      // this is where a change that lands DURING a render belongs in a test.
+      if (harness.duringPhotoRead) await harness.duringPhotoRead();
       const buffer = harness.objects.get(key);
       if (!buffer) throw new Error(`missing object ${key}`);
       return { buffer, contentType: "image/jpeg" };
@@ -98,6 +109,12 @@ import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { weeklyReportPublicRoutes, withDeadline } from "../../../src/modules/weekly-reports/public-routes.js";
 import { CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION } from "../../../src/modules/weekly-reports/pdf-artifact.js";
+import {
+  loadWeeklyReportPdfSource,
+  publishWeeklyReportPdf,
+  resetWeeklyReportRenderBackoff,
+} from "../../../src/modules/weekly-reports/pdf-service.js";
+import { WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS } from "@trock-crm/shared/types";
 import {
   createWeeklyReportProject,
   updateWeeklyReportProject,
@@ -150,6 +167,9 @@ beforeAll(async () => {
   // 0223 too. Nothing in the PDF path reads weekly_report_pauses today, but the cadence helpers
   // these suites reach through do, and two sibling suites already failed exactly this way.
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
+  // 0224 adds weekly_reports.pdf_content_generation, which the artifact classifier and the publication CAS
+  // both read. Without it every PDF assertion below fails on a missing column rather than on its subject.
+  await pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation"));
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
     INSERT INTO public.users (id, display_name, email, role, office_id) VALUES
@@ -177,6 +197,9 @@ beforeEach(async () => {
   harness.r2Configured = true;
   harness.puts = 0;
   harness.streamOptions.length = 0;
+  harness.duringPhotoRead = null;
+  // Process-local, and a deadline remembered by one case would refuse the next case's render.
+  resetWeeklyReportRenderBackoff();
   await harness.pg.exec(`
     DELETE FROM public.weekly_report_tokens;
     DELETE FROM office_dallas.weekly_report_photos;
@@ -541,7 +564,7 @@ describe("GET /wr/:token/pdf", () => {
     expect(artifactKeys()).toHaveLength(2);
   });
 
-  it("re-renders an approved report when a photo is soft-deleted out from under it", async () => {
+  it("re-renders an approved report when a photo is soft-deleted out from under it, then settles", async () => {
     // The other live input, and the awkward one: a soft delete stamps files.deleted_at and leaves
     // updated_at alone, so counting only live photos would miss the very change that drops one from the
     // document. The page filters deleted photos out on every read; a cached PDF would keep showing it.
@@ -549,13 +572,73 @@ describe("GET /wr/:token/pdf", () => {
     await request(app).get(`/wr/${rawToken}/pdf`);
     expect(harness.puts).toBe(1);
 
+    // A REAL now(), and the settling assertion below is why it has to be. This used to stamp
+    // `now() + interval '1 second'`, which parks the live generation permanently ahead of anything the
+    // publisher can record — so "it re-rendered once" passed, and would have gone on passing if the code
+    // re-rendered on EVERY request forever, which is the thrash the caching change exists to prevent.
     await harness.pg.query(
-      `UPDATE office_dallas.files SET is_active = false, deleted_at = now() + interval '1 second' WHERE id = $1::uuid`,
+      `UPDATE office_dallas.files SET is_active = false, deleted_at = now() WHERE id = $1::uuid`,
       [photoId],
     );
 
     expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
     expect(harness.puts).toBe(2);
+
+    // …and then it settles. The artifact records the generation it was rendered from, which now covers the
+    // delete, so a further download streams it rather than making a third object nothing will ever delete.
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(2);
+  });
+
+  it("never freezes a change that lands DURING the render into the cached PDF", async () => {
+    // THE defect. The generation was widened on the READ side only: the publish stamped pdf_generated_at =
+    // now() — wall-clock, taken after the render — and its CAS was conditioned on weekly_reports.updated_at
+    // alone. A photo soft-deleted while the render ran therefore moved nothing the CAS could see, and left
+    // deleted_at EARLIER than the stamp, so every later read called the artifact current. The client's page
+    // showed no photo and the PDF behind the same link showed one, indefinitely, on a report that sits in
+    // `approved` with nothing that would ever move updated_at again.
+    //
+    // The delete is interleaved into the middle of the render — not between two requests, which is the
+    // window the sibling test above misses.
+    const { rawToken, reportId, photoId } = await seedSharedReport({ send: false });
+    harness.duringPhotoRead = async () => {
+      harness.duringPhotoRead = null;
+      await harness.pg.query(
+        `UPDATE office_dallas.files SET is_active = false, deleted_at = now() WHERE id = $1::uuid`,
+        [photoId],
+      );
+    };
+
+    const first = await request(app).get(`/wr/${rawToken}/pdf`);
+    // The hook cleared itself, so the render really did read the photo before the delete landed.
+    expect(harness.duringPhotoRead).toBeNull();
+    // The render's own bytes are of a week that has already moved on, so they are not served: the row now
+    // records the generation they cover, and the retry below re-renders from what the report says now.
+    expect(first.status).toBe(503);
+
+    // The web page reads live, and shows no photographs at all.
+    const page = await request(app).get(`/wr/${rawToken}`);
+    expect(page.status).toBe(200);
+    expect(page.text).not.toContain("<figure");
+
+    // The stored artifact must NOT read as current — it describes a photograph the report no longer has.
+    expect((await loadWeeklyReportPdfSource(db, reportId))!.recheck).toBe("stale");
+
+    // And the repair is real, asserted on CONTENT rather than on a count: a render of a report with no
+    // photos reads no originals at all. A stale artifact served as current would leave this empty because
+    // nothing re-rendered; a correct re-render leaves it empty because there is nothing left to fetch, so
+    // the upload count is asserted alongside it.
+    const putsBefore = harness.puts;
+    harness.trace.length = 0;
+    const second = await request(app).get(`/wr/${rawToken}/pdf`);
+    expect(second.status).toBe(200);
+    expect(harness.puts).toBe(putsBefore + 1);
+    expect(harness.trace.filter((entry) => entry === "read-original")).toEqual([]);
+
+    // Settled: the artifact now covers everything, so a further download renders nothing new.
+    const settled = harness.puts;
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(settled);
   });
 
   it("stamps a superseded report's PDF, under a key that says which rendering it is", async () => {
@@ -592,6 +675,75 @@ describe("GET /wr/:token/pdf", () => {
     expect(harness.streamOptions[0]?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("fails the render rather than freezing 'Image unavailable' into the artifact", async () => {
+    // strictStorage covered the OBJECT READ only. The transcode catch below it degraded unconditionally,
+    // and untranscodedFallback returns null for every non-JPEG/PNG original — so an iPhone HEIC whose
+    // decode fell over (heic-convert is WASM, concurrency 1, shared with the field scorecard and AI-report
+    // renders) produced a placeholder tile, a SUCCESSFUL render, and a content-addressed artifact that a
+    // sent report never re-makes. The client's permanent record of the week would have a hole in it while
+    // the web page, which re-encodes on demand, showed the photograph perfectly well.
+    //
+    // The fixture is JPEG bytes labelled image/heic, which is what the decoder actually rejects. That
+    // makes this a PERMANENT failure being treated as if it might be transient — the deliberate side of a
+    // distinction nothing can make from inside the catch. Failing loudly is recoverable (the PM sees the
+    // download fail and can swap the photo); a frozen artifact with a hole in it is not.
+    const { rawToken, reportId } = await seedSharedReport({ send: false });
+    const undecodable = await seedPhoto("Shot on a phone", "image/heic");
+    await harness.pg.query(
+      `INSERT INTO office_dallas.weekly_report_photos (weekly_report_id, file_id, caption, sort_order)
+       VALUES ($1::uuid, $2::uuid, 'Shot on a phone', 1)`,
+      [reportId, undecodable],
+    );
+
+    const response = await request(app).get(`/wr/${rawToken}/pdf`);
+    expect(response.status).toBe(503);
+    // NOTHING was stored — not "one object instead of two". A degraded document must never become the
+    // artifact, because for a sent report nothing will ever replace it.
+    expect(harness.puts).toBe(0);
+    expect(artifactKeys()).toEqual([]);
+    const row = await harness.pg.query(
+      `SELECT pdf_r2_key FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+      [reportId],
+    );
+    expect((row.rows[0] as any).pdf_r2_key).toBeNull();
+  });
+
+  it("does not pay for the render again after one has already run out of time", async () => {
+    // `/wr/:token/pdf` is anonymous and a render that exceeds its deadline stores NOTHING, so every retry
+    // used to re-enter the publisher and pay the whole budget again — downloading and transcoding every
+    // photo up to the moment it was abandoned. One reader with an impatient finger could keep a worker
+    // busy indefinitely. MAX_REPORT_PHOTOS is 60, each an R2 round trip plus a transcode.
+    const { rawToken, reportId } = await seedSharedReport({ send: false });
+    // Slow enough to blow the budget below; the budget is shortened rather than the stall lengthened so
+    // the test costs milliseconds. AbortSignal.timeout is not driven by vitest's fake timers.
+    harness.duringPhotoRead = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    };
+    const source = (await loadWeeklyReportPdfSource(db, reportId))!;
+
+    await expect(publishWeeklyReportPdf("dallas", source, { renderTimeoutMs: 5 })).rejects.toMatchObject({
+      statusCode: 503,
+      code: "WEEKLY_REPORT_PDF_RENDER_TIMED_OUT",
+    });
+    expect(harness.puts).toBe(0);
+
+    // The retry is refused WITHOUT re-rendering, asserted on the work not done rather than on how long it
+    // took: a second render would read the original again, and the trace records every read.
+    harness.trace.length = 0;
+    await expect(publishWeeklyReportPdf("dallas", source, { renderTimeoutMs: 5 })).rejects.toMatchObject({
+      statusCode: 503,
+      code: "WEEKLY_REPORT_PDF_RENDER_TIMED_OUT",
+    });
+    expect(harness.trace).toEqual([]);
+    expect(harness.puts).toBe(0);
+
+    // …and the backoff is a delay, not a tombstone: once it lapses the report renders normally again.
+    resetWeeklyReportRenderBackoff();
+    harness.duringPhotoRead = null;
+    expect((await request(app).get(`/wr/${rawToken}/pdf`)).status).toBe(200);
+    expect(harness.puts).toBe(1);
+  });
+
   it("refuses the PDF of a report pulled back for rework", async () => {
     const { rawToken, reportId } = await seedSharedReport({ send: false });
     await transitionWeeklyReport(db, reportId, "pending_review", PM_ACTOR);
@@ -609,16 +761,55 @@ describe("withDeadline", () => {
     await expect(withDeadline(new Promise<never>(() => {}), AbortSignal.timeout(5))).rejects.toThrow();
   });
 
+  /**
+   * Watch for an unhandled rejection while `body` runs, and report what Node actually emitted.
+   *
+   * Asserting on the EVENT rather than on "the suite did not crash": a test that merely rejects a promise
+   * and waits passes whether or not anything was listening, which is how the branch below went uncovered.
+   */
+  async function unhandledRejectionsDuring(body: () => Promise<void>): Promise<unknown[]> {
+    const seen: unknown[] = [];
+    const listener = (reason: unknown) => seen.push(reason);
+    process.on("unhandledRejection", listener);
+    try {
+      await body();
+      // Node decides at the end of a microtask checkpoint, so give it one plus a macrotask.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+    return seen;
+  }
+
   it("does not leave the abandoned work's later rejection unhandled", async () => {
-    let fail: (error: Error) => void = () => {};
-    const abandoned = new Promise<never>((_, reject) => {
-      fail = reject;
+    const unhandled = await unhandledRejectionsDuring(async () => {
+      let fail: (error: Error) => void = () => {};
+      const abandoned = new Promise<never>((_, reject) => {
+        fail = reject;
+      });
+      await expect(withDeadline(abandoned, AbortSignal.timeout(5))).rejects.toThrow();
+      // An unhandled rejection here would take the process down in production, long after the request that
+      // started it had been answered.
+      fail(new Error("the queued work finally gave up"));
     });
-    await expect(withDeadline(abandoned, AbortSignal.timeout(5))).rejects.toThrow();
-    // An unhandled rejection here would take the process down in production, long after the request that
-    // started it had been answered.
-    fail(new Error("the queued work finally gave up"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(unhandled).toEqual([]);
+  });
+
+  it("does not leave it unhandled when the signal is ALREADY aborted on entry", async () => {
+    // The branch the test above cannot reach, and therefore never protected: `AbortSignal.timeout(5)`
+    // cannot possibly have fired by the time the synchronous call sequence runs, so it only ever exercises
+    // the listener path. The early-return path attached NO handler to `work` at all before rejecting —
+    // producing, inside the one function written to prevent it, exactly the unhandled rejection its doc
+    // comment describes. It would have kept passing if that branch were deleted or made worse.
+    const unhandled = await unhandledRejectionsDuring(async () => {
+      let fail: (error: Error) => void = () => {};
+      const abandoned = new Promise<never>((_, reject) => {
+        fail = reject;
+      });
+      await expect(withDeadline(abandoned, AbortSignal.abort())).rejects.toThrow();
+      fail(new Error("the queued work finally gave up"));
+    });
+    expect(unhandled).toEqual([]);
   });
 
   it("resolves normally when the work beats the deadline", async () => {

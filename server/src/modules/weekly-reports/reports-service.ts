@@ -1,4 +1,5 @@
 import {
+  WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
   WEEKLY_REPORT_SECTION_MAX_CHARS,
   canTransitionWeeklyReport,
   isIsoDateString,
@@ -580,7 +581,14 @@ export async function replaceWeeklyReportPhotos(
 }
 
 const MAX_REPORT_PHOTOS = 60;
-const MAX_CAPTION_CHARS = 500;
+/**
+ * The SHARED ceiling, not one of this module's own.
+ *
+ * It was 500 here while the PDF drew the caption into a fixed two-line box and ellipsised the rest, so the
+ * API accepted captions neither renderer could print — and the client's web page showed them in full while
+ * the attached PDF did not. See WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS for how the number was chosen.
+ */
+const MAX_CAPTION_CHARS = WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS;
 
 function normalizeCaption(value: unknown): string | null {
   if (value == null) return null;
@@ -591,6 +599,20 @@ function normalizeCaption(value: unknown): string | null {
     throw new AppError(400, `Photo captions are limited to ${MAX_CAPTION_CHARS} characters`);
   }
   return trimmed;
+}
+
+/**
+ * A caption the picker offers as a DEFAULT, cut to what the API will accept back.
+ *
+ * The default comes from `files.description`, which has no such limit — so a photo captured with a long
+ * description used to pre-fill the form with a value that 400s the moment the superintendent pressed save,
+ * with nothing on screen explaining why.
+ */
+function boundedDefaultCaption(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length <= MAX_CAPTION_CHARS ? trimmed : trimmed.slice(0, MAX_CAPTION_CHARS).trimEnd();
 }
 
 /**
@@ -648,7 +670,7 @@ export async function listWeeklyReportPhotoCandidates(
     // deliberately cleared caption as absent and restored the capture description, so the user could
     // not blank a caption and have it stay blank. The description is only a default for photos the
     // user has not selected yet.
-    caption: row.selected ? (row.selected_caption ?? null) : (row.original_description ?? null),
+    caption: row.selected ? (row.selected_caption ?? null) : boundedDefaultCaption(row.original_description),
     originalDescription: row.original_description ?? null,
     sortOrder: Number(row.selected_sort_order ?? 0),
     takenAt: toIsoTimestamp(row.taken_at ?? row.created_at),

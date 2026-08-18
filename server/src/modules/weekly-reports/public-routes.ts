@@ -107,11 +107,11 @@ weeklyReportPublicRoutes.use(weeklyReportPublicLimiter);
 export function withDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    signal.addEventListener("abort", onAbort, { once: true });
+    // ATTACHED FIRST, before the aborted check, and that order is the whole point. The early-return branch
+    // below used to come first, so a signal already aborted on entry rejected and left `work` with no
+    // handler at all — the unhandled rejection this function exists to prevent, produced by the function
+    // itself. Settling twice is a no-op on a promise, so nothing else has to change: whichever of the two
+    // gets there first wins and the other is ignored.
     work.then(
       (value) => {
         signal.removeEventListener("abort", onAbort);
@@ -122,6 +122,11 @@ export function withDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<
         reject(error);
       },
     );
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 

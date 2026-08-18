@@ -10,7 +10,11 @@ import {
   type WeeklyReportArtifactRecheck,
   type WeeklyReportPdfArtifactState,
 } from "./pdf-artifact.js";
-import { renderWeeklyReportPdf, type WeeklyReportPdfPhoto } from "./pdf.js";
+import {
+  renderWeeklyReportPdf,
+  weeklyReportRenderTimeoutMs,
+  type WeeklyReportPdfPhoto,
+} from "./pdf.js";
 import { buildWeeklyReportView, type WeeklyReportView } from "./report-view.js";
 import type { QueryExecutor } from "./projects-service.js";
 
@@ -135,7 +139,9 @@ export async function loadWeeklyReportPdfSource(
   const state: WeeklyReportPdfArtifactState = {
     pdfR2Key: row.pdf_r2_key ?? null,
     pdfRenderVersion: Number(row.pdf_render_version ?? 0),
-    pdfGeneratedAt: row.pdf_generated_at ?? null,
+    // NOT pdf_generated_at. That column records when a render finished, which is a clock reading and not
+    // comparable with a content generation — see the pdf-artifact.ts header for what comparing them cost.
+    pdfContentGeneration: row.pdf_content_generation ?? null,
     updatedAt: row.updated_at ?? null,
     liveInputGeneration: newestTimestamp([
       row.project_updated_at,
@@ -161,14 +167,54 @@ export async function loadWeeklyReportPdfSource(
 }
 
 /**
- * Upper bound on a whole publish — render plus upload — after which the single-flight entry is freed.
+ * How long the upload of a finished PDF may take before the single-flight entry is freed.
  *
- * Wider than the render's own budget because it covers both phases; the point is not a tight SLA but
- * that the entry can never be held forever by one stalled R2 socket.
+ * ITS OWN budget rather than whatever a shared render/upload deadline had left. The flat 90 s that covered
+ * both was shorter than a large report's render legitimately needs (see weeklyReportRenderTimeoutMs), so
+ * the outer deadline would have cancelled a render that was about to succeed — and a render that used most
+ * of a shared budget would leave the PUT with almost none. The point is not a tight SLA but that the entry
+ * can never be held forever by one stalled R2 socket.
  */
-export const WEEKLY_REPORT_PUBLISH_TIMEOUT_MS = 90_000;
+export const WEEKLY_REPORT_UPLOAD_TIMEOUT_MS = 45_000;
 
 const inFlightRenders = new Map<string, Promise<string>>();
+
+/**
+ * How long a render that ran out of time is remembered, so the next request is refused immediately.
+ *
+ * `/wr/:token/pdf` is anonymous, and a render that exceeds its deadline stores NOTHING — so without this,
+ * every retry re-enters publishWeeklyReportPdf and pays the full budget again, downloading and transcoding
+ * every photo up to the moment it is abandoned. One reader with a broken link and an impatient finger was
+ * enough to keep a worker saturated indefinitely.
+ *
+ * Deliberately narrow: ONLY a deadline. Every other failure either fails fast (a corrupt original) or is
+ * expected to succeed on the very next attempt (WEEKLY_REPORT_CONTENT_CHANGED, which means the report moved
+ * and the retry must re-read it), and caching those would turn a self-healing hiccup into an outage.
+ */
+const WEEKLY_REPORT_RENDER_BACKOFF_MS = 60_000;
+
+const renderDeadlineFailures = new Map<string, number>();
+
+function recentRenderDeadlineFailure(key: string, now: number): boolean {
+  const until = renderDeadlineFailures.get(key);
+  if (until == null) return false;
+  if (until > now) return true;
+  renderDeadlineFailures.delete(key);
+  return false;
+}
+
+/** Bounded sweep, so a process that renders many reports cannot accumulate expired entries forever. */
+function rememberRenderDeadlineFailure(key: string, now: number): void {
+  for (const [entry, until] of renderDeadlineFailures) {
+    if (until <= now) renderDeadlineFailures.delete(entry);
+  }
+  renderDeadlineFailures.set(key, now + WEEKLY_REPORT_RENDER_BACKOFF_MS);
+}
+
+/** Test seam: the backoff is process-local state and would otherwise leak between cases. */
+export function resetWeeklyReportRenderBackoff(): void {
+  renderDeadlineFailures.clear();
+}
 
 /**
  * Process-local single flight, keyed on the exact artifact identity being produced.
@@ -208,47 +254,77 @@ function generationToken(updatedAt: Date | string | null): string {
  */
 export async function publishWeeklyReportPdfKey(
   client: QueryExecutor,
-  input: { reportId: string; r2Key: string; bucket: string; generation: string },
+  input: {
+    reportId: string;
+    r2Key: string;
+    bucket: string;
+    /** `weekly_reports.updated_at` as the render read it. */
+    generation: string;
+    /** The WIDENED generation as the render read it — what the bytes actually represent. */
+    contentGeneration: string;
+  },
 ): Promise<string> {
-  // The publication CAS. Conditioned on updated_at not having moved since the read, so a report edited
-  // during the render never gets a pointer to a PDF of its previous content; and on the render version, so
-  // an older instance finishing late cannot walk the row backwards.
+  // The publication CAS, on three conditions and one recorded fact.
   //
-  // pdf_generated_at is stamped and updated_at is deliberately NOT touched: updated_at is the content
-  // generation this artifact is compared against, and bumping it here would make every render look like an
-  // edit and re-render on the download after it, forever.
+  //   • updated_at unmoved — a report edited during the render never gets a pointer to a PDF of its
+  //     previous content.
+  //   • pdf_render_version <= ours — an older instance finishing late cannot walk the row backwards.
+  //   • pdf_content_generation <= ours — NEITHER CAN AN OLDER RENDER. Two renders of different content
+  //     produce different keys and take different coalescer entries, so without this the slower one wins
+  //     whatever it rendered, and then reads as current because it also stamped the clock.
+  //
+  // pdf_content_generation is written as the generation the render READ, not as now(): it is the value the
+  // staleness comparison reads back, and a clock reading taken after the render covers changes the bytes do
+  // not contain. pdf_generated_at is still stamped, purely as the "when were these bytes made" record.
+  // updated_at is deliberately untouched — bumping it here would make every render look like an edit.
   const published = await client.query(
     `UPDATE weekly_reports
         SET pdf_r2_key = $1,
             pdf_r2_bucket = $2,
             pdf_generated_at = now(),
+            pdf_content_generation = $6::timestamptz,
             pdf_render_version = $3
       WHERE id = $4::uuid
         AND is_active
         AND date_trunc('milliseconds', updated_at) = $5::timestamptz
         AND pdf_render_version <= $3
+        AND (pdf_content_generation IS NULL
+             OR date_trunc('milliseconds', pdf_content_generation) <= $6::timestamptz)
       RETURNING pdf_r2_key`,
-    [input.r2Key, input.bucket, CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION, input.reportId, input.generation],
+    [
+      input.r2Key,
+      input.bucket,
+      CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
+      input.reportId,
+      input.generation,
+      input.contentGeneration,
+    ],
   );
-  if (published.rows[0]?.pdf_r2_key) return published.rows[0].pdf_r2_key as string;
 
-  // The CAS matched nothing. Either the content moved — the caller must re-read, because serving this
-  // render would show the client a week that has since been corrected — or a newer renderer already owns
-  // the row, whose artifact is authoritative and safe to hand back.
-  const current = await client.query(
-    `SELECT pdf_r2_key, updated_at FROM weekly_reports WHERE id = $1::uuid AND is_active LIMIT 1`,
-    [input.reportId],
-  );
-  const row = current.rows[0];
-  if (!row) throw new AppError(404, "Weekly report not found");
-  if (generationToken(row.updated_at) !== input.generation || !row.pdf_r2_key) {
+  // Whether or not the CAS matched, the ROW now decides what may be handed back, and it is asked through
+  // the same loader every other read uses. Re-deriving the answer here — "did updated_at move?" — is what
+  // let the live inputs slip through before: the report row is only part of the generation, and a second
+  // opinion about it is a second predicate to keep in step with the first. classifyWeeklyReportArtifact
+  // already knows the whole rule.
+  const after = await loadWeeklyReportPdfSource(client, input.reportId);
+  if (!after) throw new AppError(404, "Weekly report not found");
+  if (after.recheck === "awaiting-newer-renderer") {
     throw new AppError(
       503,
-      "This report changed while its PDF was rendering. Please try the download again.",
-      "WEEKLY_REPORT_CONTENT_CHANGED",
+      "This report's PDF is being upgraded. Please try again in a moment.",
+      "WEEKLY_REPORT_PDF_AWAITING_RENDERER",
     );
   }
-  return row.pdf_r2_key as string;
+  // Current: either the bytes just published, or a newer renderer's artifact that is authoritative and safe
+  // to serve. Stale: something the render did not see has moved — including a live input that changed while
+  // it ran, which the CAS above cannot lock. The row now carries an honest generation either way, so the
+  // retry re-reads and renders the current content rather than being handed these bytes.
+  if (after.recheck === "current" && after.state.pdfR2Key) return after.state.pdfR2Key;
+  throw new AppError(
+    503,
+    "This report changed while its PDF was rendering. Please try the download again.",
+    "WEEKLY_REPORT_CONTENT_CHANGED",
+  );
 }
 
 /**
@@ -263,6 +339,13 @@ export async function publishWeeklyReportPdfKey(
 export async function publishWeeklyReportPdf(
   officeSlug: string,
   source: WeeklyReportPdfSource,
+  /**
+   * Test seam, and the only one: `renderTimeoutMs` shortens the render budget so the deadline path can be
+   * exercised at all. The real budget starts at twenty seconds and rises with the photo count, and
+   * `AbortSignal.timeout` is not driven by the timers vitest can fake — so without this the branch that
+   * refuses a repeat render, on the unauthenticated route where it matters, would have no coverage.
+   */
+  options: { renderTimeoutMs?: number } = {},
 ): Promise<string> {
   if (!isR2Configured()) {
     throw new AppError(503, "File storage is not configured, so the report PDF cannot be produced.");
@@ -274,8 +357,18 @@ export async function publishWeeklyReportPdf(
   const generation = generationToken(source.updatedAt);
   const contentGeneration = generationToken(weeklyReportContentGeneration(source.state));
   const rendering = source.state.superseded ? "superseded" : "current";
+  const key = `${officeSlug}:${source.reportId}:${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}:${contentGeneration}:${rendering}`;
+  // A render of THIS artifact ran out of time recently. Re-entering would pay the same budget again and
+  // store nothing again — see WEEKLY_REPORT_RENDER_BACKOFF_MS.
+  if (recentRenderDeadlineFailure(key, Date.now())) {
+    throw new AppError(
+      503,
+      "This report's PDF is taking longer than expected to prepare. Please try again in a minute.",
+      "WEEKLY_REPORT_PDF_RENDER_TIMED_OUT",
+    );
+  }
   return coalesceWeeklyReportRender(
-    `${officeSlug}:${source.reportId}:${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}:${contentGeneration}:${rendering}`,
+    key,
     async () => {
       // Render FIRST, then derive the key from the bytes that were actually produced, so two instances
       // rendering different content can never collide on one object name.
@@ -285,11 +378,39 @@ export async function publishWeeklyReportPdf(
       // clock out of the document, but pdfkit's asynchronous PNG finalisation still renumbers objects
       // between runs (see WeeklyReportPdfData.creationDate). Bounded in practice — a sent report renders
       // once and its artifact then stays current — but it is not zero.
-      // ONE deadline covering render AND upload. Bounding only the render left the identical hang one
-      // step later: an accepted-then-stalled PUT never settles, the promise stays in `inFlightRenders`,
-      // and every later download for this generation on this process joins the same permanent wait.
-      const deadline = AbortSignal.timeout(WEEKLY_REPORT_PUBLISH_TIMEOUT_MS);
-      const pdf = await renderWeeklyReportPdf(source.view.pdf, { signal: deadline });
+      // A deadline on the render AND one on the upload. Bounding only the render left the identical hang
+      // one step later: an accepted-then-stalled PUT never settles, the promise stays in
+      // `inFlightRenders`, and every later download for this generation on this process joins the same
+      // permanent wait. They are separate signals rather than one shared budget so that the upload is not
+      // charged for a render that legitimately took most of its allowance, and — the reason it matters
+      // here — so the catch below can ask whether it was the RENDER that ran out.
+      //
+      // The render's is sized from the photo count, because a render is all-or-nothing and a report can
+      // carry sixty originals; see weeklyReportRenderTimeoutMs. When it DOES fire the failure is
+      // remembered, so the next anonymous request is refused in microseconds instead of paying the whole
+      // budget again.
+      const photoCount = source.view.pdf.photos.length;
+      const renderTimeoutMs = options.renderTimeoutMs ?? weeklyReportRenderTimeoutMs(photoCount);
+      const renderDeadline = AbortSignal.timeout(renderTimeoutMs);
+      let pdf: Buffer;
+      try {
+        pdf = await renderWeeklyReportPdf(source.view.pdf, {
+          signal: renderDeadline,
+          timeoutMs: renderTimeoutMs,
+        });
+      } catch (error) {
+        // Asked of the SIGNAL, not of the error's shape: the abort surfaces as whatever the aborted read,
+        // transcode or stream happened to throw, and matching on those messages is a guess that rots.
+        if (renderDeadline.aborted) {
+          rememberRenderDeadlineFailure(key, Date.now());
+          throw new AppError(
+            503,
+            "This report's PDF is taking longer than expected to prepare. Please try again in a minute.",
+            "WEEKLY_REPORT_PDF_RENDER_TIMED_OUT",
+          );
+        }
+        throw error;
+      }
       const r2Key = weeklyReportPdfR2Key(
         officeSlug,
         source.dealNumber,
@@ -299,7 +420,9 @@ export async function publishWeeklyReportPdf(
         weeklyReportPdfDigest(pdf),
         source.state.superseded,
       );
-      await putObject(r2Key, pdf, "application/pdf", { signal: deadline });
+      await putObject(r2Key, pdf, "application/pdf", {
+        signal: AbortSignal.timeout(WEEKLY_REPORT_UPLOAD_TIMEOUT_MS),
+      });
 
       return withWeeklyReportOfficeClient(officeSlug, {}, (client) =>
         publishWeeklyReportPdfKey(client, {
@@ -307,6 +430,9 @@ export async function publishWeeklyReportPdf(
           r2Key,
           bucket: process.env.R2_BUCKET_NAME || "trock-crm-files",
           generation,
+          // The generation the render READ, recorded as what these bytes represent. Not now(): the render
+          // just spent seconds on photos, and anything that moved while it ran must stay visible.
+          contentGeneration,
         }),
       );
     },

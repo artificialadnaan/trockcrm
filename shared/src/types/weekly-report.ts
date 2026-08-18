@@ -51,6 +51,22 @@ export const WEEKLY_REPORT_PHOTO_WINDOW_DAYS = 14;
  */
 export const WEEKLY_REPORT_SECTION_MAX_CHARS = 20_000;
 
+/**
+ * Longest one photo caption may be — the API's validation limit AND the ceiling both renderers honour.
+ *
+ * Shared for the same reason as the section limit, and it was missed the first time round: the API accepted
+ * 500 characters and the picker pre-fills a caption from the file's description, while the PDF drew the
+ * caption into a fixed two-line box with `ellipsis: true`. A 250-character caption therefore printed in
+ * full on the client's web page and as two lines and an ellipsis in the PDF attached to the same email.
+ *
+ * 250 rather than 500 because the caption shares its cell with the photograph it describes. Measured
+ * against the shipped 8pt Geist in the 218pt photo cell: 250 characters of ordinary prose is ~5 lines
+ * (57pt) and 250 of the widest glyph in the font is 9 lines (103pt), which is what the renderer's caption
+ * band is sized to hold. 500 characters of that same worst case is 205pt — most of the cell — and would
+ * leave no photograph to caption.
+ */
+export const WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS = 250;
+
 /** Days before the due date that each reminder fires. `due_digest` fires ON the due date. */
 export const WEEKLY_REPORT_REMINDER_OFFSET_DAYS: Record<WeeklyReportReminderKind, number> = {
   t_minus_2: 2,

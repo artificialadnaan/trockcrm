@@ -27,7 +27,10 @@ import {
   loadWeeklyReportPdfSource,
   publishWeeklyReportPdfKey,
 } from "../../../src/modules/weekly-reports/pdf-service.js";
-import { CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION } from "../../../src/modules/weekly-reports/pdf-artifact.js";
+import {
+  CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
+  weeklyReportContentGeneration,
+} from "../../../src/modules/weekly-reports/pdf-artifact.js";
 import {
   hashWeeklyReportToken,
   isWeeklyReportTokenShape,
@@ -93,6 +96,9 @@ beforeAll(async () => {
   // 0223 too. Nothing in the PDF path reads weekly_report_pauses today, but the cadence helpers
   // these suites reach through do, and two sibling suites already failed exactly this way.
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
+  // 0224 adds weekly_reports.pdf_content_generation, which the artifact classifier and the publication CAS
+  // both read. Without it every PDF assertion below fails on a missing column rather than on its subject.
+  await pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES
@@ -195,14 +201,32 @@ const ARTIFACT_DIGEST = "a".repeat(64);
 const artifactKey = (reportId: string) =>
   `office_dallas/deals/DFW-10432/documents/weekly-reports/${reportId}.${ARTIFACT_DIGEST}.v${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}.pdf`;
 
-/** Stand in for the publisher: stamp a content-addressed key at the row's current generation. */
+/**
+ * Stand in for the publisher: stamp a content-addressed key recording the generation it rendered.
+ *
+ * `pdf_content_generation` is set from the report's OWN widened generation, exactly as the real publisher
+ * sets it — deliberately not `now()`. A clock reading here would make this helper reproduce the bug the
+ * publisher was changed to remove, and the staleness cases below would then pass on a lie.
+ */
 async function stampArtifact(reportId: string) {
+  const source = await loadWeeklyReportPdfSource(db, reportId);
   await pg.query(
     `UPDATE office_dallas.weekly_reports
-        SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(), pdf_render_version = $3
+        SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(),
+            pdf_content_generation = $4::timestamptz, pdf_render_version = $3
       WHERE id = $1::uuid`,
-    [reportId, artifactKey(reportId), CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION],
+    [
+      reportId,
+      artifactKey(reportId),
+      CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
+      generationOf(weeklyReportContentGeneration(source!.state)),
+    ],
   );
+}
+
+function generationOf(value: Date | string | null): string {
+  if (value == null) return new Date(0).toISOString();
+  return (value instanceof Date ? value : new Date(String(value))).toISOString();
 }
 
 async function currentGeneration(reportId: string): Promise<string> {
@@ -212,6 +236,12 @@ async function currentGeneration(reportId: string): Promise<string> {
   );
   const value = (row.rows[0] as any).updated_at;
   return (value instanceof Date ? value : new Date(String(value))).toISOString();
+}
+
+/** The widened generation the render would have read — what the publisher records as rendered. */
+async function currentContentGeneration(reportId: string): Promise<string> {
+  const source = await loadWeeklyReportPdfSource(db, reportId);
+  return generationOf(weeklyReportContentGeneration(source!.state));
 }
 
 async function mint(reportId: string, ttlDays?: number) {
@@ -510,18 +540,20 @@ describe("publishing an artifact", () => {
     return id;
   }
 
-  it("points the row at the new artifact and stamps the render version", async () => {
+  it("points the row at the new artifact and records the generation it rendered", async () => {
     const id = await sentReport();
+    const contentGeneration = await currentContentGeneration(id);
     const key = await publishWeeklyReportPdfKey(db, {
       reportId: id,
       r2Key: artifactKey(id),
       bucket: "test-bucket",
       generation: await currentGeneration(id),
+      contentGeneration,
     });
     expect(key).toBe(artifactKey(id));
 
     const row = await pg.query(
-      `SELECT pdf_r2_key, pdf_r2_bucket, pdf_render_version, pdf_generated_at
+      `SELECT pdf_r2_key, pdf_r2_bucket, pdf_render_version, pdf_generated_at, pdf_content_generation
          FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
       [id],
     );
@@ -531,6 +563,10 @@ describe("publishing an artifact", () => {
       pdf_render_version: CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
     });
     expect((row.rows[0] as any).pdf_generated_at).not.toBeNull();
+    // The GENERATION IT WAS GIVEN, verbatim — never now(). This is the assertion that keeps the publisher
+    // honest: a wall-clock stamp taken after a render swallows everything that moved while it ran, and the
+    // artifact then reads current forever. Compared as an instant, since the driver hands back a Date.
+    expect(new Date((row.rows[0] as any).pdf_content_generation).toISOString()).toBe(contentGeneration);
     // The artifact it just published must read as current, or every download re-renders forever.
     expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("current");
   });
@@ -540,6 +576,7 @@ describe("publishing an artifact", () => {
     // Publishing anyway would point a client's link at a week that has since been corrected.
     const id = await sentReport();
     const staleGeneration = await currentGeneration(id);
+    const staleContentGeneration = await currentContentGeneration(id);
     await pg.query(`UPDATE office_dallas.weekly_reports SET updated_at = now() + interval '1 second' WHERE id = $1::uuid`, [id]);
 
     await expectAppError(
@@ -548,6 +585,7 @@ describe("publishing an artifact", () => {
         r2Key: artifactKey(id),
         bucket: "test-bucket",
         generation: staleGeneration,
+        contentGeneration: staleContentGeneration,
       }),
       503,
       /changed while its PDF was rendering/i,
@@ -556,18 +594,72 @@ describe("publishing an artifact", () => {
     expect((row.rows[0] as any).pdf_r2_key).toBeNull();
   });
 
+  it("refuses to let an OLDER render overwrite a newer one when only a LIVE input moved", async () => {
+    // Last-writer-wins, and precisely the half a report-row CAS cannot see. Two renders of different
+    // content take different coalescer entries and produce different content-addressed keys, so the only
+    // thing between them is the publication CAS — and before an approved report is sent, its header is read
+    // live from weekly_report_projects, which moves NOTHING on weekly_reports. So the slower render, started
+    // first and finishing second, passed a CAS conditioned on updated_at alone, pointed the row at the
+    // property name the client no longer has, and then read as current because it also stamped the clock.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+
+    const olderGeneration = await currentGeneration(id);
+    const olderContentGeneration = await currentContentGeneration(id);
+
+    // The live header moves. `updated_at` on the report is untouched by this — that is the whole point.
+    await updateWeeklyReportProject(db, project.id, { propertyDisplayName: "4123 Cedar Springs — Phase II" }, OFFICE);
+    expect(await currentGeneration(id)).toBe(olderGeneration);
+    expect(await currentContentGeneration(id)).not.toBe(olderContentGeneration);
+
+    // The newer render lands first, recording what it read.
+    const newerKey = `office_dallas/deals/DFW-10432/documents/weekly-reports/${id}.${"c".repeat(64)}.v${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}.pdf`;
+    const newerContentGeneration = await currentContentGeneration(id);
+    await publishWeeklyReportPdfKey(db, {
+      reportId: id,
+      r2Key: newerKey,
+      bucket: "test-bucket",
+      generation: await currentGeneration(id),
+      contentGeneration: newerContentGeneration,
+    });
+
+    // …and now the older one finishes. Its updated_at still matches, so only the recorded generation stops
+    // it. It is handed the newer artifact — which is current and safe to serve — instead of its own.
+    const key = await publishWeeklyReportPdfKey(db, {
+      reportId: id,
+      r2Key: artifactKey(id),
+      bucket: "test-bucket",
+      generation: olderGeneration,
+      contentGeneration: olderContentGeneration,
+    });
+    expect(key).toBe(newerKey);
+
+    const row = await pg.query(
+      `SELECT pdf_r2_key, pdf_content_generation FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+      [id],
+    );
+    // The NEWER artifact still owns the row, and the recorded generation was not walked backwards either.
+    expect((row.rows[0] as any).pdf_r2_key).toBe(newerKey);
+    expect(new Date((row.rows[0] as any).pdf_content_generation).toISOString()).toBe(newerContentGeneration);
+    expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("current");
+  });
+
   it("hands back a NEWER renderer's artifact rather than walking the row backwards", async () => {
     // A rolling deploy: an instance on the old renderer finishes late. Its bytes are not wrong, but the
     // row already points at a NEWER artifact and must not be walked backwards.
     const newerVersion = CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION + 1;
     const id = await sentReport();
     const generation = await currentGeneration(id);
+    const contentGeneration = await currentContentGeneration(id);
     const newerKey = `office_dallas/deals/DFW-10432/documents/weekly-reports/${id}.${"b".repeat(64)}.v${newerVersion}.pdf`;
     await pg.query(
       `UPDATE office_dallas.weekly_reports
-          SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(), pdf_render_version = $3
+          SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(),
+              pdf_content_generation = $4::timestamptz, pdf_render_version = $3
         WHERE id = $1::uuid`,
-      [id, newerKey, newerVersion],
+      [id, newerKey, newerVersion, contentGeneration],
     );
 
     const key = await publishWeeklyReportPdfKey(db, {
@@ -575,6 +667,7 @@ describe("publishing an artifact", () => {
       r2Key: artifactKey(id),
       bucket: "test-bucket",
       generation,
+      contentGeneration,
     });
     expect(key).toBe(newerKey);
     const row = await pg.query(`SELECT pdf_render_version FROM office_dallas.weekly_reports WHERE id = $1::uuid`, [id]);
@@ -588,6 +681,7 @@ describe("publishing an artifact", () => {
         r2Key: artifactKey(U("dead1")),
         bucket: "test-bucket",
         generation: new Date().toISOString(),
+        contentGeneration: new Date().toISOString(),
       }),
       404,
     );
