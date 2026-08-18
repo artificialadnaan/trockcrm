@@ -73,8 +73,9 @@ const STRANGER_ACTOR = { id: STRANGER, role: "rep" };
  * admin/director. Intersect those and the CRM's sender is LEADERSHIP, full stop: a `construction` PM,
  * which is the normal case, is refused at the router.
  *
- * The assigned PM's send lives on the deferred T-Rock Cam field mount. The one test that still says so is
- * "the assigned PM has no send route yet" below; everything else uses the actor the product ships.
+ * The assigned PM's send lives on the T-Rock Cam field mount, and is covered end to end — with the control
+ * that a `construction` PM's send actually executes — in weekly-report-field-send.runtime.test.ts. This
+ * suite stays on the CRM's sender so that what it asserts is what the CRM ships.
  */
 const SENDER = DIRECTOR_ACTOR;
 
@@ -1048,11 +1049,12 @@ describe("superseding", () => {
 /**
  * WHO THE CRM ACTUALLY LETS SEND.
  *
- * Recorded as a test because the answer is not what the service layer suggests, and the gap is the kind
- * that reads as a working feature until a real PM tries it.
+ * Recorded as a test because the answer is not what the service layer suggests, and it stays recorded now
+ * that the field mount exists: the two routers deliberately admit different people, and somebody reading
+ * only `canPublishWeeklyReport` would conclude the CRM's refusal is a bug and remove it.
  */
-describe("the assigned PM has no send route yet", () => {
-  it("passes the SERVICE gate — which is why the field mount can reuse this code unchanged", async () => {
+describe("the assigned PM sends from the FIELD mount, not this one", () => {
+  it("passes the SERVICE gate — which is why the field mount reuses this code unchanged", async () => {
     const project = await seedProject();
     const row = await pg.query(
       `SELECT * FROM office_dallas.weekly_report_projects WHERE id = $1::uuid`,
@@ -1061,12 +1063,14 @@ describe("the assigned PM has no send route yet", () => {
     expect(canPublishWeeklyReport(row.rows[0] as Record<string, any>, PM_ACTOR)).toBe(true);
   });
 
-  it("but reaches no CRM endpoint, because the router admits neither of the roles a PM holds", async () => {
+  it("but reaches no CRM endpoint, because that router admits neither of the roles a PM holds", async () => {
     // `ASSIGNABLE_ROLES` (projects-service.ts) is field_contractor/construction/admin/director — the roles
     // that may hold the PM slot. The CRM send routes require admin/director. So the assigned-PM arm of
-    // `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not already leadership, and
-    // this PR ships no send capability for a PM at all. The refusal itself is asserted end-to-end in
-    // tests/weekly-report-send-route.test.ts; asserted here is that the two role sets genuinely disjoin.
+    // `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not already leadership; it is
+    // reachable on /api/field, where that PM authenticates and where the mount carries only their own
+    // reports. The CRM refusal is asserted end-to-end in tests/weekly-report-send-route.test.ts and the
+    // field capability in weekly-report-field-send.runtime.test.ts; asserted here is that the two role
+    // sets genuinely disjoin, which is what makes a second mount necessary rather than merely convenient.
     const assignableButNotLeadership = ["field_contractor", "construction"];
     const crmSenders = ["admin", "director"];
     expect(assignableButNotLeadership.some((role) => crmSenders.includes(role))).toBe(false);

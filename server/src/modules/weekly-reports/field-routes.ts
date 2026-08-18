@@ -28,6 +28,13 @@ import {
   updateWeeklyReportContent,
   type WeeklyReportActor,
 } from "./reports-service.js";
+import {
+  buildWeeklyReportSendDraft,
+  createWeeklyReportCorrection,
+  retryWeeklyReportSend,
+  sendWeeklyReport,
+} from "./send-service.js";
+import { assertClientLinksAreConfigured, weeklyReportShareUrl } from "./tokens-service.js";
 import { toFieldWeeklyReportProject, type QueryExecutor } from "./projects-service.js";
 
 const router = Router();
@@ -66,6 +73,22 @@ function actorFrom(req: Request): WeeklyReportActor {
 /** "Today" in the OFFICE's timezone. A crew in Dallas is not on the server's UTC clock. */
 function asOfFrom(): string {
   return businessToday();
+}
+
+/**
+ * The office this request is scoped to, which the send flow needs and the authoring flow does not.
+ *
+ * `activeOfficeId` is set by requireFieldContractor (it validates the `x-office-id` header against
+ * `user_office_access` before writing it), and `officeSlug` by tenantMiddleware. Both are already the
+ * values the search_path was pinned to, so the token row and the job row cannot be written against a
+ * different office than the one whose report was just read. Absent means the request never went through
+ * the mount's own middleware, which is a wiring bug rather than a user error.
+ */
+function officeContextFrom(req: Request): { slug: string; tenantId: string } {
+  const slug = req.officeSlug;
+  const tenantId = req.user?.activeOfficeId;
+  if (!slug || !tenantId) throw new AppError(400, "Office context not available");
+  return { slug, tenantId };
 }
 
 /**
@@ -111,6 +134,14 @@ async function resolvePhotoUrls(
   return urls;
 }
 
+/**
+ * Applied to EVERY `report` this mount answers with, including the send, retry and correction responses.
+ *
+ * The uniform shape is the point: a client that has to remember which endpoints presign and which return
+ * bare file ids will eventually render an empty grid on the one it forgot. It runs inside the request
+ * transaction, so on the send path a failure here rolls the send back — which is the safe direction, and
+ * the only one available: after the commit the email is queued and nothing can recall it.
+ */
 async function withPhotoUrls<T extends { fileId: string }>(
   client: QueryExecutor,
   photos: T[],
@@ -246,12 +277,27 @@ router.put("/reports/:id/photos", async (req, res, next) => {
 // superintendent posting `{"to":"approved"}` from a patched build is refused by the service.
 router.post("/reports/:id/transition", async (req, res, next) => {
   try {
-    // `sent` is refused on this surface until the send flow exists (PR 5). The service would allow a PM
-    // to reach it, and the effect would be a report stamped sent_by/sent_at with its header frozen and
-    // NOTHING delivered — permanently immutable, invisible on the dashboard as outstanding, and with no
-    // way back, because corrections are a new version the send flow has not shipped either.
+    // `sent` is NOT reachable here, and this refusal SURVIVES the send flow shipping.
+    //
+    // It used to be a 409 saying sending was "not available in the app yet". That was the deferral. The
+    // send flow now exists below, so the sentence changed — but the guard did not, because what it stops
+    // was never about the feature being unfinished. `canTransitionAs` grants `sent` to PM powers, so a PM
+    // reaching it THROUGH THIS ENDPOINT would stamp sent_by/sent_at and freeze the header snapshot with no
+    // email composed, no token minted and no delivery queued: the week stops being owed, the board reads
+    // "Sent", and the client has nothing.
+    //
+    // Nothing cleans that up. The row is immutable (`canEditWeeklyReport` is false at `sent`), and
+    // `retryWeeklyReportSend` refuses it outright — it has no `send_request` to replay, which is exactly
+    // the "there is no send on this report to retry" case. A correction IS still possible, so the WEEK is
+    // recoverable, but the row is not: it sits on the board for the 26-week lookback as a send that never
+    // delivered and can never be retried, and the correction goes out as a first copy because no earlier
+    // version ever reached the client — which is true, and is the giveaway that the first "send" was not
+    // one.
+    //
+    // Sending is POST /reports/:id/send, which does the transition, the snapshot, the token and the queued
+    // delivery in ONE transaction. Same wording and same reason as the CRM router's guard (routes.ts).
     if (req.body?.to === "sent") {
-      throw new AppError(409, "Sending a weekly report is not available in the app yet");
+      throw new AppError(400, "Use the send endpoint to send a report to the client");
     }
     const report = await transitionWeeklyReport(
       req.tenantClient!,
@@ -261,6 +307,152 @@ router.post("/reports/:id/transition", async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json({ report });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Send + corrections — THE ASSIGNED PM's, on the surface the assigned PM uses
+// ---------------------------------------------------------------------------
+
+// WHY THESE ARE HERE AND NOT ON THE CRM ROUTER.
+//
+// The person who should send a weekly report is the assigned PM, and until now they were the one person
+// who could not. The CRM's send is gated `admin | director` (`requireWeeklyReportSender`), while
+// `ASSIGNABLE_ROLES` — who may hold the PM slot at all — is field_contractor/construction/admin/director.
+// Intersect those and `canPublishWeeklyReport`'s assigned-PM arm could only ever fire for somebody who was
+// already leadership; a `construction` PM, which is the ordinary case, got 403 at the router before any
+// permission logic ran.
+//
+// The fix is NOT to widen the CRM router. That router is the office-wide leadership board, the client
+// contact book and the dismissal ledger, and admitting `construction` there would hand every
+// superintendent in the office the whole surface — on top of a known open question about the construction
+// role's CRM boundary. So the capability goes where the PM already authenticates, on a mount that carries
+// nothing but their own reports.
+//
+// AUTHORISATION IS THE SERVICE'S, NOT THIS FILE'S. There is no role gate below, deliberately: every one of
+// these four handlers reaches a send-service.ts function that calls `canPublishWeeklyReport` itself, under
+// FOR UPDATE on both the report and its setup row. That is what makes the answer the same whichever
+// surface asks, and it is why a superintendent is refused even though they authenticate here perfectly
+// well — /api/field admits every field user in the company, so a router-level gate would be the only
+// thing standing between any of them and any project's client contacts.
+
+/**
+ * The send modal, COMPOSED SERVER-SIDE and returned as data.
+ *
+ * The same draft the CRM's dialog renders, from the same endpoint's service, so "the modal is identical on
+ * both surfaces" is a fact about there being one composer rather than a promise two clients keep. It
+ * carries the client's addresses and the PM's phone number, which is why it takes the publication gate
+ * rather than the weaker read gate the rest of this file uses.
+ *
+ * IT RETURNS NO SHARE URL, for a sent report or any other — see buildWeeklyReportSendDraft. The raw token
+ * is handed back exactly once, by the send itself.
+ */
+router.get("/reports/:id/send-draft", async (req, res, next) => {
+  try {
+    const draft = await buildWeeklyReportSendDraft(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      actorFrom(req),
+    );
+    await req.commitTransaction!();
+    res.json({ draft });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Send the report to the client.
+ *
+ * Everything below the commit is a queued job. What happens INSIDE the transaction is the part that must
+ * be atomic: the `approved -> sent` transition, the frozen header snapshot, the minted 180-day token and
+ * the job row that will deliver it. Splitting the token mint out of that transaction — minting it after
+ * the commit, say, to answer faster — would let a report reach `sent` with no link for its email to point
+ * at, which nothing reconciles.
+ *
+ * `shareUrl` IS THE ONLY TIME THE RAW TOKEN EXISTS. public.weekly_report_tokens stores a SHA-256 hash, so
+ * this response is unreproducible: the app must show it and must NOT write it to the draft store, a log or
+ * crash telemetry.
+ *
+ * AND LOSING IT IS SURVIVABLE, WHICH IS WHY THAT IS ACCEPTABLE — but not from this surface. `POST
+ * /reports/:id/share-link` mints a fresh one and is on the CRM router, behind that router's
+ * admin/director/rep gate, so the `construction` PM sending here cannot reach it: somebody in leadership
+ * mints the replacement. Deliberately NOT mirrored onto this mount in this change. The four endpoints
+ * below are the send; adding a fifth that hands out durable unauthenticated client credentials is a
+ * separate decision with its own blast radius, and the client already has their link — it is in the email
+ * this call queues. What the PM loses is only their own copy of it.
+ */
+router.post("/reports/:id/send", async (req, res, next) => {
+  try {
+    // CHECKED BEFORE ANYTHING IS MINTED, and it matters more from a phone than from the CRM: a PM sending
+    // on a jobsite has no way to notice that the link they just emailed points at a host that does not
+    // serve /wr. Nothing downstream of the commit can stop the email, so a warning after it could only
+    // describe a client link that had already gone out.
+    assertClientLinksAreConfigured();
+    const office = officeContextFrom(req);
+    const { report, shareUrl } = await sendWeeklyReport(req.tenantClient!, {
+      reportId: requireUuid(req.params.id, "id"),
+      office: { tenantId: office.tenantId, slug: office.slug },
+      actor: actorFrom(req),
+      payload: req.body ?? {},
+      shareUrlFor: (rawToken) => weeklyReportShareUrl(req, rawToken),
+    });
+    const photos = await withPhotoUrls(req.tenantClient!, report.photos);
+    await req.commitTransaction!();
+    res.status(202).json({ report: { ...report, photos }, shareUrl });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Queue the same message again for a send that has not reached the client.
+ *
+ * `acknowledgeDuplicateRisk` is the caller confirming they understand that past the provider's 24-hour
+ * idempotency window a replay is a genuinely second email, not a no-op. Default false: silence must mean
+ * the safe answer, on this surface as much as on the CRM's, because the app is where a PM staring at a
+ * "Send failed" chip is most likely to press the biggest button on the row.
+ */
+router.post("/reports/:id/send/retry", async (req, res, next) => {
+  try {
+    const office = officeContextFrom(req);
+    const report = await retryWeeklyReportSend(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      actorFrom(req),
+      { tenantId: office.tenantId, slug: office.slug },
+      { acknowledgeDuplicateRisk: req.body?.acknowledgeDuplicateRisk === true },
+    );
+    const photos = await withPhotoUrls(req.tenantClient!, report.photos);
+    await req.commitTransaction!();
+    res.status(202).json({ report: { ...report, photos } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Clone a sent report to the next version so it can be corrected.
+ *
+ * Answers 201 with the new report. It is NOT sent by this call and it does NOT supersede the original yet
+ * — a correction the PM abandons half-written must not put "a newer version was issued" in front of a
+ * client with nothing behind it.
+ *
+ * This is what makes `sent` survivable from the app. Without it a PM who spotted a wrong figure after
+ * sending had no move at all: a sent report is immutable for everyone, leadership included.
+ */
+router.post("/reports/:id/correction", async (req, res, next) => {
+  try {
+    const correction = await createWeeklyReportCorrection(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      actorFrom(req),
+    );
+    const photos = await withPhotoUrls(req.tenantClient!, correction.photos);
+    await req.commitTransaction!();
+    res.status(201).json({ report: { ...correction, photos } });
   } catch (error) {
     next(error);
   }

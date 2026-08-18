@@ -226,3 +226,34 @@ export async function listWeeklyReportTokens(
 export function weeklyReportShareUrl(req: Request, rawToken: string): string {
   return `${publicViewerBaseUrl(req)}/wr/${encodeURIComponent(rawToken)}`;
 }
+
+/**
+ * Refuse to mint a client link when nothing says where client links live.
+ *
+ * FAILS CLOSED IN PRODUCTION, warns elsewhere. The deploy is configured today (reports.trockcam.com), so
+ * this is fragility rather than a live bug — but the cost of being wrong is a client receiving an email
+ * whose only link 404s, discoverable by nobody but them, and the send is irreversible the moment the
+ * transaction commits. A local or CI process legitimately has no such host, so the refusal is scoped to the
+ * environment where a real client is on the other end.
+ *
+ * LIVES HERE, NEXT TO `weeklyReportShareUrl`, BECAUSE THERE ARE NOW TWO SENDERS. It began as a private
+ * helper in routes.ts, and the field mount needs exactly the same refusal for a sharper reason: a PM
+ * sending from a phone has no way to notice that the link they just emailed points at a host that does not
+ * serve /wr. Copying the check into field-routes.ts would have made the two surfaces' answer to "is this
+ * deploy safe to send from?" independently editable, which is the divergence the whole send flow is
+ * arranged to avoid.
+ */
+export function assertClientLinksAreConfigured(): void {
+  if (process.env.PUBLIC_SHARE_BASE_URL?.trim()) return;
+  if (process.env.NODE_ENV === "production") {
+    throw new AppError(
+      500,
+      "Client links are not configured (PUBLIC_SHARE_BASE_URL is unset), so the link in the client's " +
+        "email would not resolve. Nothing has been sent.",
+    );
+  }
+  console.warn(
+    "[weekly-report] PUBLIC_SHARE_BASE_URL is unset — a client link would be minted against FRONTEND_URL " +
+      "or the request host, neither of which is guaranteed to serve /wr.",
+  );
+}

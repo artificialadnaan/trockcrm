@@ -410,29 +410,56 @@ export default function ReportsHubScreen() {
             <SectionLabel>Waiting on your review</SectionLabel>
             {queueNote ? <Text style={styles.queueNote}>{queueNote}</Text> : null}
             {pendingReview.map((item) => (
-              <Pressable
-                key={item.reportId}
-                onPress={() => void openForReview(item)}
-                disabled={opening !== null}
-                accessibilityRole="button"
-                accessibilityLabel={`Review the weekly report for ${item.projectName}, week of ${formatWeekOf(item.weekOf)}`}
-                style={({ pressed }) => [styles.card, pressed && { opacity: 0.7 }]}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.cardTitle} numberOfLines={1}>
-                    {item.projectName}
-                  </Text>
-                  <Text style={styles.cardSub}>
-                    Week of {formatWeekOf(item.weekOf)}
-                    {item.authoredByName ? ` · ${item.authoredByName}` : ""}
-                  </Text>
-                </View>
-                <Badge
-                  label={weeklyReportWeekStateLabel(item.status)}
-                  color={weeklyReportWeekStateTone(item.status).background}
-                  textColor={weeklyReportWeekStateTone(item.status).text}
-                />
-              </Pressable>
+              <View key={item.reportId} style={styles.card}>
+                <Pressable
+                  onPress={() => void openForReview(item)}
+                  disabled={opening !== null}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Review the weekly report for ${item.projectName}, week of ${formatWeekOf(item.weekOf)}`}
+                  style={({ pressed }) => [styles.cardBody, pressed && { opacity: 0.7 }]}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.cardTitle} numberOfLines={1}>
+                      {item.projectName}
+                    </Text>
+                    <Text style={styles.cardSub}>
+                      Week of {formatWeekOf(item.weekOf)}
+                      {item.authoredByName ? ` · ${item.authoredByName}` : ""}
+                    </Text>
+                  </View>
+                  <Badge
+                    label={weeklyReportWeekStateLabel(item.status)}
+                    color={weeklyReportWeekStateTone(item.status).background}
+                    textColor={weeklyReportWeekStateTone(item.status).text}
+                  />
+                </Pressable>
+                {/* THE LAST STEP, AND THE ONE THAT USED TO BE MISSING. An approved report does not leave
+                    this queue — only a SENT one does — so without a Send here an approval looked like the
+                    end of the line and the row sat there until somebody with CRM access noticed. Offered
+                    only at `approved`, because that is the only status the send accepts; the server
+                    refuses anything else, and a button that always 409s is worse than no button.
+
+                    A superintendent never sees this: the queue is the PM's, and the send is refused by
+                    `canPublishWeeklyReport` in the service regardless of what this list draws. */}
+                {item.status === "approved" ? (
+                  <Button
+                    // "Send", not "Send to client": the row already carries a project name, a week and an
+                    // "Approved, not sent" badge, and a longer label squeezes all three on a phone. The
+                    // full sentence is on the accessibility label, where it costs no width.
+                    title="Send"
+                    variant="ghost"
+                    disabled={opening !== null}
+                    accessibilityLabel={`Send the weekly report for ${item.projectName}, week of ${formatWeekOf(item.weekOf)}, to the client`}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/(app)/reports/send/[reportId]",
+                        params: { reportId: item.reportId, projectName: item.projectName },
+                      })
+                    }
+                    style={styles.sendButton}
+                  />
+                ) : null}
+              </View>
             ))}
           </View>
         ) : null}
@@ -659,6 +686,9 @@ const styles = StyleSheet.create({
   // Muted, not danger: a capped queue is information about this list, not a fault the PM has to fix.
   queueNote: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   discardButton: { minWidth: 76 },
+  // Sized like Discard so the queue row and the In-progress row read as the same kind of card with the
+  // same kind of trailing action, rather than one of them growing a full-width primary button.
+  sendButton: { minWidth: 76 },
   outstandingLabel: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.danger },
   outstandingRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   // Sized so a week chip does not stretch to the full row width like a primary action.
