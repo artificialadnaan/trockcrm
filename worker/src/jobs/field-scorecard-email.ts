@@ -6,6 +6,10 @@ import {
 } from "../lib/system-email.js";
 import { getObjectBuffer } from "../lib/r2-client.js";
 import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScorecardEmails";
+import {
+  scorecardGenerationSql,
+  scorecardGenerationsMatch,
+} from "@trock-crm/shared/lib/scorecardGeneration";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 // Reuse the branded-email primitives (frontend URL + hosted logo) so the scorecard email points at
 // trockcrm.com and matches the RFP / project-number emails' look.
@@ -61,7 +65,13 @@ async function isStoredArtifactStillCurrent(
   fetchedKey: string,
 ): Promise<boolean> {
   const res = await query(
-    `SELECT status, pdf_r2_key, pdf_render_version, pdf_content_generation, updated_at
+    // BOTH generations as canonical MICROSECOND text. Selected as the raw timestamptz they arrive as
+    // millisecond JS Dates, and this comparison then agrees that a card whose content moved on 400µs after
+    // the render read it is still the content in these bytes — which is precisely the attachment this guard
+    // exists to withhold. See shared/src/lib/scorecardGeneration.ts.
+    `SELECT status, pdf_r2_key, pdf_render_version,
+            ${scorecardGenerationSql("pdf_content_generation")} AS pdf_content_generation,
+            ${scorecardGenerationSql("updated_at")} AS updated_at
        FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId],
   );
@@ -85,7 +95,10 @@ async function isStoredArtifactStillCurrent(
   const rendered = row.pdf_content_generation;
   const current = row.updated_at;
   if (rendered == null || current == null) return true;
-  return new Date(rendered).getTime() === new Date(current).getTime();
+  // MICROSECOND-exact, and the same comparison the server's download classification makes. The two must
+  // agree: a worker that calls an artifact current when the server would call it stale emails exactly the
+  // bytes the download refuses to hand out.
+  return scorecardGenerationsMatch(rendered, current);
 }
 
 export interface FieldScorecardEmailPayload {
@@ -187,7 +200,10 @@ export async function handleFieldScorecardEmail(
   // Idempotency: skip if this scorecard's email was already sent. tenantSchema is regex-validated above, so
   // interpolating it as the schema qualifier is safe (identifiers can't be $-parametrized).
   const existing = await query(
-    `SELECT email_sent_at, pdf_r2_key, pdf_render_version, pdf_content_generation, updated_at
+    // Generations as canonical MICROSECOND text — see isStoredArtifactStillCurrent.
+    `SELECT email_sent_at, pdf_r2_key, pdf_render_version,
+            ${scorecardGenerationSql("pdf_content_generation")} AS pdf_content_generation,
+            ${scorecardGenerationSql("updated_at")} AS updated_at
        FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId]
   );
@@ -224,12 +240,16 @@ export async function handleFieldScorecardEmail(
   // predates migration 0200 and there is nothing to compare — treating that as stale would silently drop the
   // attachment for every legacy card, a regression far broader than the edge this guards. The case Codex
   // raised always has a non-null generation, because the v3 render is what writes it.
+  //
+  // Compared at MICROSECOND resolution, matching the server. Rounded to the millisecond, "provably stale"
+  // could not see a corrective-action response that landed inside the same millisecond the render read —
+  // and the attachment on an email announcing that very response is where the omission is most visible.
   const renderedGeneration = existing.rows[0].pdf_content_generation;
   const currentGeneration = existing.rows[0].updated_at;
   const storedArtifactIsProvablyStale =
     renderedGeneration != null &&
     currentGeneration != null &&
-    new Date(renderedGeneration).getTime() !== new Date(currentGeneration).getTime();
+    !scorecardGenerationsMatch(renderedGeneration, currentGeneration);
 
   const storedArtifactIsCurrent =
     storedPdfR2Key != null &&

@@ -38,6 +38,48 @@ function queryWithCurrentKey(pdfR2Key: string | null, pdfRenderVersion = 2) {
   });
 }
 
+/**
+ * The same row, with GENERATIONS — and with a distinct pair for the POST-FETCH revalidation, so a change
+ * landing during the R2 read can be modelled separately from one visible before it.
+ *
+ * The generations are canonical microsecond TEXT because that is how the handler now reads them (a raw
+ * timestamptz arrives as a millisecond JS Date and the microseconds are gone). Written as explicit literals:
+ * no clock available to a test — JS or Postgres-in-wasm — can produce a sub-millisecond difference, so a
+ * derived fixture could not express the failure these cover.
+ */
+function queryWithGenerations(over: {
+  rendered: string | null;
+  current: string | null;
+  postFetchRendered?: string | null;
+  postFetchCurrent?: string | null;
+  pdfR2Key?: string;
+  pdfRenderVersion?: number;
+}) {
+  const key = over.pdfR2Key ?? `office_dallas/deals/DFW-10432/documents/scorecards/card.${DIGEST}.v4.pdf`;
+  let selects = 0;
+  const query = vi.fn(async (sql: string) => {
+    if (!/SELECT/i.test(sql)) return { rows: [] };
+    selects += 1;
+    // The first SELECT is the pre-fetch idempotency/artifact read; the second is the post-fetch guard.
+    const postFetch = selects > 1;
+    return {
+      rows: [{
+        email_sent_at: null,
+        status: "corrective_action_closed",
+        pdf_r2_key: key,
+        pdf_render_version: over.pdfRenderVersion ?? 4,
+        pdf_content_generation: postFetch
+          ? (over.postFetchRendered === undefined ? over.rendered : over.postFetchRendered)
+          : over.rendered,
+        updated_at: postFetch
+          ? (over.postFetchCurrent === undefined ? over.current : over.postFetchCurrent)
+          : over.current,
+      }],
+    };
+  });
+  return { query, key };
+}
+
 describe("field scorecard email artifact safety", () => {
   it("uses the row's current artifact key after regeneration, not a stale queued payload key", async () => {
     const currentKey = `office_dallas/deals/DFW-10432/documents/scorecards/card.${"b".repeat(64)}.v3.pdf`;
@@ -67,6 +109,62 @@ describe("field scorecard email artifact safety", () => {
     expect(getPdf).not.toHaveBeenCalled();
     expect(sendEmail).toHaveBeenCalledOnce();
     expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
+  });
+
+  it("REGRESSION: does not attach a PDF the card outgrew by less than a millisecond", async () => {
+    // `timestamptz` is microseconds, a JS Date is milliseconds. Compared through millisecond values, a
+    // render that read the card at .123456 and the change that committed at .123900 are indistinguishable,
+    // so "provably stale" proves nothing and the submitted-scorecard email carries the PRE-change document.
+    const { query } = queryWithGenerations({
+      rendered: "2026-07-27T14:00:00.123456Z",
+      current: "2026-07-27T14:00:00.123900Z",
+    });
+    const getPdf = vi.fn().mockResolvedValue(Buffer.from("%PDF-pre-change"));
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "mail-us-1" });
+
+    await handleFieldScorecardEmail(payload, null, {
+      query: query as any, getPdf, sendEmail, env, logger,
+    });
+
+    expect(getPdf).not.toHaveBeenCalled();
+    expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
+  });
+
+  it("REGRESSION: the POST-FETCH guard sees a sub-millisecond change during the R2 read", async () => {
+    // Everything before the fetch described the row as it was; the fetch is the slowest step in the handler.
+    // A revalidation at a coarser resolution than the change it is looking for revalidates nothing.
+    const { query } = queryWithGenerations({
+      rendered: "2026-07-27T14:00:00.123456Z",
+      current: "2026-07-27T14:00:00.123456Z",
+      postFetchCurrent: "2026-07-27T14:00:00.123900Z",
+    });
+    const getPdf = vi.fn().mockResolvedValue(Buffer.from("%PDF-fetched"));
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "mail-us-2" });
+
+    await handleFieldScorecardEmail(payload, null, {
+      query: query as any, getPdf, sendEmail, env, logger,
+    });
+
+    expect(getPdf).toHaveBeenCalledOnce();
+    expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
+  });
+
+  it("attaches when the generations match to the microsecond", async () => {
+    // The other side of the coin: full-precision equality must still read as current, or no scorecard email
+    // would ever carry its PDF again.
+    const { query, key } = queryWithGenerations({
+      rendered: "2026-07-27T14:00:00.123456Z",
+      current: "2026-07-27T14:00:00.123456Z",
+    });
+    const getPdf = vi.fn().mockResolvedValue(Buffer.from("%PDF-current"));
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "mail-us-3" });
+
+    await handleFieldScorecardEmail(payload, null, {
+      query: query as any, getPdf, sendEmail, env, logger,
+    });
+
+    expect(getPdf).toHaveBeenCalledWith(key);
+    expect(sendEmail.mock.calls[0][3].attachments).toHaveLength(1);
   });
 
   it.each([
