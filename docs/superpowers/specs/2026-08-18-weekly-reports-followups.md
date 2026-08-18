@@ -184,7 +184,23 @@ Move the pass server-side. Per repo convention, use the latest and most capable 
 ### The problem
 The flag defaults off, so every reminder ships with the CRM web link alone.
 
-### Both stated blockers are already gone
+### ⚠️ Correction (2026-08-18, found during implementation)
+**This section was wrong.** It claimed both blockers were gone. Only the `APP_OWN_ROUTES` one was.
+
+`mobile/app/(app)/reports/` exists, but the worker emitted
+`trockcam://reports/weekly/<weeklyReportProjectId>?weekOf=…`, which file-system-routes to
+`reports/weekly/[draftId].tsx` — and that segment is a **local draft id** (`newClientUploadId()`, read
+back through `loadWeeklyReportDraft`), not a server project id. A server id there matches nothing on the
+device and renders *"Draft not found. It may have been submitted or discarded."* — worse than no link at
+all, because it tells the superintendent their work is gone. `?weekOf=` is never read. There is no
+`+not-found`, no `+native-intent`, and no `getStateFromPath` override to catch it.
+
+The route existing is not the same as the route accepting what the email sends. **Check the parameter
+semantics, not just the path.** Resolved by pointing `appUrl` at the hub (`trockcam://reports`), which is
+the deepest destination that actually lands; per-week deep linking needs a mobile route that accepts a
+project id and a week, and that is its own PR on a surface CI never compiles.
+
+### The stated blockers, as originally assessed
 `weekly-report-reminders.ts:187` says turning the flag on "requires both the route and a `reports` entry
 in `APP_OWN_ROUTES`." **Both now exist:**
 
