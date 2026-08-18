@@ -285,6 +285,178 @@ export type FieldResponderRole = "superintendent" | "project_manager";
 export type FieldResponderOption = { id: string; name: string; email: string; role: FieldResponderRole };
 export type FieldRespondersResponse = { responders: FieldResponderOption[] };
 
+// ── Weekly reports ────────────────────────────────────────────────────────────
+// The client-facing weekly progress report, authored on the phone and reviewed by the PM. Served from
+// /field/weekly-reports — a FIELD mount, because this app's `surface: "field"` token is rejected on every
+// CRM route (#722) and the CRM's own /weekly-reports router is additionally gated to admin/director/rep.
+//
+// `status` and `weekState` are kept as broad unions rather than plain strings because the app switches on
+// them to choose a label and an action; an unknown value falls through to a neutral chip.
+export type WeeklyReportStatusValue = "draft" | "pending_review" | "approved" | "sent";
+export type WeeklyReportWeekStateValue = WeeklyReportStatusValue | "not_started" | "dismissed";
+
+/** One project the signed-in user owes reports on. */
+export type WeeklyReportAssignment = {
+  weeklyReportProjectId: string;
+  dealId: string;
+  projectName: string;
+  projectNumber: string | null;
+  clientName: string | null;
+  /** The viewer's relationship to this project. Both are true on a one-person job. */
+  isSuper: boolean;
+  isPm: boolean;
+  cadenceWeekday: number;
+  /** What `week_of` auto-fills to — the cadence due date, NOT today. */
+  currentWeekOf: string;
+  currentState: WeeklyReportWeekStateValue;
+  currentReportId: string | null;
+  currentReportStatus: WeeklyReportStatusValue | null;
+  /**
+   * False once reporting has ENDED but missed weeks remain: `currentWeekOf` is then past the cadence end
+   * date and the server refuses it, so the card must not offer to start it.
+   */
+  currentWeekFilable: boolean;
+  /**
+   * How late the OLDEST week still owed is — over the whole backlog, not just the weeks this payload
+   * carries. 0 when only the current, not-yet-due week is outstanding.
+   */
+  daysLate: number;
+  /**
+   * Earlier weeks still owed, oldest first. Offered, never auto-selected. A week whose only report is a
+   * DRAFT is still owed and still listed: the wizard creates the row on the photos step, so dropping it
+   * once a row existed put the week beyond reach of the phone entirely.
+   */
+  outstandingWeeks: string[];
+  /**
+   * weekOf → the report id an outstanding week already has, so the wizard resumes that row instead of
+   * posting a second create. Only weeks that were started appear. Optional: an older API build does not
+   * send it, and absent simply means every outstanding week starts fresh, as it did before.
+   */
+  outstandingWeekReportIds?: Record<string, string>;
+  hasMoreOutstandingWeeks: boolean;
+  previousWeekOf: string | null;
+  previousCompletionPercent: number | null;
+  previousWeatherDelayDays: number | null;
+  /** Predecessor figures keyed by the week being filled — cumulative values must not cross weeks. */
+  previousByWeekOf?: Record<
+    string,
+    { weekOf: string; completionPercent: number | null; weatherDelayDays: number | null }
+  >;
+};
+
+/** One row of the PM's review queue. */
+export type WeeklyReportReviewItem = {
+  reportId: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  projectName: string;
+  weekOf: string;
+  status: WeeklyReportStatusValue;
+  authoredByName: string | null;
+  submittedAt: string | null;
+};
+
+export type WeeklyReportAssignmentsResponse = {
+  asOf: string;
+  projects: WeeklyReportAssignment[];
+  /** Newest week first — the queue only empties when a report is SENT, so the tail is the stale end. */
+  pendingReview: WeeklyReportReviewItem[];
+  /**
+   * The true depth of the queue, which the payload caps. Greater than `pendingReview.length` ⇒ rows were
+   * left out and the hub must say so. Optional because an older API build does not send it; absent is
+   * read as "not truncated", which is what the app assumed before the field existed.
+   */
+  pendingReviewTotal?: number;
+};
+
+/**
+ * A photo on a report. `caption` is REPORT-SPECIFIC: the server seeds it from `originalDescription` and
+ * never writes an edit back to the file, so retitling a photo for a client cannot rewrite what the crew
+ * typed on site.
+ */
+export type WeeklyReportPhotoView = {
+  fileId: string;
+  caption: string | null;
+  originalDescription: string | null;
+  sortOrder: number;
+  takenAt: string | null;
+  mimeType: string | null;
+  /** Presigned by the field route; the services deal in file ids. Null when unresolvable. */
+  thumbnailUrl: string | null;
+  fullUrl: string | null;
+};
+
+export type WeeklyReportPhotoCandidate = WeeklyReportPhotoView & {
+  /** The `week_of` of an earlier report this photo already appeared on, so it isn't repeated by accident. */
+  alreadyUsedOn: string | null;
+  selected: boolean;
+};
+
+export type WeeklyReportDetailView = {
+  id: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  weekOf: string;
+  version: number;
+  status: WeeklyReportStatusValue;
+  workCompleted: string | null;
+  nextWeekLookAhead: string | null;
+  issuesConcerns: string | null;
+  completionPercent: number | null;
+  weatherDelayDays: number | null;
+  remainingWeeks: number | null;
+  projectedDurationWeeks: number | null;
+  authoredByName: string | null;
+  submittedAt: string | null;
+  reviewedAt: string | null;
+  sentAt: string | null;
+  photos: WeeklyReportPhotoView[];
+};
+
+/** The standing setup the report prints its header from. */
+export type WeeklyReportProjectView = {
+  id: string;
+  dealId: string;
+  dealName: string | null;
+  propertyDisplayName: string | null;
+  clientName: string | null;
+  trockPmName: string | null;
+  trockSuperName: string | null;
+  projectStartDate: string | null;
+  projectCompletionDate: string | null;
+  projectedDurationWeeks: number | null;
+  cadenceWeekday: number;
+};
+
+/**
+ * Resolved SERVER-SIDE and shipped with the payload rather than re-derived here.
+ *
+ * The PM reviews on either surface, so two clients each deriving "can I approve this?" from a status and
+ * a pair of user ids would eventually disagree with each other and with the service that enforces it —
+ * and the visible failure is a button that 403s.
+ */
+export type WeeklyReportPermissions = {
+  canEdit: boolean;
+  canSubmit: boolean;
+  canApprove: boolean;
+  canReturnToDraft: boolean;
+};
+
+export type WeeklyReportResponse = { report: WeeklyReportDetailView };
+export type WeeklyReportDetailResponse = {
+  report: WeeklyReportDetailView;
+  project: WeeklyReportProjectView;
+  permissions: WeeklyReportPermissions;
+};
+export type WeeklyReportPhotoCandidatesResponse = {
+  photos: WeeklyReportPhotoCandidate[];
+  /**
+   * The true size of the window, which `photos` caps. Greater than `photos.length` ⇒ the oldest days of
+   * the fortnight were left out and the picker must say so. Optional for an older API build.
+   */
+  total?: number;
+};
+
 // ── Corrective actions ────────────────────────────────────────────────────────
 // A response-evidence photo linked to a corrective-action item. Mirrors the server's
 // CorrectiveActionResponsePhoto (corrective-action-api.ts). The read endpoint now resolves a presigned `url`

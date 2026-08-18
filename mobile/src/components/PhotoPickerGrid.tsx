@@ -1,14 +1,25 @@
 import React, { useCallback } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View, type ListRenderItem } from "react-native";
 import { Image as ExpoImage } from "expo-image";
-import type { FieldPhoto } from "../api/types";
 import { theme } from "../theme/theme";
 
 const NUM_COLUMNS = 3;
 const CELL_GAP = 8;
 
+/**
+ * The minimum a photo needs to be pickable. Structural rather than `FieldPhoto` so the weekly-report
+ * picker — whose rows are `weekly_report_photos` candidates keyed by fileId, not gallery photos — can use
+ * the same virtualized grid instead of a fourth hand-rolled one. `FieldPhoto` satisfies it unchanged.
+ */
+export type PickablePhoto = {
+  id: string;
+  displayName: string;
+  /** Thumbnail URL for the grid; null renders the placeholder tile. */
+  imageUrl: string | null;
+};
+
 export type PhotoPickerGridProps = {
-  photos: FieldPhoto[];
+  photos: readonly PickablePhoto[];
   /** Set of currently-selected photo ids (owned by the parent). */
   selected: Set<string>;
   onToggle: (id: string) => void;
@@ -19,7 +30,9 @@ export type PhotoPickerGridProps = {
   header?: React.ReactElement | null;
   /** Rendered below the grid inside the same scroll container (e.g. the report's "Group photos" chips). */
   footer?: React.ReactElement | null;
-  getAccessibilityLabel?: (photo: FieldPhoto, isSelected: boolean) => string;
+  getAccessibilityLabel?: (photo: PickablePhoto, isSelected: boolean) => string;
+  /** Rendered over a cell's bottom edge (e.g. "used 8/6" on a photo an earlier report already printed). */
+  renderBadge?: (photo: PickablePhoto) => React.ReactNode;
 };
 
 /**
@@ -41,10 +54,11 @@ export function PhotoPickerGrid({
   header = null,
   footer = null,
   getAccessibilityLabel,
+  renderBadge,
 }: PhotoPickerGridProps) {
   const rowHeight = cellSize + CELL_GAP;
 
-  const renderItem = useCallback<ListRenderItem<FieldPhoto>>(
+  const renderItem = useCallback<ListRenderItem<PickablePhoto>>(
     ({ item }) => {
       const isSelected = selected.has(item.id);
       return (
@@ -81,15 +95,20 @@ export function PhotoPickerGrid({
               <Text style={styles.checkMark}>✓</Text>
             </View>
           ) : null}
+          {renderBadge ? (
+            <View style={styles.badge} pointerEvents="none">
+              {renderBadge(item)}
+            </View>
+          ) : null}
         </Pressable>
       );
     },
-    [selected, onToggle, disabled, cellSize, getAccessibilityLabel],
+    [selected, onToggle, disabled, cellSize, getAccessibilityLabel, renderBadge],
   );
 
   return (
     <FlatList
-      data={photos}
+      data={photos as PickablePhoto[]}
       keyExtractor={(item) => item.id}
       renderItem={renderItem}
       numColumns={NUM_COLUMNS}
@@ -135,4 +154,5 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   checkMark: { color: theme.color.textInverse, fontFamily: theme.font.bold, fontSize: 14 },
+  badge: { position: "absolute", left: 4, bottom: 4, right: 4 },
 });

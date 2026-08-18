@@ -26,6 +26,9 @@ import {
   updateWeeklyReportSettings,
 } from "../../../src/modules/weekly-reports/projects-service.js";
 import {
+  MAX_PHOTO_CANDIDATES,
+  WEEKLY_REPORT_WEEK_EXISTS_CODE,
+  canEditWeeklyReport,
   canTransitionAs,
   createWeeklyReportDraft,
   getWeeklyReportDetail,
@@ -220,6 +223,27 @@ async function seedPhoto(input: { dealId?: string; takenAt: string; description?
     [id, filename, `k/${filename}`, SUPER, input.dealId ?? DEAL, input.description ?? null, `${input.takenAt}T15:00:00Z`],
   );
   return id;
+}
+
+/**
+ * A run of photos one minute apart, counting BACKWARDS from `newestAt`.
+ *
+ * The candidate cap only becomes reachable at 300 rows, and driving those through seedPhoto would be 300
+ * round trips for a test about one query's ranking. The columns written here are exactly the ones that
+ * query reads; the minute spacing gives it a deterministic newest-first order to rank by.
+ */
+async function seedPhotoBurst(count: number, newestAt: string): Promise<void> {
+  await pg.query(
+    `INSERT INTO office_dallas.files (
+       id, category, display_name, system_filename, original_filename, mime_type,
+       file_size_bytes, file_extension, r2_key, r2_bucket, uploaded_by, deal_id, taken_at
+     )
+     SELECT gen_random_uuid(), 'photo', 'burst-' || n, 'burst-' || n, 'burst-' || n, 'image/jpeg',
+            1024, 'jpg', 'k/burst-' || n, 'test-bucket', $1::uuid, $2::uuid,
+            $3::timestamptz - (n::int * interval '1 minute')
+       FROM generate_series(0, $4::int - 1) AS n`,
+    [SUPER, DEAL, newestAt, count],
+  );
 }
 
 describe("migration 0222", () => {
@@ -476,6 +500,47 @@ describe("draft creation", () => {
       409,
       /already exists/i,
     );
+  });
+
+  it("TAGS that conflict, so the phone can tell it from the other 409 this call can answer", async () => {
+    // The app recovers from this one by ADOPTING the row that already exists for the week — without that
+    // the phone's draft is unfilable: the create 409s identically on every retry and Discard is the only
+    // exit. It must not attempt the same recovery for "Weekly reporting is paused for this project",
+    // which is also a 409 and has no row to adopt. Matching on the prose would break the moment the copy
+    // is improved, so the discriminator is the code.
+    const project = await seedProject();
+    await createWeeklyReportDraft(
+      db,
+      { clientSubmissionId: U("bbbb8"), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+      SUPER_ACTOR,
+    );
+    let caught: unknown;
+    try {
+      await createWeeklyReportDraft(
+        db,
+        { clientSubmissionId: U("bbbb9"), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+        PM_ACTOR,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AppError);
+    expect((caught as AppError).code).toBe(WEEKLY_REPORT_WEEK_EXISTS_CODE);
+
+    // The paused answer is a 409 too, and carries no such tag.
+    await db.query(`UPDATE weekly_report_projects SET status = 'paused' WHERE id = $1::uuid`, [project.id]);
+    let paused: unknown;
+    try {
+      await createWeeklyReportDraft(
+        db,
+        { clientSubmissionId: U("bbba0"), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+        SUPER_ACTOR,
+      );
+    } catch (error) {
+      paused = error;
+    }
+    expect((paused as AppError).statusCode).toBe(409);
+    expect((paused as AppError).code).toBeUndefined();
   });
 
   it("refuses a stranger who is neither the super nor the PM", async () => {
@@ -745,7 +810,7 @@ describe("photos", () => {
     await seedPhoto({ takenAt: "2026-08-14" }); // after week_of
     await seedPhoto({ dealId: OTHER_DEAL, takenAt: "2026-08-11" }); // another project
 
-    const candidates = await listWeeklyReportPhotoCandidates(db, id);
+    const { photos: candidates } = await listWeeklyReportPhotoCandidates(db, id);
     expect(candidates.map((c) => c.fileId).sort()).toEqual([inWindowEdge, inWindow, onWeekOf].sort());
   });
 
@@ -754,13 +819,13 @@ describe("photos", () => {
     const id = await seedDraft(project.id);
     const photo = await seedPhoto({ takenAt: "2026-08-11", description: "as captured" });
 
-    expect((await listWeeklyReportPhotoCandidates(db, id))[0]!.caption).toBe("as captured");
+    expect((await listWeeklyReportPhotoCandidates(db, id)).photos[0]!.caption).toBe("as captured");
 
     await replaceWeeklyReportPhotos(db, id, [{ fileId: photo, caption: "edited for the client" }], SUPER_ACTOR);
     const after = await listWeeklyReportPhotoCandidates(db, id);
     // Falling back to the description here would silently revert the user's edit on every reload.
-    expect(after[0]!.caption).toBe("edited for the client");
-    expect(after[0]!.selected).toBe(true);
+    expect(after.photos[0]!.caption).toBe("edited for the client");
+    expect(after.photos[0]!.selected).toBe(true);
   });
 
   it("flags a photo already used on an earlier report", async () => {
@@ -770,7 +835,7 @@ describe("photos", () => {
     await replaceWeeklyReportPhotos(db, priorId, [{ fileId: photo }], SUPER_ACTOR);
 
     const currentId = await seedDraft(project.id, WEEK_OF, U("dddd2"));
-    const candidates = await listWeeklyReportPhotoCandidates(db, currentId);
+    const { photos: candidates } = await listWeeklyReportPhotoCandidates(db, currentId);
     const match = candidates.find((c) => c.fileId === photo);
     // Shown, not hidden — re-using a photo is sometimes right — but marked so it is a choice.
     expect(match?.alreadyUsedOn).toBe(PRIOR_WEEK);
@@ -785,6 +850,49 @@ describe("photos", () => {
     await pg.query(`UPDATE office_dallas.files SET deleted_at = now() WHERE id = $1::uuid`, [photo]);
     const detail = await getWeeklyReportDetail(db, id);
     expect(detail!.photos).toHaveLength(0);
+  });
+
+  it("reports the true depth of the window rather than truncating it silently", async () => {
+    // The cap used to be a bare LIMIT with nothing in the payload to say it had bitten. Because the
+    // window is anchored on `week_of` and ordered newest-first, the rows it removes are the EARLIEST
+    // days of the fortnight — for a report filed late, the days the report is actually about.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await seedPhotoBurst(MAX_PHOTO_CANDIDATES + 5, "2026-08-13T12:00:00Z");
+
+    const { photos, total } = await listWeeklyReportPhotoCandidates(db, id);
+    expect(total).toBe(MAX_PHOTO_CANDIDATES + 5);
+    expect(photos).toHaveLength(MAX_PHOTO_CANDIDATES);
+  });
+
+  it("never drops a photo already on the report, however deep in the window it sits", async () => {
+    // A selected photo pushed past the cap disappeared from the grid while still counting toward the
+    // picker's "N selected" — the count and the visible ticks disagreed, and there was no way to
+    // deselect it.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    const oldest = await seedPhoto({ takenAt: "2026-07-31" }); // first day of the window
+    await replaceWeeklyReportPhotos(db, id, [{ fileId: oldest }], SUPER_ACTOR);
+    // Every one of these is newer, so the selected photo ranks last of all.
+    await seedPhotoBurst(MAX_PHOTO_CANDIDATES + 5, "2026-08-13T12:00:00Z");
+
+    const { photos, total } = await listWeeklyReportPhotoCandidates(db, id);
+    expect(total).toBe(MAX_PHOTO_CANDIDATES + 6);
+    expect(photos.find((c) => c.fileId === oldest)?.selected).toBe(true);
+    // The carve-out is for the SELECTED row only; the rest is still capped.
+    expect(photos).toHaveLength(MAX_PHOTO_CANDIDATES + 1);
+  });
+
+  it("keeps a selected photo that has fallen outside the window", async () => {
+    // An import carries the shot's own EXIF time, so a photo selected on the report can sit outside the
+    // fortnight entirely. Filtering it out left the report holding a photo its own picker denied.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    const ancient = await seedPhoto({ takenAt: "2026-05-02" });
+    await replaceWeeklyReportPhotos(db, id, [{ fileId: ancient }], SUPER_ACTOR);
+
+    const { photos } = await listWeeklyReportPhotoCandidates(db, id);
+    expect(photos.map((c) => c.fileId)).toEqual([ancient]);
   });
 });
 
@@ -1387,7 +1495,7 @@ describe("review findings, round two", () => {
     await replaceWeeklyReportPhotos(db, laterId, [{ fileId: photo }], SUPER_ACTOR);
 
     const earlierId = await seedDraft(project.id, WEEK_OF, U("e2222"));
-    const candidates = await listWeeklyReportPhotoCandidates(db, earlierId);
+    const { photos: candidates } = await listWeeklyReportPhotoCandidates(db, earlierId);
     expect(candidates.find((c) => c.fileId === photo)?.alreadyUsedOn).toBeNull();
   });
 
@@ -1452,7 +1560,7 @@ describe("review findings, round three", () => {
     const photo = await seedPhoto({ takenAt: "2026-08-11", description: "as captured" });
 
     await replaceWeeklyReportPhotos(db, id, [{ fileId: photo, caption: null }], SUPER_ACTOR);
-    const candidates = await listWeeklyReportPhotoCandidates(db, id);
+    const { photos: candidates } = await listWeeklyReportPhotoCandidates(db, id);
     const match = candidates.find((c) => c.fileId === photo);
     expect(match?.selected).toBe(true);
     expect(match?.caption).toBeNull();
@@ -1587,5 +1695,42 @@ describe("transition authorisation helper", () => {
     expect(canTransitionAs(reassigned, { status: "draft", authored_by: SUPER }, "pending_review", SUPER_ACTOR)).toBe(
       true,
     );
+  });
+});
+
+describe("edit authorisation helper", () => {
+  // The matrix that has to agree with the transition matrix above: every actor granted a submit must also
+  // be granted the write, because the clients PATCH the content and PUT the photos before transitioning.
+  const project = { trock_pm_user_id: PM, trock_super_user_id: SUPER };
+  const reassigned = { trock_pm_user_id: PM, trock_super_user_id: DIRECTOR };
+
+  it("lets the author edit their own DRAFT after the assignment moves on", () => {
+    const row = { status: "draft", authored_by: SUPER };
+    expect(canEditWeeklyReport(reassigned, row, SUPER_ACTOR)).toBe(true);
+    // Exactly the pairing that was broken: a submit right with no write right behind it.
+    expect(canTransitionAs(reassigned, row, "pending_review", SUPER_ACTOR)).toBe(true);
+  });
+
+  it("takes it away again once the report has been submitted or approved", () => {
+    for (const status of ["pending_review", "approved"] as const) {
+      expect(canEditWeeklyReport(reassigned, { status, authored_by: SUPER }, SUPER_ACTOR)).toBe(false);
+    }
+  });
+
+  it("keeps a sent report immutable for its author, its PM and a director alike", () => {
+    const row = { status: "sent", authored_by: SUPER };
+    for (const actor of [SUPER_ACTOR, PM_ACTOR, DIRECTOR_ACTOR]) {
+      expect(canEditWeeklyReport(project, row, actor)).toBe(false);
+    }
+  });
+
+  it("keeps an approved report the PM's alone, even for the super who wrote it", () => {
+    expect(canEditWeeklyReport(project, { status: "approved", authored_by: SUPER }, SUPER_ACTOR)).toBe(false);
+    expect(canEditWeeklyReport(project, { status: "approved", authored_by: SUPER }, PM_ACTOR)).toBe(true);
+  });
+
+  it("grants nothing on the strength of an absent author", () => {
+    // `authored_by` is nullable (ON DELETE SET NULL). A null must never match an actor id.
+    expect(canEditWeeklyReport(reassigned, { status: "draft", authored_by: null }, SUPER_ACTOR)).toBe(false);
   });
 });
