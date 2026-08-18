@@ -18,14 +18,23 @@ const net = require("net");
  * `requireRegisteredMetaApp` and fails prebuild rather than ship a build that finds no glasses.
  * This is the same rule for the other half of what a production build needs.
  *
- * ONLY ON THE BUILDER, and that qualification is load-bearing rather than cautious. EAS evaluates
- * this config LOCALLY before it uploads anything — to read the slug, the version and the
- * fingerprint — and a variable stored with secret visibility is readable only on EAS's own
- * machines. Keying this off the build profile alone would abort every
- * `eas build --profile production` on the developer's laptop, reporting a host missing that is
- * present exactly where it is needed, and would make the documented secret setup unbuildable —
- * worse than the silent failure it replaces. `EAS_BUILD` is set only by the builder, so the check
- * runs there, where the secrets exist and where failing still costs nothing but a build.
+ * ONLY ON THE BUILDER. Both `EAS_BUILD` and `EAS_BUILD_PROFILE` are required, and the second is
+ * belt-and-braces rather than load-bearing — an earlier version of this comment claimed otherwise
+ * and was wrong, so the correction is recorded here rather than quietly dropped.
+ *
+ * The claim was that keying off the build profile alone "would abort every
+ * `eas build --profile production` on the developer's laptop". It would not: eas-cli never sets
+ * `EAS_BUILD_PROFILE` in the local process (verified against eas-cli 20.1.0, which `eas.json` pins —
+ * the string appears nowhere in the package), and `app.config.ts` already ships a profile-only guard
+ * of exactly that shape driving `requireRegisteredMetaApp`. Recommending `--visibility plaintext`
+ * removes the other half of the worry, since a plaintext variable IS readable during local config
+ * evaluation.
+ *
+ * Both conditions are kept anyway, because narrowing a build gate is not worth the risk of being
+ * wrong twice. But two independent string comparisons against undocumented vendor-controlled
+ * variables means TWO ways to silently disable the whole check — so it logs one line when it passes.
+ * Without that, a build log cannot distinguish "the guard ran and approved this" from "the guard
+ * never ran at all", and a gate whose only job is to fail closed must not be able to vanish quietly.
  *
  * CommonJS, and a `.js`, to match `withWearablesDat.js`. `app.config.ts` is transpiled by Expo's
  * config loader, but the modules it imports are required by Node as-is — so a `.ts` sibling cannot
@@ -192,18 +201,33 @@ const PRIVATE_HOSTNAME_PATTERNS = [
 function isSyntacticallyResolvableHostname(host) {
   const withoutRootDot = host.endsWith(".") ? host.slice(0, -1) : host;
   if (withoutRootDot === "" || withoutRootDot.length > 253) return false;
+  // Underscores are ALLOWED. RFC 1123 omits them from the preferred host syntax, but RFC 2181 places
+  // no such restriction on a DNS label, resolvers accept them, and hosts like `api_prod.example.com`
+  // do exist and do resolve. This gate's asymmetry decides the call: refusing a legitimate host blocks
+  // a build that would have worked, which is worse than admitting an unusual spelling that the next
+  // check (private-host) still has to clear.
   return withoutRootDot
     .split(".")
-    .every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+    .every((label) => /^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$/i.test(label));
 }
 
 function isPrivateHost(host) {
   const family = net.isIP(host);
   if (family === 4) return !ipv4IsGlobal(host);
   if (family === 6) return !ipv6IsGlobal(host);
-  // A name that cannot exist is treated as unreachable, which is what the caller's message says.
-  if (!isSyntacticallyResolvableHostname(host)) return true;
   return PRIVATE_HOSTNAME_PATTERNS.some((pattern) => pattern.test(host));
+}
+
+/**
+ * A name that cannot resolve — SEPARATE from a private one, because the two need different messages.
+ *
+ * This used to fold into `isPrivateHost`, so a typo like `api..example.com` or `-api.example.com` was
+ * reported as "points at a private host — the developer default leaking into a shipped build". That
+ * sends whoever hits it looking for a LAN address they never set, and costs exactly the debugging time
+ * this gate exists to save.
+ */
+function isUnresolvableHostname(host) {
+  return net.isIP(host) === 0 && !isSyntacticallyResolvableHostname(host);
 }
 
 function assertProductionBuildEnv(env) {
@@ -217,7 +241,14 @@ function assertProductionBuildEnv(env) {
       "EXPO_PUBLIC_API_BASE_URL is not set, and this is a production build. It is baked in at " +
         "bundle time, so a build without it installs and then cannot reach the CRM at all. " +
         "`mobile/.env` is gitignored and never reaches EAS — set it as an EAS environment " +
-        "variable: eas env:create --scope project --name EXPO_PUBLIC_API_BASE_URL --value <host>"
+        "variable:\n\n" +
+        "  eas env:create production --scope project --name EXPO_PUBLIC_API_BASE_URL " +
+        "--value <https-host> --visibility plaintext\n\n" +
+        "The `production` environment and `--visibility` are both required: without the " +
+        "environment the variable is created somewhere this build will not read it, and you get " +
+        "this identical error on the next twenty-minute build. `plaintext` is correct because " +
+        "EXPO_PUBLIC_* values are inlined into the bundle and can be read straight out of the app, " +
+        "so secret visibility buys nothing and would hide the value from local config evaluation."
     );
   }
 
@@ -255,7 +286,7 @@ function assertProductionBuildEnv(env) {
   // this. That comparison also rejects `https://[2606:0050::1]` — a valid global address the parser
   // merely compresses to `[2606:50::1]` — and blocking a real build over a spelling is a worse failure
   // than the one being prevented.
-  if (/[ - ]/.test(raw) || raw.includes("\\") || !/^https:\/\/[^/]/i.test(raw)) {
+  if (/[\u0000-\u0020\u007f]/.test(raw) || raw.includes("\\") || !/^https:\/\/[^/]/i.test(raw)) {
     throw new Error(
       `EXPO_PUBLIC_API_BASE_URL must begin with "https://" followed immediately by the host, and may ` +
         `contain no whitespace or control characters (got ${JSON.stringify(raw)}). Values like ` +
@@ -322,6 +353,13 @@ function assertProductionBuildEnv(env) {
 
   // IPv6 hostnames come back bracketed from `new URL()`.
   const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (isUnresolvableHostname(host)) {
+    throw new Error(
+      `EXPO_PUBLIC_API_BASE_URL's host ("${host}") is not a resolvable hostname — this looks like a ` +
+        "typo rather than a wrong host. Every dot-separated label must be 1-63 characters of " +
+        "letters, digits, hyphen or underscore, and may not begin or end with a hyphen."
+    );
+  }
   if (isPrivateHost(host)) {
     throw new Error(
       `EXPO_PUBLIC_API_BASE_URL points at a private host ("${host}"), which no phone in the field ` +
@@ -329,7 +367,13 @@ function assertProductionBuildEnv(env) {
         "API host as an EAS environment variable instead."
     );
   }
+
+  // The positive signal. See the header: this check is guarded by two string comparisons against
+  // vendor-controlled variables, so a build log that says nothing is ambiguous between "approved" and
+  // "never ran". One line makes the difference readable in the EAS log without opening anything.
+  console.log(`[assert-production-build-env] production API host OK: ${url.origin}`);
 }
 
 module.exports.assertProductionBuildEnv = assertProductionBuildEnv;
 module.exports.isPrivateHost = isPrivateHost;
+module.exports.isUnresolvableHostname = isUnresolvableHostname;

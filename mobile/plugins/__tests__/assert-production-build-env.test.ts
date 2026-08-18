@@ -261,8 +261,13 @@ describe("assertProductionBuildEnv", () => {
     // The URL parser is far more permissive than DNS. An empty label is unrepresentable in the wire
     // format, and a leading or trailing hyphen is illegal — so these are not unlikely names, they are
     // impossible ones, and the build shipped unable to resolve its own API.
+    //
+    // These used to expect /private host/, because "impossible name" was folded into isPrivateHost.
+    // They are now their own error: a typo is not a LAN leak, and telling someone their build points
+    // at "the developer default" when they actually mistyped the host sends them hunting for an
+    // address they never set.
     expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
-      /private host/
+      /not a resolvable hostname/
     );
   });
 
@@ -329,5 +334,78 @@ describe("assertProductionBuildEnv", () => {
     expect(() =>
       assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://api.example.com/" }))
     ).not.toThrow();
+  });
+
+  it("GUARD: accepts an underscore in a label, which is a legal DNS label and does resolve", () => {
+    // Folding "impossible name" into isPrivateHost also rejected this, and reported it as a LAN
+    // leak. Refusing a host that would have worked is the expensive direction for a build gate.
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://api_prod.example.com" }))
+    ).not.toThrow();
+  });
+
+  it("names a malformed host as a TYPO, not as a private host", () => {
+    // The two need different messages: "points at a private host — the developer default leaking
+    // into a shipped build" sends whoever hits a typo looking for a LAN address they never set.
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://api..example.com" }))
+    ).toThrow(/not a resolvable hostname/);
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://-api.example.com" }))
+    ).toThrow(/not a resolvable hostname/);
+  });
+});
+
+/**
+ * THE WIRING, which is a separate question from whether the assertion works.
+ *
+ * Every test above imports the module directly, so all of them pass with the call in
+ * `app.config.ts` DELETED — verified by mutation: commenting out `assertProductionBuildEnv(
+ * process.env)` left the whole 1284-test mobile suite green. One line is the entire reason this
+ * feature exists, and nothing exercised it.
+ *
+ * These require `app.config.ts` itself, so the assertion has to actually be reached through the file
+ * that Expo loads. Note this is only meaningful because the `mobile` CI job (premerge-build-gate.yml)
+ * runs this suite — the native half of this app is not compiled by anything, but this part is.
+ */
+describe("app.config.ts wiring", () => {
+  const ORIGINAL_ENV = process.env;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  afterEach(() => {
+    process.env = ORIGINAL_ENV;
+  });
+
+  const loadConfigModule = () => {
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require("../../app.config");
+    });
+  };
+
+  it("REGRESSION: app.config.ts CALLS the assertion — deleting that one line must fail this test", () => {
+    process.env.EAS_BUILD = "true";
+    process.env.EAS_BUILD_PROFILE = "production";
+    // A LAN host rather than an absent one, deliberately. `mobile`'s own `test` script exports
+    // EXPO_PUBLIC_API_BASE_URL=https://api.test.local, so "unset" is not a state this suite can
+    // reliably reach — and an assertion that depends on unsetting it would be testing the harness.
+    // A private host is unambiguous either way, and it is the case that actually leaks.
+    process.env.EXPO_PUBLIC_API_BASE_URL = "https://192.168.1.99:3002";
+
+    expect(loadConfigModule).toThrow(/points at a private host/);
+  });
+
+  it("REGRESSION: and reading the config off the builder still loads cleanly", () => {
+    // The dev path. If this ever throws, the guard has escaped its scope and bricked local work —
+    // the failure mode that matters more than the one it prevents.
+    delete process.env.EAS_BUILD;
+    delete process.env.EAS_BUILD_PROFILE;
+    delete process.env.EXPO_PUBLIC_API_BASE_URL;
+
+    expect(loadConfigModule).not.toThrow();
   });
 });
