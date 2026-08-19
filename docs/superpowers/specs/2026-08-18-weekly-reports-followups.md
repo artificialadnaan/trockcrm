@@ -108,8 +108,27 @@ collapses the moment a correction goes to the same client for the same week.
   given delivery key exists.
 - A bounce for **version N** must not mark version N+1 undelivered, and vice versa — corrections share a
   client and a week but not a delivery key.
-- `send_delivered_at` keeps its current meaning (*accepted*) or gains a sibling; **do not silently
-  redefine it**, because the board, the chip and the sweep all read it.
+### The delivery-state contract — decide it once, change every reader together
+
+"Keep `send_delivered_at` or add a sibling" is not a detail to settle per-file. **Either choice makes a
+claim that four other places already rely on**, and picking it late means discovering the consequences
+one surface at a time. What shipped, stated as the contract it is:
+
+- **`send_delivered_at` keeps meaning "the provider ACCEPTED the message".** It is not redefined.
+- **`send_delivery_status` / `_status_at` / `_detail` carry the real verdict**, written only by the
+  webhook: `delivered` / `bounced` / `complained` / `delayed` / `failed`.
+- Therefore **`send_delivered_at IS NULL` still means "not accepted"**, and 0226's partial index keeps its
+  meaning — which is exactly why the sweep can go on using it unchanged.
+- And therefore **a bounced report HAS an acceptance stamp.** This is the trap the whole contract exists
+  to make visible: `sendFailed`, `sendStalled` and `sendPending` are all false for it, so every surface
+  reading only `send_delivered_at` files a bounced week away as *settled*. The board needs a `sendBounced`
+  state, the Projects-tab aggregates must stop counting it under "Reports sent", the sweep must not
+  announce it as merely stalled, and the settled predicate must veto on it.
+- Per-version: a verdict is keyed on `send_delivery_key`, so a bounce for version N never touches N+1.
+
+**The list of readers is the deliverable.** Board pass one, board pass two, `olderOutstandingCounts`,
+`listWeeklyReportProjectSummaries`, the status chip, and the sweep. Changing a subset is how the two
+surfaces disagree, which is the drift this feature has already had to fix twice.
 
 ---
 

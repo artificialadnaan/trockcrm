@@ -63,9 +63,19 @@ and `@coderabbitai` by hand.
 ### PR B1 — the field-route send *(the one that makes the feature usable)*
 **Base:** `feat/weekly-reports-send-v2`
 
-1. Add to `field-routes.ts`, gated by `canPublishWeeklyReport` (**not** `requireWeeklyReportSender`):
-   `GET /reports/:id/send-draft`, `POST /reports/:id/send`, `POST /reports/:id/send/retry`,
-   `POST /reports/:id/correction`.
+1. Add to `field-routes.ts`: `GET /reports/:id/send-draft`, `POST /reports/:id/send`,
+   `POST /reports/:id/send/retry`, `POST /reports/:id/correction`. **No `requireWeeklyReportSender`.**
+
+   **`send-service.ts` IS THE AUTHORIZATION BOUNDARY, not the router.** Each of those operations calls
+   `canPublishWeeklyReport` itself, having taken `FOR UPDATE` on the report and its setup row, and both
+   things matter. A route-level check protects only callers that arrive through that route — it does
+   nothing for a direct caller, a future second mount, or a script — and a check made outside the lock is
+   a check against a row that can change before the transition commits, which is how two concurrent sends
+   both pass. Put it where the decision and the write are in one transaction.
+
+   The tests belong at the same boundary: call the service directly for both the assigned-PM success and
+   the unauthorized refusal. A test that only drives the router proves the router, and the router is the
+   layer that is easy to get right.
 2. Remove the 409 at `field-routes.ts:253` — **in the same commit** as the endpoints above, never before.
 3. Reuse `send-service.ts` wholesale. The token mint stays in the same commit as the transition.
 4. Mobile send screen under `mobile/app/(app)/reports/`, over `mobile/src/weekly-reports/`.
@@ -100,6 +110,14 @@ bounce on version N leaves N+1 untouched; an unsigned request is rejected.
    `lastSendActivityAt` already computed; put it in `shared/` so board and sweep cannot diverge.
 3. Alert on the *transition* into stalled, with per-report suppression — an alert every pass gets muted.
 4. Skip reports superseded by a correction; that is not a delivery failure.
+5. **The sweep must not assume its own schema exists.** Migrations run on the API before it starts and
+   never on the worker, and the two are separate Railway services deployed independently — so "apply the
+   migration first" is a sequence nobody enforces, and a worker that starts first queries
+   `send_stall_alerted_at` and every send column PR5 added, and fails. Either gate the deploy on
+   migrations having run, or — better, because it needs no coordination — **probe for the schema and skip
+   the office until it appears**, logging at INFO. Probe COLUMNS, not tables: `weekly_reports` has existed
+   since 0222, so a table check passes in exactly the window that breaks. Nothing is lost by waiting a
+   tick, and this removes deploy ordering as a requirement in both directions.
 
 **Tests:** absolute date fixtures, never `ageSend(STALL_MINUTES + 5)` — a fixture computed from the
 constant it tests can never fail; a stalled send alerts once, not every pass; a superseded report does
@@ -175,10 +193,17 @@ numbers are real; quoting one as "the" baseline sends the next person hunting a 
 config difference. Say which command produced the number.
 
 **Verification** — `shared` must be built first or typecheck reports thousands of phantom errors. Run
-each workspace separately with `TZ=UTC npm run test:ci`; root `test:ci` exceeds the tool timeout and dies
-*after* server prints green. Never pipe a test run through `tail` — you get tail's exit code, not npm's.
-Include `client-field` or the count is short. Derive expected counts from the branch's **actual base**,
-not from a number written down before a rebase.
+each npm workspace separately with `TZ=UTC npm run test:ci` — `server`, `client`, `client-field`,
+`worker`, `shared`; root `test:ci` exceeds the tool timeout and dies *after* server prints green.
+Include `client-field` or the count is short.
+
+**`mobile/` is NOT one of them.** It is a self-contained app outside the workspace graph and runs
+**jest**: `EXPO_PUBLIC_API_BASE_URL=… npx jest` from `mobile/`, with its own `npm install` and its own
+`npx tsc -p tsconfig.json --noEmit`. `npm run test:ci` does not exist there. (`mobile-crm` is a second
+such app, same shape.)
+
+Never pipe a test run through `tail` — you get tail's exit code, not npm's. Derive expected counts from
+the branch's **actual base**, not from a number written down before a rebase.
 
 **Review** — heavy adversarial subagent review *before* `gh pr create`. Merge only when a review of the
 **current tip** returns nothing, aggregating every review on that tip; "not yet reviewed" ≠ clean.
