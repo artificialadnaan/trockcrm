@@ -105,6 +105,10 @@ beforeAll(async () => {
   // dashboard read selects them. A suite that stops at 0223 fails with "column send_delivered_at does
   // not exist" — or worse, would swallow it inside an office-level handler and skip the office.
   await pg.exec(migrationSql("0226_weekly_report_send"));
+  // And 0227, which adds the DELIVERY VERDICT columns. Same reason again: `getWeeklyReportDashboard`
+  // selects `send_delivery_status`, and `priorVersionReachedClient` binds it — a suite that stops at 0226
+  // fails on a missing column rather than on its subject.
+  await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES

@@ -9,6 +9,12 @@ import {
   weeklyReportRetryIsProviderDeduped,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import {
+  isWeeklyReportDeliveryStatus,
+  weeklyReportDeliveryFailed,
+  weeklyReportDeliveryLabel,
+  type WeeklyReportBounceClass,
+} from "@trock-crm/shared/lib/weeklyReportDelivery";
+import {
   createWeeklyReportCorrection,
   fetchWeeklyReportDetail,
   retryWeeklyReportSend,
@@ -165,6 +171,14 @@ export function WeeklyReportHistoryPanel({
                     <Badge variant="outline" className={`${STATUS_BADGE[report.status] ?? ""} whitespace-nowrap`}>
                       {STATUS_LABEL[report.status] ?? report.status}
                     </Badge>
+                    {/* What the mail provider said AFTERWARDS. The "Sent" badge above means the PM
+                        committed and the provider accepted; it has never meant the client received
+                        anything, and a report addressed to a mistyped domain wears it just the same.
+                        This line is the only place that difference is visible to a person. Rendered only
+                        when a verdict exists — silence here means no webhook has spoken, which is
+                        "unknown", and dressing that up as "Delivered" is the bug this whole feature is
+                        about. */}
+                    <DeliveryVerdict report={report} />
                   </td>
                   <td className="px-3.5 py-3 text-slate-600">{report.authoredByName ?? "—"}</td>
                   <td className="px-3.5 py-3 text-right tabular-nums text-slate-700">
@@ -212,7 +226,16 @@ export function WeeklyReportHistoryPanel({
                         report.version >= (latestVersionByWeek.get(report.weekOf) ?? report.version) && (
                           <CorrectionButton
                             reportId={report.id}
-                            delivered={Boolean(report.sendDeliveredAt)}
+                            // ACCEPTANCE MINUS THE PROVIDER'S LATER VERDICT, not acceptance alone. A
+                            // bounced report has `sendDeliveredAt` set — the provider took it before the
+                            // receiving server refused it — so the old test called it delivered and told
+                            // the PM their correction "replaces the copy the client already has". The
+                            // client has no copy.
+                            delivered={
+                              Boolean(report.sendDeliveredAt) &&
+                              !weeklyReportDeliveryFailed(report.sendDeliveryStatus)
+                            }
+                            bounced={weeklyReportDeliveryFailed(report.sendDeliveryStatus)}
                             onCreated={(correction) => {
                               void refetch();
                               onChanged();
@@ -275,6 +298,40 @@ export function WeeklyReportHistoryPanel({
 }
 
 /**
+ * The mail provider's verdict on this version's send, when there is one.
+ *
+ * RENDERS NOTHING WITHOUT A VERDICT, and that silence is the honest answer rather than a gap. A `sent`
+ * report with no delivery status has not been reported as delivered — it has not been reported on at all,
+ * which is the permanent state of everything sent before the webhook existed and of every environment
+ * where it is not configured. Filling that in with "Delivered" would recreate the exact overclaim this
+ * feature was built to remove.
+ */
+function DeliveryVerdict({ report }: { report: WeeklyReportDetail }) {
+  const status = report.sendDeliveryStatus;
+  if (!isWeeklyReportDeliveryStatus(status)) return null;
+
+  const detail = report.sendDeliveryDetail;
+  const rawClass = detail && typeof detail.bounceClass === "string" ? detail.bounceClass : null;
+  const bounceClass = (
+    rawClass === "hard" || rawClass === "soft" ? rawClass : "unknown"
+  ) satisfies WeeklyReportBounceClass;
+  const failed = weeklyReportDeliveryFailed(status);
+  const message = detail && typeof detail.message === "string" ? detail.message : null;
+
+  return (
+    <div
+      className={`mt-1 flex items-center gap-1 text-[11.5px] font-bold ${
+        failed ? "text-brand-red" : status === "complained" ? "text-amber-600" : "text-slate-400"
+      }`}
+      title={message ?? undefined}
+    >
+      {failed && <AlertTriangle className="h-3 w-3" />}
+      {weeklyReportDeliveryLabel(status, bounceClass)}
+    </div>
+  );
+}
+
+/**
  * Clone a sent report to the next version so it can be corrected.
  *
  * Confirmed first: this creates a real second version of a document a client has already read, and the
@@ -283,11 +340,22 @@ export function WeeklyReportHistoryPanel({
 function CorrectionButton({
   reportId,
   delivered,
+  bounced,
   onCreated,
 }: {
   reportId: string;
   /** Whether the version being corrected actually reached the client. Changes what a correction MEANS. */
   delivered: boolean;
+  /**
+   * The provider told us it did not reach them. A THIRD case, not the negation of `delivered`.
+   *
+   * "Never reached the client" covers two situations that need opposite advice. A send still stuck in the
+   * queue is fixed by Retry, and the copy below says so. A BOUNCE is not — the message went out, the
+   * receiving server refused it, and replaying the identical message to the identical address does it
+   * again. The only route that reaches anybody is a correction addressed differently, which is why this
+   * is the one case where the button in front of them is the right one.
+   */
+  bounced: boolean;
   onCreated: (correction: WeeklyReportDetail) => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -299,11 +367,13 @@ function CorrectionButton({
       onClick={async () => {
         if (
           !window.confirm(
-            delivered
-              ? "Issue a correction? This creates a new version of the report. Once you send it, the client is told it replaces the copy they already have and their old link shows a notice."
-              : // The wording the old copy was missing entirely, and the case a PM staring at a "Send
-                // failed" chip is most likely to be in. A correction is NOT how a failed send is fixed.
-                "This report's email never reached the client. A correction is a new version, not a re-send — if you only need the delivery to go out, use Retry send instead. Create a new version anyway?",
+            bounced
+              ? "The mail provider reported this report as not delivered — the client did not receive it. Check their email address on the project first, then create a new version to send to the corrected address. Continue?"
+              : delivered
+                ? "Issue a correction? This creates a new version of the report. Once you send it, the client is told it replaces the copy they already have and their old link shows a notice."
+                : // The wording the old copy was missing entirely, and the case a PM staring at a "Send
+                  // failed" chip is most likely to be in. A correction is NOT how a failed send is fixed.
+                  "This report's email never reached the client. A correction is a new version, not a re-send — if you only need the delivery to go out, use Retry send instead. Create a new version anyway?",
           )
         ) {
           return;

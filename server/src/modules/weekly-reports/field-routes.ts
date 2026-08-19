@@ -19,6 +19,7 @@ import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { resolvePhotoDisplayUrls } from "../files/service.js";
 import { listWeeklyReportAssignments } from "./assignments-service.js";
+import { formatWeeklyReportDictation } from "./dictation-service.js";
 import {
   createWeeklyReportDraft,
   getWeeklyReportForActor,
@@ -39,6 +40,44 @@ import { toFieldWeeklyReportProject, type QueryExecutor } from "./projects-servi
 
 const router = Router();
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// ---------------------------------------------------------------------------
+// Dictation — registered ABOVE the router-wide middleware ON PURPOSE
+// ---------------------------------------------------------------------------
+
+/**
+ * Clean up a dictated transcript into report bullets.
+ *
+ * MOUNTED BEFORE `router.use(requireFieldContractor, tenantMiddleware)` BELOW, AND THAT ORDERING IS LOAD
+ * BEARING. Express matches layers in registration order, so a POST here is answered by this handler and
+ * never reaches the router-wide middleware. That is the point: this endpoint reads and writes no rows,
+ * and the pass behind it waits on a model call. Under the shared middleware it would hold a pooled
+ * Postgres connection open inside a transaction for the whole round trip — the exact shape of the
+ * pool-saturation outage this API has already had once, bought for nothing. It keeps
+ * `requireFieldContractor` explicitly, so it is authenticated exactly like every route below it, and it
+ * is the SAME arrangement the field photo-transcription endpoint already uses one layer up.
+ *
+ * If you add another route above the `router.use` line, give it `requireFieldContractor` too — the router
+ * mount does not supply it up here.
+ *
+ * The response is an ADDITION the app appends to whatever the superintendent has already written; it is
+ * never given, and can never return, the existing section. `existingChars` is a count used only to size
+ * the remaining room. See dictation-service.ts for why that split matters.
+ */
+router.post("/dictation", requireFieldContractor, async (req, res, next) => {
+  try {
+    // Passed through UNCOERCED so the service's own type and length checks stay reachable: substituting
+    // "" for a malformed transcript would answer 200 with an empty addition and look like a clean
+    // dictation that simply heard nothing.
+    const result = await formatWeeklyReportDictation({
+      transcript: req.body?.transcript,
+      existingChars: req.body?.existingChars,
+    });
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
 
 // Every route needs a field session AND an office-bound transaction. tenantMiddleware pins the search_path
 // to the user's ACTIVE office (the `x-office-id` header requireFieldContractor already validated) and

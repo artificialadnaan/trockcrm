@@ -6,6 +6,7 @@ import {
 } from "../lib/system-email.js";
 import { getObjectBuffer } from "../lib/r2-client.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
+import { WEEKLY_REPORT_DELIVERY_TAG } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import {
   normalizeWeeklyReportRecipients,
   weeklyReportEmailParagraphBlocks,
@@ -33,6 +34,12 @@ import { TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 //      That covers the window (1) cannot: provider accepted, process died before the stamp. A retry
 //      replays the same key and the provider answers "already delivered" rather than sending again. Only
 //      a CORRECTION — a new report row — gets a new key, and a correction is meant to reach the client.
+//
+// AND `send_delivered_at` STILL ONLY MEANS "ACCEPTED". Nothing this job can observe says the client's mail
+// server took the message; that answer arrives later, on the provider's delivery webhook, which the API
+// serves at /api/webhooks/resend and correlates through the delivery key this job TAGS the message with
+// (see `deliveryTags` below). The verdict lands in `send_delivery_status` (0227) — a sibling column, not a
+// redefinition of this one.
 
 export const WEEKLY_REPORT_SEND_JOB = "weekly_report_send";
 
@@ -597,6 +604,18 @@ export async function handleWeeklyReportSend(
     return;
   }
 
+  // THE SAME KEY, TAGGED ONTO THE MESSAGE, so the provider hands it back on every webhook about it.
+  //
+  // This is what makes a bounce attributable. `send_delivered_at` records only that the provider accepted
+  // the message; whether the client's mail server then took it arrives minutes later on
+  // /api/webhooks/resend, with no session and no office context — just this tag. The API resolves it
+  // through public.weekly_report_send_deliveries and writes the verdict to the report.
+  //
+  // Deliberately the DELIVERY KEY and not the report id. A correction is a different report with its own
+  // key, and a retry is the same request with the same one, so the tag identifies the MESSAGE rather than
+  // the document — which is the only granularity at which "this one bounced" is a true statement.
+  const deliveryTags = [{ name: WEEKLY_REPORT_DELIVERY_TAG, value: deliveryKey }];
+
   // THE SEND ITSELF. Only this call is inside the failure-recording catch. Everything after it has already
   // put the report in the client's inbox, and must never be written down as a send failure.
   let result: SendSystemEmailResult;
@@ -605,6 +624,7 @@ export async function handleWeeklyReportSend(
     result = await sendEmail(recipients, email.subject, email.html, {
       text: email.text,
       idempotencyKey,
+      tags: deliveryTags,
       // No Reply-To override. `sendSystemEmailWithMetadata` does not support one, and teaching a helper
       // shared by fifteen jobs a new header to route this one email is a wider change than it earns —
       // the PM's own address and phone are in the signature, and the footer no longer claims otherwise.

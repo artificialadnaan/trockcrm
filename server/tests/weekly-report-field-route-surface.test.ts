@@ -54,6 +54,7 @@ describe("weekly-report field route surface", () => {
     ["GET", `/api/field/weekly-reports/reports/${REPORT}/photo-candidates`],
     ["PUT", `/api/field/weekly-reports/reports/${REPORT}/photos`],
     ["POST", `/api/field/weekly-reports/reports/${REPORT}/transition`],
+    ["POST", "/api/field/weekly-reports/dictation"],
     // The send, which is the whole reason this mount exists for a PM. On the CRM router these four are
     // gated admin/director, and the roles that may HOLD the PM slot do not intersect that except at
     // leadership — so before they were mounted here the assigned PM could not send their own report at all.
@@ -89,6 +90,10 @@ describe("weekly-report field route surface", () => {
 
     expect([...new Set(paths)].sort()).toEqual([
       "/assignments",
+      // Sorts first among the report routes. It is the one entry here that is NOT report authoring: it
+      // takes a transcript and a character count, touches no rows, and is registered above the
+      // router-wide tenantMiddleware for exactly that reason — see the ordering test below.
+      "/dictation",
       "/reports",
       "/reports/:id",
       "/reports/:id/correction",
@@ -176,6 +181,62 @@ describe("weekly-report field route surface", () => {
       expect(layer, `${path} is not mounted`).toBeTruthy();
       expect(layer.route.stack).toHaveLength(1);
     }
+  });
+
+  it("keeps /dictation ahead of the router-wide middleware, and everything else behind it", async () => {
+    // ORDERING IS THE POINT, and it is invisible in the route list above. Express matches layers in
+    // registration order, so /dictation being registered BEFORE `router.use(requireFieldContractor,
+    // tenantMiddleware)` is what stops it opening an office transaction: it waits on a model call, reads
+    // and writes no rows, and holding a pooled Postgres connection open for that round trip is the shape
+    // of a pool-saturation outage this API has already had once. Moving it below the `use` would still
+    // pass every other test in this file and quietly reintroduce that.
+    //
+    // It keeps requireFieldContractor of its own, so it is not a hole in the mount either — the 401 case
+    // above is the control for that.
+    const { weeklyReportFieldRoutes } = await import("../src/modules/weekly-reports/field-routes.js");
+    const stack = (weeklyReportFieldRoutes as any).stack as Array<{ route?: { path: string } }>;
+    const useIndex = stack.findIndex((layer) => !layer.route);
+    const dictationIndex = stack.findIndex((layer) => layer.route?.path === "/dictation");
+
+    expect(useIndex).toBeGreaterThanOrEqual(0);
+    expect(dictationIndex).toBeGreaterThanOrEqual(0);
+    expect(dictationIndex).toBeLessThan(useIndex);
+
+    // Every OTHER route stays behind it: they all read or write rows and need the tenant transaction.
+    const behind = stack
+      .map((layer, index) => ({ path: layer.route?.path, index }))
+      .filter((entry) => entry.path && entry.path !== "/dictation");
+    expect(behind.length).toBeGreaterThan(0);
+    for (const entry of behind) expect(entry.index).toBeGreaterThan(useIndex);
+  });
+
+  it("formats a dictated transcript without touching the database", async () => {
+    // Drives the handler the way the transition test does. No ANTHROPIC_API_KEY here, so the service takes
+    // its own local-split fallback — which is exactly the point: the endpoint answers usefully on a deploy
+    // where the model pass is not configured at all.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    const { weeklyReportFieldRoutes } = await import("../src/modules/weekly-reports/field-routes.js");
+    const layer = (weeklyReportFieldRoutes as any).stack.find(
+      (entry: any) => entry.route?.path === "/dictation",
+    );
+    // stack[0] is requireFieldContractor; stack[1] is the handler.
+    const handler = layer.route.stack.at(-1).handle;
+
+    let body: unknown;
+    const req = {
+      body: { transcript: "Poured the north slab. Framing starts Monday.", existingChars: 0 },
+      // Deliberately absent: tenantClient / commitTransaction. A handler that reached for either would
+      // throw here rather than silently working in a test that supplied them.
+    };
+    await handler(req, { json: (payload: unknown) => { body = payload; } }, (error: unknown) => {
+      throw error;
+    });
+
+    expect(body).toEqual({
+      text: "- Poured the north slab\n- Framing starts Monday",
+      source: "local",
+    });
+    vi.unstubAllEnvs();
   });
 
   it.each([

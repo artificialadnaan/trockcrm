@@ -97,3 +97,27 @@ export const weeklyReportPublicLimiter = rateLimit({
   legacyHeaders: false,
   message: "Too many requests, please try again later",
 });
+
+// The mail provider's delivery webhook (/api/webhooks/resend), which is world-reachable and verifies a
+// signature over the request body. That HMAC is the work an unauthenticated caller can force — cheap per
+// request, not cheap at volume, and reachable by anyone who learns the URL.
+//
+// SIZED SO THE PROVIDER CANNOT TRIP IT. This is not a CRM surface where a 429 costs somebody a refresh:
+// the webhook is configured per provider ACCOUNT, so every system email this company sends — scorecards,
+// RFP mail, project-number notifications, weekly reports — produces events here, and a burst is normal
+// (one send to four recipients emits sent/delivered/opened events within seconds). The provider does retry
+// a non-2xx, so a trip is recoverable rather than lost, but a limiter that fires on ordinary traffic
+// converts real delivery facts into delayed ones for no benefit. 600/min is roughly an order of magnitude
+// above the busiest minute this account has ever had.
+//
+// Keyed by IP, like its siblings: the provider sends from a small stable set, so legitimate traffic shares
+// a bucket that an unrelated flood cannot consume.
+const WEEKLY_REPORT_DELIVERY_WEBHOOK_LIMIT = 600;
+export const weeklyReportDeliveryWebhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: WEEKLY_REPORT_DELIVERY_WEBHOOK_LIMIT,
+  keyGenerator: correctiveActionIpKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: "Too many requests, please try again later" } },
+});

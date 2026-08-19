@@ -67,14 +67,26 @@ export interface WeeklyReportDetail {
    * the PM commits. Null on a `sent` report means the delivery is still in flight or has failed, which is
    * exactly the state the dashboard's "Send failed" chip exists to surface.
    *
-   * AND NOTHING MORE THAN THAT. There is no bounce webhook anywhere in this codebase (no svix handler, no
-   * resend-signature verification), and client addresses are hand-typed with no verification — so a report
-   * addressed to `jay@examle.com` is accepted, hard-bounces, and reads here forever as though it landed.
-   * Every surface that consumes this field is worded accordingly. Ingesting Resend's delivery/bounce
-   * webhooks is the real fix and is deliberately out of scope for this PR: it needs a public unauthenticated
-   * endpoint, signature verification, and an event table, which is a feature rather than a correction.
+   * AND NOTHING MORE THAN THAT, STILL. Acceptance is not delivery: a report addressed to `jay@examle.com`
+   * is accepted, hard-bounces, and this field goes on reading as though it landed. That is not a defect in
+   * the field, it is its meaning — the provider's later verdict lands in `sendDeliveryStatus` below, and
+   * migration 0227 deliberately did NOT redefine this one, because the board, the History chip, the retry
+   * gate and `weekly_reports_send_undelivered_idx` all read it as "handed over successfully" and are right
+   * to. Read the two together to answer "did the client get it".
    */
   sendDeliveredAt: string | null;
+  /**
+   * What the provider said AFTERWARDS, on its delivery webhook (0227):
+   * `delayed | delivered | complained | failed | bounced`, or null while nothing has spoken for the send.
+   *
+   * Null is the permanent state of every send made before that webhook existed, and of every send in an
+   * environment where the webhook is not configured — so a null here means "unknown", never "fine".
+   */
+  sendDeliveryStatus: string | null;
+  /** THE PROVIDER'S timestamp for the event behind `sendDeliveryStatus`, not the time we received it. */
+  sendDeliveryStatusAt: string | null;
+  /** Bounce class (hard/soft), the provider's own type/subtype and its message, verbatim. */
+  sendDeliveryDetail: Record<string, unknown> | null;
   sendLastAttemptAt: string | null;
   pdfAvailable: boolean;
   photos: WeeklyReportPhoto[];
@@ -128,6 +140,9 @@ function mapReportRow(row: Record<string, any>, photos: WeeklyReportPhoto[]): We
     sendError: row.send_error ?? null,
     sendAttempts: Number(row.send_attempts ?? 0),
     sendDeliveredAt: toIsoTimestamp(row.send_delivered_at),
+    sendDeliveryStatus: row.send_delivery_status ?? null,
+    sendDeliveryStatusAt: toIsoTimestamp(row.send_delivery_status_at),
+    sendDeliveryDetail: (row.send_delivery_detail ?? null) as Record<string, unknown> | null,
     sendLastAttemptAt: toIsoTimestamp(row.send_last_attempt_at),
     pdfAvailable: Boolean(row.pdf_r2_key),
     photos,
@@ -959,11 +974,19 @@ export async function transitionWeeklyReport(
       assignments.push(`send_delivery_key = $${params.length}::uuid`);
       // A fresh send starts from a clean delivery record. These are all already at their defaults for a
       // first send; stating them keeps the invariant true for any future path that reuses this row.
+      //
+      // The 0227 verdict columns are cleared with them, and belong in the same list for the same reason:
+      // they describe what the provider said about a PARTICULAR message, and this statement is minting a
+      // new delivery key — i.e. a different message. Carrying a stale `bounced` onto it would report a
+      // failure for a send that has not been attempted yet.
       assignments.push(
         `send_attempts = 0`,
         `send_error = NULL`,
         `send_delivered_at = NULL`,
         `send_last_attempt_at = NULL`,
+        `send_delivery_status = NULL`,
+        `send_delivery_status_at = NULL`,
+        `send_delivery_detail = NULL`,
       );
     }
   }
