@@ -126,8 +126,15 @@ const REQUIRED_TENANT_TABLES = [
  * has existed since 0222, so `to_regclass` passes happily while the column the join needs is missing, and
  * the read throws 42703 for every office on every tick until the API happens to deploy.
  *
- * Skipping is the right failure: the reminders are re-derived from the cadence on the next tick, so an
- * office that sits out a few ticks loses nothing once the migration lands.
+ * Skipping is the right failure, but it is NOT free, and the earlier version of this note said it was.
+ * This cron runs at 07:00 with catch-up ticks at 09:00 and 11:00 CT, and a claim it misses is retried by
+ * THAT DAY's catch-up ticks only — by tomorrow's run the due date has moved buckets. So an office skipped
+ * here recovers fully if the API applies 0228 before 11:00 CT, and loses that day's t−2 / t−1 nudges if
+ * the window outlasts it. The digest is the same.
+ *
+ * That is still the correct trade against the alternative, which is a 42703 on every office on every
+ * tick — the same outcome plus an error log and no recovery. It just means the deploy is worth doing in
+ * the morning, and it is why this note says so rather than claiming nothing is at stake.
  */
 const REQUIRED_PROJECT_COLUMNS = ["trock_pm_responder_id", "trock_super_responder_id"] as const;
 
