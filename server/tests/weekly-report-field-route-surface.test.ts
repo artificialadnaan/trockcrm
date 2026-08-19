@@ -55,6 +55,13 @@ describe("weekly-report field route surface", () => {
     ["PUT", `/api/field/weekly-reports/reports/${REPORT}/photos`],
     ["POST", `/api/field/weekly-reports/reports/${REPORT}/transition`],
     ["POST", "/api/field/weekly-reports/dictation"],
+    // The send, which is the whole reason this mount exists for a PM. On the CRM router these four are
+    // gated admin/director, and the roles that may HOLD the PM slot do not intersect that except at
+    // leadership — so before they were mounted here the assigned PM could not send their own report at all.
+    ["GET", `/api/field/weekly-reports/reports/${REPORT}/send-draft`],
+    ["POST", `/api/field/weekly-reports/reports/${REPORT}/send`],
+    ["POST", `/api/field/weekly-reports/reports/${REPORT}/send/retry`],
+    ["POST", `/api/field/weekly-reports/reports/${REPORT}/correction`],
   ])("registers %s %s on the FIELD router, where T-Rock Cam can reach it", async (method, path) => {
     const agent = request(createApp()) as any;
     const response = await agent[method.toLowerCase()](path).send({});
@@ -83,13 +90,97 @@ describe("weekly-report field route surface", () => {
 
     expect([...new Set(paths)].sort()).toEqual([
       "/assignments",
+      // Sorts first among the report routes. It is the one entry here that is NOT report authoring: it
+      // takes a transcript and a character count, touches no rows, and is registered above the
+      // router-wide tenantMiddleware for exactly that reason — see the ordering test below.
       "/dictation",
       "/reports",
       "/reports/:id",
+      "/reports/:id/correction",
       "/reports/:id/photo-candidates",
       "/reports/:id/photos",
+      "/reports/:id/send",
+      "/reports/:id/send-draft",
+      "/reports/:id/send/retry",
       "/reports/:id/transition",
     ]);
+  });
+
+  it("refuses `sent` on the field transition route EVEN THOUGH the send flow now exists", async () => {
+    // This guard used to say sending was "not available in the app yet". That deferral is gone — the four
+    // send routes above are its replacement — but the refusal itself stays, because what it stops was never
+    // about the feature being unfinished.
+    //
+    // `canTransitionAs` grants `sent` to PM powers, so a PM reaching it through the GENERIC endpoint would
+    // stamp sent_by/sent_at and freeze the header snapshot with no email composed, no token minted and no
+    // delivery queued. The week stops being owed, every surface reads "Sent", and the client has nothing.
+    // The row is then immutable (`canEditWeeklyReport` is false at `sent`) and un-retryable — it carries no
+    // `send_request` to replay — so it sits on the board as a send that never delivered and never can.
+    // Sending is POST /reports/:id/send, which does all of it in one transaction.
+    const { weeklyReportFieldRoutes } = await import("../src/modules/weekly-reports/field-routes.js");
+    const layer = (weeklyReportFieldRoutes as any).stack.find(
+      (entry: any) => entry.route?.path === "/reports/:id/transition",
+    );
+    const handler = layer.route.stack[0].handle;
+
+    let captured: unknown;
+    await handler(
+      { body: { to: "sent" }, params: { id: REPORT }, fieldUser: { id: "u", role: "construction" } },
+      { json: () => undefined, status: () => ({ json: () => undefined }) },
+      (error: unknown) => {
+        captured = error;
+      },
+    );
+    expect((captured as { statusCode?: number })?.statusCode).toBe(400);
+    expect((captured as { message?: string })?.message).toMatch(/send endpoint/i);
+  });
+
+  it("routes /send/retry to the RETRY handler, not to /send", async () => {
+    // The one pair on this router where a matching mistake would be silent AND destructive. `/send` is
+    // registered first, so if it matched as a prefix, every Retry would be routed to the initial send —
+    // which answers 409 "already sent" on a report the PM is trying to un-stick, leaving the only way
+    // forward for an undelivered client report permanently unreachable from the app.
+    //
+    // Asserted through the router's own matcher rather than over HTTP, because the mount applies
+    // requireFieldContractor to everything: an unauthenticated request to ANY path under it answers 401
+    // before routing, so a supertest 401 cannot tell a correctly-routed request from a misrouted one.
+    const { weeklyReportFieldRoutes } = await import("../src/modules/weekly-reports/field-routes.js");
+    const matching = (path: string) =>
+      (weeklyReportFieldRoutes as any).stack
+        .filter((entry: any) => entry.route?.methods?.post && entry.match(path))
+        .map((entry: any) => entry.route.path);
+
+    expect(matching(`/reports/${REPORT}/send/retry`)).toEqual(["/reports/:id/send/retry"]);
+    expect(matching(`/reports/${REPORT}/send`)).toEqual(["/reports/:id/send"]);
+  });
+
+  it("puts NO role gate in front of the send routes — the gate is the service's", async () => {
+    // The point of moving the PM's send here is that the person holding the PM slot is normally a
+    // `construction` user. A `requireRole` on these four would re-create, on this mount, the exact
+    // exclusion the CRM router's gate creates and this work exists to remove — and it would do it
+    // silently, because a role gate looks like ordinary hardening.
+    //
+    // Every one of these handlers reaches a send-service.ts function that calls `canPublishWeeklyReport`
+    // itself, under FOR UPDATE on the report and its setup row. That refusal is asserted against real rows
+    // in tests/modules/weekly-reports/weekly-report-field-send.runtime.test.ts, including the control
+    // proving the assigned construction PM's send actually executes.
+    //
+    // A single handler in the stack is what "no extra middleware was attached to this route" looks like.
+    // The mount-wide `requireFieldContractor + tenantMiddleware` is a router.use and is not in it — which
+    // the "%s %s registers on the FIELD router" cases above prove is still running, since they 401.
+    const { weeklyReportFieldRoutes } = await import("../src/modules/weekly-reports/field-routes.js");
+    for (const path of [
+      "/reports/:id/send-draft",
+      "/reports/:id/send",
+      "/reports/:id/send/retry",
+      "/reports/:id/correction",
+    ]) {
+      const layer = (weeklyReportFieldRoutes as any).stack.find(
+        (entry: any) => entry.route?.path === path,
+      );
+      expect(layer, `${path} is not mounted`).toBeTruthy();
+      expect(layer.route.stack).toHaveLength(1);
+    }
   });
 
   it("keeps /dictation ahead of the router-wide middleware, and everything else behind it", async () => {
@@ -146,29 +237,6 @@ describe("weekly-report field route surface", () => {
       source: "local",
     });
     vi.unstubAllEnvs();
-  });
-
-  it("refuses `sent` on the field transition route until the send flow exists", async () => {
-    // `canTransitionAs` grants `sent` to PM powers, and PR 5 has not shipped the send flow — so a PM
-    // reaching it here would stamp sent_by/sent_at and freeze the snapshot with NOTHING delivered. The
-    // report is then permanently immutable (corrections are a new version, which also does not exist),
-    // and it drops off the outstanding board as if the client had received it.
-    const { weeklyReportFieldRoutes } = await import("../src/modules/weekly-reports/field-routes.js");
-    const layer = (weeklyReportFieldRoutes as any).stack.find(
-      (entry: any) => entry.route?.path === "/reports/:id/transition",
-    );
-    const handler = layer.route.stack[0].handle;
-
-    let captured: unknown;
-    await handler(
-      { body: { to: "sent" }, params: { id: REPORT }, fieldUser: { id: "u", role: "construction" } },
-      { json: () => undefined, status: () => ({ json: () => undefined }) },
-      (error: unknown) => {
-        captured = error;
-      },
-    );
-    expect((captured as { statusCode?: number })?.statusCode).toBe(409);
-    expect((captured as { message?: string })?.message).toMatch(/not available in the app/i);
   });
 
   it.each([

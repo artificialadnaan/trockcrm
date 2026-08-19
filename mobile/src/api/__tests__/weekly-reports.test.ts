@@ -1,9 +1,13 @@
 import {
   createWeeklyReport,
+  createWeeklyReportCorrection,
   getWeeklyReport,
   getWeeklyReportAssignments,
   getWeeklyReportPhotoCandidates,
+  getWeeklyReportSendDraft,
   replaceWeeklyReportPhotos,
+  retryWeeklyReportSend,
+  sendWeeklyReport,
   transitionWeeklyReport,
   updateWeeklyReport,
   type Fetcher,
@@ -48,11 +52,61 @@ describe("weekly-report endpoints", () => {
     await getWeeklyReportPhotoCandidates(fetcher, REPORT);
     await replaceWeeklyReportPhotos(fetcher, REPORT, []);
     await transitionWeeklyReport(fetcher, REPORT, "pending_review");
+    // The send, which has CRM counterparts gated admin/director — the one place addressing the wrong
+    // mount would look like a permission problem rather than a routing one, and the one place where
+    // "the PM cannot do this" is the exact bug these four exist to fix.
+    await getWeeklyReportSendDraft(fetcher, REPORT);
+    await sendWeeklyReport(fetcher, REPORT, {
+      recipients: ["jay@example.com"],
+      subject: "s",
+      contextParagraph: "c",
+      attachPdf: true,
+    });
+    await retryWeeklyReportSend(fetcher, REPORT);
+    await createWeeklyReportCorrection(fetcher, REPORT);
 
-    expect(calls).toHaveLength(7);
+    expect(calls).toHaveLength(11);
     for (const call of calls) {
       expect(call.path.startsWith("/field/weekly-reports/")).toBe(true);
     }
+  });
+
+  it("posts the send exactly as composed, with nothing invented client-side", async () => {
+    const { calls, fetcher } = recorder();
+    await sendWeeklyReport(fetcher, REPORT, {
+      recipients: ["jay@example.com", "melissa@example.com"],
+      subject: "4123 Cedar Springs — Weekly Progress Report",
+      contextParagraph: "Week 3 update attached.",
+      attachPdf: true,
+    });
+    expect(calls[0]).toEqual({
+      path: `/field/weekly-reports/reports/${REPORT}/send`,
+      opts: {
+        method: "POST",
+        body: {
+          recipients: ["jay@example.com", "melissa@example.com"],
+          subject: "4123 Cedar Springs — Weekly Progress Report",
+          contextParagraph: "Week 3 update attached.",
+          attachPdf: true,
+        },
+      },
+    });
+  });
+
+  it("defaults the retry's duplicate-risk acknowledgement to FALSE", async () => {
+    // Silence must mean the safe answer. Past the mail provider's 24-hour idempotency window a replay is a
+    // genuinely second email to a paying client, and the server refuses without this flag rather than
+    // trusting the caller to have asked first — so a client that sent `true` by default would turn a
+    // deliberate act into an accidental one.
+    const { calls, fetcher } = recorder();
+    await retryWeeklyReportSend(fetcher, REPORT);
+    expect(calls[0]).toEqual({
+      path: `/field/weekly-reports/reports/${REPORT}/send/retry`,
+      opts: { method: "POST", body: { acknowledgeDuplicateRisk: false } },
+    });
+
+    await retryWeeklyReportSend(fetcher, REPORT, true);
+    expect(calls[1].opts).toEqual({ method: "POST", body: { acknowledgeDuplicateRisk: true } });
   });
 
   it("posts the idempotency key with the create, so a lost response cannot double-file a week", async () => {

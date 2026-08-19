@@ -43,6 +43,8 @@ import type {
   WeeklyReportDictationResponse,
   WeeklyReportPhotoCandidatesResponse,
   WeeklyReportResponse,
+  WeeklyReportSendDraftResponse,
+  WeeklyReportSendResponse,
   WeeklyReportStatusValue,
 } from "./types";
 import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
@@ -305,6 +307,12 @@ export const replaceWeeklyReportPhotos = (
 
 // Submit for review / approve / bounce back. The PM gate is server-side: a superintendent posting
 // `{"to":"approved"}` is refused regardless of what this app's buttons allow.
+//
+// `to: "sent"` is refused here with a 400 pointing at the send endpoint below, and that refusal is not a
+// missing feature. Reaching `sent` through this endpoint would stamp the report delivered and freeze its
+// header with no email composed, no link minted and no delivery queued: the week would stop being owed
+// while the client had nothing, and the row would be stuck there — immutable at `sent`, and un-retryable
+// because there is no send request to replay.
 export const transitionWeeklyReport = (f: Fetcher, id: string, to: WeeklyReportStatusValue) =>
   f<WeeklyReportResponse>(`/field/weekly-reports/reports/${id}/transition`, { method: "POST", body: { to } });
 
@@ -338,6 +346,45 @@ export const formatWeeklyReportDictation = (
     body,
     timeoutMs: 20_000,
   });
+
+// ── Sending the report to the client ──────────────────────────────────────────
+// The assigned PM's send. These four have CRM counterparts gated admin/director, which is why they are
+// mounted on /field as well rather than instead: the roles that may hold the PM slot
+// (field_contractor/construction/admin/director) barely intersect that gate, so before this existed the
+// person who should send the report was the one person who could not.
+//
+// Authorisation is the SERVER's `canPublishWeeklyReport` — the assigned PM or office leadership — checked
+// inside the service under a row lock, not by anything this app decides. A superintendent gets 403 on all
+// four however the app's buttons are drawn.
+
+// The composed email, as data. Carries the client's addresses and the PM's phone number, so it takes the
+// same gate the send does. It does NOT carry a share URL, for a sent report or any other.
+export const getWeeklyReportSendDraft = (f: Fetcher, id: string) =>
+  f<WeeklyReportSendDraftResponse>(`/field/weekly-reports/reports/${id}/send-draft`);
+
+// 202: the transition, the frozen header, the minted link and the queued job are all done; the EMAIL is
+// the queued part. The response carries `shareUrl`, which is the only time the raw token exists anywhere
+// the app can see — show it, never store it.
+export const sendWeeklyReport = (
+  f: Fetcher,
+  id: string,
+  body: { recipients: string[]; subject: string; contextParagraph: string; attachPdf: boolean },
+) => f<WeeklyReportSendResponse>(`/field/weekly-reports/reports/${id}/send`, { method: "POST", body });
+
+// Queue the SAME message again for a delivery that has not reached the client. Past the mail provider's
+// 24-hour idempotency window a replay is a genuinely second email rather than a no-op, and the server
+// refuses without `acknowledgeDuplicateRisk` rather than trusting the caller to have asked.
+export const retryWeeklyReportSend = (f: Fetcher, id: string, acknowledgeDuplicateRisk = false) =>
+  f<WeeklyReportResponse>(`/field/weekly-reports/reports/${id}/send/retry`, {
+    method: "POST",
+    body: { acknowledgeDuplicateRisk },
+  });
+
+// Clone a sent report to the next version so it can be corrected. 201, and it is NOT sent by this call —
+// the original keeps its link and only starts showing "a newer version was issued" when the correction
+// actually goes out. This is the only way back from `sent`, which is immutable for everyone.
+export const createWeeklyReportCorrection = (f: Fetcher, id: string) =>
+  f<WeeklyReportResponse>(`/field/weekly-reports/reports/${id}/correction`, { method: "POST" });
 
 // ── Corrective actions ────────────────────────────────────────────────────────
 // Read a below-band scorecard's corrective-action items + their inline responses. Session auth in-app
