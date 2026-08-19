@@ -5,6 +5,7 @@ import {
   Bell,
   Check,
   CheckCheck,
+  Clock,
   FileText,
   Loader2,
   Mail,
@@ -40,6 +41,7 @@ const EVENT_ICON: Record<WeeklyReportAuditEvent["type"], typeof Check> = {
   sent: Mail,
   accepted: CheckCheck,
   delivered: CheckCheck,
+  delayed: Clock,
   failed: AlertTriangle,
   retried: RefreshCw,
   alerted: Siren,
@@ -53,6 +55,7 @@ const EVENT_LABEL: Record<WeeklyReportAuditEvent["type"], string> = {
   sent: "Sent",
   accepted: "Accepted by the mail provider",
   delivered: "Delivered",
+  delayed: "Still in transit",
   failed: "Delivery failed",
   retried: "Retried",
   alerted: "Stalled — leadership alerted",
@@ -62,6 +65,7 @@ const EVENT_LABEL: Record<WeeklyReportAuditEvent["type"], string> = {
 /** Only the two failure tones get colour. Everything else is a normal step and stays neutral. */
 const EVENT_TONE: Partial<Record<WeeklyReportAuditEvent["type"], string>> = {
   failed: "text-brand-red",
+  delayed: "text-amber-600",
   alerted: "text-amber-600",
   superseded: "text-slate-400",
 };

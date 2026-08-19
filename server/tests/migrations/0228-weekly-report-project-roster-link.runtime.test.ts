@@ -116,6 +116,13 @@ async function pmResponderIdOf(schema: string): Promise<string | null> {
   return result.rows[0]?.id ?? null;
 }
 
+async function superResponderIdOf(schema: string): Promise<string | null> {
+  const result = await pg.query<{ id: string | null }>(
+    `SELECT trock_super_responder_id AS id FROM ${schema}.weekly_report_projects LIMIT 1`,
+  );
+  return result.rows[0]?.id ?? null;
+}
+
 beforeEach(async () => {
   pg = new PGlite();
 });
@@ -261,6 +268,53 @@ describe("migration 0228 — field-team roster link on weekly_report_projects", 
       await pg.exec(migrationSql(MIGRATION));
 
       expect(await pmResponderIdOf("office_dallas")).toBeNull();
+    });
+
+    it("links the SUPERINTENDENT slot too, from its own hand-written UPDATE", async () => {
+      // The migration contains a SECOND, hand-duplicated backfill for `trock_super_responder_id`. Every
+      // other assertion in this block reads the PM column, so a copy-paste error in that block — the
+      // wrong role literal, or `trock_pm_user_id` left in the correlation predicate — passes the whole
+      // suite unnoticed, and the failure mode is a silently wrong superintendent on the client PDF.
+      await seedOffices(["office_dallas"]);
+      const pm = await seedLinkablePerson({
+        schema: "office_dallas",
+        email: "asherwood@trockgc.com",
+        rosterRole: "project_manager",
+      });
+      const sup = await seedLinkablePerson({
+        schema: "office_dallas",
+        email: "ssanchez@trockgc.com",
+        rosterRole: "superintendent",
+      });
+      await pg.exec(
+        `INSERT INTO office_dallas.weekly_report_projects (trock_pm_user_id, trock_super_user_id)
+         VALUES ('${pm.userId}'::uuid, '${sup.userId}'::uuid)`,
+      );
+
+      await pg.exec(migrationSql(MIGRATION));
+
+      // BOTH, and each to its OWN person — a predicate that correlated on the wrong user id would put
+      // the PM's roster row in the superintendent slot and still be non-null.
+      expect(await pmResponderIdOf("office_dallas")).toBe(pm.responderId);
+      expect(await superResponderIdOf("office_dallas")).toBe(sup.responderId);
+      expect(pm.responderId).not.toBe(sup.responderId);
+    });
+
+    it("does NOT put a project manager into the superintendent slot", async () => {
+      // The mirror of the PM-slot role check, against the duplicated block.
+      await seedOffices(["office_dallas"]);
+      const { userId } = await seedLinkablePerson({
+        schema: "office_dallas",
+        email: "asherwood@trockgc.com",
+        rosterRole: "project_manager",
+      });
+      await pg.exec(
+        `INSERT INTO office_dallas.weekly_report_projects (trock_super_user_id) VALUES ('${userId}'::uuid)`,
+      );
+
+      await pg.exec(migrationSql(MIGRATION));
+
+      expect(await superResponderIdOf("office_dallas")).toBeNull();
     });
 
     it("leaves an unassigned setup alone rather than inventing a PM for it", async () => {

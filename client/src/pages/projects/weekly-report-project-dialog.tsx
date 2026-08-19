@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Info, Loader2, Search, X } from "lucide-react";
+import { AlertTriangle, Info, Loader2, Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -164,7 +164,7 @@ export function WeeklyReportProjectDialog({
 }) {
   const [form, setForm] = useState<FormState>(() => (project ? formFromProject(project) : emptyForm()));
   const [saving, setSaving] = useState(false);
-  const { responders, loading: rosterLoading } = useWeeklyReportAssignableUsers();
+  const { responders, loading: rosterLoading, error: rosterError } = useWeeklyReportAssignableUsers();
 
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -300,6 +300,7 @@ export function WeeklyReportProjectDialog({
                       responders={responders}
                       role="project_manager"
                       loading={rosterLoading}
+                      error={rosterError}
                       ariaLabel="T-Rock project manager"
                       currentName={project?.trockPmName ?? null}
                     />
@@ -311,6 +312,7 @@ export function WeeklyReportProjectDialog({
                       responders={responders}
                       role="superintendent"
                       loading={rosterLoading}
+                      error={rosterError}
                       ariaLabel="T-Rock superintendent"
                       currentName={project?.trockSuperName ?? null}
                     />
@@ -496,13 +498,24 @@ function Field({
   label,
   hint,
   children,
+  /**
+   * Render a <div> instead of a <label>.
+   *
+   * A <label> forwards a click to its first labelable descendant and may legally wrap at most ONE form
+   * control. The project picker puts a search input AND a button per result inside its field, so as a
+   * <label> it was both non-conforming and actively wrong: clicking a result row also activated the
+   * search box. Anything with more than one control in it passes `asFieldset`.
+   */
+  asFieldset = false,
 }: {
   label: string;
   hint?: string;
   children: React.ReactNode;
+  asFieldset?: boolean;
 }) {
+  const Wrapper = asFieldset ? "div" : "label";
   return (
-    <label className="block">
+    <Wrapper className="block">
       <span className="mb-1.5 flex items-baseline gap-1.5">
         {/* slate-600, not the slate-400 this form used throughout: at 12px that was roughly 2.8:1 on
             white, under the 4.5:1 floor for text somebody has to read to fill the field in. */}
@@ -510,7 +523,7 @@ function Field({
         {hint && <span className="text-[11.5px] font-normal text-slate-500">{hint}</span>}
       </span>
       {children}
-    </label>
+    </Wrapper>
   );
 }
 
@@ -639,7 +652,7 @@ function DealPicker({
 
   if (value) {
     return (
-      <Field label="Project">
+      <Field label="Project" asFieldset>
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1">
             <ReadOnlyValue>{label}</ReadOnlyValue>
@@ -654,7 +667,7 @@ function DealPicker({
   }
 
   return (
-    <Field label="Project" hint="Required">
+    <Field label="Project" hint="Required" asFieldset>
       <div className="relative">
         <div className="flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 focus-within:border-brand-red/50 focus-within:ring-2 focus-within:ring-brand-red/15">
           <Search className="h-4 w-4 shrink-0 text-slate-400" />
@@ -722,6 +735,7 @@ function RosterSelect({
   responders,
   role,
   loading,
+  error,
   ariaLabel,
   currentName,
 }: {
@@ -730,6 +744,8 @@ function RosterSelect({
   responders: WeeklyReportAssignableResponder[];
   role: "project_manager" | "superintendent";
   loading: boolean;
+  /** A FAILED roster request. Distinct from an empty one — see below. */
+  error: string | null;
   ariaLabel: string;
   currentName: string | null;
 }) {
@@ -754,7 +770,16 @@ function RosterSelect({
           </option>
         ))}
       </SelectInput>
-      {!loading && options.length === 0 && (
+      {/* A failed request and an empty roster are NOT the same thing, and saying "nobody holds this
+          role" for a request that never landed is the worse of the two: it reads as a settled fact, and
+          somebody acts on it by saving the project with the slot unassigned. */}
+      {!loading && error && (
+        <p className="flex items-start gap-1.5 text-[11.5px] text-brand-red">
+          <AlertTriangle className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+          <span>Couldn't load the Field Team roster, so nobody can be picked. Reopen this form to retry.</span>
+        </p>
+      )}
+      {!loading && !error && options.length === 0 && (
         <p className="text-[11.5px] text-slate-500">
           Nobody on the Field Team roster holds this role yet.
         </p>

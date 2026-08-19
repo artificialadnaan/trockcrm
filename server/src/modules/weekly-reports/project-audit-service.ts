@@ -1,4 +1,4 @@
-import { WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES } from "@trock-crm/shared/lib/weeklyReportDelivery";
+import { weeklyReportDeliveryFailed } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import { AppError } from "../../middleware/error-handler.js";
 import { getWeeklyReportProject, type QueryExecutor, type WeeklyReportProject } from "./projects-service.js";
 
@@ -26,6 +26,7 @@ export interface WeeklyReportAuditEvent {
     | "sent"
     | "accepted"
     | "delivered"
+    | "delayed"
     | "failed"
     | "retried"
     | "alerted"
@@ -145,7 +146,6 @@ function buildEvents(row: Record<string, any>): WeeklyReportAuditEvent[] {
 
   const status = row.send_delivery_status as string | null;
   if (status) {
-    const failed = (WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES as readonly string[]).includes(status);
     const detail = row.send_delivery_detail as Record<string, unknown> | null;
     const reason =
       typeof detail?.message === "string" && detail.message
@@ -153,12 +153,20 @@ function buildEvents(row: Record<string, any>): WeeklyReportAuditEvent[] {
         : typeof detail?.bounceSubType === "string" && detail.bounceSubType
           ? detail.bounceSubType
           : null;
-    push(
-      failed ? "failed" : "delivered",
-      row.send_delivery_status_at,
-      null,
-      reason ? `${status} — ${reason}` : status,
-    );
+    // THREE outcomes, not two. A binary "failure or delivered" split sent `delayed` — which the shared
+    // vocabulary defines as "the provider is still trying, and explicitly not a failure" — down the
+    // delivered branch, so a report still in flight was reported to a director as having reached the
+    // client. That is the same mistake as reading acceptance for delivery, one field over.
+    //
+    // `complained` DOES belong on the delivered branch: a spam complaint can only follow a delivery, so
+    // the client has the report. The word itself still prints in the detail line, because "delivered,
+    // and they marked it as spam" is a different thing to know than "delivered".
+    const type = weeklyReportDeliveryFailed(status)
+      ? "failed"
+      : status === "delayed"
+        ? "delayed"
+        : "delivered";
+    push(type, row.send_delivery_status_at, null, reason ? `${status} — ${reason}` : status);
   }
 
   // A retry only reads as an event when it is DISTINCT from the original send; otherwise every ordinary
@@ -259,12 +267,18 @@ export async function getWeeklyReportProjectAudit(
       deliveryStatus: row.send_delivery_status ?? null,
       // "Sent, and no evidence it arrived." A bounce counts: the provider accepted the message, so
       // send_delivered_at IS set, and any predicate keyed on that alone reads a bounce as a success.
+      // "The CRM has no evidence the client received this."
+      //   • never accepted by the provider          -> no evidence
+      //   • bounced / failed                        -> evidence AGAINST
+      //   • delayed                                 -> still trying; the client does not have it yet
+      //   • accepted, webhook silent (status null)  -> the ordinary pre-verdict case, NOT flagged, or
+      //                                                every report would go red for its first minutes
+      //   • delivered / complained                  -> they have it
       undelivered:
         row.status === "sent" &&
         (row.send_delivered_at == null ||
-          (WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES as readonly string[]).includes(
-            row.send_delivery_status ?? "",
-          )),
+          weeklyReportDeliveryFailed(row.send_delivery_status) ||
+          row.send_delivery_status === "delayed"),
       events: buildEvents(row),
     })),
     reminders: reminders.rows.map((row) => ({

@@ -130,7 +130,11 @@ describe("the per-project audit trail", () => {
   it("404s a project that does not exist, rather than reporting an empty history for it", async () => {
     // An empty history and a missing project look identical to a reader, and only one of them means
     // "nothing has happened here".
-    await expect(getWeeklyReportProjectAudit(db as any, U("99999"))).rejects.toBeInstanceOf(AppError);
+    // The CODE, not just the class: AppError carries 400/403/404/409/500 across this codebase, so
+    // `toBeInstanceOf` alone would still pass if this became a 500.
+    await expect(getWeeklyReportProjectAudit(db as any, U("99999"))).rejects.toMatchObject({
+      statusCode: 404,
+    });
   });
 
   it("reports who drafted, who approved and who sent — the question the page exists to answer", async () => {
@@ -193,6 +197,41 @@ describe("the per-project audit trail", () => {
     expect(report.events.find((e) => e.type === "failed")!.detail).toContain("mailbox does not exist");
     // A bounce HAS a delivery stamp, so any predicate keyed on that alone reads it as a success.
     expect(report.undelivered).toBe(true);
+  });
+
+  it("does not call a report still in transit DELIVERED", async () => {
+    // `delayed` means the provider is still trying, and the shared vocabulary says so explicitly. A
+    // binary "failure or delivered" split sent it down the delivered branch, so a report the client did
+    // not have was reported to a director as arrived — the same mistake as reading acceptance for
+    // delivery, one field over, and on the page whose entire job is to be trusted about this.
+    await seedFullySentReport({
+      send_delivery_status: "delayed",
+      send_delivery_status_at: "2026-08-13T17:10:00Z",
+    });
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const report = audit.reports[0]!;
+
+    expect(typesOf(report.events)).toContain("delayed");
+    expect(typesOf(report.events)).not.toContain("delivered");
+    expect(typesOf(report.events)).not.toContain("failed");
+    // And it is not evidence of receipt, so the week still reads as outstanding.
+    expect(report.undelivered).toBe(true);
+  });
+
+  it("treats a spam complaint as delivered, because a complaint can only follow one", async () => {
+    // The other non-failure status, and it goes the OTHER way — the client demonstrably has the report.
+    // Pinned so a future "anything that isn't `delivered` is a problem" simplification cannot pass.
+    await seedFullySentReport({
+      send_delivery_status: "complained",
+      send_delivery_status_at: "2026-08-13T18:00:00Z",
+    });
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const report = audit.reports[0]!;
+
+    expect(typesOf(report.events)).toContain("delivered");
+    expect(report.undelivered).toBe(false);
+    // The word still shows, because "delivered, and they marked it as spam" is worth knowing.
+    expect(report.events.find((e) => e.type === "delivered")!.detail).toContain("complained");
   });
 
   it("does not report a plain accepted send as undelivered", async () => {

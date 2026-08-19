@@ -399,6 +399,7 @@ export interface WeeklyReportAuditEvent {
     | "sent"
     | "accepted"
     | "delivered"
+    | "delayed"
     | "failed"
     | "retried"
     | "alerted"
@@ -497,6 +498,9 @@ export function useWeeklyReportEligibleDeals(search: string, enabled: boolean) {
 
   useEffect(() => {
     if (!enabled) {
+      // Bump the sequence too, not just the state: an earlier request still in flight would otherwise
+      // resolve after this and repopulate a picker that is no longer showing.
+      seq.current += 1;
       setDeals([]);
       setLoading(false);
       return;

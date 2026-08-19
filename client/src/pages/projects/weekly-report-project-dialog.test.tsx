@@ -54,6 +54,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Unconditional, because the useFakeTimers/useRealTimers pairs below live INSIDE test bodies: an
+  // assertion that throws between them leaves fake timers installed for every later test in this file,
+  // and the async "closing mid-save" test then awaits a promise that never settles.
+  vi.useRealTimers();
   act(() => root.unmount());
   container.remove();
 });
