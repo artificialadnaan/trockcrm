@@ -56,10 +56,10 @@ import { loginMobileUser } from "./mobile-auth-service.js";
 // registered first in a worker.
 import { validatePasswordPolicy } from "./password-policy.js";
 import {
-  applyPasswordReset,
-  consumeResetToken,
+  completePasswordReset,
   dbClient,
   deliverResetEmail,
+  finalizePasswordReset,
   isResetTokenUsable,
   issueResetToken,
   lookupUserContact,
@@ -808,30 +808,24 @@ router.post("/password-reset/complete", authLimiter, async (req, res, next) => {
     // to request a whole new email to try again.
     validatePasswordPolicy(password);
 
-    const userId = await consumeResetToken(dbClient, token);
+    // Consume and apply are ONE transaction. Consuming separately left a window where a failure
+    // between the two burned the link without changing the password, telling the user their link was
+    // invalid and making them request another email.
+    const userId = await completePasswordReset(dbClient, token, password);
     if (!userId) {
+      // Covers an unusable token AND an account whose eligibility lapsed inside the TTL -- the same
+      // generic message, because neither distinction helps a legitimate user and both help an attacker.
       res.status(400).json({ error: { message: GENERIC_RESET_FAILURE } });
       return;
     }
 
-    // Anything thrown from here on is a real error and is passed to the error handler unchanged, never
-    // flattened into GENERIC_RESET_FAILURE -- telling someone their link is dead when it was fine sends
-    // them back for an email they do not need.
-    await applyPasswordReset(userId, password);
     res.json({ ok: true });
 
-    // Everything past the response lives in its own guarded chain, NOT in the try above. A throw from
-    // the lookup would otherwise reach the error handler, which has no headersSent guard and would try
-    // to write a 500 onto a finished response. The notice is what makes an unauthorized reset visible,
-    // but failing to send it must not fail a reset that already committed.
-    void (async () => {
-      try {
-        const account = await lookupUserContact(dbClient, userId);
-        if (account) await notifyPasswordChanged(account.email, account.display_name);
-      } catch (err) {
-        console.error("[password-reset] change notice failed", err);
-      }
-    })();
+    // Post-commit side effects (SSE teardown, audit row, change notice) run outside the try above and
+    // are individually guarded inside. A throw here would otherwise reach the error handler, which has
+    // no headersSent guard and would try to write a 500 onto a finished response -- and none of these
+    // may turn a committed password change into a failure the user is told about.
+    void finalizePasswordReset(dbClient, userId);
   } catch (err) {
     next(err);
   }

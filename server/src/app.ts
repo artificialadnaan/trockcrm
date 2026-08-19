@@ -90,11 +90,20 @@ import { getSecurityOptions } from "./middleware/security.js";
 // Narrowing it to the documents that actually carry a token keeps the incident from recurring.
 const TOKENIZED_SPA_PATHS = ["/reset-password", "/p", "/daily-summary"];
 
+// /scorecards/:id/corrective-action is tokenized too — AuthGate lets it through unauthenticated
+// precisely because its ?token authorizes the flow — but it CANNOT go in the prefix list above. A
+// "/scorecards" prefix would also match the authenticated scorecard pages, which are write-heavy, and
+// putting no-referrer on those is the #1077 P0 again. Anchored to the exact shape instead.
+const TOKENIZED_SPA_PATTERNS = [/^\/scorecards\/[^/]+\/corrective-action$/];
+
 // Whole-segment matching, not `startsWith`. `/p` as a bare prefix would swallow `/properties` and
 // `/pipeline` — the pages people do most of their WRITING from — and putting `no-referrer` on those
 // documents is the P0 all over again, just wearing a smaller blast radius.
 function isTokenizedSpaPath(pathname: string): boolean {
-  return TOKENIZED_SPA_PATHS.some((base) => pathname === base || pathname.startsWith(`${base}/`));
+  if (TOKENIZED_SPA_PATHS.some((base) => pathname === base || pathname.startsWith(`${base}/`))) {
+    return true;
+  }
+  return TOKENIZED_SPA_PATTERNS.some((pattern) => pattern.test(pathname));
 }
 
 export function createApp() {

@@ -80,7 +80,25 @@ unauthorized reset visible rather than silent; it carries no token and no action
 |---|---|---|---|
 | `POST /api/auth/password-reset/request` | none | `{ email }` | always `200 { ok: true }` |
 | `POST /api/auth/password-reset/validate` | none | `{ token }` | `200 { valid: boolean }` |
-| `POST /api/auth/password-reset/complete` | none | `{ token, password }` | `200 { ok: true }` / generic `400` |
+| `POST /api/auth/password-reset/complete` | none | `{ token, password }` | `200 { ok: true }` / `400` |
+
+**Throttling.** All three sit under `authLimiter` — 10 requests per IP per 60 seconds. Over that, the
+response is `429 { error: { message: "Too many auth attempts, please try again later" } }`. This is
+keyed by IP, not by account, so it carries no signal about whether an account exists; the per-account
+limit is separate and answers with the ordinary `200`.
+
+**`complete` failure branches.** Two distinct classes, deliberately not merged:
+
+| Condition | Response |
+|---|---|
+| Missing token or password; token invalid, expired, already used, or invalidated; account eligibility lapsed inside the TTL | `400 { error: { message: "This reset link is no longer valid. Request a new one." } }` |
+| Password shorter than 12 | `400 { error: { message: "Password must be at least 12 characters" } }` |
+| Password longer than 256 | `400 { error: { message: "Password must be at most 256 characters" } }` |
+
+The policy messages are intentionally specific. Flattening them into the generic link failure would tell
+someone their link was dead when it was fine and only their password was too short, sending them back
+for an email they do not need. The policy is also checked *before* the token is consumed, so a typo
+never burns the link.
 
 All three are POST (keeping the token out of the request line and therefore out of access logs), all
 three sit under `authLimiter`, and all three are in `isPublicAuthCsrfExempt` — the CSRF gate engages

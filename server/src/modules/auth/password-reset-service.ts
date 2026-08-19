@@ -244,16 +244,27 @@ export async function deliverResetEmail(
     resetUrl: resetUrl(issued.rawToken),
     ttlMinutes: RESET_TTL_MINUTES,
   });
-  const sent = await sendSystemEmail(issued.user.email, content.subject, content.html, {
-    text: content.text,
-    // MANDATORY. SYSTEM_EMAIL_BCC is live on the API and BCCs every system email; without this, every
-    // reset link in the company would be delivered to a personal inbox -- a standing account-takeover
-    // primitive. The field reset flow already does this; this must not be the exception.
-    suppressGlobalBcc: true,
-    // Fail loudly rather than reporting a successful "dev send" while the user waits for mail that is
-    // never coming.
-    requireConfiguredTransport: true,
-  });
+  // A THROW must be treated exactly like a `false`. sendSystemEmail catches transport errors and
+  // returns false, but the work before its try block (recipient normalisation, client construction)
+  // can still reject -- and on that path the invalidation below would be skipped, leaving a live token
+  // nobody can reach still occupying the account's single live-link slot for the full TTL.
+  let sent = false;
+  try {
+    sent = await sendSystemEmail(issued.user.email, content.subject, content.html, {
+      text: content.text,
+      // MANDATORY. SYSTEM_EMAIL_BCC is live on the API and BCCs every system email; without this,
+      // every reset link in the company would be delivered to a personal inbox -- a standing
+      // account-takeover primitive. The field reset flow already does this; this is not the exception.
+      suppressGlobalBcc: true,
+      // Fail loudly rather than reporting a successful "dev send" while the user waits for mail that
+      // is never coming.
+      requireConfiguredTransport: true,
+    });
+  } catch (err) {
+    console.error("[password-reset] delivery threw", err);
+    sent = false;
+  }
+
   if (!sent) {
     // Never leave a live token behind a failed send: nobody can use it, and it would still consume the
     // account's "one live link" slot.
@@ -264,31 +275,6 @@ export async function deliverResetEmail(
       [hashResetToken(issued.rawToken)]
     );
   }
-}
-
-/**
- * ONE statement. `used_at IS NULL` is evaluated under the row lock the UPDATE itself takes, so two
- * concurrent requests carrying the same token cannot both succeed. A SELECT-then-UPDATE would race
- * even inside a transaction at READ COMMITTED.
- *
- * Expiry is enforced HERE, not only in isResetTokenUsable -- that check is UX and carries no security
- * weight.
- */
-export async function consumeResetToken(
-  client: QueryClient,
-  rawToken: string
-): Promise<string | null> {
-  const result = await client.query(
-    `UPDATE public.user_password_resets
-        SET used_at = now()
-      WHERE token_hash = $1
-        AND used_at IS NULL
-        AND invalidated_at IS NULL
-        AND expires_at > now()
-    RETURNING user_id`,
-    [hashResetToken(rawToken)]
-  );
-  return (result.rows ?? [])[0]?.user_id ?? null;
 }
 
 /**
@@ -319,49 +305,100 @@ export async function lookupUserContact(
 }
 
 /**
- * Applies the new password and every associated state change in one transaction.
+ * Consumes the token AND applies the password in ONE transaction, returning the user id, or null when
+ * the token was unusable or the account is no longer eligible.
  *
- * hashPassword validates the 12-character policy and throws on failure, so an invalid password aborts
- * before anything is written -- note the token is already consumed by then, which is intended: a reset
- * link is single-use even if the chosen password is rejected.
+ * Consuming in a separate statement left a real window: if hashing, connection acquisition, the update
+ * or the process itself failed after the consume committed, the link was burned while the password was
+ * unchanged. The user would be told their link was invalid and be forced to request another email --
+ * with a password they believe no longer works. Now either both happen or neither does.
+ *
+ * Raw SQL throughout rather than Drizzle, because the consume and the account write have to share one
+ * connection to share one transaction, and the raw client is what `transaction` hands out.
  */
-export async function applyPasswordReset(userId: string, newPassword: string): Promise<void> {
+export async function completePasswordReset(
+  client: QueryClient,
+  rawToken: string,
+  newPassword: string
+): Promise<string | null> {
+  // scrypt is deliberately slow and validatePasswordPolicy throws on a bad password. Both happen
+  // BEFORE the transaction opens, so a rejected password never burns a token and no connection or row
+  // lock is held across the hash.
   const passwordHash = await hashPassword(newPassword);
-  const currentTime = new Date();
 
-  await db.transaction(async (tx) => {
-    await tx
-      .update(userLocalAuth)
-      .set({
-        passwordHash,
-        mustChangePassword: false,
-        inviteExpiresAt: null,
-        // Clearing the lockout is REQUIRED, not incidental: someone who forgot their password has
-        // usually just burned MAX_FAILED_LOGIN_ATTEMPTS and is inside the 15-minute lockout. Without
-        // this they reset successfully, still cannot log in, and contact the admin anyway.
-        //
-        // This does mean mailbox access clears a lockout. That is correct: the lockout defends against
-        // online guessing, not against someone who controls the account's email.
-        failedLoginAttempts: 0,
-        lastFailedLoginAt: null,
-        lockedUntil: null,
-        passwordChangedAt: currentTime,
-        updatedAt: currentTime,
-      })
-      .where(eq(userLocalAuth.userId, userId));
+  return await client.transaction(async (tx) => {
+    // Single-use enforcement, unchanged: `used_at IS NULL` is evaluated under the row lock this UPDATE
+    // takes, so two concurrent requests with the same token cannot both win.
+    const consumed = await tx.query(
+      `UPDATE public.user_password_resets
+          SET used_at = now()
+        WHERE token_hash = $1
+          AND used_at IS NULL
+          AND invalidated_at IS NULL
+          AND expires_at > now()
+      RETURNING user_id`,
+      [hashResetToken(rawToken)]
+    );
+    const userId: string | undefined = (consumed.rows ?? [])[0]?.user_id;
+    if (!userId) return null;
+
+    // Re-check the FULL eligibility set at APPLY time, not just at issue time. Eligibility was only
+    // ever checked when the link was created, so a deactivation, revocation, role change or removed
+    // auth row inside the 60-minute TTL was undone by an outstanding link. "Revocation must not be
+    // undoable by self-serve reset" has to hold here too, not only in selectEligibleUser.
+    const applied = await tx.query(
+      `UPDATE public.user_local_auth la
+          SET password_hash = $2,
+              must_change_password = false,
+              invite_expires_at = NULL,
+              -- Clearing the lockout is REQUIRED, not incidental: someone who forgot their password
+              -- has usually just burned MAX_FAILED_LOGIN_ATTEMPTS and is inside the 15-minute lockout.
+              -- Without this they reset successfully, still cannot log in, and contact the admin
+              -- anyway. It does mean mailbox access clears a lockout, which is correct -- the lockout
+              -- defends against online guessing, not against someone who controls the account's email.
+              failed_login_attempts = 0,
+              last_failed_login_at = NULL,
+              locked_until = NULL,
+              password_changed_at = now(),
+              updated_at = now()
+         FROM public.users u
+        WHERE la.user_id = $1
+          AND u.id = la.user_id
+          AND u.is_active = true
+          AND la.is_enabled = true
+          AND la.revoked_at IS NULL
+          AND u.role <> 'field_contractor'
+      RETURNING la.user_id`,
+      [userId, passwordHash]
+    );
+
+    // Eligibility lapsed since the link was issued. The token stays CONSUMED -- it really was used --
+    // but nothing about the account changes, and the caller gets the same generic failure.
+    if ((applied.rows ?? []).length === 0) return null;
 
     // The single most important control here. The primary reason to reset is suspected compromise, and
-    // a reset that leaves the attacker's 30-day session alive accomplishes nothing.
-    await incrementTokenVersion(tx, userId);
+    // a reset that leaves the attacker's 30-day session alive accomplishes nothing. Written inline
+    // rather than through incrementTokenVersion because that helper takes a Drizzle handle and this
+    // has to run on the transaction's connection; the semantics (monotonic +1) are identical.
+    await tx.query(`UPDATE public.users SET token_version = token_version + 1 WHERE id = $1`, [userId]);
 
     // Any other outstanding link for this account dies with the one just used.
-    await tx.execute(sql`
-      UPDATE public.user_password_resets
-         SET invalidated_at = now()
-       WHERE user_id = ${userId}::uuid AND used_at IS NULL AND invalidated_at IS NULL
-    `);
-  });
+    await tx.query(
+      `UPDATE public.user_password_resets
+          SET invalidated_at = now()
+        WHERE user_id = $1 AND used_at IS NULL AND invalidated_at IS NULL`,
+      [userId]
+    );
 
+    return userId;
+  });
+}
+
+/**
+ * Post-commit side effects. Separate from the transaction on purpose: both are best-effort, and
+ * neither may turn a committed password change into a failure the user is told about.
+ */
+export async function finalizePasswordReset(client: QueryClient, userId: string): Promise<void> {
   // Bumping token_version only stops NEW requests. An SSE stream authenticates once at connect and
   // then stays open indefinitely, so without this an attacker's already-open notification stream keeps
   // delivering the victim's payloads after the very reset performed to lock them out.
@@ -371,13 +408,22 @@ export async function applyPasswordReset(userId: string, newPassword: string): P
     console.error("[password-reset] sse teardown failed", err);
   }
 
-  // Non-fatal, and outside the transaction on purpose. The password IS changed and every session IS
-  // dead by this point; letting a failed audit insert throw would report a committed reset as a 500,
-  // sending the user to request another link with a password they think does not work.
+  // The password IS changed and every session IS dead by this point; letting a failed audit insert
+  // throw would report a committed reset as a 500, sending the user to request another link with a
+  // password they think does not work.
   try {
     await recordLocalAuthEvent({ userId, eventType: "password_reset_completed" });
   } catch (err) {
     console.error("[password-reset] audit event failed", err);
+  }
+
+  // The change notice is what makes an unauthorized reset visible to its victim, so it is worth
+  // sending on a best-effort basis -- but never at the cost of the reset itself.
+  try {
+    const account = await lookupUserContact(client, userId);
+    if (account) await notifyPasswordChanged(account.email, account.display_name);
+  } catch (err) {
+    console.error("[password-reset] change notice failed", err);
   }
 }
 

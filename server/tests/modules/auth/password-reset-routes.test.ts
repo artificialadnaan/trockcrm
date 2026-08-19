@@ -16,11 +16,11 @@ const serviceMocks = vi.hoisted(() => ({
   issueResetToken: vi.fn(),
   deliverResetEmail: vi.fn(),
   isResetTokenUsable: vi.fn(),
-  consumeResetToken: vi.fn(),
-  applyPasswordReset: vi.fn(),
+  completePasswordReset: vi.fn(),
+  finalizePasswordReset: vi.fn(),
   notifyPasswordChanged: vi.fn(),
   lookupUserContact: vi.fn(),
-  dbClient: { query: vi.fn() },
+  dbClient: { query: vi.fn(), transaction: vi.fn() },
 }));
 
 vi.mock("../../../src/middleware/rate-limit.js", () => ({
@@ -150,26 +150,29 @@ describe("POST /api/auth/password-reset/validate", () => {
 
 describe("POST /api/auth/password-reset/complete", () => {
   it("returns one generic failure for an unusable token", async () => {
-    serviceMocks.consumeResetToken.mockResolvedValueOnce(null);
+    serviceMocks.completePasswordReset.mockResolvedValueOnce(null);
     const res = await request(createTestApp())
       .post("/api/auth/password-reset/complete")
       .send({ token: "bad", password: ["correct", "horse", "battery"].join("-") });
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: { message: GENERIC_FAILURE } });
-    expect(serviceMocks.applyPasswordReset).not.toHaveBeenCalled();
+    // null also covers "eligibility lapsed inside the TTL", which must NOT reach the finalize step.
+    expect(serviceMocks.finalizePasswordReset).not.toHaveBeenCalled();
   });
 
-  it("applies the reset and notifies on success", async () => {
+  it("applies the reset and finalizes on success", async () => {
     const secret = ["correct", "horse", "battery"].join("-");
-    serviceMocks.consumeResetToken.mockResolvedValueOnce("user-1");
-    serviceMocks.applyPasswordReset.mockResolvedValueOnce(undefined);
+    serviceMocks.completePasswordReset.mockResolvedValueOnce("user-1");
     const res = await request(createTestApp())
       .post("/api/auth/password-reset/complete")
       .send({ token: "good", password: secret });
+    await flushDeferredWork();
 
     expect(res.status).toBe(200);
-    expect(serviceMocks.applyPasswordReset).toHaveBeenCalledWith("user-1", secret);
+    // Consume and apply are one call now, so the route cannot burn a token without writing a password.
+    expect(serviceMocks.completePasswordReset).toHaveBeenCalledWith(expect.anything(), "good", secret);
+    expect(serviceMocks.finalizePasswordReset).toHaveBeenCalledWith(expect.anything(), "user-1");
   });
 
   it("rejects a missing token or password with the same generic failure", async () => {
@@ -184,7 +187,7 @@ describe("POST /api/auth/password-reset/complete", () => {
     expect(noPassword.status).toBe(400);
     expect(noToken.body).toEqual({ error: { message: GENERIC_FAILURE } });
     expect(noPassword.body).toEqual({ error: { message: GENERIC_FAILURE } });
-    expect(serviceMocks.consumeResetToken).not.toHaveBeenCalled();
+    expect(serviceMocks.completePasswordReset).not.toHaveBeenCalled();
   });
 
   it("rejects a too-short password WITHOUT consuming the token, so the link survives a typo", async () => {
@@ -195,26 +198,26 @@ describe("POST /api/auth/password-reset/complete", () => {
     expect(res.status).toBe(400);
     expect(res.body?.error?.message).toContain("at least 12 characters");
     // The important half: burning the link on a typo would force a whole new email to try again.
-    expect(serviceMocks.consumeResetToken).not.toHaveBeenCalled();
-    expect(serviceMocks.applyPasswordReset).not.toHaveBeenCalled();
+    expect(serviceMocks.completePasswordReset).not.toHaveBeenCalled();
   });
 
-  it("surfaces a post-consume failure as itself, not as the generic link failure", async () => {
-    // The link WAS valid and WAS consumed; the write then failed. Reporting that as "your link is no
-    // longer valid" would be actively misleading -- the link is gone, and a new one would fail too.
-    // Password is deliberately policy-VALID so the failure comes from applyPasswordReset and not from
-    // the pre-consume policy check.
-    serviceMocks.consumeResetToken.mockResolvedValueOnce("user-1");
+  it("surfaces a real failure as itself, not as the generic link failure", async () => {
+    // Reporting an infrastructure failure as "your link is no longer valid" would be misleading and
+    // send the user off to request an email that would fail the same way. Password is deliberately
+    // policy-VALID so the failure comes from the service, not the pre-consume policy check.
     const { AppError } = await import("../../../src/middleware/error-handler.js");
-    serviceMocks.applyPasswordReset.mockRejectedValueOnce(new AppError(409, "Local login is not enabled"));
+    serviceMocks.completePasswordReset.mockRejectedValueOnce(
+      new AppError(409, "Local login is not enabled")
+    );
 
     const res = await request(createTestApp())
       .post("/api/auth/password-reset/complete")
       .send({ token: "good", password: ["correct", "horse", "battery"].join("-") });
 
-    expect(serviceMocks.consumeResetToken).toHaveBeenCalled();
     expect(res.status).toBe(409);
     expect(res.body?.error?.message).toContain("Local login is not enabled");
+    // Nothing was committed, so nothing may be finalized.
+    expect(serviceMocks.finalizePasswordReset).not.toHaveBeenCalled();
   });
 });
 

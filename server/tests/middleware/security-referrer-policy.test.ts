@@ -76,6 +76,10 @@ describe("Referrer-Policy on tokenized SPA documents", () => {
     ["/reset-password", "the token rides in the query string of this exact path"],
     ["/p/abcdef0123456789", "the photo-viewer token IS the path segment"],
     ["/daily-summary/2026-08-18", "the daily summary is opened by token from an email"],
+    [
+      "/scorecards/6f1c2a90-0000-4000-8000-000000000001/corrective-action",
+      "AuthGate lets this through unauthenticated because its ?token authorizes the flow",
+    ],
   ])("serves %s with no-referrer — %s", async (path) => {
     const response = await request(app).get(path);
 
@@ -94,6 +98,12 @@ describe("Referrer-Policy on tokenized SPA documents", () => {
     // A sibling route whose name merely BEGINS with a tokenized one must not inherit the stricter
     // policy either — `/reset-password` has to match as a whole path segment, not as a substring.
     ["/reset-password-help"],
+    // The corrective-action responder is tokenized, but the scorecard pages around it are ordinary
+    // authenticated, write-heavy screens. A "/scorecards" PREFIX would have caught all of them and
+    // reproduced the P0 — which is why that one is matched by an anchored pattern, not a prefix.
+    ["/scorecards"],
+    ["/scorecards/6f1c2a90-0000-4000-8000-000000000001"],
+    ["/scorecards/6f1c2a90-0000-4000-8000-000000000001/edit"],
   ])("leaves %s on the global policy", async (path) => {
     const response = await request(app).get(path);
 
