@@ -138,24 +138,42 @@ the client received.
 
 ## 6. Photos on the public link are slow
 
-**Today.** `public-viewer.ts:220` emits one `<img>` per photo at
-`/wr/:token/photos/:fileId`, and that route streams the **full original object** from R2
-(`public-routes.ts:398`). Camera originals are multi-megabyte; the grid displays them at a third of
-viewport width. There is no lazy loading and no intrinsic sizing, so every image is fetched at once and
-the page reflows as each lands.
+**MY FIRST DIAGNOSIS WAS WRONG, TWICE, AND IS CORRECTED HERE.** This section originally said the viewer
+served full-resolution originals with no lazy loading. It does neither. `public-routes.ts` already
+re-encodes every photo through `generateEvidenceJpeg` at `maxEdge: 1400, quality: 78`, and
+`public-viewer.ts` already emits `loading="lazy"`. Both claims were made from reading the `<img>` tag and
+the `getObjectBuffer` call without following what happened between them.
 
-**Change.**
+**Measured instead.** Against the real reports in production and a synthetic 12-megapixel original:
 
-- Serve a **resized variant** for the grid. `lib/image-thumbnail.ts` already has `generateEvidenceJpeg`,
-  used today only on the HEIC path.
-- `loading="lazy"` and `decoding="async"` so photos below the fold do not compete with the ones on it.
-- Explicit `width`/`height` so the page stops reflowing.
-- Cache headers on the variant. The token is already the access control; the bytes behind it are
-  immutable.
-- Full resolution stays reachable — clicking a photo opens the original.
+| | |
+|---|---|
+| Photos on the two live reports | 3 and 6 |
+| Stored originals | 10 MB and 3.6 MB total (avg 3.5 MB / 606 kB each) |
+| What the viewer actually SENDS per photo | ~180 kB at 1400px q78 |
 
-**Measured, not assumed.** The current payload is recorded before the change and after, and the numbers
-go in the PR. "Feels faster" is not a result.
+So the bytes on the wire were never the problem. **The per-request work is.** Every single photo request
+pulls the multi-megabyte original from R2, decodes a 12-megapixel image with sharp, resizes it and
+re-encodes it — and the response carries `Cache-Control: private, max-age=300`, so a client reading a
+report re-triggers that whole pipeline every five minutes, per photo. A three-photo report is ~10 MB of
+R2 reads and three twelve-megapixel decodes to put 540 kB on a page.
+
+**Change: cache the derived JPEG in R2**, content-addressed on the source key plus the render settings.
+A caption edit does not invalidate it; changing `VIEWER_PHOTO_MAX_EDGE` or the quality does. The same
+property the PDF artifact's generation gives it, reached more cheaply because a photo has no row of its
+own to version.
+
+Three properties it must keep:
+
+- **A pure accelerator.** A miss, a read failure, or an unconfigured bucket all fall through to
+  generating live. Nothing may turn a slow photo into a broken one.
+- **Written after the response, never awaited into it.** The reader who paid for the decode does not also
+  wait on a PUT.
+- **The TTL does not move.** `max-age=300` bounds how long a REVOKED link keeps working, which belongs to
+  the token and not to the bytes. Caching changes what the server does, not what a client may keep.
+
+**Not doing:** shrinking `maxEdge` below 1400. At ~180 kB it is not what makes the page slow, and 1400 is
+what makes a photo worth opening on a laptop.
 
 ---
 

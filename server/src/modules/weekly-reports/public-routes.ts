@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { pool } from "../../db.js";
@@ -8,6 +9,7 @@ import {
   buildContentDisposition,
   getObjectBuffer,
   getObjectStream,
+  putObject,
   isR2Configured,
   ObjectTooLargeError,
 } from "../../lib/r2-client.js";
@@ -388,6 +390,44 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
     // ONE deadline over everything that follows — the permit wait, the R2 read and the decode.
     const deadline = AbortSignal.timeout(VIEWER_PHOTO_TIMEOUT_MS);
 
+    /**
+     * THE DERIVED JPEG, CACHED IN R2.
+     *
+     * Measured before this existed: the bytes leaving the server were fine — a 4032x3024 camera original
+     * comes out of the resize at roughly 180 kB. What was slow was that EVERY REQUEST redid the work to
+     * produce them: a 3.5 MB GET from R2, a full sharp decode of a 12-megapixel image, a resize and a
+     * re-encode. With `max-age=300` on the response, a client scrolling a report re-triggered the whole
+     * pipeline every five minutes, per photo. A three-photo report is ~10 MB of R2 reads and three
+     * twelve-megapixel decodes to put 540 kB on the page.
+     *
+     * The derived key is content-addressed on the SOURCE KEY and the render settings, so a caption edit
+     * does not invalidate it and a change to `VIEWER_PHOTO_MAX_EDGE` or the quality does — the same
+     * property the PDF artifact's generation gives it, reached more cheaply because a photo has no
+     * database row of its own to version.
+     *
+     * The cache is a pure accelerator: a miss, a read failure or an unconfigured bucket all fall through
+     * to generating it live. Nothing here may turn a slow photo into a broken one.
+     */
+    const derivedKey = `derived/weekly-report-viewer/${createHash("sha256")
+      .update(`${photo.r2_key}|${VIEWER_PHOTO_MAX_EDGE}|78|v1`)
+      .digest("hex")}.jpg`;
+
+    const cached = await getObjectBuffer(derivedKey, {
+      maxBytes: MAX_PHOTO_SOURCE_BYTES,
+      signal: deadline,
+    }).catch(() => null);
+
+    if (cached?.buffer) {
+      res.setHeader("Content-Type", "image/jpeg");
+      res.setHeader("Content-Disposition", "inline");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      // The SAME short private TTL as the live path. The cache changes what the server does, never how
+      // long a revoked link keeps working — that bound belongs to the token, not to the bytes.
+      res.setHeader("Cache-Control", "private, max-age=300");
+      res.end(cached.buffer);
+      return;
+    }
+
     /** null means "this object cannot be turned into a picture", which is a 404. Anything else throws. */
     const transcode = async (heicDecodePermit?: symbol): Promise<Buffer | null> => {
       // Queued behind the permit past the deadline: hand it straight back rather than starting a fetch
@@ -452,6 +492,18 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
     // must stop serving within minutes rather than days.
     res.setHeader("Cache-Control", "private, max-age=300");
     res.end(jpeg);
+
+    // Stored AFTER `res.end`, which is what actually keeps the reader out of it: the response has already
+    // gone, so this PUT cannot delay them however slow the bucket is. `void` and `.catch` are belt to that
+    // braces — they stop an unhandled rejection, and they stop a storage failure turning a photo the
+    // reader can already see into an error. The next request simply regenerates, as it did before this
+    // cache existed.
+    //
+    // (Written as `void` rather than `await` for readability only. Both behave identically here BECAUSE
+    // of the ordering above — worth saying, because the difference looks load-bearing and is not.)
+    void putObject(derivedKey, jpeg, "image/jpeg").catch((error) => {
+      console.warn("[weekly-report-viewer] could not cache a derived photo", { derivedKey, error });
+    });
   } catch (error) {
     if (res.headersSent) {
       res.destroy(error instanceof Error ? error : undefined);

@@ -40,6 +40,8 @@ const harness = vi.hoisted(() => ({
    * mutates between two complete request cycles never reaches it.
    */
   duringPhotoRead: null as null | (() => Promise<void>),
+  /** Overrides the derived-cache WRITE, so a test can fail it without disturbing the reads. */
+  putObjectImpl: null as null | ((key: string, body: Buffer) => Promise<void>),
 }));
 
 // The pool, pointed at PGlite. `connect()` hands back the same underlying connection every time, which is
@@ -69,10 +71,22 @@ vi.mock("../../../src/lib/r2-client.js", async (importOriginal) => {
     isR2Configured: () => harness.r2Configured,
     putObject: async (key: string, body: Buffer) => {
       harness.puts += 1;
+      // Overridable so a test can make the WRITE fail without touching the reads.
+      if (harness.putObjectImpl) {
+        await harness.putObjectImpl(key, body);
+        return;
+      }
       harness.objects.set(key, Buffer.from(body));
     },
     getObjectBuffer: async (key: string) => {
-      harness.trace.push("read-original");
+      // Labelled by WHICH object is being read, because the ordering property below is specifically
+      // about the ORIGINAL. The viewer now looks for a cached derived JPEG first, and that read is a
+      // ~180 kB object rather than a 40 MB one — it holds none of the memory the HEIC permit exists to
+      // bound, so it legitimately happens before the permit is taken. A spy that called both reads
+      // "read-original" could not tell the cache lookup from the thing the rule is about.
+      harness.trace.push(
+        key.startsWith("derived/weekly-report-viewer/") ? "read-derived" : "read-original",
+      );
       // The interleave point. A render spends its whole life here — one read and transcode per photo — so
       // this is where a change that lands DURING a render belongs in a test.
       if (harness.duringPhotoRead) await harness.duringPhotoRead();
@@ -224,6 +238,7 @@ beforeEach(async () => {
   harness.puts = 0;
   harness.streamOptions.length = 0;
   harness.duringPhotoRead = null;
+  harness.putObjectImpl = null;
   // Process-local, and a deadline remembered by one case would refuse the next case's render.
   resetWeeklyReportRenderBackoff();
   await harness.pg.exec(`
@@ -463,7 +478,12 @@ describe("GET /wr/:token/photos/:fileId", () => {
     harness.trace.length = 0;
 
     await request(app).get(`/wr/${rawToken}/photos/${heic}`);
-    expect(harness.trace).toEqual(["acquire-heic-permit", "read-original"]);
+    // The cache lookup comes first and is not what the permit bounds — see the spy. The property is
+    // that the permit precedes the read of the ORIGINAL, which is the 40 MB one.
+    expect(harness.trace).toEqual(["read-derived", "acquire-heic-permit", "read-original"]);
+    expect(harness.trace.indexOf("acquire-heic-permit")).toBeLessThan(
+      harness.trace.indexOf("read-original"),
+    );
   });
 
   it("does not take the permit for a photo that needs no WASM decode", async () => {
@@ -472,7 +492,44 @@ describe("GET /wr/:token/photos/:fileId", () => {
     const { rawToken, photoId } = await seedSharedReport();
     harness.trace.length = 0;
     expect((await request(app).get(`/wr/${rawToken}/photos/${photoId}`)).status).toBe(200);
-    expect(harness.trace).toEqual(["read-original"]);
+    expect(harness.trace).toEqual(["read-derived", "read-original"]);
+    expect(harness.trace).not.toContain("acquire-heic-permit");
+  });
+
+  it("serves the SECOND request from the derived cache, without touching the original", async () => {
+    // THE POINT OF THE CACHE. Measured before it existed: the bytes leaving the server were already
+    // small (~180 kB at maxEdge 1400), but every request re-fetched the multi-megabyte original from R2
+    // and re-decoded a twelve-megapixel image to produce them — and `max-age=300` meant a client reading
+    // a report re-triggered that per photo, every five minutes.
+    const { rawToken, photoId } = await seedSharedReport();
+
+    expect((await request(app).get(`/wr/${rawToken}/photos/${photoId}`)).status).toBe(200);
+    expect(harness.trace).toContain("read-original");
+    expect(harness.puts).toBeGreaterThan(0);
+
+    harness.trace.length = 0;
+    const second = await request(app).get(`/wr/${rawToken}/photos/${photoId}`);
+
+    expect(second.status).toBe(200);
+    // The whole expensive half is skipped: no original read, so no decode and no re-encode either.
+    expect(harness.trace).toEqual(["read-derived"]);
+  });
+
+  it("still serves the photo when the derived cache cannot be written", async () => {
+    // A pure accelerator. A storage failure on the WRITE must not turn a photo the reader can already
+    // see into an error — the response is already sent, and the next request simply regenerates.
+    const { rawToken, photoId } = await seedSharedReport();
+    const realPut = harness.putObjectImpl;
+    harness.putObjectImpl = async () => {
+      throw new Error("bucket is having a day");
+    };
+    try {
+      const response = await request(app).get(`/wr/${rawToken}/photos/${photoId}`);
+      expect(response.status).toBe(200);
+      expect(response.body.length).toBeGreaterThan(0);
+    } finally {
+      harness.putObjectImpl = realPut;
+    }
   });
 
   it("never lets a browser cache a photo failure that is only transient", async () => {
