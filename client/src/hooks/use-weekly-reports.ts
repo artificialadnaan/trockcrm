@@ -390,6 +390,83 @@ export function createWeeklyReportCorrection(reportId: string) {
   return api<WeeklyReportDetail>(`/weekly-reports/reports/${reportId}/correction`, { method: "POST" });
 }
 
+/** One thing that happened to a report, in the order it happened. Built on the SERVER, not here. */
+export interface WeeklyReportAuditEvent {
+  type:
+    | "drafted"
+    | "submitted"
+    | "approved"
+    | "sent"
+    | "accepted"
+    | "delivered"
+    | "failed"
+    | "retried"
+    | "alerted"
+    | "superseded";
+  at: string;
+  actorName: string | null;
+  detail: string | null;
+}
+
+export interface WeeklyReportAuditReport {
+  id: string;
+  weekOf: string;
+  version: number;
+  status: string;
+  supersededById: string | null;
+  recipients: string[] | null;
+  deliveryStatus: string | null;
+  /** The CRM has no evidence the client received this one. A bounce counts — see the server's note. */
+  undelivered: boolean;
+  events: WeeklyReportAuditEvent[];
+}
+
+export interface WeeklyReportProjectAudit {
+  project: WeeklyReportProject;
+  reports: WeeklyReportAuditReport[];
+  reminders: { weekOf: string; kind: string; at: string }[];
+  dismissals: { weekOf: string; reason: string | null; actorName: string | null; at: string }[];
+  pauses: {
+    pausedFrom: string;
+    resumedOn: string | null;
+    pausedByName: string | null;
+    resumedByName: string | null;
+  }[];
+}
+
+/** The whole life of one project's reporting. Fetched only when the drill-in is actually opened. */
+export function useWeeklyReportProjectAudit(projectId: string | null) {
+  const [data, setData] = useState<WeeklyReportProjectAudit | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectId) {
+      setData(null);
+      setError(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const audit = await api<WeeklyReportProjectAudit>(`/weekly-reports/projects/${projectId}/audit`);
+        if (!cancelled) setData(audit);
+      } catch (err) {
+        if (!cancelled) setError(errorMessage(err, "Couldn't load this project's history"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  return { audit: data, loading, error };
+}
+
 /** A Won job that can still be given a cadence, as the project picker lists it. */
 export interface WeeklyReportEligibleDeal {
   id: string;

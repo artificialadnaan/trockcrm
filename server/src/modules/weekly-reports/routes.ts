@@ -2,6 +2,7 @@ import { Router, type Request } from "express";
 import { businessToday } from "../../lib/period.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireRole } from "../../middleware/rbac.js";
+import { getWeeklyReportProjectAudit } from "./project-audit-service.js";
 import {
   createWeeklyReportProject,
   deactivateWeeklyReportProject,
@@ -260,6 +261,24 @@ router.get("/projects/:id", async (req, res, next) => {
     if (!project) throw new AppError(404, "Weekly report project not found");
     await req.commitTransaction!();
     res.json(project);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * The whole life of one project's reporting: every version of every week, who did what to it and when,
+ * and what the mail provider said afterwards — plus the reminder, dismissal and pause ledgers.
+ *
+ * Read-only, and open to the same readers as the rest of this router. It exposes no client contact
+ * details — the recipients it lists are the addresses a send was actually composed for, which is the
+ * fact being audited.
+ */
+router.get("/projects/:id/audit", async (req, res, next) => {
+  try {
+    const audit = await getWeeklyReportProjectAudit(req.tenantClient!, requireUuid(req.params.id, "id"));
+    await req.commitTransaction!();
+    res.json(audit);
   } catch (error) {
     next(error);
   }

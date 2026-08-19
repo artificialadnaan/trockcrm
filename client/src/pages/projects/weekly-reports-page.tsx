@@ -21,6 +21,7 @@ import {
   type WeeklyReportDashboardRow,
   type WeeklyReportProject,
 } from "@/hooks/use-weekly-reports";
+import { WeeklyReportProjectAuditDialog } from "./weekly-report-project-audit-dialog";
 import { WeeklyReportProjectDialog } from "./weekly-report-project-dialog";
 import { WeeklyReportHistoryPanel } from "./weekly-report-history-panel";
 import { WeeklyReportSendDialog } from "./weekly-report-send-dialog";
@@ -73,6 +74,9 @@ export default function WeeklyReportsPage() {
   // One send modal for the whole page, so opening it from This Week and from History cannot end up as two
   // divergent copies of the same dialog.
   const [sendingReportId, setSendingReportId] = useState<string | null>(null);
+  // The project whose full history is open. Its own state rather than a field on `editing`: opening the
+  // record is a READ and must not put the page into the editing mode whose save handler closes dialogs.
+  const [auditProjectId, setAuditProjectId] = useState<string | null>(null);
 
   const [historyRefreshSignal, setHistoryRefreshSignal] = useState(0);
 
@@ -170,6 +174,7 @@ export default function WeeklyReportsPage() {
       )}
       {tab === "projects" && (
         <ProjectsTable
+          onOpen={setAuditProjectId}
           loading={projectsQuery.loading}
           error={projectsQuery.error}
           projects={projectsQuery.projects}
@@ -200,6 +205,12 @@ export default function WeeklyReportsPage() {
             setEditing(null);
             refreshAll();
           }}
+        />
+      )}
+      {auditProjectId && (
+        <WeeklyReportProjectAuditDialog
+          projectId={auditProjectId}
+          onClose={() => setAuditProjectId(null)}
         />
       )}
       {sendingReportId && (
@@ -599,11 +610,13 @@ function ProjectsTable({
   error,
   projects,
   onEdit,
+  onOpen,
 }: {
   loading: boolean;
   error: string | null;
   projects: WeeklyReportProject[];
   onEdit: (project: WeeklyReportProject) => void;
+  onOpen: (projectId: string) => void;
 }) {
   const [search, setSearch] = useState("");
   const filtered = useMemo(() => {
@@ -686,10 +699,28 @@ function ProjectsTable({
               </thead>
               <tbody>
                 {sortedRows.map((project) => (
-                  <tr key={project.id} className="border-b border-slate-100 hover:bg-slate-50">
+                  <tr
+                    key={project.id}
+                    // The whole row opens the record. `onClick` on the <tr> rather than wrapping the
+                    // first cell in a link, so the large hit area a table row already looks like is the
+                    // one that works — and the Edit button stops propagation so it still edits.
+                    onClick={() => onOpen(project.id)}
+                    className="cursor-pointer border-b border-slate-100 hover:bg-slate-50"
+                  >
                     <td className="px-3.5 py-3">
                       <div className="font-semibold text-slate-950">
-                        {project.propertyDisplayName ?? project.dealName ?? "Untitled project"}
+                        {/* A real button, so the row is reachable and announced to a keyboard and a
+                            screen reader. The <tr> handler above is the mouse affordance only. */}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpen(project.id);
+                          }}
+                          className="text-left hover:text-brand-red hover:underline"
+                        >
+                          {project.propertyDisplayName ?? project.dealName ?? "Untitled project"}
+                        </button>
                       </div>
                       <div className="mt-0.5 text-[11.5px] font-semibold text-slate-400">
                         {project.projectNumber ?? "—"}
