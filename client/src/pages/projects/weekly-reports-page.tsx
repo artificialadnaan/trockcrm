@@ -185,10 +185,12 @@ export default function WeeklyReportsPage() {
         />
       )}
 
+      {/* No `existingDealIds`: the picker's endpoint excludes jobs that already have a setup with a
+          NOT EXISTS, rather than the browser filtering whichever page of results it happens to hold —
+          which silently stopped working as soon as the list ran past one page. */}
       {(creating || editing) && (
         <WeeklyReportProjectDialog
           project={editing}
-          existingDealIds={projectsQuery.projects.map((p) => p.dealId)}
           onClose={() => {
             setCreating(false);
             setEditing(null);

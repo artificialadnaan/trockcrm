@@ -13,7 +13,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { deals, files, offices, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, users } from "@trock-crm/shared/schema";
 import { WEEKLY_REPORT_SEND_STALL_MINUTES } from "@trock-crm/shared/lib/weeklyReportSendStall";
 import { migrationSql } from "../../../server/tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../server/tests/helpers/tenant-schema-from-drizzle.js";
@@ -304,14 +304,18 @@ beforeAll(async () => {
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_austin;`);
   await pg.exec(tenantSchemaSql("public", [offices, users]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
-  await pg.exec(tenantSchemaSql("office_austin", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
+  await pg.exec(tenantSchemaSql("office_austin", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   // 0222's loop builds the weekly-report tables in BOTH office schemas, which is what makes the
   // cross-office cases real rather than a fixture of this file.
   await pg.exec(migrationSql("0222_weekly_reports"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
   await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER. The job PROBES for these
+  // columns and skips any office without them (migrations do not run on the worker), so a fixture
+  // that stops at 0227 makes every office silently skip and every assertion read zero.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES
@@ -734,7 +738,17 @@ describe("offices", () => {
     // for that office on every tick until the API happens to deploy.
     await pg.exec(`
       CREATE SCHEMA IF NOT EXISTS office_houston;
-      CREATE TABLE office_houston.weekly_report_projects (id uuid PRIMARY KEY, is_active boolean NOT NULL DEFAULT true);
+      CREATE TABLE office_houston.weekly_report_projects (
+        id uuid PRIMARY KEY, is_active boolean NOT NULL DEFAULT true,
+        -- 0228's columns ARE present here. This test's subject is the COLUMN probe on weekly_reports;
+        -- withholding these too would make the earlier TABLE probe fire instead and the assertion below
+        -- would pass while saying something else happened.
+        trock_pm_responder_id uuid, trock_super_responder_id uuid
+      );
+      CREATE TABLE office_houston.field_responders (
+        id uuid PRIMARY KEY, name text NOT NULL, email text NOT NULL,
+        role text NOT NULL, is_active boolean NOT NULL DEFAULT true
+      );
       CREATE TABLE office_houston.weekly_report_settings (leadership_recipient_emails text[] NOT NULL DEFAULT '{}');
       -- 0222's shape exactly: no send_delivered_at, no send_last_attempt_at, no send_stall_alerted_at.
       CREATE TABLE office_houston.weekly_reports (
@@ -758,6 +772,45 @@ describe("offices", () => {
       expect(sent.map((email) => email.to[0])).toEqual(["director@example.com"]);
     } finally {
       await pg.exec(`DROP SCHEMA office_houston CASCADE; DELETE FROM public.offices WHERE slug = 'houston';`);
+    }
+  });
+
+  it("skips an office that has 0227's columns but NOT 0228's roster link", async () => {
+    // The same deploy window one migration later, and it needs its own probe: `weekly_report_projects`
+    // has existed since 0222, so the TABLE probe passes happily while the candidate query — which now
+    // joins the roster off `wrp.trock_pm_responder_id` to resolve the PM's name — throws 42703 for that
+    // office on every tick. Caught one level up, so it would fail silently: no alert ever goes out
+    // there, and the only trace is a log line.
+    await pg.exec(`
+      CREATE SCHEMA IF NOT EXISTS office_waco;
+      -- Everything through 0227, and nothing of 0228: no trock_*_responder_id.
+      CREATE TABLE office_waco.weekly_report_projects (id uuid PRIMARY KEY, is_active boolean NOT NULL DEFAULT true);
+      CREATE TABLE office_waco.field_responders (
+        id uuid PRIMARY KEY, name text NOT NULL, email text NOT NULL,
+        role text NOT NULL, is_active boolean NOT NULL DEFAULT true
+      );
+      CREATE TABLE office_waco.weekly_report_settings (leadership_recipient_emails text[] NOT NULL DEFAULT '{}');
+      CREATE TABLE office_waco.weekly_reports (
+        id uuid PRIMARY KEY, status varchar(20) NOT NULL DEFAULT 'sent',
+        is_active boolean NOT NULL DEFAULT true, sent_at timestamptz,
+        send_attempts integer NOT NULL DEFAULT 0, send_error text,
+        send_delivered_at timestamptz, send_last_attempt_at timestamptz, send_stall_alerted_at timestamptz
+      );
+      INSERT INTO public.offices (id, name, slug) VALUES ('${U("00005")}', 'Waco', 'waco');
+    `);
+    try {
+      await seedSend({ schema: "office_dallas", id: REPORT, sentAt: STALLED_AT });
+
+      const { sent, summary, logs } = await run();
+
+      expect(summary.offices).toBe(2);
+      expect(summary.failed).toBe(0);
+      expect(logs.error).toEqual([]);
+      expect(logs.log.some((line) => line.includes("roster columns not migrated yet"))).toBe(true);
+      // Dallas is unaffected and still alerted in the same pass.
+      expect(sent.map((email) => email.to[0])).toEqual(["director@example.com"]);
+    } finally {
+      await pg.exec(`DROP SCHEMA office_waco CASCADE; DELETE FROM public.offices WHERE slug = 'waco';`);
     }
   });
 

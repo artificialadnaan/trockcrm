@@ -5,8 +5,11 @@ import {
   isIsoDateString,
   type WeeklyReportProjectStatus,
 } from "@trock-crm/shared/types";
+import { trockTeamColumns, trockTeamJoins } from "@trock-crm/shared/lib/weeklyReportTeam";
 import { businessToday } from "../../lib/period.js";
 import { AppError } from "../../middleware/error-handler.js";
+
+export { trockTeamColumns, trockTeamJoins };
 
 export type QueryExecutor = Pick<PoolClient, "query">;
 
@@ -28,8 +31,12 @@ export interface WeeklyReportProject {
   propertyDisplayName: string | null;
   clientName: string | null;
   clientTeam: Record<WeeklyReportClientRole, WeeklyReportClientContact>;
+  /** The roster row — WHO holds the slot. Null on setups made before the roster link existed. */
+  trockPmResponderId: string | null;
+  /** The CRM login that person signs in with, or null when they have none. Decides who may approve/send. */
   trockPmUserId: string | null;
   trockPmName: string | null;
+  trockSuperResponderId: string | null;
   trockSuperUserId: string | null;
   trockSuperName: string | null;
   contractDate: string | null;
@@ -53,12 +60,10 @@ const PROJECT_SELECT = `
          d.name              AS deal_name,
          d.deal_number       AS deal_number,
          d.project_number    AS project_number,
-         pm.display_name     AS trock_pm_name,
-         sup.display_name    AS trock_super_name
+${trockTeamColumns()}
     FROM weekly_report_projects wrp
     JOIN deals d          ON d.id = wrp.deal_id
-    LEFT JOIN public.users pm  ON pm.id = wrp.trock_pm_user_id
-    LEFT JOIN public.users sup ON sup.id = wrp.trock_super_user_id
+${trockTeamJoins("wrp")}
 `;
 
 // `date` columns come back from node-postgres as JS Date objects when the type parser is left at its
@@ -91,8 +96,10 @@ export function mapWeeklyReportProject(row: Record<string, any>): WeeklyReportPr
       rm: { name: row.client_rm_name ?? null, email: row.client_rm_email ?? null },
       cm: { name: row.client_cm_name ?? null, email: row.client_cm_email ?? null },
     },
+    trockPmResponderId: row.trock_pm_responder_id ?? null,
     trockPmUserId: row.trock_pm_user_id ?? null,
     trockPmName: row.trock_pm_name ?? null,
+    trockSuperResponderId: row.trock_super_responder_id ?? null,
     trockSuperUserId: row.trock_super_user_id ?? null,
     trockSuperName: row.trock_super_name ?? null,
     contractDate: toIsoDate(row.contract_date),
@@ -140,8 +147,13 @@ export interface WeeklyReportProjectInput {
   propertyDisplayName?: string | null;
   clientName?: string | null;
   clientTeam?: Partial<Record<WeeklyReportClientRole, Partial<WeeklyReportClientContact>>>;
-  trockPmUserId?: string | null;
-  trockSuperUserId?: string | null;
+  /**
+   * Field-team roster ids. The CALLER never supplies a user id: `trock_*_user_id` is derived from the
+   * roster row's email server-side, so a client cannot nominate an arbitrary login into the slot that
+   * decides who may approve and send.
+   */
+  trockPmResponderId?: string | null;
+  trockSuperResponderId?: string | null;
   contractDate?: string | null;
   contractDateNote?: string | null;
   projectStartDate?: string | null;
@@ -238,8 +250,8 @@ export function normalizeWeeklyReportProjectInput(input: WeeklyReportProjectInpu
     clientRmEmail: normalizeEmail(team.rm?.email, "Client RM email"),
     clientCmName: normalizeText(team.cm?.name),
     clientCmEmail: normalizeEmail(team.cm?.email, "Client CM email"),
-    trockPmUserId: normalizeText(input.trockPmUserId),
-    trockSuperUserId: normalizeText(input.trockSuperUserId),
+    trockPmResponderId: normalizeText(input.trockPmResponderId),
+    trockSuperResponderId: normalizeText(input.trockSuperResponderId),
     contractDate: normalizeOptionalDate(input.contractDate, "contractDate"),
     contractDateNote: normalizeText(input.contractDateNote),
     projectStartDate: normalizeOptionalDate(input.projectStartDate, "projectStartDate"),
@@ -312,8 +324,12 @@ export async function createWeeklyReportProject(
   officeId: string,
 ): Promise<WeeklyReportProject> {
   const values = normalizeWeeklyReportProjectInput(input);
-  await assertAssignableUser(client, officeId, values.trockPmUserId, "Project manager");
-  await assertAssignableUser(client, officeId, values.trockSuperUserId, "Superintendent");
+  const pm = await resolveRosterAssignee(
+    client, officeId, values.trockPmResponderId, "project_manager", "Project manager",
+  );
+  const superintendent = await resolveRosterAssignee(
+    client, officeId, values.trockSuperResponderId, "superintendent", "Superintendent",
+  );
 
   // The deal must exist in THIS office, be live, and be WON.
   //
@@ -360,6 +376,7 @@ export async function createWeeklyReportProject(
        client_doc_name, client_doc_email, client_pm_name, client_pm_email,
        client_rm_name, client_rm_email, client_cm_name, client_cm_email,
        trock_pm_user_id, trock_super_user_id,
+       trock_pm_responder_id, trock_super_responder_id,
        contract_date, contract_date_note,
        project_start_date, project_start_date_note,
        project_completion_date, project_completion_date_note,
@@ -367,8 +384,9 @@ export async function createWeeklyReportProject(
        status, created_by
      ) VALUES (
        $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-       $12::uuid, $13::uuid, $14::date, $15, $16::date, $17, $18::date, $19,
-       $20, $21, $22::date, $23::date, $24, $25::uuid
+       $12::uuid, $13::uuid, $14::uuid, $15::uuid,
+       $16::date, $17, $18::date, $19, $20::date, $21,
+       $22, $23, $24::date, $25::date, $26, $27::uuid
      ) ON CONFLICT DO NOTHING
        RETURNING id`,
     [
@@ -383,8 +401,10 @@ export async function createWeeklyReportProject(
       values.clientRmEmail,
       values.clientCmName,
       values.clientCmEmail,
-      values.trockPmUserId,
-      values.trockSuperUserId,
+      pm?.userId ?? null,
+      superintendent?.userId ?? null,
+      pm?.responderId ?? null,
+      superintendent?.responderId ?? null,
       values.contractDate,
       values.contractDateNote,
       values.projectStartDate,
@@ -432,8 +452,10 @@ const UPDATABLE_COLUMNS: Record<string, string> = {
   client_rm_email: "clientRmEmail",
   client_cm_name: "clientCmName",
   client_cm_email: "clientCmEmail",
-  trock_pm_user_id: "trockPmUserId",
-  trock_super_user_id: "trockSuperUserId",
+  // trock_* is deliberately ABSENT from this map. Those four columns are written as a unit by the team
+  // block in updateWeeklyReportProject: the user id is DERIVED from the roster row, not patched, and
+  // letting a caller reach it through the generic loop is exactly the "nominate your own login into the
+  // approval slot" hole resolveRosterAssignee exists to close.
   contract_date: "contractDate",
   contract_date_note: "contractDateNote",
   project_start_date: "projectStartDate",
@@ -449,8 +471,6 @@ const UPDATABLE_COLUMNS: Record<string, string> = {
 
 /** Columns that need an explicit cast so a null parameter is not inferred as text. */
 const COLUMN_CASTS: Record<string, string> = {
-  trock_pm_user_id: "::uuid",
-  trock_super_user_id: "::uuid",
   contract_date: "::date",
   project_start_date: "::date",
   project_completion_date: "::date",
@@ -462,8 +482,6 @@ const COLUMN_CASTS: Record<string, string> = {
 const COLUMN_PATCH_KEYS: Record<string, keyof WeeklyReportProjectInput> = {
   property_display_name: "propertyDisplayName",
   client_name: "clientName",
-  trock_pm_user_id: "trockPmUserId",
-  trock_super_user_id: "trockSuperUserId",
   contract_date: "contractDate",
   contract_date_note: "contractDateNote",
   project_start_date: "projectStartDate",
@@ -519,8 +537,8 @@ export async function updateWeeklyReportProject(
       rm: pickContact(patch, "rm", current.client_rm_name, current.client_rm_email),
       cm: pickContact(patch, "cm", current.client_cm_name, current.client_cm_email),
     },
-    trockPmUserId: pick(patch, "trockPmUserId", current.trock_pm_user_id),
-    trockSuperUserId: pick(patch, "trockSuperUserId", current.trock_super_user_id),
+    trockPmResponderId: pick(patch, "trockPmResponderId", current.trock_pm_responder_id),
+    trockSuperResponderId: pick(patch, "trockSuperResponderId", current.trock_super_responder_id),
     contractDate: pick(patch, "contractDate", toIsoDate(current.contract_date)),
     contractDateNote: pick(patch, "contractDateNote", current.contract_date_note),
     projectStartDate: pick(patch, "projectStartDate", toIsoDate(current.project_start_date)),
@@ -535,14 +553,20 @@ export async function updateWeeklyReportProject(
   };
   const values = normalizeWeeklyReportProjectInput(merged) as Record<string, any>;
 
-  // Assignees are re-validated on every patch, not just on create: the PATCH route is open to `rep`
-  // users, and `trock_pm_user_id` is exactly what decides who may approve and send.
-  if (Object.prototype.hasOwnProperty.call(patch, "trockPmUserId")) {
-    await assertAssignableUser(client, officeId, values.trockPmUserId, "Project manager");
-  }
-  if (Object.prototype.hasOwnProperty.call(patch, "trockSuperUserId")) {
-    await assertAssignableUser(client, officeId, values.trockSuperUserId, "Superintendent");
-  }
+  // Assignees are re-resolved on every patch, not just on create: the PATCH route is open to `rep` users,
+  // and `trock_pm_user_id` is exactly what decides who may approve and send. Re-resolving also re-reads
+  // the roster row, so an edit made after that person was deactivated is refused rather than silently
+  // carried forward.
+  const patchesPm = Object.prototype.hasOwnProperty.call(patch, "trockPmResponderId");
+  const patchesSuper = Object.prototype.hasOwnProperty.call(patch, "trockSuperResponderId");
+  const pm = patchesPm
+    ? await resolveRosterAssignee(client, officeId, values.trockPmResponderId, "project_manager", "Project manager")
+    : null;
+  const superintendent = patchesSuper
+    ? await resolveRosterAssignee(
+        client, officeId, values.trockSuperResponderId, "superintendent", "Superintendent",
+      )
+    : null;
 
   // Write ONLY the columns this patch actually supplied. Writing every column from the merged row means
   // two people editing different fields race: both read the same original, and whoever commits second
@@ -553,6 +577,23 @@ export async function updateWeeklyReportProject(
     params.push(values[UPDATABLE_COLUMNS[column]!]);
     assignments.push(`${column} = $${params.length}${COLUMN_CASTS[column] ?? ""}`);
   };
+  /** A column whose value is derived rather than taken from the normalised patch. */
+  const writeValue = (column: string, value: unknown, cast = "") => {
+    params.push(value);
+    assignments.push(`${column} = $${params.length}${cast}`);
+  };
+
+  // The roster id and the login it resolves to move together, ALWAYS. Writing one without the other
+  // leaves a project whose printed PM is one person and whose approver is another — and clearing the
+  // slot has to clear both, or the old approver silently keeps their rights over an unassigned project.
+  if (patchesPm) {
+    writeValue("trock_pm_responder_id", pm?.responderId ?? null, "::uuid");
+    writeValue("trock_pm_user_id", pm?.userId ?? null, "::uuid");
+  }
+  if (patchesSuper) {
+    writeValue("trock_super_responder_id", superintendent?.responderId ?? null, "::uuid");
+    writeValue("trock_super_user_id", superintendent?.userId ?? null, "::uuid");
+  }
 
   const touchedCadence: string[] = [];
   for (const [column, key] of Object.entries(COLUMN_PATCH_KEYS)) {
@@ -792,6 +833,85 @@ async function assertAssignableUser(
   }
 }
 
+/** The roster row behind one slot, plus the login it resolves to (null when that person has none). */
+export interface ResolvedTrockAssignee {
+  responderId: string;
+  userId: string | null;
+  name: string;
+  email: string;
+  hasLogin: boolean;
+}
+
+/**
+ * Turn a field-team roster id into the pair the project row stores.
+ *
+ * This is the AUTHORISATION boundary, and it is a stricter one than the roles check it replaces. Before,
+ * any user holding one of four broad roles could be dropped into the PM slot — which is what
+ * `isAssignedPm` reads to decide who may approve and send a client-facing report. Now the id must name an
+ * ACTIVE row on the office's field-team roster, a list only a director may write to, AND the row's role
+ * must match the slot: a superintendent cannot be installed as the PM, which is precisely the direction
+ * that would hand out approval rights.
+ *
+ * The login is looked up BY EMAIL, the only identifier the two tables share, and is allowed to come back
+ * null — five of the fifteen people on the Dallas roster have no CRM account at all. A null login is not
+ * an error: that person still owns the slot, still prints on the PDF and still receives reminders at the
+ * roster address. What they cannot do is approve or send from the phone, because there is no identity to
+ * compare against. That case falls through to the elevated (admin/director) arm the gates already have,
+ * and the setup form states it rather than leaving it to be discovered on a Thursday afternoon.
+ *
+ * The match is deliberately restricted to a SINGLE active non-test user in this office. Two accounts on
+ * one address is not a situation to resolve by picking one — that silently decides who may approve.
+ */
+async function resolveRosterAssignee(
+  client: QueryExecutor,
+  officeId: string,
+  responderId: string | null,
+  role: "project_manager" | "superintendent",
+  label: string,
+): Promise<ResolvedTrockAssignee | null> {
+  if (!responderId) return null;
+
+  const roster = await client.query(
+    `SELECT id, name, email, role, is_active FROM field_responders WHERE id = $1::uuid LIMIT 1`,
+    [responderId],
+  );
+  const row = roster.rows[0];
+  if (!row) {
+    throw new AppError(400, `${label} is not on this office's field team`);
+  }
+  if (!row.is_active) {
+    throw new AppError(400, `${row.name} has been removed from the field team and cannot be assigned`);
+  }
+  if (row.role !== role) {
+    const expected = role === "project_manager" ? "a project manager" : "a superintendent";
+    throw new AppError(400, `${row.name} is not ${expected} on the field team`);
+  }
+
+  // Office membership is NOT just `users.office_id` — a multi-office PM holds a user_office_access grant,
+  // and keying only on the primary office would drop exactly the people most likely to run a second
+  // office's projects. No role filter: the roster IS the curated list, and gating on `role` again is what
+  // made Adam Sherwood (a `rep` login who is genuinely a PM) unassignable in the first place.
+  const login = await client.query(
+    `SELECT u.id
+       FROM public.users u
+       LEFT JOIN public.user_office_access uoa ON uoa.user_id = u.id AND uoa.office_id = $2::uuid
+      WHERE lower(u.email) = lower($1)
+        AND (u.office_id = $2::uuid OR uoa.user_id IS NOT NULL)
+        AND u.is_active = true
+        AND COALESCE(u.is_test_data, false) = false
+      LIMIT 2`,
+    [row.email, officeId],
+  );
+
+  return {
+    responderId: row.id,
+    userId: login.rows.length === 1 ? login.rows[0].id : null,
+    name: row.name,
+    email: row.email,
+    hasLogin: login.rows.length === 1,
+  };
+}
+
 export async function listWeeklyReportAssignableUsers(
   client: QueryExecutor,
   officeId: string,
@@ -810,6 +930,139 @@ export async function listWeeklyReportAssignableUsers(
     displayName: row.display_name,
     email: row.email,
     role: row.role,
+  }));
+}
+
+/** One selectable field-team member, as the setup form's PM / superintendent pickers render them. */
+export interface WeeklyReportAssignableResponder {
+  /** `field_responders.id` — what the form submits and the project row stores. */
+  id: string;
+  name: string;
+  email: string;
+  role: "superintendent" | "project_manager";
+  /**
+   * Whether this person holds a CRM login, and can therefore approve and send from the phone. False for
+   * the field staff who never needed an account. The form surfaces this rather than hiding them: they are
+   * still the right person to name on the report, and a director can still approve on their behalf.
+   */
+  hasLogin: boolean;
+}
+
+/**
+ * The field-team roster, which is what the PM and superintendent pickers offer.
+ *
+ * Replaces a feed built from `public.users` filtered to four broad roles. Against the live Dallas data
+ * that feed could offer six of the fifteen active roster members: four are `rep` logins who are genuinely
+ * PMs and superintendents, and five have no CRM account at all. The roster is the list a director already
+ * curates for the deal Team tab and the QC scorecards, it is constrained to exactly the two roles this
+ * feature needs, and it contains all fifteen.
+ *
+ * `has_login` mirrors resolveRosterAssignee's lookup EXACTLY — same email match, same office-membership
+ * rule, same "one unambiguous account or none" test. The two must not drift: if the picker promised a
+ * login the write path then declines to resolve, a project would be created whose PM cannot approve it
+ * and whose form said they could.
+ */
+export async function listWeeklyReportAssignableResponders(
+  client: QueryExecutor,
+  officeId: string,
+): Promise<WeeklyReportAssignableResponder[]> {
+  const result = await client.query(
+    `SELECT fr.id, fr.name, fr.email, fr.role,
+            (SELECT count(*)
+               FROM public.users u
+               LEFT JOIN public.user_office_access uoa
+                      ON uoa.user_id = u.id AND uoa.office_id = $1::uuid
+              WHERE lower(u.email) = lower(fr.email)
+                AND (u.office_id = $1::uuid OR uoa.user_id IS NOT NULL)
+                AND u.is_active = true
+                AND COALESCE(u.is_test_data, false) = false) = 1 AS has_login
+       FROM field_responders fr
+      WHERE fr.is_active
+      ORDER BY fr.role ASC, lower(fr.name) ASC`,
+    [officeId],
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role,
+    hasLogin: row.has_login === true,
+  }));
+}
+
+/** A Won job that can still be given a weekly-report cadence, as the setup form's project picker shows it. */
+export interface WeeklyReportEligibleDeal {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  /** The company the work is being done for — seeds the Client field. */
+  clientName: string | null;
+  /** Seeds the Contract date field. Null on the ~20% of Won deals that carry no signed date. */
+  contractSignedDate: string | null;
+}
+
+/**
+ * The project picker's feed: ACTIVE, non-test, WON deals in this office that do not already have a live
+ * weekly-report setup.
+ *
+ * Its own endpoint rather than a filter bolted onto `GET /deals`, for three reasons.
+ *
+ * The Won rule is the one `createWeeklyReportProject` enforces, and it is subtle — a Bid Board-owned deal
+ * carries its terminal state in `bid_board_stage_slug` while its CRM `stage_id` can still point at a
+ * non-terminal stage, so BOTH sides of the dual-record model count. The picker used no stage filter at
+ * all, so it offered all 1,445 active deals and the server refused the other ~970 with a 400 only after
+ * the whole form had been filled in. Reusing the create path's predicate is what stops the picker and the
+ * write disagreeing again.
+ *
+ * The already-taken exclusion was being done in the browser against whatever page of results it happened
+ * to hold, which silently fails as soon as the list is longer than one page. It is a NOT EXISTS here.
+ *
+ * And the two fields the form seeds from — the client company and the signed contract date — come back
+ * with the row, so picking a job fills them in without a second request.
+ */
+export async function listWeeklyReportEligibleDeals(
+  client: QueryExecutor,
+  search: string | null,
+  limit = 20,
+): Promise<WeeklyReportEligibleDeal[]> {
+  const params: unknown[] = [[...WON_DEAL_STAGE_SLUGS]];
+  let searchClause = "";
+  if (search && search.trim()) {
+    params.push(`%${search.trim()}%`);
+    searchClause = `AND (d.name ILIKE $${params.length}
+                      OR d.project_number ILIKE $${params.length}
+                      OR d.deal_number ILIKE $${params.length})`;
+  }
+  params.push(Math.min(Math.max(limit, 1), 50));
+
+  const result = await client.query(
+    `SELECT d.id, d.name, d.deal_number, d.project_number,
+            c.name AS client_name,
+            d.contract_signed_date
+       FROM deals d
+       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+       LEFT JOIN companies c ON c.id = d.company_id
+      WHERE d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND (COALESCE(psc.slug, '') = ANY($1::text[])
+             OR COALESCE(d.bid_board_stage_slug, '') = ANY($1::text[]))
+        ${searchClause}
+        AND NOT EXISTS (
+          SELECT 1 FROM weekly_report_projects wrp
+           WHERE wrp.deal_id = d.id AND wrp.is_active
+        )
+      ORDER BY d.name ASC
+      LIMIT $${params.length}`,
+    params,
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    dealNumber: row.deal_number ?? null,
+    projectNumber: row.project_number ?? null,
+    clientName: row.client_name ?? null,
+    contractSignedDate: toIsoDate(row.contract_signed_date),
   }));
 }
 

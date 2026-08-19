@@ -9,6 +9,8 @@ import {
   getWeeklyReportProjectRow,
   getWeeklyReportSettings,
   listWeeklyReportAssignableUsers,
+  listWeeklyReportAssignableResponders,
+  listWeeklyReportEligibleDeals,
   listWeeklyReportProjects,
   updateWeeklyReportProject,
   updateWeeklyReportSettings,
@@ -192,14 +194,44 @@ router.get("/projects", async (req, res, next) => {
 });
 
 /**
- * The PM / superintendent picker feed. Any CRM user may read it — a PM setting up their own project
- * cannot be sent through the admin-only `/admin/field-users` route.
+ * The PM / superintendent picker feed — the office's FIELD TEAM ROSTER, the same list the deal Team tab
+ * and the QC scorecards pick from. Any CRM user may read it: a PM setting up their own project cannot be
+ * sent through the admin-only `/admin/field-users` route.
+ *
+ * `responders` is a new key alongside the old `users` one rather than a rename. A browser holding the
+ * previous bundle keeps working through the deploy instead of rendering an empty picker, and the two are
+ * genuinely different things — one is a roster row, the other a login — so collapsing them onto one key
+ * would make a stale client submit a `public.users` id into a column that now expects a roster id.
  */
 router.get("/assignable-users", async (req, res, next) => {
   try {
-    const users = await listWeeklyReportAssignableUsers(req.tenantClient!, officeIdFrom(req));
+    const officeId = officeIdFrom(req);
+    // Sequential, not Promise.all: both run on the ONE tenant client inside this request's transaction,
+    // where pg queues them anyway. Parallel here buys nothing and reads as if it did.
+    const users = await listWeeklyReportAssignableUsers(req.tenantClient!, officeId);
+    const responders = await listWeeklyReportAssignableResponders(req.tenantClient!, officeId);
     await req.commitTransaction!();
-    res.json({ users });
+    res.json({ users, responders });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * The project picker's feed — Won jobs that can still be given a cadence. See
+ * listWeeklyReportEligibleDeals for why this is not a filter on `GET /deals`.
+ */
+router.get("/eligible-deals", async (req, res, next) => {
+  try {
+    const search = typeof req.query.search === "string" ? req.query.search : null;
+    const limit = Number.parseInt(String(req.query.limit ?? ""), 10);
+    const deals = await listWeeklyReportEligibleDeals(
+      req.tenantClient!,
+      search,
+      Number.isFinite(limit) ? limit : 20,
+    );
+    await req.commitTransaction!();
+    res.json({ deals });
   } catch (error) {
     next(error);
   }

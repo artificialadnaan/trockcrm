@@ -11,7 +11,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import {
   WEEKLY_REPORT_SEND_REQUEST_KEYS,
   weeklyReportRetryIsProviderDeduped,
@@ -56,6 +56,11 @@ const DEAL = U("11111");
 const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
+// Field-team roster rows (0228): what the PM/superintendent slots now name. The LOGIN each
+// resolves to is derived from the roster row's email, so these are seeded from public.users
+// below rather than carrying a hand-typed address that could drift out of step.
+const PM_RESPONDER = U("44441");
+const SUPER_RESPONDER = U("44442");
 const STRANGER = U("22224");
 const WON_STAGE = U("33331");
 
@@ -207,7 +212,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   // The real job_queue shape from migration 0001, minus the job_status enum (created here so the DDL
   // runs standalone). `sendWeeklyReport` inserts into this table inside the caller's transaction, and
@@ -248,6 +253,10 @@ beforeAll(async () => {
   // suite's schema identical to production's rather than merely equivalent.
   await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
   await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER, so every read of a project now
+  // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
+  // missing column rather than on its subject.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -256,6 +265,10 @@ beforeAll(async () => {
       ('${SUPER}', 'Steve Sanchez', 'super@example.com', 'construction', '${OFFICE}', NULL),
       ('${DIRECTOR}', 'Takashi', 'director@example.com', 'director', '${OFFICE}', NULL),
       ('${STRANGER}', 'Nobody', 'nobody@example.com', 'rep', '${OFFICE}', NULL);
+    INSERT INTO office_dallas.field_responders (id, name, email, role)
+SELECT '${PM_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${PM}'
+      UNION ALL
+      SELECT '${SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${SUPER}';
     INSERT INTO public.pipeline_stage_config (id, slug) VALUES ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}');
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
       ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432');
@@ -292,8 +305,8 @@ async function seedProject(overrides: Record<string, unknown> = {}) {
         // An RM with a NAME but no address: the modal must not offer an empty recipient row.
         rm: { name: "Dana Reyes", email: null },
       },
-      trockPmUserId: PM,
-      trockSuperUserId: SUPER,
+      trockPmResponderId: PM_RESPONDER,
+      trockSuperResponderId: SUPER_RESPONDER,
       contractDate: "2026-07-08",
       projectedDurationWeeks: 19,
       cadenceWeekday: THURSDAY,

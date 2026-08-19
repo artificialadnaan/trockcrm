@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { trockTeamJoins } from "@trock-crm/shared/lib/weeklyReportTeam";
 import { pool } from "../db.js";
 import {
   sendSystemEmailWithMetadata,
@@ -112,7 +113,23 @@ const REQUIRED_TENANT_TABLES = [
   "weekly_report_dismissals",
   "weekly_report_settings",
   "weekly_report_reminders_sent",
+  // 0228 — the super/PM are resolved roster-first, so the reminder query joins this.
+  "field_responders",
 ] as const;
+
+/**
+ * Columns this tick reads that arrived after their table did.
+ *
+ * MIGRATIONS DO NOT RUN ON THE WORKER. The API applies them before it boots; the worker does not, and the
+ * two are separate Railway deployments — so on every deploy there is a window where this cron is live
+ * against a `weekly_report_projects` that predates 0228. The table probe above cannot see that: the table
+ * has existed since 0222, so `to_regclass` passes happily while the column the join needs is missing, and
+ * the read throws 42703 for every office on every tick until the API happens to deploy.
+ *
+ * Skipping is the right failure: the reminders are re-derived from the cadence on the next tick, so an
+ * office that sits out a few ticks loses nothing once the migration lands.
+ */
+const REQUIRED_PROJECT_COLUMNS = ["trock_pm_responder_id", "trock_super_responder_id"] as const;
 
 /** Basic sanity check on a stored address before it becomes a recipient. Mirrors the scorecard email's. */
 function isBasicValidEmail(email: string): boolean {
@@ -956,6 +973,35 @@ export async function runWeeklyReportReminders(
         continue;
       }
 
+      // Same shape as the table probe, one level finer — see REQUIRED_PROJECT_COLUMNS. A probe that
+      // THREW leaves the office's state unknown and is an ERROR + `failed`; columns that are merely
+      // absent are an ordinary pre-migration office and log at INFO.
+      let missingColumns: string[];
+      try {
+        const presentColumns = await query(
+          `SELECT column_name FROM information_schema.columns
+            WHERE table_schema = $1 AND table_name = 'weekly_report_projects'
+              AND column_name = ANY($2::text[])`,
+          [tenantSchema, [...REQUIRED_PROJECT_COLUMNS]],
+        );
+        const names = new Set(presentColumns.rows.map((row) => String(row.column_name)));
+        missingColumns = REQUIRED_PROJECT_COLUMNS.filter((column) => !names.has(column));
+      } catch (err) {
+        logger.error("[WeeklyReportReminders] Weekly-report column probe failed - skipping office", {
+          tenantSchema,
+          err,
+        });
+        summary.failed += 1;
+        continue;
+      }
+      if (missingColumns.length > 0) {
+        logger.log("[WeeklyReportReminders] Weekly-report roster columns not migrated yet - skipping office", {
+          tenantSchema,
+          missingColumns,
+        });
+        continue;
+      }
+
       summary.offices += 1;
       try {
         await processOffice({
@@ -1005,12 +1051,18 @@ async function processOffice(args: OfficeRunArgs): Promise<void> {
     `SELECT wrp.id, wrp.property_display_name, wrp.client_name,
             wrp.cadence_weekday, wrp.cadence_start_date, wrp.cadence_end_date,
             d.name AS deal_name, d.project_number,
-            sup.display_name AS super_name, sup.email AS super_email, sup.is_active AS super_is_active,
-            pm.display_name  AS pm_name,    pm.email    AS pm_email,    pm.is_active    AS pm_is_active
+            -- Aliased to the names this job already reads. The roster is what makes these reminders
+            -- reach the five field staff who hold no CRM login at all: before the roster link they
+            -- joined to nothing, so their projects had a superintendent nobody ever emailed.
+            COALESCE(sup_fr.name, sup_u.display_name)   AS super_name,
+            COALESCE(sup_fr.email, sup_u.email)         AS super_email,
+            COALESCE(sup_fr.is_active, sup_u.is_active) AS super_is_active,
+            COALESCE(pm_fr.name, pm_u.display_name)     AS pm_name,
+            COALESCE(pm_fr.email, pm_u.email)           AS pm_email,
+            COALESCE(pm_fr.is_active, pm_u.is_active)   AS pm_is_active
        FROM ${tenantSchema}.weekly_report_projects wrp
        JOIN ${tenantSchema}.deals d ON d.id = wrp.deal_id
-       LEFT JOIN public.users sup ON sup.id = wrp.trock_super_user_id
-       LEFT JOIN public.users pm  ON pm.id  = wrp.trock_pm_user_id
+${trockTeamJoins("wrp", tenantSchema)}
       WHERE wrp.is_active AND wrp.status = 'active'`,
   );
   if (projectsResult.rows.length === 0) return;

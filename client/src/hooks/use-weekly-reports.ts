@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type {
   WeeklyReportProjectStatus,
@@ -101,8 +101,12 @@ export interface WeeklyReportProject {
   propertyDisplayName: string | null;
   clientName: string | null;
   clientTeam: Record<"doc" | "pm" | "rm" | "cm", WeeklyReportClientContact>;
+  /** The field-team roster row holding the slot. Null on setups made before the roster link existed. */
+  trockPmResponderId: string | null;
+  /** The CRM login that person signs in with, or null when they hold none. Decides who may approve/send. */
   trockPmUserId: string | null;
   trockPmName: string | null;
+  trockSuperResponderId: string | null;
   trockSuperUserId: string | null;
   trockSuperName: string | null;
   contractDate: string | null;
@@ -271,8 +275,8 @@ export interface WeeklyReportProjectPayload {
   propertyDisplayName?: string | null;
   clientName?: string | null;
   clientTeam?: Partial<Record<"doc" | "pm" | "rm" | "cm", Partial<WeeklyReportClientContact>>>;
-  trockPmUserId?: string | null;
-  trockSuperUserId?: string | null;
+  trockPmResponderId?: string | null;
+  trockSuperResponderId?: string | null;
   contractDate?: string | null;
   contractDateNote?: string | null;
   projectStartDate?: string | null;
@@ -386,6 +390,59 @@ export function createWeeklyReportCorrection(reportId: string) {
   return api<WeeklyReportDetail>(`/weekly-reports/reports/${reportId}/correction`, { method: "POST" });
 }
 
+/** A Won job that can still be given a cadence, as the project picker lists it. */
+export interface WeeklyReportEligibleDeal {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  /** The company the work is being done for — seeds the Client field on pick. */
+  clientName: string | null;
+  /** Seeds the Contract date field on pick. Null on the Won jobs that carry no signed date. */
+  contractSignedDate: string | null;
+}
+
+/**
+ * Search the project picker's feed.
+ *
+ * Deliberately NOT `useDeals`. That searches every active deal — the picker used to offer all 1,445 of
+ * them, and the server refused the ~970 that are not Won with a 400 only after the form had been filled
+ * in. This endpoint applies the same Won predicate the write path enforces, drops jobs that already have
+ * a setup, and returns the client company and contract date so picking one seeds those fields.
+ *
+ * A sequence guard drops out-of-order responses: a slow early keystroke must not overwrite the results
+ * for what the user has actually typed.
+ */
+export function useWeeklyReportEligibleDeals(search: string, enabled: boolean) {
+  const [deals, setDeals] = useState<WeeklyReportEligibleDeal[]>([]);
+  const [loading, setLoading] = useState(false);
+  const seq = useRef(0);
+
+  useEffect(() => {
+    if (!enabled) {
+      setDeals([]);
+      setLoading(false);
+      return;
+    }
+    const mine = ++seq.current;
+    setLoading(true);
+    (async () => {
+      try {
+        const response = await api<{ deals: WeeklyReportEligibleDeal[] }>(
+          `/weekly-reports/eligible-deals?search=${encodeURIComponent(search)}&limit=20`,
+        );
+        if (mine === seq.current) setDeals(response.deals ?? []);
+      } catch {
+        if (mine === seq.current) setDeals([]);
+      } finally {
+        if (mine === seq.current) setLoading(false);
+      }
+    })();
+  }, [search, enabled]);
+
+  return { deals, loading };
+}
+
 export interface WeeklyReportAssignableUser {
   id: string;
   displayName: string;
@@ -393,15 +450,35 @@ export interface WeeklyReportAssignableUser {
   role: string;
 }
 
+/** One selectable member of the office's field team, as the PM / superintendent pickers render them. */
+export interface WeeklyReportAssignableResponder {
+  /** `field_responders.id` — what the form submits as `trockPmResponderId` / `trockSuperResponderId`. */
+  id: string;
+  name: string;
+  email: string;
+  role: "superintendent" | "project_manager";
+  /**
+   * Whether this person holds a CRM login and can therefore approve and send from the phone. False for
+   * field staff who never needed an account — they still own the slot, print on the report and get the
+   * reminder emails; a director approves on their behalf. The form says so at the point of choosing.
+   */
+  hasLogin: boolean;
+}
+
 /**
- * Candidates for the PM / superintendent slots.
+ * Candidates for the PM / superintendent slots — the office's FIELD TEAM ROSTER.
  *
- * These are `public.users` rows, which is what `trockPmUserId` / `trockSuperUserId` reference and what
- * the server compares against the acting user when deciding who may submit and who may approve. The
- * `field_responders` roster is a different table with different ids and would not authorise anyone.
+ * The same list the deal Team tab and the QC scorecards pick from. It replaced a feed of `public.users`
+ * filtered to four broad roles, which against the live roster could offer six of fifteen people: four are
+ * `rep` logins who are genuinely PMs and superintendents, and five hold no CRM account at all.
+ *
+ * `users` is still returned by the endpoint and still typed here, but nothing renders it any more. It is
+ * kept so a browser running the previous bundle through a deploy keeps working rather than showing an
+ * empty picker.
  */
 export function useWeeklyReportAssignableUsers() {
   const [users, setUsers] = useState<WeeklyReportAssignableUser[]>([]);
+  const [responders, setResponders] = useState<WeeklyReportAssignableResponder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -409,10 +486,16 @@ export function useWeeklyReportAssignableUsers() {
     let cancelled = false;
     (async () => {
       try {
-        const response = await api<{ users: WeeklyReportAssignableUser[] }>("/weekly-reports/assignable-users");
-        if (!cancelled) setUsers(response.users ?? []);
+        const response = await api<{
+          users: WeeklyReportAssignableUser[];
+          responders?: WeeklyReportAssignableResponder[];
+        }>("/weekly-reports/assignable-users");
+        if (!cancelled) {
+          setUsers(response.users ?? []);
+          setResponders(response.responders ?? []);
+        }
       } catch (err) {
-        if (!cancelled) setError(errorMessage(err, "Couldn't load the project team roster"));
+        if (!cancelled) setError(errorMessage(err, "Couldn't load the field team roster"));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -422,7 +505,7 @@ export function useWeeklyReportAssignableUsers() {
     };
   }, []);
 
-  return { users, loading, error };
+  return { users, responders, loading, error };
 }
 
 export interface WeeklyReportSettings {

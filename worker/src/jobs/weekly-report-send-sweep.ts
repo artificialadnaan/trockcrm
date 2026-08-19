@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { trockTeamJoins } from "@trock-crm/shared/lib/weeklyReportTeam";
 import { pool } from "../db.js";
 import {
   sendSystemEmailWithMetadata,
@@ -111,7 +112,14 @@ export const WEEKLY_REPORT_SEND_ALERT_MAX_AGE_HOURS = 24 * 7;
 export const WEEKLY_REPORT_SEND_ALERT_MAX_PER_EMAIL = 25;
 
 /** Every tenant table the sweep reads. Probed per office before a single query touches them — see below. */
-const REQUIRED_TENANT_TABLES = ["weekly_reports", "weekly_report_projects", "weekly_report_settings"] as const;
+const REQUIRED_TENANT_TABLES = [
+  "weekly_reports",
+  "weekly_report_projects",
+  "weekly_report_settings",
+  // The PM's name is resolved roster-first (0228). Present in every office from 0198, but a schema
+  // provisioned from a template that predates it would otherwise fail the join rather than be skipped.
+  "field_responders",
+] as const;
 
 /**
  * Every `weekly_reports` column the sweep reads or writes that arrived AFTER the table did.
@@ -141,6 +149,17 @@ const REQUIRED_REPORT_COLUMNS = [
   // 0227
   "send_stall_alerted_at",
 ] as const;
+
+/**
+ * The `weekly_report_projects` columns 0228 added, for exactly the reason above.
+ *
+ * The sweep now resolves the PM's name roster-first, which means its candidate query reads
+ * `wrp.trock_pm_responder_id`. Between a worker deploy and the API's next migration run that column does
+ * not exist, and an unguarded read throws 42703 for every office on every tick — the identical failure
+ * REQUIRED_REPORT_COLUMNS was written to prevent, one table over. Probed separately because the existing
+ * probe only looks at `weekly_reports`.
+ */
+const REQUIRED_PROJECT_COLUMNS = ["trock_pm_responder_id", "trock_super_responder_id"] as const;
 
 const BUSINESS_TIMEZONE = "America/Chicago";
 
@@ -606,6 +625,21 @@ async function officeIsReady(
     });
     return false;
   }
+
+  const projectColumns = await query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = 'weekly_report_projects' AND column_name = ANY($2::text[])`,
+    [tenantSchema, [...REQUIRED_PROJECT_COLUMNS]],
+  );
+  const projectPresent = new Set(projectColumns.rows.map((row) => String(row.column_name)));
+  const missingProjectColumns = REQUIRED_PROJECT_COLUMNS.filter((column) => !projectPresent.has(column));
+  if (missingProjectColumns.length > 0) {
+    logger.log(`${LOG} Weekly-report roster columns not migrated yet - skipping office`, {
+      tenantSchema,
+      missingColumns: missingProjectColumns,
+    });
+    return false;
+  }
   return true;
 }
 
@@ -654,12 +688,12 @@ async function sweepOffice(args: OfficeSweepArgs): Promise<void> {
             wr.send_attempts, wr.send_last_attempt_at,
             wrp.property_display_name, wrp.client_name,
             d.name AS deal_name, d.project_number,
-            pm.display_name AS pm_name
+            COALESCE(pm_fr.name, pm_u.display_name) AS pm_name
        FROM ${tenantSchema}.weekly_reports wr
        JOIN ${tenantSchema}.weekly_report_projects wrp
          ON wrp.id = wr.weekly_report_project_id AND wrp.is_active
        JOIN ${tenantSchema}.deals d ON d.id = wr.deal_id
-       LEFT JOIN public.users pm ON pm.id = wrp.trock_pm_user_id
+${trockTeamJoins("wrp", tenantSchema)}
       WHERE wr.is_active
         AND wr.status = 'sent'
         AND wr.send_delivered_at IS NULL

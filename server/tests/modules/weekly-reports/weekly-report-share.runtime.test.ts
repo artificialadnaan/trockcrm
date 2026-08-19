@@ -7,7 +7,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -52,6 +52,12 @@ const OTHER_DEAL = U("11112");
 const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
+// Field-team roster rows (0228): what the PM/superintendent slots now name. The LOGIN each
+// resolves to is derived from the roster row's email, so these are seeded from public.users
+// below rather than carrying a hand-typed address that could drift out of step.
+const PM_RESPONDER = U("44441");
+const SUPER_RESPONDER = U("44442");
+const DIRECTOR_RESPONDER = U("44443");
 const WON_STAGE = U("33331");
 
 const PM_ACTOR = { id: PM, role: "construction" };
@@ -92,7 +98,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   await pg.exec(migrationSql("0222_weekly_reports"));
   // 0223 too. Nothing in the PDF path reads weekly_report_pauses today, but the cadence helpers
@@ -109,6 +115,10 @@ beforeAll(async () => {
   // selects `send_delivery_status`, and `priorVersionReachedClient` binds it — a suite that stops at 0226
   // fails on a missing column rather than on its subject.
   await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER, so every read of a project now
+  // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
+  // missing column rather than on its subject.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES
@@ -118,6 +128,12 @@ beforeAll(async () => {
       ('${PM}', 'Adam Sherwood', 'pm@example.com', 'construction', '${OFFICE}'),
       ('${SUPER}', 'Steve Sanchez', 'super@example.com', 'construction', '${OFFICE}'),
       ('${DIRECTOR}', 'Takashi', 'director@example.com', 'director', '${OFFICE}');
+    INSERT INTO office_dallas.field_responders (id, name, email, role)
+SELECT '${PM_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${PM}'
+      UNION ALL
+      SELECT '${SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${SUPER}'
+      UNION ALL
+      SELECT '${DIRECTOR_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${DIRECTOR}';
     INSERT INTO public.pipeline_stage_config (id, slug) VALUES ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}');
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
       ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432'),
@@ -148,8 +164,8 @@ async function seedProject(overrides: Record<string, unknown> = {}) {
       propertyDisplayName: "4123 Cedar Springs",
       clientName: "Mack Real Estate Group",
       clientTeam: { doc: { name: "Jay Stauble", email: "jay@example.com" } },
-      trockPmUserId: PM,
-      trockSuperUserId: SUPER,
+      trockPmResponderId: PM_RESPONDER,
+      trockSuperResponderId: SUPER_RESPONDER,
       contractDate: "2026-07-08",
       projectStartDateNote: "TBD Permit",
       projectedDurationWeeks: 19,
@@ -442,7 +458,7 @@ describe("the PDF source", () => {
 
     // Swap the PM and rename the client AFTER delivery. The client has already read the old header.
     await updateWeeklyReportProject(db, project.id, {
-      trockPmUserId: DIRECTOR,
+      trockPmResponderId: DIRECTOR_RESPONDER,
       clientName: "New Owner LLC",
       propertyDisplayName: "Somewhere Else",
     }, OFFICE);
