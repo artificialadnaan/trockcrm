@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   dismissWeeklyReportWeek: vi.fn(),
   historyRefetch: vi.fn(),
   retryWeeklyReportSend: vi.fn(),
+  sendDialogReportId: null as string | null,
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
@@ -38,6 +39,16 @@ vi.mock("@/hooks/use-weekly-reports", () => ({
   createWeeklyReportCorrection: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+// Stand-in for the send dialog, so a Send click can be asserted by WHICH report it opens for. The real
+// dialog fetches a draft on mount, and the id it is handed is the whole point: on a row carrying both a
+// correction and a failed send, a Send pointed at the failed report renders identically to one pointed at
+// the correction.
+vi.mock("./weekly-report-send-dialog", () => ({
+  WeeklyReportSendDialog: ({ reportId }: { reportId: string }) => {
+    mocks.sendDialogReportId = reportId;
+    return null;
+  },
+}));
 
 import WeeklyReportsPage, { fmtWeek, latenessLabel } from "./weekly-reports-page";
 
@@ -112,6 +123,9 @@ beforeEach(() => {
   root = createRoot(container);
   mocks.useWeeklyReportDashboard.mockReset();
   mocks.useWeeklyReportProjects.mockReset();
+  // Plain state, not a vi.fn, so mockReset does not clear it — a stale id would let a test that opens no
+  // dialog at all inherit the previous one's and pass.
+  mocks.sendDialogReportId = null;
   mocks.useWeeklyReportProjects.mockReturnValue({
     projects: [],
     loading: false,
@@ -292,6 +306,57 @@ describe("This Week board", () => {
     // and the PM is warned about a second copy the provider provably will not send: a false alarm on the
     // one dialog on this page that is ever real.
     expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+  });
+
+  it("ALSO offers Send for the correction, which Retry used to hide", async () => {
+    // Same state as the test above, asserted from the other side. The actions cell was an if/else chain
+    // with Retry first, so this row — `approved` AND carrying a "Send failed" chip — rendered Retry alone.
+    // The PM had just written a correction and the only button on the row replayed the OLD content; the
+    // correction had no path off This Week at all, only through the History tab.
+    //
+    // Both belong here and they do different jobs: Retry replays the send that failed, for a transport
+    // problem; Send delivers the correction, for a content one.
+    mockDashboard([
+      dashboardRow({
+        state: "approved",
+        reportId: "v2",
+        sendRetryReportId: "v1",
+        sentAt: null,
+        sendRetrySentAt: new Date().toISOString(),
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+
+    const labels = Array.from(container.querySelectorAll("button")).map((button) =>
+      button.textContent?.trim(),
+    );
+    expect(labels).toContain("Retry send");
+    expect(labels).toContain("Send");
+
+    const send = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Send",
+    );
+    if (!send) throw new Error("Send button not found");
+    await act(async () => {
+      send.click();
+    });
+    // The CORRECTION, not the report that failed. A Send pointed at v1 renders identically.
+    expect(mocks.sendDialogReportId).toBe("v2");
+  });
+
+  it("still offers Send alone when nothing has failed", async () => {
+    // The control for the case above. Without it, a cell that rendered Retry unconditionally — or one
+    // that dropped the failure branch entirely — would satisfy it.
+    mockDashboard([dashboardRow({ state: "approved", reportId: "v2" })]);
+    renderPage();
+
+    const labels = Array.from(container.querySelectorAll("button")).map((button) =>
+      button.textContent?.trim(),
+    );
+    expect(labels).toContain("Send");
+    expect(labels).not.toContain("Retry send");
   });
 
   it("makes the PM acknowledge the duplicate risk on a send too old to be deduped", async () => {

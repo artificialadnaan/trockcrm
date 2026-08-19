@@ -295,27 +295,125 @@ async function recordAttempt(
   );
 }
 
+/** The variable a deployment sets to say, in so many words, that it may email real customers. */
+export const WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV = "WEEKLY_REPORT_CLIENT_EMAIL_ENABLED";
+
 /**
- * Refuse to email a real client from anything but production.
+ * Refuse to email a real client from any deployment that was not EXPLICITLY authorised to.
  *
  * EVERY OTHER SYSTEM EMAIL IN THIS CODEBASE GOES TO COLLEAGUES. This is the first job whose recipient list
- * comes from a CUSTOMER contact table, and the only thing standing between a staging or laptop worker with
- * a copied RESEND_API_KEY and a real client's inbox is `EMAIL_OVERRIDE_RECIPIENT` — which ships empty in
- * .env.example and is unset in production by design. "Remember to set the override" is not a control.
+ * comes from a CUSTOMER contact table, so the blast radius of getting this wrong is a paying client's inbox.
  *
- * Keyed on NODE_ENV, which `Dockerfile.worker` sets to `production` for the deployed image, so the
- * deployed worker is unaffected. A dev or staging worker that genuinely wants to exercise the real path
- * sets `EMAIL_OVERRIDE_RECIPIENT` — which redirects everything to one internal mailbox — and this stands
- * aside. Throwing rather than skipping: the send is not abandoned quietly, it fails visibly with a
- * `send_error` that says exactly what happened.
+ * THIS USED TO KEY ON `NODE_ENV === "production"`, AND WAS THEREFORE INERT ON EVERY DEPLOYED IMAGE.
+ * `Dockerfile.worker` hardcodes `ENV NODE_ENV=production` in its RUNTIME stage, so the value is baked into
+ * the ARTIFACT rather than supplied by the deployment: it reads `production` for the production worker, for
+ * a staging worker running the identical image against a restored production dump — which is exactly what
+ * scripts/staging/ephemeral-staging.sh sets up — and for anyone running `node worker/dist/index.js` from a
+ * built checkout. A constant carries no information about WHICH deployment is running, so the check passed
+ * unconditionally wherever it mattered. All it ever stopped was the narrow `tsx`-on-a-laptop case, while the
+ * docblock it replaced named "a staging OR laptop worker with a copied RESEND_API_KEY" as the threat and
+ * rejected "remember to set the override" as a control — which is precisely what staging was left with.
+ *
+ * Nothing else in this repo tells the tiers apart either: there is no APP_ENV, and the RAILWAY_* variables
+ * the codebase does read (server/src/modules/synchub/portfolio-projects-sync.ts) name a project and a
+ * service, not an environment. So the guard is an explicit FAIL-CLOSED opt-in instead: a deployment that
+ * may email clients says so. Unset, blank, misspelled or copied-from-a-template-and-left-empty all refuse,
+ * which is the direction this should fail in — the cost of a false refusal is a delayed report with a
+ * `send_error` naming the variable to set, and the cost of a false permit is a real client's inbox.
+ *
+ * WHAT THIS STILL DOES NOT DEFEND AGAINST: a wholesale clone of the production worker's variables into
+ * another deployment brings the flag along with the API key. No single env var survives that, and this one
+ * is not pretending to — it must be set per service, never cloned, the same discipline RESEND_API_KEY
+ * already requires. What it does buy is that a deployment which does NOT deliberately set it cannot email a
+ * client no matter how it was built or started.
+ *
+ * `EMAIL_OVERRIDE_RECIPIENT` still stands the guard aside, because it redirects every recipient to one
+ * internal mailbox before the provider is called (see sendSystemEmailWithMetadata): there is no client left
+ * to protect. Throwing rather than skipping keeps the refusal visible — it is recorded as `send_error` and
+ * the dashboard raises the chip, rather than the send evaporating.
  */
 function assertMayEmailRealClients(recipients: string[]): void {
-  if (process.env.NODE_ENV === "production") return;
   if (process.env.EMAIL_OVERRIDE_RECIPIENT?.trim()) return;
+  if (process.env[WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV]?.trim().toLowerCase() === "true") return;
   throw new Error(
-    `Refusing to email ${recipients.length} client address(es) from a non-production worker ` +
-      "(NODE_ENV is not `production` and EMAIL_OVERRIDE_RECIPIENT is unset)",
+    `Refusing to email ${recipients.length} client address(es): this deployment is not authorised to ` +
+      `email real clients (set ${WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV}=true on the production worker, ` +
+      "or set EMAIL_OVERRIDE_RECIPIENT to redirect the mail to an internal mailbox)",
   );
+}
+
+/**
+ * The one line a PM reads under the "Send failed" chip.
+ *
+ * `send_error` is the ONLY diagnostic this feature ships — client/src/pages/projects/weekly-reports-page.tsx
+ * renders it as that chip's tooltip — and it used to be a single 43-character constant, because the handler
+ * read `result.success` and threw `result.outcome` away. EVERY reachable production failure wrote the same
+ * text: a validation error on a typo'd client domain, a rate limit, a payload over the provider's cap, a
+ * 5xx, a socket hang-up, and RESEND_API_KEY unset. Three different fixes — correct the address, wait, set an
+ * env var — behind one indistinguishable string, with no way for a director to tell which they had.
+ *
+ * IT LEADS WITH THE OUTCOME, and that prefix is load-bearing rather than decorative. `rejected` means the
+ * provider refused the request and created nothing, so this report is PROVABLY still undelivered and a
+ * replay cannot duplicate it at any age; `unknown` means we never learned, so a replay might. The API's
+ * retry route currently gates its duplicate-risk warning on AGE alone (`retryWeeklyReportSend`), which warns
+ * a PM replaying a provable rejection that they may put a second copy in the client's inbox — false for that
+ * case, and it trains click-through on a warning that is true for `unknown`. Keying that gate on this
+ * outcome is the server half of the fix and is deliberately not made here.
+ */
+export function weeklyReportSendFailureMessage(result: SendSystemEmailResult): string {
+  // Anything not positively `rejected` is treated as ambiguous — the same conservative default
+  // classifySendFailure applies, and it also covers a stub or an older build that omits the field.
+  const outcome = result.outcome === "rejected" ? "rejected" : "unknown";
+  const detail = normalizeText(result.reason);
+  const summary =
+    outcome === "rejected"
+      ? "the email provider refused the message and sent nothing"
+      : "the email provider never confirmed the message, so it may or may not have gone out";
+  return detail ? `${outcome}: ${summary} — ${detail}` : `${outcome}: ${summary}`;
+}
+
+/**
+ * Re-read the facts that make this send legitimate, immediately before handing it to the provider.
+ *
+ * The checks at the top of the handler are a CHECK-THEN-ACT straddling the longest thing this job does:
+ * resolving the PDF downloads and transcodes every photo in the report and uploads the result to R2 —
+ * seconds of network and CPU during which nothing re-reads the row. A PM issuing a correction inside that
+ * window stamps `superseded_by_id` on THIS report and queues v2 (send-service.ts), and this job then sends
+ * anyway. The client receives BOTH, and neither message admits the other exists: v1 carries a frozen
+ * `isCorrection: false`, and v2's own `isCorrection` was computed from `send_delivered_at IS NOT NULL` on
+ * v1 — still NULL at the moment v2 was committed — so v2 says it is not a correction either. Two "here is
+ * this week's report" emails, two links, one of which renders a superseded banner.
+ *
+ * `recordAttempt`'s WHERE cannot be pressed into service as the gate instead. It deliberately omits
+ * `superseded_by_id` so that a delivery which DID reach the client is still stamped when a correction lands
+ * mid-flight; adding it there would drop that stamp, leaving the row looking undelivered and raising a
+ * stall chip for an email the client already has. The guard has to be its own read.
+ *
+ * This NARROWS the window from the whole render to the microseconds between this read and the provider
+ * call. It does not close it: closing it needs supersession to be an atomic claim, which is the API's half.
+ */
+async function reasonToAbandonSend(
+  query: typeof pool.query,
+  tenantSchema: string,
+  reportId: string,
+  deliveryKey: string,
+): Promise<string | null> {
+  const current = await query(
+    `SELECT status, send_delivered_at, send_delivery_key, superseded_by_id
+       FROM ${tenantSchema}.weekly_reports
+      WHERE id = $1::uuid AND is_active
+      LIMIT 1`,
+    [reportId],
+  );
+  const row = current.rows[0];
+  if (!row) return "the report disappeared while its PDF was being prepared";
+  if (row.superseded_by_id) return "a newer version was sent while this one's PDF was being prepared";
+  if (row.send_delivered_at) return "another attempt delivered this report while its PDF was being prepared";
+  if (row.status !== "sent") return `the report left \`sent\` (now \`${row.status}\`) before this send ran`;
+  if (normalizeText(row.send_delivery_key) !== deliveryKey) {
+    return "a newer send request replaced this one while its PDF was being prepared";
+  }
+  return null;
 }
 
 /**
@@ -492,6 +590,20 @@ export async function handleWeeklyReportSend(
   // what enforces that boundary, because only it knows how old the request is.
   const idempotencyKey = `weekly-report-${tenantSchema}-${reportId}-${deliveryKey}`;
 
+  // LAST LOOK BEFORE THE PROVIDER. Everything above ran before, or across, the PDF render; this re-reads
+  // the row so a correction issued during that render cannot be followed by the version it replaced. See
+  // reasonToAbandonSend. Skipped rather than thrown, matching the top-of-handler checks: retrying does not
+  // make a superseded report the right thing to send, and a "Send failed" chip on a version that must never
+  // go out would send a PM chasing a delivery nobody wants.
+  const abandon = await reasonToAbandonSend(query, tenantSchema, reportId, deliveryKey);
+  if (abandon) {
+    logger.warn("[WeeklyReportSend] Abandoning the send after the PDF render - skipping", {
+      reportId,
+      reason: abandon,
+    });
+    return;
+  }
+
   // THE SAME KEY, TAGGED ONTO THE MESSAGE, so the provider hands it back on every webhook about it.
   //
   // This is what makes a bounce attributable. `send_delivered_at` records only that the provider accepted
@@ -518,11 +630,19 @@ export async function handleWeeklyReportSend(
       // the PM's own address and phone are in the signature, and the footer no longer claims otherwise.
       attachments,
     });
-    if (!result.success) throw new Error("Email provider returned unsuccessful result");
+    // Carries WHAT WE LEARNED, not just that we lost. `sendSystemEmailWithMetadata` never throws for a
+    // provider or network failure — resend@6 catches its own fetch and returns an ordinary error result —
+    // so this branch, not the catch below, is the one every reachable production failure takes.
+    if (!result.success) throw new Error(weeklyReportSendFailureMessage(result));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Written BEFORE the rethrow, so the failure is visible on the dashboard whether the queue retries or
     // dead-letters. This is the whole difference from the fire-and-forget scorecard path.
+    //
+    // The bound is real now rather than theoretical: the message carries the provider's own words, and
+    // Resend names EVERY address it refused, so a report addressed to a long distribution list produces a
+    // validation error thousands of characters long. It goes into a tooltip. 500 keeps the actionable part
+    // — the outcome and the error name lead the string — without an unbounded row behind a hover.
     await recordAttempt(query, tenantSchema, reportId, {
       delivered: false,
       error: message.slice(0, 500),

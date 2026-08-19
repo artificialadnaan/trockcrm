@@ -1146,6 +1146,109 @@ describe("dashboard", () => {
 });
 
 /**
+ * A DISMISSED WEEK CAN STILL OWE THE CLIENT AN EMAIL.
+ *
+ * `dismissWeeklyReportWeek` refuses only a week that ALREADY has a live report, and nothing stops one
+ * being created afterwards — reports-service never so much as reads `weekly_report_dismissals`. So an
+ * ordinary sequence reaches a week that is both dismissed and owed: the PM writes off a missed week, the
+ * super files it late anyway, the PM approves and sends, and the delivery fails.
+ *
+ * Beyond the lookback window the tally tested the dismissal FIRST and short-circuited, so that week got
+ * no row, no tally entry, and nothing from the second pass either — the cadence loop had already
+ * "decided" it, which is what `cadenceDecidedKeys` records. The Projects tab meanwhile showed a permanent
+ * red "1 not delivered" for it, contradicting the invariant the dashboard states in as many words:
+ * every undelivered send that counter counts is accounted for, a row inside the window and a tally entry
+ * beyond it, never dropped.
+ */
+describe("a dismissed week that gets filed anyway", () => {
+  // ABSOLUTE, not derived: Thursdays from 2026-01-01 through the 2026-08-13 board date are 33 expected
+  // weeks, of which `lookbackWeeks: 3` renders the last three and tallies the other 30. 2026-02-05 is
+  // one of the 30. A fixture computed from the generator under test could not fail.
+  const OLD_START = "2026-01-01";
+  const OLD_WEEK = "2026-02-05";
+  const OLDER_WEEKS = 30;
+
+  /** File the week late, send it, and lose the email — the state the board has to keep hold of. */
+  async function filedThenLost(projectId: string, weekOf: string) {
+    const id = await seedDraft(projectId, weekOf, U("dddd1"));
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+    await transitionWeeklyReport(db, id, "sent", PM_ACTOR);
+    // `sent` with no `send_delivered_at`: committed, and the client never got it.
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out', send_attempts = 3
+        WHERE id = $1::uuid`,
+      [id],
+    );
+    return id;
+  }
+
+  async function dismiss(projectId: string, weekOf: string) {
+    await dismissWeeklyReportWeek(db, {
+      weeklyReportProjectId: projectId,
+      weekOf,
+      reason: "Crew off site",
+      actorUserId: DIRECTOR,
+      asOf: WEEK_OF,
+    });
+  }
+
+  it("still settles a dismissed old week nobody ever filed", async () => {
+    // CONTROL. Dismissal has to keep clearing the weeks it is for, beyond the window as well as inside
+    // it — a fix that simply stopped honouring dismissals out here would pass the test below while
+    // handing back the guilt the ledger exists to write off.
+    const project = await seedProject({ cadenceStartDate: OLD_START });
+    await dismiss(project.id, OLD_WEEK);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 3 });
+    expect(board.olderOutstandingCounts[project.id]).toBe(OLDER_WEEKS - 1);
+  });
+
+  it("counts an undelivered old send with no dismissal in sight", async () => {
+    // The second CONTROL: the tally does reach this state on its own. Without it the assertion below
+    // could pass on a count that simply never moves.
+    const project = await seedProject({ cadenceStartDate: OLD_START });
+    await filedThenLost(project.id, OLD_WEEK);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 3 });
+    expect(board.olderOutstandingCounts[project.id]).toBe(OLDER_WEEKS);
+  });
+
+  it("keeps counting a week that was dismissed BEFORE it was filed and then lost", async () => {
+    const project = await seedProject({ cadenceStartDate: OLD_START });
+    await dismiss(project.id, OLD_WEEK);
+    await filedThenLost(project.id, OLD_WEEK);
+
+    // Was OLDER_WEEKS - 1: the dismissal short-circuited the delivery test, so the send vanished from
+    // the only number that mentions weeks this old.
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 3 });
+    expect(board.olderOutstandingCounts[project.id]).toBe(OLDER_WEEKS);
+
+    // And the two surfaces agree again. This is the invariant, stated the way the dashboard states it:
+    // whatever the Projects tab counts as undelivered, the board accounts for somewhere.
+    const summary = (await listWeeklyReportProjectSummaries(db, WEEK_OF)).find(
+      (entry) => entry.weeklyReportProjectId === project.id,
+    )!;
+    expect(summary.undeliveredSends).toBe(1);
+  });
+
+  it("renders the same state as a ROW inside the lookback window", async () => {
+    // The half that was already right, pinned so the two halves cannot drift apart again: inside the
+    // window a dismissed-then-filed week with a lost send is a row with a Retry on it, and the tally
+    // beyond the window now says the same thing in the only language it has.
+    const project = await seedProject();
+    await dismiss(project.id, PRIOR_WEEK);
+    const reportId = await filedThenLost(project.id, PRIOR_WEEK);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK)!;
+    expect(row.sendFailed).toBe(true);
+    expect(row.sendRetryReportId).toBe(reportId);
+    expect(row.dismissalReason).toBe("Crew off site");
+  });
+});
+
+/**
  * Pausing, and what a project owes when it comes back.
  *
  * The defect these close: `status` says only where a setup stands TODAY, while the board regenerates its

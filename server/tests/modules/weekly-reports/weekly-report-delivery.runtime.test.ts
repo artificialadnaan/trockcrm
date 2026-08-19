@@ -916,3 +916,55 @@ describe("a correction drafted over a bounce", () => {
     expect(tab.reportsSent).toBe(1);
   });
 });
+
+/**
+ * THE "AND N OLDER" TALLY, which is where this webhook and the delivered-version lookup MEET.
+ *
+ * Beyond the lookback window a week is never rendered — it is only counted — so `settled` in the tally
+ * loop is the ONLY thing standing between a bounced week and total silence. Nothing else on the board
+ * mentions it: no row, no chip, no Retry, and the banner a director reads says the backlog is one week
+ * shorter than it is.
+ *
+ * The trap is that `deliveredByKey` cannot see a bounce. It asks `send_delivered_at IS NOT NULL`, which is
+ * provider ACCEPTANCE, and a bounced report was accepted before it was refused — so a bounced week is in
+ * the delivered set AND absent from the undelivered set, and a `settled` that consults only those two
+ * files it away as a week the client has. Neither branch alone can produce that state, which is why
+ * neither branch's suite covers it: the bounce verdict and the delivered lookup arrive from different
+ * PRs, and the defect exists only once both are in the same file.
+ */
+describe("a bounced week beyond the lookback window", () => {
+  it("stays in the older-outstanding tally instead of being filed away as delivered", async () => {
+    // ABSOLUTE ARITHMETIC, not a before/after delta. `cadenceStartDate` is 2026-07-27 and the board date
+    // is 2026-08-13, so the Thursdays expected are 07-30, 08-06 and 08-13 — three weeks, of which
+    // `lookbackWeeks: 1` renders the last and tallies the other two. 07-30 was never filed, so it is
+    // outstanding in every scenario below and the tally floor is 1.
+    const { reportId, projectId, deliveryKey } = await sentWeek(PRIOR_WEEK);
+    await markAccepted(reportId);
+
+    // THE CONTROL, taken first: with nothing but acceptance on the row PRIOR_WEEK really is settled, and
+    // the tally must be the floor. Without it the assertion below would be satisfied by a tally that
+    // counted every week unconditionally.
+    const accepted = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 1 });
+    expect(accepted.rows.some((row) => row.weekOf === PRIOR_WEEK)).toBe(false);
+    expect(accepted.olderOutstandingCounts[projectId]).toBe(1);
+
+    await ingest(providerEvent({ type: "email.bounced", createdAt: T_MID, deliveryKey, bounce: HARD_BOUNCE }));
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 1 });
+    // Still no ROW — past the window nothing is rendered — which is precisely why the count is the only
+    // thing that can carry the failure, and why getting it wrong is silent.
+    expect(board.rows.some((row) => row.weekOf === PRIOR_WEEK)).toBe(false);
+    expect(board.olderOutstandingCounts[projectId]).toBe(2);
+  });
+
+  it("still files a genuinely DELIVERED week away, so the tally is not simply counting everything", async () => {
+    // The other control, and the one that keeps the guard from degenerating into "never settle a sent
+    // week". A `delivered` verdict must leave the tally at the floor.
+    const { reportId, projectId, deliveryKey } = await sentWeek(PRIOR_WEEK);
+    await markAccepted(reportId);
+    await ingest(providerEvent({ type: "email.delivered", createdAt: T_MID, deliveryKey }));
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 1 });
+    expect(board.olderOutstandingCounts[projectId]).toBe(1);
+  });
+});

@@ -96,6 +96,20 @@ export interface SendSystemEmailResult {
   messageId: string | null;
   /** Invariant: `success === (outcome === "delivered")`. */
   outcome: SendSystemEmailOutcome;
+  /**
+   * The provider's own words for a failure — `null`/absent on success and whenever there is nothing to add.
+   *
+   * `outcome` answers "is a re-send safe". It does NOT answer "what do I do about this", and for anything a
+   * HUMAN has to act on those are different questions: `rejected` covers a typo in a client's domain (fix:
+   * correct the address), a rate limit (fix: wait) and a payload over the size cap (fix: drop the attachment)
+   * alike, and `unknown` covers a 5xx and a socket hang-up. A caller that persists a failure for someone to
+   * read — weekly_report_send writes it to `send_error`, which the dashboard renders as the tooltip on its
+   * "Send failed" chip — needs both fields or every failure it records says the same thing.
+   *
+   * Optional, not required, purely so the ~93 existing test stubs that return `{success, messageId}` keep
+   * compiling; see the note above about `worker/tests/**` sitting outside the typecheck program.
+   */
+  reason?: string | null;
 }
 
 /**
@@ -119,6 +133,26 @@ function classifySendFailure(error: unknown): "rejected" | "unknown" {
   // Every other 4xx — validation, auth, payload too large, rate limit — was refused before an email existed.
   if (statusCode >= 400) return "rejected";
   return "unknown";
+}
+
+/**
+ * Flatten a provider error into the one line a caller can persist.
+ *
+ * `name` is the machine-readable half of what went wrong and `message` the human half, so both are kept:
+ * "validation_error" tells a support engineer which class of failure this is, and "Invalid `to` field. The
+ * following addresses are invalid: jay@exmaple.cmo" is the sentence that tells a PM to go fix the address.
+ * The status code is carried when there is one — its absence is itself diagnostic, being resend's
+ * swallowed-fetch shape.
+ *
+ * Deliberately NOT truncated here. Resend names every address it refused, so this is unbounded in principle;
+ * the caller that stores it owns its column's limit and is the only place that knows what that limit is.
+ */
+export function providerFailureReason(error: unknown): string {
+  const err = (error ?? {}) as { name?: unknown; message?: unknown; statusCode?: unknown };
+  const name = typeof err.name === "string" && err.name.trim() ? err.name.trim() : "provider_error";
+  const status = typeof err.statusCode === "number" ? ` ${err.statusCode}` : "";
+  const message = typeof err.message === "string" ? err.message.trim() : "";
+  return message ? `${name}${status}: ${message}` : `${name}${status}`;
 }
 
 export async function sendSystemEmailWithMetadata(
@@ -163,8 +197,15 @@ export async function sendSystemEmailWithMetadata(
   if (!resend) {
     if (process.env.NODE_ENV === "production") {
       console.error("[Email] RESEND_API_KEY is not configured in production");
-      // No request was ever made, so nothing was delivered — a definitive rejection, not an unknown.
-      return { success: false, messageId: null, outcome: "rejected" };
+      // No request was ever made, so nothing was delivered — a definitive rejection, not an unknown. The
+      // reason is the whole diagnosis for a caller that persists it: this failure is a missing env var, and
+      // nothing about the message, the recipients or the provider will ever change it.
+      return {
+        success: false,
+        messageId: null,
+        outcome: "rejected",
+        reason: "RESEND_API_KEY is not configured on this service, so no request was made",
+      };
     }
     console.log("[Email:dev] Would send email:");
     if (override) console.log(`  [override active -> ${recipients.join(", ")}]`);
@@ -183,7 +224,12 @@ export async function sendSystemEmailWithMetadata(
   if (recipients.length === 0) {
     console.warn("[Email] No recipients after override - skipping");
     // Bailed before the request: nothing was sent and re-sending is safe.
-    return { success: false, messageId: null, outcome: "rejected" };
+    return {
+      success: false,
+      messageId: null,
+      outcome: "rejected",
+      reason: "no recipients remained after the EMAIL_OVERRIDE_RECIPIENT redirect",
+    };
   }
 
   // Resend's post-encoding attachment limit is ~40MB and base64 inflates raw bytes by ~33%, so warn well
@@ -226,7 +272,7 @@ export async function sendSystemEmailWithMetadata(
     }
     const outcome = classifySendFailure(result.error);
     console.error(`[Email] Resend error (outcome: ${outcome}):`, result.error);
-    return { success: false, messageId: null, outcome };
+    return { success: false, messageId: null, outcome, reason: providerFailureReason(result.error) };
   }
 
   const tag = override ? " [override]" : "";
