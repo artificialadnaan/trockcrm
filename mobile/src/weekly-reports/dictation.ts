@@ -64,11 +64,26 @@ export type WeeklyReportDictationOutcome = {
 export async function weeklyReportDictationText(
   input: {
     transcript: string;
-    /** Length of the section this will be appended to. A count — the text itself never leaves the phone. */
-    existingChars: number;
+    /**
+     * Length of the section this will be appended to. A count — the text itself never leaves the phone.
+     *
+     * PASS A GETTER when the section can change while this runs, which on the wizard it can: the round
+     * trip takes seconds and the superintendent is looking at an editable box the whole time. A number
+     * captured at render is wrong in both directions by the time the answer arrives. If they DELETED
+     * text, the stale count is too large and the clamp throws away dictated words that would have fit —
+     * silently, which is the outcome this file exists to avoid. If they TYPED, it is too small, the
+     * clamp lets too much through, and the reducer's own cap drops the tail instead. "The reducer is the
+     * backstop" only covers the second case, and only by moving the loss somewhere less visible.
+     *
+     * The value sent to the server stays the one read at REQUEST time — it is a hint for how much room to
+     * aim at, and the server's cap is its own safety net. Only the local clamp needs the fresh number.
+     */
+    existingChars: number | (() => number);
   },
   port: WeeklyReportDictationPort | null,
 ): Promise<WeeklyReportDictationOutcome> {
+  const existingCharsNow = () =>
+    typeof input.existingChars === "function" ? input.existingChars() : input.existingChars;
   const transcript = input.transcript.trim();
   if (!transcript) return { text: "", source: "local", emptyReason: "empty" };
 
@@ -78,21 +93,21 @@ export async function weeklyReportDictationText(
     text ? { text, source } : { text: "", source, emptyReason: "full" };
 
   const local = formatDictationAsBullets(transcript);
-  if (!port) return settle(clampToRemaining(local, input.existingChars), "local");
+  if (!port) return settle(clampToRemaining(local, existingCharsNow()), "local");
 
   try {
-    const response = await port({ transcript, existingChars: input.existingChars });
+    const response = await port({ transcript, existingChars: existingCharsNow() });
     const text = typeof response?.text === "string" ? response.text.trim() : "";
     // An empty or non-string `text` is treated exactly like a failed request. Answering "" would hand the
     // superintendent a silent no-op for a paragraph they just spoke — the worst outcome available here,
     // and the one a naive `response.text ?? ""` produces on any API drift.
-    if (!text) return settle(clampToRemaining(local, input.existingChars), "local");
-    return settle(clampToRemaining(text, input.existingChars), "server");
+    if (!text) return settle(clampToRemaining(local, existingCharsNow()), "local");
+    return settle(clampToRemaining(text, existingCharsNow()), "server");
   } catch {
     // Deliberately swallowed, including a 4xx. There is no error worth showing: the local split already
     // holds every word that was said, it lands in the same editable box, and the alternative is an alert
     // over a report the user can simply carry on writing.
-    return settle(clampToRemaining(local, input.existingChars), "local");
+    return settle(clampToRemaining(local, existingCharsNow()), "local");
   }
 }
 

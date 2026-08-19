@@ -15,6 +15,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   MAX_DICTATION_TRANSCRIPT_CHARS,
+  WEEKLY_REPORT_DICTATION_CLIENT_BUDGET_MS,
+  WEEKLY_REPORT_DICTATION_TOTAL_DEADLINE_MS,
   formatDictationAsBullets,
   formatWeeklyReportDictation,
   isWeeklyReportDictationModelConfigured,
@@ -60,6 +62,24 @@ function requestBody(fetchFn: { mock: { calls: unknown[][] } }, callIndex = 0) {
   const [, init] = fetchFn.mock.calls[callIndex] as unknown as [string, { body: string }];
   return JSON.parse(init.body);
 }
+
+describe("the deadline relationship with the phone", () => {
+  it("finishes with room to spare inside the client's abort, so its answer can actually be used", () => {
+    // These were both 20s, which cannot work: this service's clock starts when the request ARRIVES, so an
+    // answer produced just inside its budget is necessarily later than the phone's abort by however long
+    // the upload took. Every near-deadline response was discarded in favour of the on-device split — while
+    // the model call it had already paid for ran to completion, because nothing cancels it when the client
+    // disconnects. The bug was invisible: the user gets bullets either way, just not the good ones.
+    //
+    // Absolute literals, not a ratio: if either budget is re-chosen this should break and be re-argued.
+    expect(WEEKLY_REPORT_DICTATION_TOTAL_DEADLINE_MS).toBe(15_000);
+    expect(WEEKLY_REPORT_DICTATION_CLIENT_BUDGET_MS).toBe(20_000);
+    // The property that matters, stated separately from the values: at least 5s for the two network legs.
+    expect(
+      WEEKLY_REPORT_DICTATION_CLIENT_BUDGET_MS - WEEKLY_REPORT_DICTATION_TOTAL_DEADLINE_MS,
+    ).toBeGreaterThanOrEqual(5_000);
+  });
+});
 
 describe("weekly-report dictation service", () => {
   beforeEach(() => {

@@ -85,8 +85,30 @@ const MAX_BULLETS = 60;
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 400;
 const REQUEST_TIMEOUT_MS = 12_000;
-/** Wall-clock ceiling across every attempt. Bounds the worst case the phone actually waits for. */
-const TOTAL_DEADLINE_MS = 20_000;
+/**
+ * Wall-clock ceiling across every attempt, and it MUST LEAVE HEADROOM UNDER THE CLIENT'S ABORT.
+ *
+ * The phone gives up after `WEEKLY_REPORT_DICTATION_CLIENT_BUDGET_MS` (20s, set as `timeoutMs` on
+ * `formatWeeklyReportDictation` in mobile/src/api/endpoints.ts). Both were 20s, which cannot work: this
+ * clock starts when the request ARRIVES, so an answer produced just inside this budget is necessarily
+ * later than the phone's abort by however long the upload took. The phone fell back to its local split
+ * every time, while the model call it had already paid for ran to completion — nothing cancels it when
+ * the client disconnects.
+ *
+ * 15s against the client's 20s leaves 5s for the two network legs on jobsite LTE. Raising this past the
+ * client's budget silently reintroduces "we pay for an answer nobody uses".
+ */
+const TOTAL_DEADLINE_MS = 15_000;
+
+/**
+ * The client's abort, duplicated here as a literal ON PURPOSE so the relationship above is assertable
+ * from this package. mobile/ is a separate app with no shared module for this, so the alternative to a
+ * literal is a comment nothing checks.
+ */
+export const WEEKLY_REPORT_DICTATION_CLIENT_BUDGET_MS = 20_000;
+
+/** Exported for the test that pins the headroom; not read by the pass itself. */
+export const WEEKLY_REPORT_DICTATION_TOTAL_DEADLINE_MS = TOTAL_DEADLINE_MS;
 
 /** Bullets are dashes, matching the reference PDF and what both renderers print. */
 const BULLET_PREFIX = "- ";

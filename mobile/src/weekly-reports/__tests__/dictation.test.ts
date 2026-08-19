@@ -134,6 +134,46 @@ describe("weeklyReportDictationText", () => {
 
   // ── The cap. Absolute fixtures only ─────────────────────────────────────────────────────────────
 
+  it("clamps against the section as it is when the answer lands, not as it was at request time", async () => {
+    // The box stays editable for the seconds the round trip takes. This is the DELETING direction, which
+    // is the one that loses words: the section was nearly full when the request went out, the super
+    // deleted a paragraph while "Tidying up…" was showing, and a clamp using the request-time count would
+    // throw away dictated text that now fits perfectly well — silently, with no way to tell it happened.
+    //
+    // Absolute lengths, not derived from the cap: a fixture computed from the constant it tests moves
+    // with it and can never fail.
+    let sectionLength = 19_990; // 10 chars of room at request time
+    const answer = "- poured the north slab and stripped the forms";
+
+    const outcome = await weeklyReportDictationText(
+      { transcript: TRANSCRIPT, existingChars: () => sectionLength },
+      async () => {
+        sectionLength = 1_000; // the super deletes while the request is in flight
+        return { text: answer };
+      },
+    );
+
+    expect(outcome.text).toBe(answer);
+  });
+
+  it("still clamps when the section GREW during the round trip", async () => {
+    // The other direction, and the control for the test above: a getter that always reported plenty of
+    // room would satisfy that one. Here the super types while dictating, so the real room shrinks and the
+    // addition genuinely has to be cut — by this clamp, where the outcome can say so, rather than by the
+    // reducer afterwards where it cannot.
+    let sectionLength = 1_000;
+
+    const outcome = await weeklyReportDictationText(
+      { transcript: TRANSCRIPT, existingChars: () => sectionLength },
+      async () => {
+        sectionLength = 19_995; // 5 chars of room by the time it lands
+        return { text: "- poured the north slab" };
+      },
+    );
+
+    expect(outcome.text.length).toBeLessThanOrEqual(5);
+  });
+
   it("says the section is FULL rather than returning a bare empty string", async () => {
     // The distinction the screen needs. A full section and an empty transcript both produce text: "",
     // and the caller used to drop both with `if (!outcome.text) return;` — so a super who dictated a

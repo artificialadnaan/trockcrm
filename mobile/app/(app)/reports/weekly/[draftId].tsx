@@ -876,6 +876,12 @@ function SectionStep({
   dictationPort: WeeklyReportDictationPort;
   dispatch: React.Dispatch<WeeklyReportDraftAction>;
 }) {
+  // The latest rendered section text, readable from inside an async handler that started renders ago.
+  // A ref rather than state: nothing should re-render because a dictation is in flight, and the handler
+  // needs the value at the moment it clamps, not the one it closed over.
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
   return (
     <View style={{ gap: theme.space.md }}>
       <SectionLabel>{label}</SectionLabel>
@@ -902,10 +908,12 @@ function SectionStep({
             // AWAITED by the recorder, which is what keeps `voiceBusy` (and therefore the leave guard) in
             // force across the round trip rather than only across transcription.
             const outcome = await weeklyReportDictationText(
-              // `value` is this render's copy of the section. Typing during a dictation would make it
-              // stale by a few characters; the reducer's own cap is the backstop for that, and this
-              // number only ever decides how much room the addition is allowed.
-              { transcript: text, existingChars: value.length },
+              // A GETTER, not `value.length`. The box stays editable for the seconds this takes, so a
+              // render-time count is wrong in both directions by the time the answer lands: delete text
+              // and the stale count is too large, so the clamp silently discards dictated words that
+              // would have fit; type and it is too small, so the reducer drops the tail instead. Reading
+              // the latest render's value at clamp time makes the room the real room.
+              { transcript: text, existingChars: () => valueRef.current.length },
               dictationPort,
             );
             if (!outcome.text) {
