@@ -70,15 +70,17 @@ export function WeeklyReportSettingsDialog({ onClose }: { onClose: () => void })
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:!max-w-lg">
         <DialogHeader>
-          <DialogTitle>Weekly report settings</DialogTitle>
+          <DialogTitle className="text-[16px] font-extrabold tracking-tight text-slate-950">
+            Weekly report settings
+          </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4">
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Leadership digest</p>
-            <p className="mt-1 text-[13px] text-slate-500">
+            <p className="text-[13.5px] font-bold tracking-tight text-slate-900">Leadership digest</p>
+            <p className="mt-0.5 text-[13.5px] text-slate-500">
               On each project&rsquo;s due date these addresses receive one email listing which reports are done and
               which are outstanding.
             </p>

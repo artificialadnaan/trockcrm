@@ -163,6 +163,24 @@ describe("the PM and superintendent pickers", () => {
   });
 });
 
+describe("the dialog's own width", () => {
+  it("overrides the primitive's sm:max-w-sm instead of sitting alongside it", () => {
+    // THE BUG THIS PINS: DialogContent's base class list contains `sm:max-w-sm`, and `cn()` is
+    // tailwind-merge — which treats an UNPREFIXED `max-w-5xl` from a caller as a different key from the
+    // `sm:`-prefixed base and keeps BOTH. At every desktop width the 384px base then wins, so a dialog
+    // asking for 5xl rendered at roughly a third of it. Seventeen dialogs across this app are still
+    // written the unprefixed way; these two are not.
+    //
+    // Asserted on the CLASS rather than a measured width because jsdom applies no stylesheet, so a
+    // getBoundingClientRect assertion here would read 0 for every variant and prove nothing.
+    renderNew();
+    const content = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!;
+    expect(content).not.toBeNull();
+    expect(content.className).toContain("sm:!max-w-");
+    expect(content.className).not.toMatch(/(?<!!)\bmax-w-\dxl\b/);
+  });
+});
+
 describe("the project picker", () => {
   it("does not query until the search term is worth a round trip", () => {
     renderNew();
