@@ -448,14 +448,12 @@ describe("what to tell a PM whose retry or correction failed", () => {
  */
 const REPO_ROOT = path.join(__dirname, "..", "..", "..", "..");
 const SHARED_EMAIL_SOURCE = path.join(REPO_ROOT, "shared", "src", "lib", "weeklyReportEmail.ts");
-const DASHBOARD_SERVICE_SOURCE = path.join(
-  REPO_ROOT,
-  "server",
-  "src",
-  "modules",
-  "weekly-reports",
-  "dashboard-service.ts",
-);
+// The stall constant moved out of dashboard-service.ts and into shared when the dead-letter sweep landed:
+// the board and the sweep both age a send against it, and a sweep announcing a stall the board still
+// renders as "Sending…" is the drift that extraction exists to prevent. This test pointing at the old
+// location is exactly what the vacuity guard below is for — the reader returned undefined and, without
+// that guard, `expect(undefined).toBe(undefined)` would have stayed green while the phone drifted.
+const STALL_SOURCE = path.join(REPO_ROOT, "shared", "src", "lib", "weeklyReportSendStall.ts");
 
 /** The numeric value of `export const <name> = <number>;` in a file, or undefined if it is not there. */
 function numericConstant(file: string, name: string): number | undefined {
@@ -486,7 +484,7 @@ describe("the mirrored constants match their sources", () => {
     expect(numericConstant(SHARED_EMAIL_SOURCE, "WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS")).toEqual(
       expect.any(Number),
     );
-    expect(numericConstant(DASHBOARD_SERVICE_SOURCE, "WEEKLY_REPORT_SEND_STALL_MINUTES")).toEqual(
+    expect(numericConstant(STALL_SOURCE, "WEEKLY_REPORT_SEND_STALL_MINUTES")).toEqual(
       expect.any(Number),
     );
   });
@@ -499,7 +497,7 @@ describe("the mirrored constants match their sources", () => {
 
   it("restates the stall threshold exactly", () => {
     expect(WEEKLY_REPORT_SEND_STALL_MINUTES).toBe(
-      numericConstant(DASHBOARD_SERVICE_SOURCE, "WEEKLY_REPORT_SEND_STALL_MINUTES"),
+      numericConstant(STALL_SOURCE, "WEEKLY_REPORT_SEND_STALL_MINUTES"),
     );
   });
 
