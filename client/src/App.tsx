@@ -94,6 +94,7 @@ import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { PublicPhotoViewerPage } from "@/pages/public/photo-viewer-page";
 import { DailySummaryPage } from "@/pages/public/daily-summary-page";
 import CorrectiveActionResponderPage from "@/pages/scorecards/corrective-action-responder";
+import { ResetPasswordPage } from "@/pages/auth/reset-password-page";
 import { Toaster } from "@/components/ui/sonner";
 
 const HomeDashboardPage = lazy(() =>
@@ -154,6 +155,10 @@ function AuthGate({ children }: { children: ReactNode }) {
   // Public tokenized corrective-action responder (email-only super/PM, no login) — the recipient-bound
   // ?token authorizes the flow, so this path must bypass the auth gate. Matches /scorecards/:id/corrective-action.
   if (/^\/scorecards\/[^/]+\/corrective-action$/.test(location.pathname)) return <>{children}</>;
+  // Self-service password reset: the emailed link is for someone who CANNOT sign in, so the gate has to
+  // let it through — otherwise it renders the login screen and the one-time token is burned unread. The
+  // page's own fragment token is what authorizes it.
+  if (location.pathname === "/reset-password") return <>{children}</>;
 
   if (loading) {
     return (
@@ -226,6 +231,7 @@ export function App() {
             <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
             <Route path="/daily-summary/:date" element={<DailySummaryPage />} />
             <Route path="/scorecards/:id/corrective-action" element={<CorrectiveActionResponderPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route path="/onboarding-required" element={<OnboardingRequiredPage />} />
             <Route element={<AppShell />}>

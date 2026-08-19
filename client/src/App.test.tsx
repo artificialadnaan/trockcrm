@@ -62,6 +62,13 @@ describe("App route guards", () => {
     expect(source).toContain('path="/reports/analytics/executive-trends" element={<ExecutiveTrendsPage />}');
   });
 
+  it("mounts the self-service reset page as a public route that the auth gate lets through", () => {
+    expect(source).toContain('path="/reset-password" element={<ResetPasswordPage />}');
+    // AuthGate short-circuits to the login screen for every unauthenticated path before the Routes
+    // are ever reached, so the emailed reset link needs an explicit bypass or it lands on "Welcome back".
+    expect(source).toContain('if (location.pathname === "/reset-password") return <>{children}</>;');
+  });
+
   it("opens the Reports by Region route to all authenticated users (no role guard)", () => {
     // Region is now available to every CRM role (server /api/reports/region dropped requireDirector too),
     // so it is mounted like the open analytics reports — with no RequireRole wrapper.
