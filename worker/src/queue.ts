@@ -470,11 +470,15 @@ async function flushPendingRecoveries(): Promise<void> {
 //   • glasses_walkthrough_forward — relays a glasses walkthrough's clips (video/audio/photo, potentially
 //     GIGABYTES) to TROCK Scope via ranged R2 reads + multipart upload; one can hold the guard for minutes,
 //     so it gets the same dedicated treatment (pollGlassesWalkthroughForwardJobs)
+//   • weekly_report_send  — renders the client PDF before it can send: `resolveWeeklyReportPdfKeyViaServer`
+//     downloads and transcodes EVERY photo on the report and uploads the result to R2, which is the same
+//     shape of work as ai_report_generation and belongs under the same rule (pollWeeklyReportSendJobs)
 const MAIN_POLL_JOB_TYPE_SQL =
-  "AND job_type NOT IN ('bid_board_ingest', 'ai_report_generation', 'glasses_walkthrough_forward')";
+  "AND job_type NOT IN ('bid_board_ingest', 'ai_report_generation', 'glasses_walkthrough_forward', 'weekly_report_send')";
 const BID_BOARD_INGEST_JOB_TYPE_SQL = "AND job_type = 'bid_board_ingest'";
 const AI_REPORT_JOB_TYPE_SQL = "AND job_type = 'ai_report_generation'";
 const GLASSES_WALKTHROUGH_FORWARD_JOB_TYPE_SQL = "AND job_type = 'glasses_walkthrough_forward'";
+const WEEKLY_REPORT_SEND_JOB_TYPE_SQL = "AND job_type = 'weekly_report_send'";
 // One import at a time on the dedicated poller: imports are already per-office-serialized by an advisory lock,
 // and each holds a lock connection + the importer's queries, so a single in-flight import keeps this poller
 // well under the DB pool max even while the main poller runs its own RUN_CONCURRENCY batch.
@@ -483,6 +487,12 @@ const BID_BOARD_INGEST_CONCURRENCY = 1;
 // running several concurrently is the straightforward way to OOM the worker. Reports are not latency-critical
 // (the phone polls and shows progress), so serializing them is the right trade.
 const AI_REPORT_CONCURRENCY = 1;
+// One client report at a time, for the reason directly above: a send renders the report's PDF first, which
+// decodes every photo on it into memory and uploads to R2. Three of those on the main poller's shared slots
+// is both the OOM shape ai_report_generation is serialized to avoid AND a starvation shape — the main poller
+// also carries RFP delivery and email sync, and a Monday morning sends many reports at once. Sends are not
+// latency-critical: the CRM shows "Sending…" and the board reconciles, so serializing them is the right trade.
+const WEEKLY_REPORT_SEND_CONCURRENCY = 1;
 // One forward at a time, same "one long-running unit at a time" posture as the two pollers above: each run
 // relays every clip of a walk (potentially gigabytes) over the estimator's real-world network conditions, so
 // running several concurrently would let one dedicated poller tick spend minutes of bandwidth/wall-clock on
@@ -652,6 +662,19 @@ export async function pollAiReportJobs() {
     await claimAndRunJobs(AI_REPORT_JOB_TYPE_SQL, AI_REPORT_CONCURRENCY);
   } finally {
     pollingAiReport = false;
+  }
+}
+
+// Dedicated poller for the client weekly-report send, same reason as the AI report above: the PDF render it
+// performs first holds tens of MB of decoded image data and can run for a while on a photo-heavy report.
+let pollingWeeklyReportSend = false;
+export async function pollWeeklyReportSendJobs() {
+  if (pollingWeeklyReportSend) return;
+  pollingWeeklyReportSend = true;
+  try {
+    await claimAndRunJobs(WEEKLY_REPORT_SEND_JOB_TYPE_SQL, WEEKLY_REPORT_SEND_CONCURRENCY);
+  } finally {
+    pollingWeeklyReportSend = false;
   }
 }
 

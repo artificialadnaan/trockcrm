@@ -8,8 +8,8 @@ import { hashPassword, verifyPassword } from "../auth/local-auth-service.js";
 import { signJwt } from "../auth/service.js";
 import { getFieldAppUrl } from "../auth/http-config.js";
 import { toProperCaseName } from "../../lib/person-name.js";
+import { generateResetToken, hashResetToken } from "../auth/reset-tokens.js";
 
-const INVITE_TOKEN_BYTES = 32;
 const INVITE_TTL_DAYS = 7;
 const PASSWORD_RESET_TTL_MINUTES = 30;
 const PASSWORD_RESET_MAX_LENGTH = 256;
@@ -43,13 +43,15 @@ export function normalizeEmail(email: string): string {
   return normalized;
 }
 
-export function generateInviteToken(): string {
-  return crypto.randomBytes(INVITE_TOKEN_BYTES).toString("base64url");
-}
-
-export function hashInviteToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
+// Moved to ../auth/reset-tokens.js so the CRM reset path does not import the field module for its own
+// auth. Aliased under the original names so every existing field caller is untouched, and so both flows
+// keep sharing ONE implementation.
+//
+// Deliberately `import` + `export const`, NOT `export { x as y } from "..."`. A bare re-export creates
+// no LOCAL binding, and this module calls both helpers internally -- so the re-export form compiles and
+// then throws "hashInviteToken is not defined" at runtime on every invite and field login.
+export const generateInviteToken = generateResetToken;
+export const hashInviteToken = hashResetToken;
 
 export function splitName(displayName: string): { firstName: string; lastName: string } {
   const parts = displayName.trim().split(/\s+/).filter(Boolean);
