@@ -441,7 +441,16 @@ router.post("/reports/:id/transition", async (req, res, next) => {
  * that router adds routing and no logic. Relaxing the gate here would not enable anything new — it would
  * hand the whole leadership surface to every superintendent to enable something that already works.
  */
-const requireWeeklyReportSender = requireRole("admin", "director");
+/**
+ * The roles that may send a weekly report from the CRM.
+ *
+ * A named constant rather than inline arguments so the boundary is assertable: the test that pins "an
+ * assigned PM cannot send from the CRM" intersects this with `ASSIGNABLE_ROLES` instead of re-typing both
+ * lists, and therefore actually fails if this widens.
+ */
+export const WEEKLY_REPORT_SENDER_ROLES = ["admin", "director"] as const;
+
+const requireWeeklyReportSender = requireRole(...WEEKLY_REPORT_SENDER_ROLES);
 
 /**
  * The send modal, COMPOSED SERVER-SIDE and returned as data.

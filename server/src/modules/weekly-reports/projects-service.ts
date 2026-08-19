@@ -726,7 +726,14 @@ export async function deactivateWeeklyReportProject(client: QueryExecutor, id: s
  * that the authorisation check compares against the acting user's id. Nor from `deal_team_members`,
  * which is empty in production.
  */
-const ASSIGNABLE_ROLES = ["field_contractor", "construction", "admin", "director"] as const;
+/**
+ * Who may hold the PM slot on a weekly-report project.
+ *
+ * Exported so the test that pins the CRM send boundary can INTERSECT it with the sender roles rather than
+ * re-typing both lists. It used to assert two hand-written literals were disjoint, which no source change
+ * could ever falsify — widening the send gate to admit `construction` left it green.
+ */
+export const ASSIGNABLE_ROLES = ["field_contractor", "construction", "admin", "director"] as const;
 
 export interface WeeklyReportAssignableUser {
   id: string;

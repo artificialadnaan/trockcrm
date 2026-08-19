@@ -118,6 +118,85 @@ describe("a sent report the client has not received", () => {
     expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
   });
 
+  // The three below cover the duplicate-risk confirmation, which had NO test at all: the shared `report()`
+  // fixture stamps `sentAt: new Date().toISOString()`, so every other test in this file sits inside the
+  // provider window and never reaches the dialog. Deleting the `window.confirm` from RetryButton outright
+  // left both client suites green.
+  //
+  // What that hides is the worst outcome this feature has: past the window the provider no longer dedupes
+  // the key, `retryWeeklyReportSend(reportId, true)` is exactly the flag that disables the server's 409
+  // gate, and History is the surface a PM lands on when chasing a failed send. So a >24h retry would post
+  // the acknowledgement with nobody having been asked, and the client gets a second copy of the report.
+  //
+  // Time is pinned with an absolute `now` AND an absolute `sentAt`. A fixture that is merely "long ago"
+  // decays: the one relied on elsewhere sits ~424h in the past, which only ever caught a window above 424,
+  // and that bound grows by 24 every real day.
+  const NOW = new Date("2026-08-18T12:00:00.000Z");
+  const SENT_25H_AGO = "2026-08-17T11:00:00.000Z";
+  const SENT_23H_AGO = "2026-08-17T13:00:00.000Z";
+
+  it("warns before retrying a send the provider will no longer dedupe, and obeys a refusal", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("acknowledges the duplicate risk explicitly once the PM accepts it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      // `true` is what disables the server's 409 gate. It must only ever follow a dialog the PM saw, so
+      // assert the dialog as well as the flag — checking the flag alone still passes if the confirm is
+      // deleted, because `!deduped` is true either way.
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", true);
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks nothing inside the window, where the key really does dedupe", async () => {
+    // The CONTROL. Without it, a RetryButton that confirmed unconditionally — or one whose predicate
+    // always returned false — would satisfy both tests above.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_23H_AGO, sendError: "Resend timed out" })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("warns before a correction that the send never reached the client", async () => {
     // The old confirm text described what a correction does to a client who HAS the report, which is the
     // wrong client entirely when the email failed. A PM reading it had no way to know this is not how a
