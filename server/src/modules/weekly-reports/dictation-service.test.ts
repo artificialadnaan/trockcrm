@@ -181,23 +181,33 @@ describe("weekly-report dictation service", () => {
     expect(result.text.startsWith("- AAAA")).toBe(true);
   });
 
-  it("counts what the section already holds, so the two together stay inside the cap", async () => {
+  it("does NOT truncate to the section length it was told, because that number goes stale", async () => {
+    // This used to slice to `20000 - existingChars`, and it lost words. `existingChars` is true when the
+    // request is sent; the box stays editable for the seconds the model takes. A superintendent who
+    // deletes a paragraph while "Tidying up…" is showing has made room this number does not know about,
+    // and anything cut HERE is gone before the phone's own clamp — which reads the length at the moment
+    // the text lands — ever sees it. A client re-clamp cannot undo a server-side truncation.
+    //
+    // So the client owns remaining room and this side keeps only the absolute ceiling. Handing it a
+    // nearly-full section must therefore change nothing about a short answer.
     const fetchFn = stubBullets(["A".repeat(500)]);
     const result = await formatWeeklyReportDictation(
       { transcript: TRANSCRIPT, existingChars: 19_990 },
       { fetchFn: fetchFn as unknown as typeof fetch },
     );
-    expect(result.text).toBe("- AAAAAAAA");
-    expect(result.text.length).toBe(10);
+    expect(result.text).toBe(`- ${"A".repeat(500)}`);
   });
 
-  it("leaves no room at all once the section is already full", async () => {
+  it("still answers a section it was told is completely full", async () => {
+    // Same rule, at the extreme that used to return "". The phone decides there is no room, and says so
+    // ("That section is already full") — a decision it can only make correctly with the CURRENT length.
+    // Returning "" from here would have pre-empted that with a stale one.
     const fetchFn = stubBullets(["A".repeat(500)]);
     const result = await formatWeeklyReportDictation(
       { transcript: TRANSCRIPT, existingChars: 20000 },
       { fetchFn: fetchFn as unknown as typeof fetch },
     );
-    expect(result.text).toBe("");
+    expect(result.text).toBe(`- ${"A".repeat(500)}`);
   });
 
   it("refuses to let a negative existingChars manufacture room above the cap", async () => {

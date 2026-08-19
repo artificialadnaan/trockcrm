@@ -118,7 +118,13 @@ export type WeeklyReportDictationInput = {
   transcript: string;
   /**
    * How many characters the target section ALREADY holds. A count, never the text — see the file header.
-   * Used only to size the remaining room, so the addition plus what is there cannot exceed the ceiling.
+   *
+   * A HINT FOR THE PROMPT, not the clamp. It is true when the request is sent and can be false by the time
+   * the answer comes back: the box stays editable throughout, so a superintendent who deletes a paragraph
+   * during "Tidying up…" has made room this number does not know about. Truncating to it here would throw
+   * away words that now fit, before the phone's own clamp — which reads the length at the moment the text
+   * lands — ever saw them, and a client re-clamp cannot undo a server-side cut. The client owns remaining
+   * room; this side keeps only the absolute per-response ceiling.
    */
   existingChars?: number;
 };
@@ -380,17 +386,28 @@ function composeBullets(bullets: readonly string[]): string {
 }
 
 /**
- * Cap the addition so `existing + addition` cannot exceed the section ceiling.
+ * Bound the addition, WITHOUT deciding how much room the section has.
+ *
+ * This used to slice to `MAX_ADDITION_CHARS - existingChars`, and that quietly lost words. The count
+ * arrives with the request; the section stays editable for the seconds the model takes. A superintendent
+ * who deletes a paragraph while "Tidying up…" is showing has made room that this stale number does not
+ * know about, and text sliced off HERE is gone before the phone's own clamp — which does read the current
+ * length — ever sees it. The client re-clamping cannot undo a truncation the server already performed.
+ *
+ * So the split of responsibility is: THE CLIENT OWNS REMAINING ROOM, because only it knows the length at
+ * the moment the text lands. This is an absolute ceiling on a single response, which needs no knowledge of
+ * the section at all — it stops a runaway model answer, nothing more. `existingChars` still reaches the
+ * prompt as a hint about how much to aim for, and the reducer and the submit-time validation remain the
+ * enforcement points for the row itself.
  *
  * Sliced rather than rejected: the superintendent has already spoken, and answering 400 at this point
- * loses the recording for the sake of a guard whose only purpose is bounding the row. `trimEnd` keeps the
- * cut from leaving a dangling space, and a slice that lands mid-word is a word the user can fix in the
+ * loses the recording for the sake of a guard whose only purpose is bounding the response. `trimEnd` keeps
+ * the cut from leaving a dangling space, and a slice that lands mid-word is a word the user can fix in the
  * box the text lands in.
  */
-function clampToRemaining(text: string, existingChars: number): string {
-  const remaining = Math.max(0, MAX_ADDITION_CHARS - existingChars);
-  if (text.length <= remaining) return text;
-  return text.slice(0, remaining).trimEnd();
+function clampToCeiling(text: string): string {
+  if (text.length <= MAX_ADDITION_CHARS) return text;
+  return text.slice(0, MAX_ADDITION_CHARS).trimEnd();
 }
 
 function normalizeExistingChars(value: unknown): number {
@@ -420,7 +437,7 @@ export async function formatWeeklyReportDictation(
   const transcript = input.transcript.trim();
   if (!transcript) return { text: "", source: "local" };
 
-  const local = () => ({ text: clampToRemaining(formatDictationAsBullets(transcript), existingChars), source: "local" as const });
+  const local = () => ({ text: clampToCeiling(formatDictationAsBullets(transcript)), source: "local" as const });
 
   // Above the model ceiling this is not one clip of speech; format it locally rather than pay to read it.
   if (transcript.length > MAX_MODEL_TRANSCRIPT_CHARS) return local();
@@ -432,5 +449,5 @@ export async function formatWeeklyReportDictation(
   // A model that answered with an empty or all-blank list is not a reason to hand back nothing — the
   // superintendent said SOMETHING, and the split is the floor under every failure in this function.
   if (!composed) return local();
-  return { text: clampToRemaining(composed, existingChars), source: "model" };
+  return { text: clampToCeiling(composed), source: "model" };
 }
