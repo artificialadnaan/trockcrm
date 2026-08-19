@@ -82,6 +82,13 @@ export const weeklyReportProjects = pgTable(
     projectCompletionDate: date("project_completion_date"),
     projectCompletionDateNote: text("project_completion_date_note"),
     projectedDurationWeeks: integer("projected_duration_weeks"),
+    /**
+     * The report this week's starting values were carried from (migration 0230).
+     *
+     * A BARE uuid: the FK is self-referential within the tenant schema and is declared in 0230 with
+     * ON DELETE SET NULL, so Drizzle does not emit it a second time for every test fixture.
+     */
+    carriedFromReportId: uuid("carried_from_report_id"),
     /** 0=Sunday .. 6=Saturday, matching BOTH Postgres EXTRACT(DOW) and JS getDay() so the reminder SQL
      *  and the client's date maths agree without a translation layer. */
     cadenceWeekday: smallint("cadence_weekday").notNull(),

@@ -383,6 +383,11 @@ describe("migration 0224", () => {
 describe("migration 0223", () => {
   it("is replayable — running it a second time is a no-op, not an error", async () => {
     await expect(pg.exec(migrationSql("0223_weekly_report_pauses"))).resolves.toBeDefined();
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
   });
 
   it("allows only ONE open pause per project", async () => {
