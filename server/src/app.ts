@@ -55,6 +55,7 @@ import { fieldRoutes } from "./modules/field/routes.js";
 import { fieldRespondersRoutes } from "./modules/field/field-responders-routes.js";
 import { weeklyReportRoutes } from "./modules/weekly-reports/routes.js";
 import { weeklyReportPublicRoutes } from "./modules/weekly-reports/public-routes.js";
+import { weeklyReportDeliveryWebhookRoutes } from "./modules/weekly-reports/delivery-webhook-routes.js";
 import {
   adminPhotoTokenRoutes,
   publicPhotoViewerRoutes,
@@ -149,6 +150,12 @@ export function createApp() {
   // Internal SyncHub RFP callbacks — signed integration routes. Mounted before
   // express.json() so HMAC verification uses the original raw body bytes.
   app.use("/api/internal", internalRfpRoutes);
+
+  // The mail provider's delivery webhook — what actually happened to a weekly report AFTER the provider
+  // accepted it (delivered, bounced, reported as spam). Public and signature-verified, and mounted here
+  // with the other signed integrations because the signature covers the RAW bytes: once express.json()
+  // has parsed and discarded them there is nothing left to verify against.
+  app.use("/api/webhooks/resend", weeklyReportDeliveryWebhookRoutes);
 
   app.use(cookieParser());
 

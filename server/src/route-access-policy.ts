@@ -35,6 +35,10 @@ export const PUBLIC_ROUTE_MOUNTS = [
   "/api/docs",
   "/api/webhooks/procore",
   "/api/webhooks/synchub",
+  // The mail provider's delivery webhook. Public at the tenant-middleware layer and authenticated by the
+  // provider's Standard Webhooks signature over the raw body (RESEND_WEBHOOK_SECRET); the office comes
+  // from public.weekly_report_send_deliveries, not from a session, because the request carries no context.
+  "/api/webhooks/resend",
   "/api/bid-board-sync",
   "/api/public/photo-viewer",
   "/api/public/daily-summary",

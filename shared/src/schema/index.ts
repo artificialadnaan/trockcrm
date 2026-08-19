@@ -23,6 +23,7 @@ export { syncHubWebhookOrphans } from "./public/synchub-webhook-orphans.js";
 export { portfolioProjectStageEventReceipts } from "./public/portfolio-project-stage-event-receipts.js";
 export { publicPhotoTokens } from "./public/public-photo-tokens.js";
 export { weeklyReportTokens } from "./public/weekly-report-tokens.js";
+export { weeklyReportSendDeliveries } from "./public/weekly-report-send-deliveries.js";
 export { hubspotOwnerMappings } from "./public/hubspot-owner-mappings.js";
 export { hubspotActivityBackfillLedger } from "./public/hubspot-activity-backfill-ledger.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";

@@ -241,8 +241,12 @@ beforeAll(async () => {
   // production shape.
   await pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
-  // 0227 adds `send_stall_alerted_at`, which the retry path clears in the same statement that moves the
-  // stall clock. Without it every retry here fails on an undefined column.
+  // BOTH 0227s, in the order the runner would apply them. Two migrations independently took that number
+  // — the sweep's `send_stall_alerted_at` and the webhook's delivery-verdict columns — which is benign
+  // because the runner tracks applied migrations by FILENAME and sorts alphabetically, so
+  // `delivery_events` runs before `send_stall_alerted`. Loading them in that same order here keeps the
+  // suite's schema identical to production's rather than merely equivalent.
+  await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
   await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
 
   await pg.exec(`

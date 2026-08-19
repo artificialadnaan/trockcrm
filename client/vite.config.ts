@@ -16,6 +16,10 @@ export default defineConfig({
         __dirname,
         "../shared/src/lib/weeklyReportEmail.ts",
       ),
+      "@trock-crm/shared/lib/weeklyReportDelivery": path.resolve(
+        __dirname,
+        "../shared/src/lib/weeklyReportDelivery.ts",
+      ),
     },
   },
   server: {

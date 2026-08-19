@@ -81,6 +81,10 @@
       "types": "./dist/lib/weeklyReportSendStall.d.ts",
       "default": "./dist/lib/weeklyReportSendStall.js"
     },
+    "./lib/weeklyReportDelivery": {
+      "types": "./dist/lib/weeklyReportDelivery.d.ts",
+      "default": "./dist/lib/weeklyReportDelivery.js"
+    },
     "./lib/userProvisioningGuards": {
       "types": "./dist/lib/userProvisioningGuards.d.ts",
       "default": "./dist/lib/userProvisioningGuards.js"

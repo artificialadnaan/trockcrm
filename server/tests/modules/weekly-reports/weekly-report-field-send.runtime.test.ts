@@ -227,11 +227,14 @@ beforeAll(async () => {
   await pg.exec(migrationSql("0222_weekly_reports"));
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
-  // 0227 too, even though this suite tests SENDING rather than the stall sweep. `retryWeeklyReportSend`
-  // clears `send_stall_alerted_at` in the same statement that moves the stall clock — re-arming the alert
-  // is the whole point of a human retry — so without this column every retry here dies on an undefined
-  // column rather than on its subject. Neither branch could have written this line: the sweep never saw
-  // this file, and this file predates the sweep.
+  // BOTH 0227s, in the order the runner applies them. Two migrations independently took that number —
+  // the webhook's delivery-verdict columns and the sweep's `send_stall_alerted_at` — which is benign
+  // because the runner tracks applied migrations by FILENAME and sorts alphabetically. This suite needs
+  // the delivery columns even though it tests SENDING: once the webhook lands, `dashboard-service` and
+  // `priorVersionReachedClient` select `send_delivery_status`, so a suite that stops at 0226 dies on a
+  // missing column rather than on its subject. Neither branch could have added this — the webhook never
+  // saw this file, and this file predates the webhook.
+  await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
   await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
 
   await pg.exec(`

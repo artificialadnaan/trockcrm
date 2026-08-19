@@ -101,8 +101,15 @@ export default function WeeklyReportsPage() {
   // whose retry succeeded keeps its error text as the record of what happened, and a send that failed
   // WITHOUT recording anything — the delivery job's own bookkeeping goes to the same database whose
   // absence is the likeliest reason it failed — has no error text to read at all.
+  //
+  // `sendBounced` joins them, and is the one that would otherwise never appear: it is the only send
+  // failure whose delivery stamp is PRESENT — the provider accepted the message and the receiving server
+  // then refused it — so every predicate keyed on a missing delivery reads it as a success. The card's
+  // "need a retry" is not literally true of a bounce (a retry replays the same message to the same bad
+  // address; the fix is a correction), but the count exists to tell a director how many clients are
+  // missing a report, and a bounced one is missing it exactly as much.
   const failed = useMemo(
-    () => dashboard.rows.filter((row) => row.sendFailed || row.sendStalled),
+    () => dashboard.rows.filter((row) => row.sendFailed || row.sendStalled || row.sendBounced),
     [dashboard.rows],
   );
 
@@ -365,7 +372,24 @@ function ThisWeekTable({
                   <Badge variant="outline" className={`${STATE_BADGE[row.state]} whitespace-nowrap`}>
                     {weeklyReportWeekStateLabel(row.state)}
                   </Badge>
-                  {row.sendFailed ? (
+                  {/* BOUNCED FIRST, because it is the only one of the four whose row otherwise looks
+                      completely healthy. The other three are all keyed on a MISSING delivery stamp; a
+                      bounce has one — the provider accepted the message and the receiving server then
+                      refused it — so without this branch the week renders as plain "Sent" and the client
+                      who never got their report is invisible on the page built to catch exactly that.
+                      Mutually exclusive with the rest by construction, so the order is for the reader. */}
+                  {row.sendBounced ? (
+                    <div
+                      className="mt-1 flex items-center gap-1 text-[11.5px] font-bold text-brand-red"
+                      title={
+                        "The mail provider accepted this report and then reported that it was not " +
+                        "delivered. Check the client's email address on the project and send a correction " +
+                        "— retrying would replay the same message to the same address."
+                      }
+                    >
+                      <AlertTriangle className="h-3 w-3" /> Not delivered
+                    </div>
+                  ) : row.sendFailed ? (
                     <div
                       className="mt-1 flex items-center gap-1 text-[11.5px] font-bold text-brand-red"
                       title={row.sendError ?? undefined}
