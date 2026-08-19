@@ -1020,6 +1020,68 @@ describe("the alert email", () => {
   });
 });
 
+describe("the cohort cap", () => {
+  // An unbounded cohort is a self-perpetuating failure, not just an ugly email. A database outage stalls
+  // every in-flight send at once; the builder renders one detail block per report into ONE message; a
+  // large enough message is refused; a refusal is `rejected`, which releases every claim; the next tick
+  // assembles the same oversized cohort and is refused again. The alert never arrives, precisely on the
+  // incident that most needs it, and silently — a released claim looks exactly like a quiet tick.
+  //
+  // Absolute count, not derived from WEEKLY_REPORT_SEND_ALERT_MAX_PER_EMAIL: a fixture computed from the
+  // constant it tests moves with it and can never fail.
+  const OVER_CAP = 30;
+  // Absolute week labels, one per seeded report, walking back from 2026-08-13. Distinct weeks rather than
+  // distinct projects because SeedSend keys a row by week; the age that makes them stalled comes from
+  // `sentAt`, not from `week_of`, so every one of these is inside the alert window.
+  const WEEKS = Array.from({ length: OVER_CAP }, (_, i) => {
+    const d = new Date(Date.UTC(2026, 7, 13) - i * 7 * 86_400_000);
+    return d.toISOString().slice(0, 10);
+  });
+
+  it("announces at most 25 reports in one email, and leaves the rest CLAIM-FREE for the next tick", async () => {
+    for (let i = 0; i < OVER_CAP; i += 1) {
+      await seedSend({ id: U(`9${String(i).padStart(4, "0")}`), sentAt: STALLED_AT, weekOf: WEEKS[i]! });
+    }
+
+    const { sent } = await run();
+
+    expect(sent).toHaveLength(1);
+    // Claimed exactly the cap — the remainder must keep a NULL stamp or it is marked announced to nobody.
+    const alerted = await pg.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM office_dallas.weekly_reports WHERE send_stall_alerted_at IS NOT NULL`,
+    );
+    expect(Number(alerted.rows[0]!.n)).toBe(25);
+    expect(sent[0]!.text).toContain("5 more sends are also waiting");
+  });
+
+  it("drains rather than deadlocking: the next tick takes what the cap left", async () => {
+    for (let i = 0; i < OVER_CAP; i += 1) {
+      await seedSend({ id: U(`9${String(i).padStart(4, "0")}`), sentAt: STALLED_AT, weekOf: WEEKS[i]! });
+    }
+
+    await run();
+    const { sent } = await run();
+
+    expect(sent).toHaveLength(1);
+    const alerted = await pg.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM office_dallas.weekly_reports WHERE send_stall_alerted_at IS NOT NULL`,
+    );
+    expect(Number(alerted.rows[0]!.n)).toBe(OVER_CAP);
+    // Nothing left over, so no remainder line — the control for the assertion above.
+    expect(sent[0]!.text).not.toContain("also waiting");
+  });
+
+  it("says nothing about a remainder when the cohort fits", async () => {
+    // The control. Without it, an email that ALWAYS printed the remainder line would pass the cap test.
+    await seedSend({ sentAt: STALLED_AT });
+
+    const { sent } = await run();
+
+    expect(sent[0]!.text).not.toContain("also waiting");
+    expect(sent[0]!.html).not.toContain("also waiting");
+  });
+});
+
 describe("email composition helpers", () => {
   it("describes the two shapes of failure differently", () => {
     expect(sendFailureSummary({ sendError: "Resend timed out", sendAttempts: 2 })).toBe("Resend timed out");

@@ -1130,11 +1130,23 @@ describe("retrying a failed send", () => {
     );
     expect((await reportRow(reportId)).send_stall_alerted_at).not.toBeNull();
 
+    // Park the clock at an absolute past instant first. `failedSend()` already writes
+    // `send_last_attempt_at = now()`, so asserting `not.toBeNull()` after the retry passed whether or not
+    // `retryWeeklyReportSend` wrote the column at all — it was measuring the fixture, not the code. An
+    // absolute stamp makes "did it MOVE" the question, which is the property the sweep depends on.
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_last_attempt_at = '2026-08-01T10:00:00Z'
+        WHERE id = $1::uuid`,
+      [reportId],
+    );
+    const parked = (await reportRow(reportId)).send_last_attempt_at as Date;
+
     await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
 
     expect((await reportRow(reportId)).send_stall_alerted_at).toBeNull();
-    // ...and the clock the sweep ages against moved with it, so the retry is not instantly stalled again.
-    expect((await reportRow(reportId)).send_last_attempt_at).not.toBeNull();
+    // ...and the clock the sweep ages against MOVED with it, so the retry is not instantly stalled again.
+    const after = (await reportRow(reportId)).send_last_attempt_at as Date;
+    expect(new Date(after).getTime()).toBeGreaterThan(new Date(parked).getTime());
   });
 
   it("refuses once the provider has accepted it — and says only what it can evidence", async () => {

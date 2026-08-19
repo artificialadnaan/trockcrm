@@ -92,6 +92,24 @@ export const WEEKLY_REPORT_SEND_SWEEP_LOCK_KEY = 0x57_52_53_57;
  */
 export const WEEKLY_REPORT_SEND_ALERT_MAX_AGE_HOURS = 24 * 7;
 
+/**
+ * How many reports one alert email may carry.
+ *
+ * The cohort is otherwise unbounded, and the failure it guards against is self-perpetuating rather than
+ * merely ugly: a database outage or an expired provider key stalls every in-flight send at once, the
+ * builder renders one detail block per report into a SINGLE message, a large enough message is refused by
+ * the provider, and a refusal is `rejected` — which releases every claim. The next tick then assembles the
+ * same oversized cohort and is refused again, forever. The alert would never arrive precisely on the
+ * incident that most needs it, and silently, because a released claim is indistinguishable from a tick
+ * that found nothing.
+ *
+ * 25 is chosen to keep the worst-case message small enough that size is not the reason it fails, while
+ * still being more reports than a healthy office has weeks in its lookback. The remainder is not dropped:
+ * it keeps its NULL `send_stall_alerted_at`, so the next tick takes the next batch and the email says how
+ * many are still waiting.
+ */
+export const WEEKLY_REPORT_SEND_ALERT_MAX_PER_EMAIL = 25;
+
 /** Every tenant table the sweep reads. Probed per office before a single query touches them — see below. */
 const REQUIRED_TENANT_TABLES = ["weekly_reports", "weekly_report_projects", "weekly_report_settings"] as const;
 
@@ -333,8 +351,16 @@ export function buildWeeklyReportSendAlertEmail(input: {
   reports: StalledSendRow[];
   dashboardUrl: string;
   now: Date;
+  /**
+   * Stalled sends this email is NOT about, because the cohort was capped at
+   * `WEEKLY_REPORT_SEND_ALERT_MAX_PER_EMAIL`. Said out loud, because an email listing 25 reports during an
+   * outage that stalled 200 otherwise reads as the complete picture, and the reader would size their
+   * response to the wrong number. They keep their claim-free state and arrive on the next tick.
+   */
+  remainder?: number;
 }): WeeklyReportSendAlertEmail {
   const { reports, dashboardUrl, now } = input;
+  const remainder = Math.max(0, input.remainder ?? 0);
   // Unreachable from the sweep, which returns before composing anything when it claims no rows. Stated
   // rather than assumed because the alternative is a TypeError inside the send try, which would classify
   // as an unknown transport outcome and roll back claims that were never announced.
@@ -391,7 +417,13 @@ export function buildWeeklyReportSendAlertEmail(input: {
                 many ? "they are" : "it is",
               )} no longer in flight. Open the weekly reports board to retry the send, or issue a correction if the report itself needs changing.</p>${detailBlocks}
               <p style="margin:22px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12.5px;line-height:19px;color:#64748b;">Delivery is recorded when the mail provider accepts the message. The CRM does not yet track bounces, so this means the CRM never saw the message accepted — not that the client definitely did or did not receive it.</p>
-              <p style="margin:8px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12.5px;line-height:19px;color:#64748b;">You are told once per stuck send. Retrying one from the board arms this alert again, so a retry that also goes quiet is reported.</p>`;
+              <p style="margin:8px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12.5px;line-height:19px;color:#64748b;">You are told once per stuck send. Retrying one from the board arms this alert again, so a retry that also goes quiet is reported.</p>${
+                remainder > 0
+                  ? `<p style="margin:8px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12.5px;line-height:19px;color:#64748b;"><strong>${remainder} more ${
+                      remainder === 1 ? "send is" : "sends are"
+                    }</strong> also waiting and not listed here — this email is capped at ${WEEKLY_REPORT_SEND_ALERT_MAX_PER_EMAIL}. They are reported on the next pass; none is lost.</p>`
+                  : ""
+              }`;
 
   const html = renderBrandedEmail({
     title: many ? `${reports.length} weekly report deliveries not confirmed` : "Weekly report delivery not confirmed",
@@ -437,6 +469,14 @@ export function buildWeeklyReportSendAlertEmail(input: {
     "",
     "You are told once per stuck send. Retrying one from the board arms this alert again.",
   );
+  if (remainder > 0) {
+    textLines.push(
+      "",
+      `${remainder} more ${remainder === 1 ? "send is" : "sends are"} also waiting and not listed here — ` +
+        `this email is capped at ${WEEKLY_REPORT_SEND_ALERT_MAX_PER_EMAIL}. They are reported on the next ` +
+        "pass; none is lost.",
+    );
+  }
 
   return { subject, html, text: textLines.join("\n") };
 }
@@ -686,15 +726,31 @@ async function sweepOffice(args: OfficeSweepArgs): Promise<void> {
   // row that has moved on — the retry being the case none of the other conjuncts can see, see
   // `claimAlerts`. It is also what makes two replicas safe if the advisory lock is ever lost: only one
   // UPDATE can win a row.
+  // CAP THE COHORT, and claim only what this email can carry.
+  //
+  // `stalled` is unbounded: a database outage or an expired provider key stalls every in-flight send at
+  // once, and the builder renders one detail block per report into a SINGLE message. A large enough
+  // message is refused by the provider, and that outcome is `rejected` — which releases every claim, so
+  // the next tick assembles the same oversized cohort and is refused again. The alert would never reach
+  // leadership precisely on the incident that most needs it, and it would fail silently, because a
+  // released claim looks exactly like a tick that found nothing to do.
+  //
+  // Cap first, then claim: claiming everything and rendering a slice would mark reports announced that
+  // nobody was told about, which is the one outcome this job exists to prevent. The remainder keeps its
+  // NULL `send_stall_alerted_at`, so the next tick takes the next batch — the backlog drains rather than
+  // deadlocking, and the email says how many are still waiting.
+  const cohort = stalled.slice(0, WEEKLY_REPORT_SEND_ALERT_MAX_PER_EMAIL);
+  const remainder = stalled.length - cohort.length;
+
   const claimStamp = now.toISOString();
   const claimed = await claimAlerts(
     query,
     tenantSchema,
-    stalled.map((report) => report.id),
+    cohort.map((report) => report.id),
     claimStamp,
   );
   if (claimed.size === 0) return;
-  const announced = stalled.filter((report) => claimed.has(report.id));
+  const announced = cohort.filter((report) => claimed.has(report.id));
 
   let outcome: SendSystemEmailOutcome;
   let sendError: unknown = null;
@@ -716,6 +772,10 @@ async function sweepOffice(args: OfficeSweepArgs): Promise<void> {
       reports: announced,
       dashboardUrl: weeklyReportDashboardUrl(args.frontendUrl, args.officeId),
       now,
+      // ONLY what the cap left behind. Deliberately not `cohort.length - announced.length` as well: a row
+      // the claim lost was delivered, superseded or retried in the interim, so it is not waiting for
+      // anything and counting it would tell a director there is a backlog that resolved itself.
+      remainder,
     });
 
     const result = await args.sendEmail(recipients, email.subject, email.html, {
