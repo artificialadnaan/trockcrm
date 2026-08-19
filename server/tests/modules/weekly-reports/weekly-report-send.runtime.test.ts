@@ -74,8 +74,9 @@ const STRANGER_ACTOR = { id: STRANGER, role: "rep" };
  * admin/director. Intersect those and the CRM's sender is LEADERSHIP, full stop: a `construction` PM,
  * which is the normal case, is refused at the router.
  *
- * The assigned PM's send lives on the deferred T-Rock Cam field mount. The one test that still says so is
- * "the assigned PM has no send route yet" below; everything else uses the actor the product ships.
+ * The assigned PM's send lives on the T-Rock Cam field mount, and is covered end to end — with the control
+ * that a `construction` PM's send actually executes — in weekly-report-field-send.runtime.test.ts. This
+ * suite stays on the CRM's sender so that what it asserts is what the CRM ships.
  */
 const SENDER = DIRECTOR_ACTOR;
 
@@ -240,10 +241,13 @@ beforeAll(async () => {
   // production shape.
   await pg.exec(migrationSql("0224_weekly_reports_pdf_content_generation"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
-  // And 0227, which adds the DELIVERY VERDICT columns. Same reason again: `getWeeklyReportDashboard`
-  // selects `send_delivery_status`, and `priorVersionReachedClient` binds it — a suite that stops at 0226
-  // fails on a missing column rather than on its subject.
+  // BOTH 0227s, in the order the runner would apply them. Two migrations independently took that number
+  // — the sweep's `send_stall_alerted_at` and the webhook's delivery-verdict columns — which is benign
+  // because the runner tracks applied migrations by FILENAME and sorts alphabetically, so
+  // `delivery_events` runs before `send_stall_alerted`. Loading them in that same order here keeps the
+  // suite's schema identical to production's rather than merely equivalent.
   await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
+  await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -1080,11 +1084,12 @@ describe("superseding", () => {
 /**
  * WHO THE CRM ACTUALLY LETS SEND.
  *
- * Recorded as a test because the answer is not what the service layer suggests, and the gap is the kind
- * that reads as a working feature until a real PM tries it.
+ * Recorded as a test because the answer is not what the service layer suggests, and it stays recorded now
+ * that the field mount exists: the two routers deliberately admit different people, and somebody reading
+ * only `canPublishWeeklyReport` would conclude the CRM's refusal is a bug and remove it.
  */
-describe("the assigned PM has no send route yet", () => {
-  it("passes the SERVICE gate — which is why the field mount can reuse this code unchanged", async () => {
+describe("the assigned PM sends from the FIELD mount, not this one", () => {
+  it("passes the SERVICE gate — which is why the field mount reuses this code unchanged", async () => {
     const project = await seedProject();
     const row = await pg.query(
       `SELECT * FROM office_dallas.weekly_report_projects WHERE id = $1::uuid`,
@@ -1093,12 +1098,15 @@ describe("the assigned PM has no send route yet", () => {
     expect(canPublishWeeklyReport(row.rows[0] as Record<string, any>, PM_ACTOR)).toBe(true);
   });
 
-  it("but reaches no CRM endpoint, because the router admits neither of the roles a PM holds", async () => {
+  it("but reaches no CRM endpoint, because that router admits neither of the roles a PM holds", async () => {
     // `ASSIGNABLE_ROLES` (projects-service.ts) is field_contractor/construction/admin/director — the roles
     // that may hold the PM slot. The CRM send routes require admin/director. So the assigned-PM arm of
-    // `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not already leadership, and
-    // this PR ships no send capability for a PM at all. The refusal itself is asserted end-to-end in
-    // tests/weekly-report-send-route.test.ts; asserted here is that the two role sets genuinely disjoin.
+    // `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not already leadership; it is
+    // reachable on /api/field, where that PM authenticates and where the mount carries only their own
+    // reports. The CRM refusal is asserted end-to-end in tests/weekly-report-send-route.test.ts and the
+    // field capability in weekly-report-field-send.runtime.test.ts; asserted here is that the two role
+    // sets genuinely disjoin, which is what makes a second mount necessary rather than merely convenient.
+    //
     // Read from SOURCE, both sides. This previously compared two hand-typed literals, so it asserted a
     // property of the test file rather than of the code — widening the send gate to admit `construction`
     // left it green while its comment claimed to pin exactly that.
@@ -1150,6 +1158,38 @@ describe("retrying a failed send", () => {
     const detail = await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
     expect(detail.sendError).toBeNull();
     expect(detail.sendAttempts).toBe(3);
+  });
+
+  it("RE-ARMS the dead-letter alert, so a retry that also goes quiet is reported", async () => {
+    // `send_stall_alerted_at` (0227) is the worker sweep's memory of having already told leadership this
+    // delivery stopped moving, and it is what stops the sweep emailing every fifteen minutes about the
+    // same stuck report. A retry is a transition OUT of stalled: somebody saw the alert and acted, so if
+    // this attempt goes quiet too that is a NEW incident. Left set, a report retried three times and
+    // stalled three times would be announced once and then never again.
+    const reportId = await failedSend();
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_stall_alerted_at = now() WHERE id = $1::uuid`,
+      [reportId],
+    );
+    expect((await reportRow(reportId)).send_stall_alerted_at).not.toBeNull();
+
+    // Park the clock at an absolute past instant first. `failedSend()` already writes
+    // `send_last_attempt_at = now()`, so asserting `not.toBeNull()` after the retry passed whether or not
+    // `retryWeeklyReportSend` wrote the column at all — it was measuring the fixture, not the code. An
+    // absolute stamp makes "did it MOVE" the question, which is the property the sweep depends on.
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_last_attempt_at = '2026-08-01T10:00:00Z'
+        WHERE id = $1::uuid`,
+      [reportId],
+    );
+    const parked = (await reportRow(reportId)).send_last_attempt_at as Date;
+
+    await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
+
+    expect((await reportRow(reportId)).send_stall_alerted_at).toBeNull();
+    // ...and the clock the sweep ages against MOVED with it, so the retry is not instantly stalled again.
+    const after = (await reportRow(reportId)).send_last_attempt_at as Date;
+    expect(new Date(after).getTime()).toBeGreaterThan(new Date(parked).getTime());
   });
 
   it("refuses once the provider has accepted it — and says only what it can evidence", async () => {

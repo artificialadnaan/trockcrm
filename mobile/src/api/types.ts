@@ -442,12 +442,74 @@ export type WeeklyReportPermissions = {
   canReturnToDraft: boolean;
 };
 
+// ── The client send ───────────────────────────────────────────────────────────
+// The email the client receives is COMPOSED SERVER-SIDE and shipped here as data. Nothing below is
+// re-derived on the phone: the subject, the greeting, the default message and the body preview all arrive
+// from GET /field/weekly-reports/reports/:id/send-draft, and the CRM's dialog renders the very same
+// payload from the same service. A second implementation of any of it on either surface would mean the PM
+// approves one wording and the client receives another.
+
+/** A client-team address the modal offers. `role` is the label the report prints (DOC / PM / RM / CM). */
+export type WeeklyReportRecipientOption = { role: string; name: string | null; email: string };
+
+/** The T-Rock PM block that signs the email — what the client replies to. */
+export type WeeklyReportSenderContact = {
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+};
+
+export type WeeklyReportSendDraftView = {
+  reportId: string;
+  weekOf: string;
+  version: number;
+  /**
+   * True only when an EARLIER version of this week actually reached the client. Deliberately not
+   * `version > 1`: a v2 whose v1 never got out is not a correction, it is a first copy, and telling a
+   * client that this "replaces the copy they already have" sends them hunting for an email that does not
+   * exist. The banner the app shows and the sentence the client reads come from this one flag.
+   */
+  isCorrection: boolean;
+  propertyName: string | null;
+  /** The pre-filled selection. */
+  recipients: string[];
+  /** Everything the client team offers, so a role with an address can be re-added without retyping it. */
+  recipientOptions: WeeklyReportRecipientOption[];
+  subject: string;
+  greeting: string;
+  /** The one part the PM edits. */
+  contextParagraph: string;
+  sender: WeeklyReportSenderContact;
+  attachPdf: boolean;
+  /** The exact plain-text body the client will receive, given the values above. Preview, not input. */
+  bodyPreview: string;
+};
+
+export type WeeklyReportSendDraftResponse = { draft: WeeklyReportSendDraftView };
+
+/**
+ * The send's answer — and the ONE moment the raw client link exists.
+ *
+ * `public.weekly_report_tokens` stores a SHA-256 hash of the token, so this URL is unreproducible: no
+ * later API call returns it, and the send draft above deliberately does not carry it. The screen shows it
+ * once, for copying, and it MUST NOT be written to the draft store, a log line or crash telemetry.
+ */
+export type WeeklyReportSendResponse = { report: WeeklyReportDetailView; shareUrl: string };
+
 export type WeeklyReportResponse = { report: WeeklyReportDetailView };
 export type WeeklyReportDetailResponse = {
   report: WeeklyReportDetailView;
   project: WeeklyReportProjectView;
   permissions: WeeklyReportPermissions;
 };
+/**
+ * What the server-side dictation pass hands back: an ADDITION, never a replacement for the section.
+ *
+ * `source` says which pass produced it — `"model"` when Claude cleaned the transcript, `"local"` when the
+ * server fell back to its own sentence split (no API key configured, or the model call failed). Both are
+ * appended identically; it exists so a degraded deploy is legible rather than invisible.
+ */
+export type WeeklyReportDictationResponse = { text: string; source?: "model" | "local" };
 export type WeeklyReportPhotoCandidatesResponse = {
   photos: WeeklyReportPhotoCandidate[];
   /**

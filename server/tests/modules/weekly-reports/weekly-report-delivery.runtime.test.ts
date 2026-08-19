@@ -189,6 +189,10 @@ beforeAll(async () => {
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
   await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
+  // The sweep's 0227 too, once both are on one branch: `retryWeeklyReportSend` clears
+  // `send_stall_alerted_at` in the same statement that moves the stall clock, so a retry here fails on
+  // an undefined column without it.
+  await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES

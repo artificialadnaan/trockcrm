@@ -80,6 +80,33 @@ import {
 } from "./modules/auth/http-config.js";
 import { getSecurityOptions } from "./middleware/security.js";
 
+// SPA routes whose URL IS a credential — the token is either the path segment (/p/<token>) or the
+// query string (/reset-password?token=..., /daily-summary/<date>?token=...). The document those URLs
+// load must not hand the URL to anything it subsequently talks to, so it is served `no-referrer`.
+//
+// This is deliberately per-response and NOT a `<meta name="referrer" content="no-referrer">` in
+// client/index.html: that file is the single shell every route loads, so a meta tag there is a global
+// policy — and a global `no-referrer` is precisely the P0 in security.ts (browsers then send
+// `Origin: null` on same-origin writes and the cookie-auth allowlist 403s every mutation in the CRM).
+// Narrowing it to the documents that actually carry a token keeps the incident from recurring.
+const TOKENIZED_SPA_PATHS = ["/reset-password", "/p", "/daily-summary"];
+
+// /scorecards/:id/corrective-action is tokenized too — AuthGate lets it through unauthenticated
+// precisely because its ?token authorizes the flow — but it CANNOT go in the prefix list above. A
+// "/scorecards" prefix would also match the authenticated scorecard pages, which are write-heavy, and
+// putting no-referrer on those is the #1077 P0 again. Anchored to the exact shape instead.
+const TOKENIZED_SPA_PATTERNS = [/^\/scorecards\/[^/]+\/corrective-action$/];
+
+// Whole-segment matching, not `startsWith`. `/p` as a bare prefix would swallow `/properties` and
+// `/pipeline` — the pages people do most of their WRITING from — and putting `no-referrer` on those
+// documents is the P0 all over again, just wearing a smaller blast radius.
+function isTokenizedSpaPath(pathname: string): boolean {
+  if (TOKENIZED_SPA_PATHS.some((base) => pathname === base || pathname.startsWith(`${base}/`))) {
+    return true;
+  }
+  return TOKENIZED_SPA_PATTERNS.some((pattern) => pattern.test(pathname));
+}
+
 export function createApp() {
   const app = express();
 
@@ -317,7 +344,13 @@ export function createApp() {
   if (existsSync(clientDist)) {
     app.use(express.static(clientDist));
     // SPA fallback — serve index.html for non-API routes
-    app.get("/{*path}", (_req, res) => {
+    app.get("/{*path}", (req, res) => {
+      // Overrides helmet's global `strict-origin-when-cross-origin` for the token-bearing routes only.
+      // Every other document keeps the global policy, which is what preserves `Origin` on same-origin
+      // writes; see TOKENIZED_SPA_PATHS above for why this is not a meta tag in the shared shell.
+      if (isTokenizedSpaPath(req.path)) {
+        res.setHeader("Referrer-Policy", "no-referrer");
+      }
       res.sendFile(join(clientDist, "index.html"));
     });
   }

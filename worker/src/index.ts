@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, pollWeeklyReportSendJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -13,6 +13,7 @@ import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 import { runWeeklyReportReminders } from "./jobs/weekly-report-reminders.js";
+import { runWeeklyReportSendSweep } from "./jobs/weekly-report-send-sweep.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
@@ -86,6 +87,14 @@ async function main() {
   // this poller claims only that type (one at a time).
   setInterval(pollGlassesWalkthroughForwardJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling glasses_walkthrough_forward queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // And the client weekly-report send, which renders the report's PDF before it can send — decoding every
+  // photo on it into memory and uploading to R2. On the main poller's three shared slots that is both the
+  // OOM shape ai_report_generation is serialized to avoid and a starvation shape, since the same poller
+  // carries RFP delivery and email sync and a Monday morning sends many reports at once. pollJobs excludes
+  // weekly_report_send; this poller claims only that type, one at a time.
+  setInterval(pollWeeklyReportSendJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling weekly_report_send queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
   // NOTE: the recoverStaleJobs call above is no longer the ONLY one. It now also runs periodically, from
   // inside pollJobs (startExpiredJobLeaseSweepIfDue, which STARTS the sweep beside the tick rather than
@@ -233,6 +242,26 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: weekly report reminders at 7:00 AM CT daily (catch-up 9 & 11 AM)");
+
+  // Weekly Reports dead-letter sweep: every 15 minutes, round the clock.
+  //
+  // NOT on the reminders' business-hours schedule, and not daily. This one is about a CLIENT-facing email
+  // that never went out, and the threshold it measures is thirty minutes — a daily pass would report a
+  // Monday-morning failure on Tuesday, by which point the client has spent a working day wondering where
+  // their report is. Fifteen minutes means the alert lands while the person who pressed Send is still at
+  // their desk.
+  //
+  // Cheap to run this often: the read is a partial index holding only the sends currently in flight, and
+  // the alert is claimed per report, so a pass with nothing new to say does two SELECTs per office and
+  // sends nothing. No timezone is set because the schedule has no time-of-day component.
+  cron.schedule("*/15 * * * *", async () => {
+    try {
+      await runWeeklyReportSendSweep();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report send sweep failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: weekly report send sweep every 15 minutes");
 
   // Weekly digest: Monday at 7:00 AM CT
   cron.schedule("0 7 * * 1", async () => {

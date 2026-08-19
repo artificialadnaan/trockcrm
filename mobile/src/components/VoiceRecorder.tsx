@@ -7,7 +7,13 @@ import { transcribeAudio } from "../dictation/transcribe";
 
 // "starting" = permission prompt + audio-session/recorder setup, before the first
 // frame is recorded — counts as busy so a parent can't tear us down mid-start.
-type Status = "idle" | "starting" | "recording" | "transcribing";
+//
+// "formatting" = the parent's onTranscript handler is still running. It exists because a handler may now
+// be ASYNC (the weekly-report wizard sends the transcript to the server-side dictation pass), and that
+// round trip is a second window in which the recorder can be unmounted with the transcript still in
+// flight — a longer one than transcription, on exactly the connections this feature is written for.
+// Every non-idle status reports busy, so extending the enum is what extends the parent's guard.
+type Status = "idle" | "starting" | "recording" | "transcribing" | "formatting";
 
 const MAX_SECONDS = 60;
 
@@ -21,8 +27,9 @@ export function VoiceRecorder({
   onBusyChange,
   label = "🎤 Dictate description",
 }: {
-  onTranscript: (text: string) => void;
-  // Reports recording/transcribing so a parent can block teardown (e.g. closing a
+  // May be async. If it returns a promise, this component stays BUSY until it settles — see `stop()`.
+  onTranscript: (text: string) => void | Promise<void>;
+  // Reports recording/transcribing/formatting so a parent can block teardown (e.g. closing a
   // sheet) that would abandon an in-flight recording and lose the dictated text.
   onBusyChange?: (busy: boolean) => void;
   // Idle-state button label (e.g. "🎤 Dictate summary" in the report builder).
@@ -103,8 +110,15 @@ export function VoiceRecorder({
         fileName: "voice-note.m4a",
       });
       const transcript = result.transcript?.trim();
-      if (transcript) onTranscript(transcript);
-      else setError("No speech detected.");
+      if (transcript) {
+        // AWAITED, not fired and forgotten. A handler that post-processes the transcript over the network
+        // (the weekly-report wizard's server-side dictation pass) is still holding the only copy of what
+        // was said; returning to "idle" here would tell the parent it is safe to unmount, and the spoken
+        // paragraph would go with it. Awaiting keeps `onBusyChange(true)` in force until the handler is
+        // genuinely done — a synchronous handler simply resolves on the next microtask.
+        applyStatus("formatting");
+        await onTranscript(transcript);
+      } else setError("No speech detected.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Transcription failed.");
     } finally {
@@ -115,30 +129,33 @@ export function VoiceRecorder({
 
   const recording = status === "recording";
   const transcribing = status === "transcribing";
+  const formatting = status === "formatting";
   const starting = status === "starting";
 
   return (
     <View style={{ gap: 6 }}>
       <Pressable
         onPress={recording ? stop : start}
-        disabled={transcribing || starting}
+        disabled={transcribing || formatting || starting}
         accessibilityRole="button"
         accessibilityLabel={recording ? "Stop voice note" : "Record voice note"}
         style={({ pressed }) => [
           styles.button,
           recording && styles.buttonRecording,
-          (transcribing || starting) && styles.buttonBusy,
+          (transcribing || formatting || starting) && styles.buttonBusy,
           pressed && { opacity: 0.85 },
         ]}
       >
         <Text style={styles.buttonText}>
           {transcribing
             ? "Transcribing…"
-            : starting
-              ? "Starting…"
-              : recording
-                ? `Stop · ${String(seconds).padStart(2, "0")}s`
-                : label}
+            : formatting
+              ? "Tidying up…"
+              : starting
+                ? "Starting…"
+                : recording
+                  ? `Stop · ${String(seconds).padStart(2, "0")}s`
+                  : label}
         </Text>
       </Pressable>
       {error ? <Text style={styles.error}>{error}</Text> : null}

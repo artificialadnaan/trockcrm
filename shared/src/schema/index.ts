@@ -31,6 +31,7 @@ export { userExternalIdentities, externalUserSourceEnum } from "./public/user-ex
 export { userLocalAuth } from "./public/user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local-auth-events.js";
 export { fieldUserPasswordResets } from "./public/field-user-password-resets.js";
+export { userPasswordResets } from "./public/user-password-resets.js";
 export { userCommissionSettings } from "./public/user-commission-settings.js";
 export {
   notificationRecipientGroups,

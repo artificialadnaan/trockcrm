@@ -377,8 +377,9 @@ export async function listWeeklyReportAssignments(
  * The PM's queue: reports somebody has submitted, on projects this user is the PM for.
  *
  * `approved` is included alongside `pending_review` because an approved-but-unsent report is still the
- * PM's move — PR5 adds the send step, and until then leaving it off the queue would make an approval look
- * like the end of the line.
+ * PM's move: the send is the step after it, and it is now on this surface too (field-routes.ts), so a row
+ * sitting here approved is work the person reading it can actually finish. Leaving it off would make an
+ * approval look like the end of the line.
  *
  * NEWEST FIRST, and counted.
  *
