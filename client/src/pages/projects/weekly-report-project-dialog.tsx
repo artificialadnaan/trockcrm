@@ -385,7 +385,7 @@ export function WeeklyReportProjectDialog({
                     onNote={(value) => setField("projectCompletionDateNote", value)}
                   />
                 </div>
-                <div className="sm:max-w-[220px]">
+                <div className="sm:max-w-[320px]">
                   <Field label="Projected duration" hint="Weeks">
                     <TextInput
                       type="number"
@@ -394,6 +394,17 @@ export function WeeklyReportProjectDialog({
                       placeholder="19"
                     />
                   </Field>
+                  {/* Left blank, the client's PDF prints an empty Projected/Remaining pair — a pair of
+                      bars with no numbers in them, which reads as a job with no time left rather than
+                      as a field nobody filled in. Said here, where it can still be fixed for free. */}
+                  {!form.projectedDurationWeeks.trim() && (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] text-amber-700">
+                      <Info className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        Without this, the Projected and Remaining bars print empty on the client's report.
+                      </span>
+                    </p>
+                  )}
                 </div>
               </Section>
 

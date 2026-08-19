@@ -203,3 +203,87 @@ describe("value formatting", () => {
     expect(view.weekOf).toBe("2026-08-13");
   });
 });
+
+describe("projected and remaining duration", () => {
+  /** The live setup row a not-yet-sent report reads from. */
+  const LIVE_PROJECT = {
+    projected_duration_weeks: 19,
+    project_start_date: "2026-07-02",
+  };
+
+  it("falls back to the project's CURRENT duration while the report is not frozen", () => {
+    // The reported symptom: a duration entered on the project after the report was drafted never showed
+    // up. `projected_duration_weeks` is stamped onto the report only at draft -> pending_review.
+    const view = buildWeeklyReportView({
+      report: { week_of: "2026-08-13", status: "draft", projected_duration_weeks: null },
+      project: LIVE_PROJECT,
+      photos: [],
+    });
+
+    expect(view.pdf.duration.projectedWeeks).toBe(19);
+  });
+
+  it("computes REMAINING live too, instead of printing a bar with nothing in it", () => {
+    // `remaining_weeks` is stored at submit, so an unsubmitted report had none — while projected already
+    // fell back to the live row. The result was a Projected bar beside an empty Remaining one, which
+    // reads as "no time left" rather than "not submitted yet".
+    //
+    // Week of 2026-08-13 is 6 whole weeks after a 2026-07-02 start, so 19 - 6 = 13.
+    const view = buildWeeklyReportView({
+      report: { week_of: "2026-08-13", status: "draft", remaining_weeks: null },
+      project: LIVE_PROJECT,
+      photos: [],
+    });
+
+    expect(view.pdf.duration.remainingWeeks).toBe(13);
+  });
+
+  it("prefers the report's OWN stamped numbers once it has them", () => {
+    // A submitted report keeps the arithmetic it was written with, even if the schedule is revised after.
+    const view = buildWeeklyReportView({
+      report: {
+        week_of: "2026-08-13",
+        status: "pending_review",
+        projected_duration_weeks: 12,
+        remaining_weeks: 4,
+      },
+      project: LIVE_PROJECT,
+      photos: [],
+    });
+
+    expect(view.pdf.duration.projectedWeeks).toBe(12);
+    expect(view.pdf.duration.remainingWeeks).toBe(4);
+  });
+
+  it("never recomputes for a SENT report — the client's copy does not move", () => {
+    // A snapshot exists, so nothing here may read the live row. Recomputing would silently change a
+    // number the client already has in a PDF and behind a bookmarked link.
+    const view = buildWeeklyReportView({
+      report: {
+        week_of: "2026-08-13",
+        status: "sent",
+        remaining_weeks: null,
+        snapshot: { schedule: { projectedDurationWeeks: 8 } },
+      },
+      project: LIVE_PROJECT,
+      photos: [],
+    });
+
+    expect(view.pdf.duration.projectedWeeks).toBe(8);
+    // Null, not a number computed today against a schedule that has since moved.
+    expect(view.pdf.duration.remainingWeeks).toBeNull();
+  });
+
+  it("leaves both null when the project genuinely has no duration", () => {
+    // Haven Lake Highlands in production: the project row itself has none, so there is nothing to reach
+    // the report. The renderer must not invent a number — the setup form now warns instead.
+    const view = buildWeeklyReportView({
+      report: { week_of: "2026-08-13", status: "draft" },
+      project: { projected_duration_weeks: null, project_start_date: "2026-07-02" },
+      photos: [],
+    });
+
+    expect(view.pdf.duration.projectedWeeks).toBeNull();
+    expect(view.pdf.duration.remainingWeeks).toBeNull();
+  });
+});
