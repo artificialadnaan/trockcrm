@@ -58,6 +58,20 @@ export const weeklyReportProjects = pgTable(
      *  tenant-local `users` table that does not exist. Same convention as glasses-walkthroughs.ts. */
     trockPmUserId: uuid("trock_pm_user_id"),
     trockSuperUserId: uuid("trock_super_user_id"),
+    /**
+     * The FIELD TEAM ROSTER rows those two logins are derived from (migration 0228).
+     *
+     * The pair above answers "what authorises this person"; this pair answers "who are they". The picker
+     * offers the roster, the printed report and the reminder emails use the roster's name and address,
+     * and `trock_*_user_id` is resolved from the roster row's email at write time — null for the field
+     * staff who hold no CRM account, which is most of the reason this split exists.
+     *
+     * Also BARE uuids here, but for the opposite reason to the two above: `field_responders` IS in this
+     * tenant schema, so the FK is real and declared in 0228 per-office. Declaring it in Drizzle as well
+     * would have the schema builder emit it a second time for every test fixture.
+     */
+    trockPmResponderId: uuid("trock_pm_responder_id"),
+    trockSuperResponderId: uuid("trock_super_responder_id"),
     contractDate: date("contract_date"),
     /** The `*_note` columns render in place of a missing date. The reference report prints "TBD Permit"
      *  where the start and completion dates belong; a nullable date plus a note keeps date arithmetic
@@ -90,6 +104,17 @@ export const weeklyReportProjects = pgTable(
       .where(sql`is_active`),
     index("weekly_report_projects_super_idx").on(table.trockSuperUserId).where(sql`is_active`),
     index("weekly_report_projects_pm_idx").on(table.trockPmUserId).where(sql`is_active`),
+    // 0228's own indexes: "which projects is this roster person the PM / super on" — the drill-down
+    // behind a roster row, and the per-person lookup the reminder job runs. Their predicate is the
+    // column being non-null rather than `is_active`, matching the migration exactly; a Drizzle
+    // definition that disagreed with the migration would give test fixtures an index production
+    // does not have.
+    index("weekly_report_projects_pm_responder_idx")
+      .on(table.trockPmResponderId)
+      .where(sql`trock_pm_responder_id is not null`),
+    index("weekly_report_projects_super_responder_idx")
+      .on(table.trockSuperResponderId)
+      .where(sql`trock_super_responder_id is not null`),
     check("weekly_report_projects_status_check", sql`${table.status} in ('active', 'paused', 'completed')`),
     check("weekly_report_projects_weekday_check", sql`${table.cadenceWeekday} between 0 and 6`),
     check(
