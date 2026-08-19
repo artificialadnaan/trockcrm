@@ -193,8 +193,13 @@ describe("renderFieldPhotoReportPdf page count", () => {
     const tileRights = [...streams.matchAll(/([\d.]+) 72 l/g)].map((m) => Number(m[1]) + RADIUS);
     const rightEdges = [...new Set(tileRights)].sort((a, b) => a - b);
     expect(rightEdges.length).toBe(2);
-    // Nothing may cross the right margin (612 - 32 = 580). This is the assertion with teeth: a tile width
-    // of 300 escapes all 37 tests in the other two pdf-layout suites and is caught only here.
+    // Nothing may cross the right margin (612 - 32 = 580). This is the assertion with teeth — but the
+    // module-load guard in pdf-layout.ts fires FIRST for the case that motivated it: at
+    // PHOTO_TILE_WIDTH = 300 the import throws, and the other two pdf-layout suites fail rather than
+    // escape. It is only with that guard disabled that 300 passes 37/37 there and is caught solely here.
+    // Stated with the qualifier because an earlier version of this comment dropped it, which reads as
+    // though the guard adds nothing for this case — it is the first line of defence, and this is the
+    // second, covering widths the guard's `>` boundary admits.
     expect(Math.max(...rightEdges)).toBeLessThanOrEqual(612 - 32);
     // ...and the left tile ends before the right tile begins. STRICTLY REDUNDANT at a single tile width —
     // the margin check above fails at width > 264 while this one needs > 284, so it can never fire first,

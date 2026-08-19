@@ -347,12 +347,19 @@ function formatPhotoDate(value: string | null, fallback: string): string {
  * carry historical photos or straddle a year boundary, and "Jul 31, 4:52 PM" then reads identically for a
  * 2025 and a 2026 capture, which for an evidence document is a real loss.
  *
- * It fits, with room to spare: re-measured against Geist at META_FONT_SIZE across all twelve months, the
- * long form runs 71.8-83.7pt — and since the caption moved BELOW the tile it now has the tile's full 256pt
- * to sit in, rather than the ~106pt side column the original measurement was taken against. The width
- * worry that prompted the short form came from the one-up grid's 8.5pt text and did not survive the move
- * to 7.5pt. (The figures previously quoted here, "74.7pt (82.4pt worst case)", could not be reproduced for
- * any month/hour combination; they predate the move and are replaced by the measured range.)
+ * It fits, with room to spare. Measured against Geist-Regular at META_FONT_SIZE over the month/day/hour/
+ * minute shapes this formatter emits, the long form spans 64.76pt to 84.78pt — narrowest
+ * "Jul 1, 2026, 1:11 PM", widest "May 20, 2026, 10:00 AM" — inside a caption box that, since the block
+ * moved BELOW the tile, is the tile's full 256pt rather than the ~106pt side column the original
+ * measurement was taken against. The width worry that prompted the short form came from the one-up grid's
+ * 8.5pt text and did not survive the move to 7.5pt.
+ *
+ * TWO earlier versions of this sentence were wrong, so the method is recorded next to the number. The
+ * long-standing "74.7pt (82.4pt worst case)" is REAL — 74.730pt and 82.395pt both reproduce exactly — but
+ * they are two sample points, not bounds, and reading them as a min/max is what made them look
+ * unreproducible. A replacement "71.8-83.7pt" was then asserted here on trust, and it is wrong in both
+ * directions. Re-measure with pdfkit's `widthOfString` before editing this line; do not adjust it from
+ * memory or from a summary.
  */
 function formatPhotoDateCompact(value: string | null, fallback: string): string {
   const date = new Date(value ?? fallback);
