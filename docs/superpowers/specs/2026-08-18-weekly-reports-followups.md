@@ -232,8 +232,11 @@ one, evicting a real held callback and leaving the glasses unpaired — is there
    change that is already safe.
 
 ### Failure modes to design against
-- **`mobile/` is not in CI at all and has no OTA.** Nothing compiles it on push, so a break ships
-  unchecked for days and cannot be pulled back without a store release. Verify locally.
+- **`mobile/` has no OTA.** (It *is* CI-gated — `premerge-build-gate.yml` runs `npm ci`, typecheck, jest
+  and `expo export` — an older note here said otherwise and was wrong.) CI compiling the app is not the
+  risk; **delivery** is. A change reaches devices only through an EAS build, TestFlight and a user
+  installing it, so a break cannot be pulled back without a store release and lives on un-updated phones
+  indefinitely. That is also why this flag's precondition is the build in the field, not the repo.
 - `mobile/` has **two source roots** (`mobile/app` and `mobile/src`). Sweep both, and parse the TS AST
   rather than grepping.
 - The flag is read as `String(env.…).trim().toLowerCase() === "true"`, so `"1"` is **false**. Set it

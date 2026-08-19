@@ -12,16 +12,30 @@ These touch nothing PR5 owns, so they do not wait on it.
 ### PR A1 — enable the deep-link flag *(smallest; do it first)*
 **Base:** `main`
 
-1. Verify `trockcam://reports/...` resolves to the report route and never reaches
-   `pairing-callback.ts`. Both preconditions already hold — `APP_OWN_ROUTES` contains `"reports"` and
-   `mobile/app/(app)/reports/` exists — so this is a confirmation, not a build.
-2. Set `WEEKLY_REPORT_APP_DEEP_LINKS=true`. Literally `true`; `"1"` parses as false.
-3. Rewrite the stale comment block at `weekly-report-reminders.ts:187`. It still says the route and the
-   `APP_OWN_ROUTES` entry are missing, which would talk the next reader out of a safe change.
+1. **Replace the emitted URL with `trockcam://reports` (the hub).** The worker emitted
+   `trockcam://reports/weekly/<weeklyReportProjectId>?weekOf=…`, which file-system-routes to
+   `reports/weekly/[draftId].tsx` — and that segment is a **local draft id**, not a server project id. A
+   server id there matches nothing on the device and renders *"Draft not found. It may have been submitted
+   or discarded."* Do this **before** step 3, not after: enabling the flag without it ships that link.
+   Drop the now-dead `weeklyReportProjectId` / `weekOf` inputs rather than leaving them implying a routing
+   that does not exist.
+2. Verify `trockcam://reports` never reaches `pairing-callback.ts`. `APP_OWN_ROUTES` contains `"reports"`,
+   so this is a confirmation, not a build.
+3. Set `WEEKLY_REPORT_APP_DEEP_LINKS`. Parsed as `=== "true"` after trim+lowercase, so `"1"` and `"yes"`
+   are false. ⚠️ **Ship it `false`.** The deny-list that decides what a tapped link does is the one
+   compiled into the build ON THE PHONE, and `"reports"` entered `APP_OWN_ROUTES` in the same commit as
+   the route (#1073) — which `mobile/` has no OTA to deliver. On any older build the link is retained as a
+   Meta pairing callback and unpairs the glasses. Enabling is a human call once field adoption is
+   confirmed; no test in this repo can assert it.
+4. Rewrite the stale comment block at `weekly-report-reminders.ts:187`, which still says the route and the
+   `APP_OWN_ROUTES` entry are missing — and state the real gate, which is the shipped build.
 
-**Tests:** a reminder-job test asserting `appUrl` is emitted when the flag is on; a `pairing-callback`
-test that a reports URL is not retainable (extend the existing one rather than duplicating it).
-**Risk:** `mobile/` is not in CI and has no OTA. Verify locally before pushing.
+**Tests:** an end-to-end reminder-job test asserting `appUrl` IS emitted when the flag is on (every
+job-level assertion was negative, so replacing the flag read with a literal `false` left all 97 green); a
+`pairing-callback` test that the exact emitted string is not retainable.
+**Risk:** `mobile/` has **no OTA**, so a break reaches devices only via a store release and lives on
+un-updated phones indefinitely. It *is* CI-gated (typecheck + jest + `expo export`), but verify on a
+device anyway — CI compiles the app, it does not tell you what anyone is running.
 
 ### PR A2 — server-side dictation
 **Base:** `main`
@@ -78,7 +92,12 @@ bounce on version N leaves N+1 untouched; an unsigned request is rejected.
 **Base:** B2
 
 1. Worker sweep over `weekly_reports_send_undelivered_idx`, per office via `search_path`.
-2. Age against `send_last_attempt_at`, **never** `sent_at`.
+2. Age against **`max(sent_at, send_last_attempt_at)`** — never `sent_at` alone, and never
+   `send_last_attempt_at` alone either. This step used to say the latter, which is wrong in exactly the
+   case the job exists for: a send that dead-letters before the worker writes `send_last_attempt_at` has a
+   NULL there, so an attempt-only clock yields a null age and the sweep skips the report entirely — no
+   alert, on the failure it was built to catch. Take the later of the two, which is what the board's
+   `lastSendActivityAt` already computed; put it in `shared/` so board and sweep cannot diverge.
 3. Alert on the *transition* into stalled, with per-report suppression — an alert every pass gets muted.
 4. Skip reports superseded by a correction; that is not a delivery failure.
 
