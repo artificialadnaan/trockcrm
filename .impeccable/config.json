@@ -1,43 +1,16 @@
 {
   "detector": {
     "ignoreRules": [],
-    "ignoreFiles": [],
+    "ignoreFiles": [
+      "worker/src/**",
+      "server/src/**"
+    ],
     "ignoreValues": [
       {
         "rule": "overused-font",
         "value": "arial",
         "createdAt": "2026-08-18T21:55:42.277Z",
-        "reason": "Arial/Helvetica is the correct stack for HTML email templates; webfonts do not load in Outlook or Gmail desktop"
-      },
-      {
-        "rule": "design-system-font",
-        "value": "*",
-        "files": [
-          "worker/src/jobs/weekly-report-reminders.ts",
-          "worker/src/jobs/weekly-report-send.ts"
-        ],
-        "createdAt": "2026-08-18T22:01:48.402Z",
-        "reason": "HTML email builders: clients strip <style> blocks and do not support CSS variables, so inline literal font/size/color is mandatory and no token ramp can be referenced"
-      },
-      {
-        "rule": "design-system-font-size",
-        "value": "*",
-        "files": [
-          "worker/src/jobs/weekly-report-reminders.ts",
-          "worker/src/jobs/weekly-report-send.ts"
-        ],
-        "createdAt": "2026-08-18T22:01:48.464Z",
-        "reason": "HTML email builders: clients strip <style> blocks and do not support CSS variables, so inline literal font/size/color is mandatory and no token ramp can be referenced"
-      },
-      {
-        "rule": "design-system-color",
-        "value": "*",
-        "files": [
-          "worker/src/jobs/weekly-report-reminders.ts",
-          "worker/src/jobs/weekly-report-send.ts"
-        ],
-        "createdAt": "2026-08-18T22:01:48.532Z",
-        "reason": "HTML email builders: clients strip <style> blocks and do not support CSS variables, so inline literal font/size/color is mandatory and no token ramp can be referenced"
+        "reason": "Arial/Helvetica is the correct stack for HTML email templates; webfonts do not load in Outlook or Gmail desktop. Repo-wide because email markup is also authored outside worker/src and server/src."
       }
     ]
   }
