@@ -88,6 +88,11 @@ beforeEach(() => {
   sendMock.mockReset();
   sendMock.mockResolvedValue({ data: { id: "msg_1" } });
   vi.stubEnv("NODE_ENV", "production");
+  // This job refuses to email a customer from a deployment that has not explicitly opted in, so the cases
+  // below stand in for an AUTHORISED production worker. NODE_ENV is not that opt-in and never could be:
+  // Dockerfile.worker bakes `production` into the image, so it reads the same on a staging worker running
+  // that image as it does here. See assertMayEmailRealClients.
+  vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", "true");
 });
 
 afterEach(() => {

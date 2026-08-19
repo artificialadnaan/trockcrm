@@ -16,8 +16,13 @@ import { errorHandler } from "../src/middleware/error-handler.js";
 //      that is pinned. It matters because the service layer suggests otherwise: `canPublishWeeklyReport`
 //      allows "the assigned PM or an admin/director", but the roles that may HOLD the PM slot
 //      (ASSIGNABLE_ROLES: field_contractor/construction/admin/director) do not intersect the roles these
-//      routes admit except at admin/director — so the assigned-PM arm is unreachable here and this PR
-//      ships no send capability for a PM. That capability is deferred to the T-Rock Cam field mount.
+//      routes admit except at admin/director — so the assigned-PM arm is unreachable HERE.
+//
+//      That is not a gap any more, and it must not be "fixed" by widening this router. The assigned PM
+//      sends from /api/field/weekly-reports (field-routes.ts), over the same send-service.ts, gated by
+//      `canPublishWeeklyReport` rather than by a role. Relaxing the gate below would enable nothing new
+//      and would hand every superintendent in the office the leadership board, the client contact book
+//      and the dismissal ledger. The refusals asserted here are load-bearing, not leftovers.
 //
 //   3. WHO MAY REWRITE THE CLIENT ADDRESSES the send modal pre-fills. The project routes are open to
 //      every `rep`, and `client_*_email` became an email sink the moment this branch turned it into
@@ -98,9 +103,10 @@ describe("the send routes sit behind the role gate", () => {
     expect((await request(appAs("director"))[method](path)).status).not.toBe(403);
   });
 
-  it("refuses the role a real assigned PM actually holds — the deferral, stated", async () => {
-    // `construction` is what a T-Rock PM logs in as. The send service would accept them; the CRM has no
-    // route that will. Their send belongs on /api/field, which the mobile PR mounts.
+  it("refuses the role a real assigned PM actually holds — ON THIS ROUTER, by design", async () => {
+    // `construction` is what a T-Rock PM logs in as. The send service accepts them (their project row
+    // names them as PM); this router does not, and that is the boundary rather than a bug. Their send is
+    // POST /api/field/weekly-reports/reports/:id/send, on a mount that carries only their own reports.
     const response = await request(appAs("construction")).post(
       `/weekly-reports/reports/${REPORT}/send`,
     );

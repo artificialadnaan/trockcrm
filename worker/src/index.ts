@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, pollWeeklyReportSendJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -87,6 +87,14 @@ async function main() {
   // this poller claims only that type (one at a time).
   setInterval(pollGlassesWalkthroughForwardJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling glasses_walkthrough_forward queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // And the client weekly-report send, which renders the report's PDF before it can send — decoding every
+  // photo on it into memory and uploading to R2. On the main poller's three shared slots that is both the
+  // OOM shape ai_report_generation is serialized to avoid and a starvation shape, since the same poller
+  // carries RFP delivery and email sync and a Monday morning sends many reports at once. pollJobs excludes
+  // weekly_report_send; this poller claims only that type, one at a time.
+  setInterval(pollWeeklyReportSendJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling weekly_report_send queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
   // NOTE: the recoverStaleJobs call above is no longer the ONLY one. It now also runs periodically, from
   // inside pollJobs (startExpiredJobLeaseSweepIfDue, which STARTS the sweep beside the tick rather than

@@ -34,11 +34,18 @@ const SEND_REQUEST = {
 
 const SILENT_LOGGER = { log: () => {}, warn: () => {}, error: () => {} };
 
-// THESE TESTS DESCRIBE THE DEPLOYED WORKER, which Dockerfile.worker runs with NODE_ENV=production. The
-// job refuses to email a client from anything else unless EMAIL_OVERRIDE_RECIPIENT redirects the mail
-// somewhere internal — see "not from a laptop" below, which unsets this to assert the refusal.
+// THESE TESTS DESCRIBE AN AUTHORISED PRODUCTION WORKER. The job refuses to email a customer from any
+// deployment that has not explicitly opted in, so the flag is stubbed here and unset by the cases that
+// assert the refusal — see "only an explicitly authorised deployment may email a real client" below.
+//
+// NODE_ENV is stubbed to `production` too, and NOT because the guard reads it: it does not, deliberately.
+// `Dockerfile.worker` bakes `ENV NODE_ENV=production` into the runtime stage, so that value is a property
+// of the IMAGE and is identical on the production worker, on a staging worker running the same image, and
+// on `node worker/dist/index.js` locally. Keeping it stubbed here is what lets the refusal cases prove the
+// guard no longer depends on it.
 beforeEach(() => {
   vi.stubEnv("NODE_ENV", "production");
+  vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", "true");
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -269,7 +276,15 @@ describe("making failure visible", () => {
     // `sendSystemEmailWithMetadata` returns `{ success: false }` rather than throwing for a Resend error
     // and for an unconfigured API key in production. Reading only the throw would stamp those delivered.
     const { query, updates } = fakeQuery(baseRow());
-    const sendEmail = vi.fn(async () => ({ success: false, messageId: null }));
+    // The FULL failure shape, not `{success, messageId}`: this file is outside the typecheck program, so a
+    // stub missing `outcome` and `reason` compiles happily and quietly tests a result the library cannot
+    // return. Here it is Resend's rate limit — a real 429.
+    const sendEmail = vi.fn(async () => ({
+      success: false,
+      messageId: null,
+      outcome: "rejected" as const,
+      reason: "rate_limit_exceeded 429: Too many requests. Please limit the number of requests per second.",
+    }));
 
     await expect(
       handleWeeklyReportSend(payload(), null, {
@@ -306,21 +321,13 @@ describe("making failure visible", () => {
     expect(updates.find((u) => u.sql.includes("send_attempts"))!.params[1]).toMatch(/no stored send request/i);
   });
 
-  it("truncates a runaway provider message rather than writing an unbounded row", async () => {
-    const { query, updates } = fakeQuery(baseRow());
-    const sendEmail = vi.fn(async () => {
-      throw new Error("x".repeat(5000));
-    });
-    await expect(
-      handleWeeklyReportSend(payload(), null, {
-        query,
-        sendEmail,
-        resolvePdfKey: async () => null,
-        logger: SILENT_LOGGER,
-      }),
-    ).rejects.toThrow();
-    expect(String(updates.find((u) => u.sql.includes("send_attempts"))!.params[1])).toHaveLength(500);
-  });
+  // NOTE: the truncation of a runaway provider message is asserted in "a send failure a PM can actually
+  // act on" below, from a RESULT rather than a throw. The version that used to live here injected a stub
+  // that THREW a 5000-character error, and `sendSystemEmailWithMetadata` never throws for a provider or
+  // network failure — resend@6.10.0 wraps its entire fetch in try/catch and returns
+  // `{error:{name:"application_error", statusCode:null}}` (verified in node_modules/resend/dist/index.cjs).
+  // So it drove the slice down a path no deployed input can reach, and would have stayed green through
+  // any change to the path that is actually taken.
 });
 
 describe("a delivery that succeeded is never written down as a failure", () => {
@@ -374,12 +381,199 @@ describe("a delivery that succeeded is never written down as a failure", () => {
   });
 });
 
+describe("a send failure a PM can actually act on", () => {
+  // `send_error` is the ONLY diagnostic this feature ships: weekly-reports-page.tsx renders it as the
+  // tooltip on the "Send failed" chip. It used to be the SAME 42-character constant for every reachable
+  // production failure, because the handler read `result.success` and threw away `result.outcome`. A
+  // director whose send died on a misspelled client domain (fix: issue a correction with the right
+  // address) saw byte-identical text to one who was rate-limited (fix: wait) and to one whose worker had
+  // no RESEND_API_KEY (fix: an env var).
+  //
+  // The stubs below return what `sendSystemEmailWithMetadata` ACTUALLY returns for these cases —
+  // `{success:false, messageId:null, outcome, reason}` — and never throw, because it never throws for a
+  // provider or network failure: resend@6.10.0 wraps its whole fetch in try/catch and hands back an
+  // ordinary error result. worker/tests/lib/system-email.test.ts pins both halves of that shape against
+  // the real dependency.
+  const REJECTED_REASON =
+    "validation_error 422: Invalid `to` field. The following addresses are invalid: jay@exmaple.cmo";
+  const UNKNOWN_REASON =
+    "application_error: Unable to fetch data. The request could not be resolved.";
+
+  function failingSend(outcome: "rejected" | "unknown", reason: string) {
+    return vi.fn(async () => ({ success: false, messageId: null, outcome, reason }));
+  }
+
+  async function sendErrorFor(sendEmail: ReturnType<typeof failingSend>): Promise<string> {
+    const { query, updates } = fakeQuery(baseRow());
+    await expect(
+      handleWeeklyReportSend(payload(), null, {
+        query,
+        sendEmail,
+        resolvePdfKey: async () => null,
+        logger: SILENT_LOGGER,
+      }),
+    ).rejects.toThrow();
+    return String(updates.find((u) => u.sql.includes("send_attempts"))!.params[1]);
+  }
+
+  it("writes the provider's own words, so a typo'd client address does not read like a rate limit", async () => {
+    const written = await sendErrorFor(failingSend("rejected", REJECTED_REASON));
+    expect(written).toContain("validation_error");
+    expect(written).toContain("jay@exmaple.cmo");
+    expect(written).not.toBe("Email provider returned unsuccessful result");
+  });
+
+  it("says whether the message was PROVABLY not sent, or merely unconfirmed", async () => {
+    // The distinction the API's retry route needs: `rejected` created nothing, so a replay cannot
+    // duplicate it at any age; `unknown` may already be in the client's inbox. Discarding `outcome`
+    // collapsed them into one string, which is why a PM retrying a provable rejection past the provider
+    // dedup window is warned about a second copy that cannot exist.
+    const rejected = await sendErrorFor(failingSend("rejected", REJECTED_REASON));
+    const unknown = await sendErrorFor(failingSend("unknown", UNKNOWN_REASON));
+    expect(rejected.startsWith("rejected")).toBe(true);
+    expect(unknown.startsWith("unknown")).toBe(true);
+    expect(rejected).not.toBe(unknown);
+  });
+
+  it("still records something usable when the provider gave no reason at all", async () => {
+    const written = await sendErrorFor(failingSend("unknown", ""));
+    expect(written.startsWith("unknown")).toBe(true);
+    expect(written.length).toBeGreaterThan(0);
+  });
+
+  it("bounds a runaway provider message, from an input the provider can really produce", async () => {
+    // Resend's validation error names every address it refused. A weekly report addressed to a long
+    // distribution list produces a message thousands of characters long, and `send_error` is read into a
+    // tooltip. This is what the old truncation test claimed to cover with a stub that THREW a 5000-character
+    // error — a shape no deployed input can produce, so the slice was never exercised by anything real.
+    const refused = Array.from(
+      { length: 120 },
+      (_, index) => `contact${index}@a-very-long-client-domain-example.com`,
+    ).join(", ");
+    const reason = `validation_error 422: Invalid \`to\` field. The following addresses are invalid: ${refused}`;
+    expect(reason.length).toBeGreaterThan(500);
+    expect(await sendErrorFor(failingSend("rejected", reason))).toHaveLength(500);
+  });
+});
+
+describe("a correction issued while the PDF was still rendering", () => {
+  const NEWER_REPORT = "1c0a7d51-0f2e-4b76-8f1a-2d9c3e5b7a04";
+
+  /** A `query` whose SELECT answer can change mid-handler, which is the whole point of these cases. */
+  function mutableQuery(rowFor: () => Record<string, unknown>) {
+    const updates: Array<{ sql: string; params: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (/^\s*SELECT/i.test(sql)) return { rows: [rowFor()], rowCount: 1 };
+      updates.push({ sql, params });
+      return { rows: [], rowCount: 1 };
+    });
+    return { query: query as any, updates, calls: query };
+  }
+
+  it("does not deliver a version that was superseded while its PDF rendered", async () => {
+    // CHECK-THEN-ACT across the longest thing this job does. `superseded_by_id` is read once at the top
+    // and nothing re-reads it, while resolving the PDF downloads and transcodes every photo and uploads
+    // to R2 — seconds during which a PM can issue a correction. That stamps `superseded_by_id` on THIS
+    // row and queues v2, and this job then sends anyway.
+    //
+    // The client receives BOTH and neither admits the other exists: v1 carries a frozen
+    // `isCorrection: false`, and v2's own `isCorrection` was computed from `send_delivered_at IS NOT NULL`
+    // on v1 — still NULL at the moment v2 was committed — so v2 says it is not a correction either. Two
+    // "here is this week's report" emails, two links, one of which renders a superseded banner.
+    let superseded = false;
+    const { query, updates } = mutableQuery(() =>
+      baseRow(superseded ? { superseded_by_id: NEWER_REPORT } : {}),
+    );
+    const sendEmail = okSend();
+
+    await expect(
+      handleWeeklyReportSend(payload(), null, {
+        query,
+        sendEmail,
+        // The correction lands while this render is in flight.
+        resolvePdfKey: async () => {
+          superseded = true;
+          return null;
+        },
+        logger: SILENT_LOGGER,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    // Skipped, not recorded as a failure — the same reasoning the top-of-handler check gives. No amount
+    // of retrying makes a superseded report the right thing to send, and a "Send failed" chip on v1 would
+    // send a PM chasing a delivery that must never happen.
+    expect(updates).toHaveLength(0);
+  });
+
+  it("does not deliver a report another worker delivered while its PDF rendered", async () => {
+    // The other duplicate in the same window: a retry running concurrently with the original.
+    let delivered = false;
+    const { query, updates } = mutableQuery(() =>
+      baseRow(delivered ? { send_delivered_at: "2026-08-13T21:05:00.000Z" } : {}),
+    );
+    const sendEmail = okSend();
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail,
+      resolvePdfKey: async () => {
+        delivered = true;
+        return null;
+      },
+      logger: SILENT_LOGGER,
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(0);
+  });
+
+  it("does not deliver under a delivery key the row stopped describing mid-render", async () => {
+    let rekeyed = false;
+    const { query } = mutableQuery(() =>
+      baseRow(rekeyed ? { send_delivery_key: "a-newer-request-key" } : {}),
+    );
+    const sendEmail = okSend();
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail,
+      resolvePdfKey: async () => {
+        rekeyed = true;
+        return null;
+      },
+      logger: SILENT_LOGGER,
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("CONTROL: still delivers when nothing changed while the PDF rendered", async () => {
+    const { query, updates } = fakeQuery(baseRow());
+    const sendEmail = okSend();
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail,
+      resolvePdfKey: async () => null,
+      logger: SILENT_LOGGER,
+    });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    // The re-read RAN and let it through — two SELECTs, one before the render and one after. Without this
+    // the three guards above would also pass on a handler that simply stopped sending.
+    expect(query.mock.calls.filter(([sql]: [string]) => /^\s*SELECT/i.test(String(sql)))).toHaveLength(2);
+    expect(updates.find((u) => u.sql.includes("send_delivered_at"))!.params[2]).toBe(true);
+  });
+});
+
 describe("not from a laptop", () => {
-  it("refuses to email a real client from a non-production worker with no override", async () => {
+  it("refuses to email a real client from an unauthorised worker with no override", async () => {
     // EMAIL_OVERRIDE_RECIPIENT was the only thing standing between a staging or local worker holding a
     // copied RESEND_API_KEY and a real client's inbox, and it ships EMPTY in .env.example. Every other
     // system email in this codebase goes to colleagues; this one goes to a customer contact table.
     vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", "");
     const { query, updates } = fakeQuery(baseRow());
     const sendEmail = okSend();
 
@@ -390,17 +584,20 @@ describe("not from a laptop", () => {
         resolvePdfKey: async () => null,
         logger: SILENT_LOGGER,
       }),
-    ).rejects.toThrow(/non-production worker/i);
+    ).rejects.toThrow(/not authorised to email real clients/i);
 
     expect(sendEmail).not.toHaveBeenCalled();
     // Refused loudly, not silently: the row says exactly what happened.
     expect(String(updates.find((u) => u.sql.includes("send_attempts"))!.params[1])).toMatch(
-      /non-production worker/i,
+      /not authorised to email real clients/i,
     );
   });
 
   it("stands aside when an override redirects the mail somewhere internal", async () => {
+    // The override is not a weaker opt-in — it redirects EVERY recipient to one internal mailbox before
+    // the provider is called, so there is no client left to protect.
     vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", "");
     vi.stubEnv("EMAIL_OVERRIDE_RECIPIENT", "dev@trockconstruction.com");
     const { query } = fakeQuery(baseRow());
     const sendEmail = okSend();
@@ -411,6 +608,64 @@ describe("not from a laptop", () => {
       logger: SILENT_LOGGER,
     });
     expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("only an explicitly authorised deployment may email a real client", () => {
+  async function attempt() {
+    const { query, updates } = fakeQuery(baseRow());
+    const sendEmail = okSend();
+    const run = handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail,
+      resolvePdfKey: async () => null,
+      logger: SILENT_LOGGER,
+    });
+    return { run, sendEmail, updates };
+  }
+
+  it("refuses even under NODE_ENV=production, because the deployed image hardcodes exactly that", async () => {
+    // `Dockerfile.worker` sets `ENV NODE_ENV=production` in its RUNTIME stage, so the value is baked into
+    // the ARTIFACT rather than supplied by the deployment. It reads `production` for the production
+    // worker, for a staging worker running the identical image against a restored production dump, and
+    // for `node worker/dist/index.js` on a laptop. A constant cannot say WHICH deployment is running, so
+    // the guard it keyed on passed unconditionally in the one case its own docblock named as the threat:
+    // "a staging or laptop worker with a copied RESEND_API_KEY".
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", "");
+    vi.stubEnv("EMAIL_OVERRIDE_RECIPIENT", "");
+    const { run, sendEmail, updates } = await attempt();
+
+    await expect(run).rejects.toThrow(/not authorised to email real clients/i);
+    expect(sendEmail).not.toHaveBeenCalled();
+    // Refused loudly, not silently: the row names the variable an operator has to set.
+    expect(String(updates.find((u) => u.sql.includes("send_attempts"))!.params[1])).toContain(
+      "WEEKLY_REPORT_CLIENT_EMAIL_ENABLED",
+    );
+  });
+
+  it("treats anything short of an explicit opt-in as no opt-in", async () => {
+    // Fail-closed in every direction: unset, blank, and a value that plainly says no all refuse. A flag
+    // whose absence permits the send is not a control.
+    for (const value of ["", "  ", "false", "0", "no", "production"]) {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("EMAIL_OVERRIDE_RECIPIENT", "");
+      vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", value);
+      const { run, sendEmail } = await attempt();
+      await expect(run).rejects.toThrow(/not authorised to email real clients/i);
+      expect(sendEmail).not.toHaveBeenCalled();
+    }
+  });
+
+  it("CONTROL: delivers when the deployment says, in so many words, that it may", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("EMAIL_OVERRIDE_RECIPIENT", "");
+    vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", "TRUE");
+    const { run, sendEmail, updates } = await attempt();
+
+    await expect(run).resolves.toBeUndefined();
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(updates.find((u) => u.sql.includes("send_delivered_at"))!.params[2]).toBe(true);
   });
 });
 

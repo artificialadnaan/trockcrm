@@ -36,6 +36,7 @@ import {
   weeklyReportPdfFilename,
 } from "./pdf-service.js";
 import {
+  assertClientLinksAreConfigured,
   isWeeklyReportShareableStatus,
   listWeeklyReportTokens,
   mintWeeklyReportToken,
@@ -78,8 +79,9 @@ router.use(requireRole("admin", "director", "rep"));
 // only after `loadPublishableReport` has taken FOR UPDATE on two rows.
 //
 // The assigned PM's publication action belongs on the FIELD router (/api/field/weekly-reports), where
-// that PM actually works and where their app already authenticates. Deliberately deferred to the
-// send-flow PR rather than half-built here.
+// that PM actually works and where their app already authenticates. It NOW LIVES THERE — field-routes.ts
+// mounts send-draft / send / send-retry / correction over the same send-service.ts these routes call — so
+// the answer to "how does a construction PM publish?" is that router, not a widening of this one.
 
 function requireUuid(value: unknown, label: string): string {
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
@@ -120,30 +122,6 @@ function asOfFrom(req: Request): string {
 
 function readQueryString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-/**
- * Refuse to mint a client link when nothing says where client links live.
- *
- * FAILS CLOSED IN PRODUCTION, warns elsewhere. The deploy is configured today
- * (reports.trockcam.com), so this is fragility rather than a live bug — but the cost of being wrong is a
- * client receiving an email whose only link 404s, discoverable by nobody but them, and the send is
- * irreversible the moment the transaction commits. A local or CI process legitimately has no such host,
- * so the refusal is scoped to the environment where a real client is on the other end.
- */
-function assertClientLinksAreConfigured(): void {
-  if (process.env.PUBLIC_SHARE_BASE_URL?.trim()) return;
-  if (process.env.NODE_ENV === "production") {
-    throw new AppError(
-      500,
-      "Client links are not configured (PUBLIC_SHARE_BASE_URL is unset), so the link in the client's " +
-        "email would not resolve. Nothing has been sent.",
-    );
-  }
-  console.warn(
-    "[weekly-report] PUBLIC_SHARE_BASE_URL is unset — a client link would be minted against FRONTEND_URL " +
-      "or the request host, neither of which is guaranteed to serve /wr.",
-  );
 }
 
 /**
@@ -443,7 +421,7 @@ router.post("/reports/:id/transition", async (req, res, next) => {
 // ---------------------------------------------------------------------------
 
 /**
- * THE CRM's SEND IS A LEADERSHIP ACTION. The assigned PM's send is on the field route, and it is deferred.
+ * THE CRM's SEND IS A LEADERSHIP ACTION. The assigned PM's send is on the FIELD route.
  *
  * Stated as a role gate rather than left implicit, because implicit it was WRONG in a way that read as
  * right. `canPublishWeeklyReport` allows "the assigned PM or an admin/director"; the router above admits
@@ -457,12 +435,22 @@ router.post("/reports/:id/transition", async (req, res, next) => {
  * `construction` — is deliberately NOT taken: this router is the office-wide leadership board, the client
  * contact book and the dismissal ledger, and the construction role's CRM boundary is a known open issue.
  *
- * The assigned PM's own send belongs on /api/field/weekly-reports, where that PM already authenticates and
- * where `canPublishWeeklyReport`'s assigned-PM arm becomes reachable and meaningful. That mount is the
- * mobile PR's work (the app's Reports group has not merged), which is why every piece of composition,
- * validation and delivery lives in send-service.ts: that PR adds a route and no logic.
+ * THIS LINE THEREFORE STAYS AS IT IS EVEN THOUGH THE PM CAN NOW SEND. Their route is
+ * /api/field/weekly-reports (field-routes.ts), which authenticates the same person on a mount that carries
+ * only their own reports; every piece of composition, validation and delivery lives in send-service.ts, so
+ * that router adds routing and no logic. Relaxing the gate here would not enable anything new — it would
+ * hand the whole leadership surface to every superintendent to enable something that already works.
  */
-const requireWeeklyReportSender = requireRole("admin", "director");
+/**
+ * The roles that may send a weekly report from the CRM.
+ *
+ * A named constant rather than inline arguments so the boundary is assertable: the test that pins "an
+ * assigned PM cannot send from the CRM" intersects this with `ASSIGNABLE_ROLES` instead of re-typing both
+ * lists, and therefore actually fails if this widens.
+ */
+export const WEEKLY_REPORT_SENDER_ROLES = ["admin", "director"] as const;
+
+const requireWeeklyReportSender = requireRole(...WEEKLY_REPORT_SENDER_ROLES);
 
 /**
  * The send modal, COMPOSED SERVER-SIDE and returned as data.
@@ -561,21 +549,21 @@ router.post("/reports/:id/correction", requireWeeklyReportSender, async (req, re
   }
 });
 
-// T-ROCK CAM — AND THE ASSIGNED PM'S SEND, WHICH DOES NOT EXIST YET.
+// T-ROCK CAM — AND THE ASSIGNED PM'S SEND, WHICH IS ON THE OTHER MOUNT.
 //
 // The four endpoints above are the LEADERSHIP send: admin/director only, as `requireWeeklyReportSender`
 // states. They are mounted on the CRM router, which the app cannot reach — its surface is /api/field, a
 // separate mount with its own authorisation.
 //
 // The assigned PM is normally a `construction` or `field_contractor` user (ASSIGNABLE_ROLES), so they are
-// refused here by design and have NO send capability in this PR. That is the deferral, stated plainly so
-// nobody reads `canPublishWeeklyReport`'s assigned-PM arm as a shipped feature: on this router that arm
-// can only ever fire for somebody who is already an admin or director, and it exists for the field mount.
+// refused HERE by design. Their four counterparts are in field-routes.ts, gated by
+// `canPublishWeeklyReport` instead of by a role — which is where that predicate's assigned-PM arm becomes
+// reachable and meaningful, and why it was written before anything consumed it.
 //
-// Attaching that mount is deliberately left to the mobile PR: the app's Reports group (#1073) has not
-// merged, so there is nowhere for the modal to live and a field route added now would be an unreachable,
-// untested authorisation surface. The composition, validation and delivery are all in send-service.ts
-// precisely so that PR adds a route and no logic.
+// BOTH MOUNTS CALL THE SAME send-service.ts. Not as a tidiness preference: the recipient rules, the
+// subject, the body, the correction wording, the supersede predicate and the retry's duplicate-risk gate
+// are all decisions a client sees, and a second implementation of any of them means the PM approves one
+// email and the client receives another. The two routers differ in authentication and in nothing else.
 
 // ---------------------------------------------------------------------------
 // PDF + the client share link

@@ -176,6 +176,10 @@ describe("the app's own deep links", () => {
     // The Weekly Reports group. Unlisted, this link would be retained as a possible Meta callback and
     // evict a real held one — the app's own deep link silently breaking glasses pairing.
     expect(pairing.isRetainablePairingUrl("trockcam://reports/weekly/abc")).toBe(false);
+    // The EXACT link worker/src/jobs/weekly-report-reminders.ts emails out when
+    // WEEKLY_REPORT_APP_DEEP_LINKS is on. Written as a literal, not imported: this side must keep
+    // working whatever the worker does, and the point of the assertion is that the two agree.
+    expect(pairing.isRetainablePairingUrl("trockcam://reports")).toBe(false);
     expect(pairing.isRetainablePairingUrl("trockcam://Reports")).toBe(false);
     expect(pairing.isRetainablePairingUrl("https://field.example.com/reports/weekly/abc")).toBe(false);
   });
