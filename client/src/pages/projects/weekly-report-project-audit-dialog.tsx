@@ -141,9 +141,20 @@ function ProjectSubtitle({ audit }: { audit: WeeklyReportProjectAudit }) {
 }
 
 function AuditBody({ audit }: { audit: WeeklyReportProjectAudit }) {
-  const undelivered = useMemo(() => audit.reports.filter((r) => r.undelivered).length, [audit.reports]);
-  // Only LIVE versions are counted as sent. A superseded one was replaced by a correction; counting it
-  // would report two sends of the same week to a director trying to reconcile what the client holds.
+  // Both counts exclude SUPERSEDED versions, and for the same reason.
+  //
+  // A week whose v1 bounced and whose v2 was then delivered is a resolved week: the client has their
+  // report. Counting v1 as still-undelivered puts a permanent red "1 not delivered" on a project where
+  // nothing is outstanding — and it contradicted the two things beside it, because the report card
+  // already suppresses its own chip on a superseded row and the sent count already skipped them. The
+  // aggregate was the one surface still claiming a failure the other two called resolved.
+  //
+  // Caught by Greptile on this PR; the `sent` half had the guard from the start, which is precisely how
+  // the disagreement hid.
+  const undelivered = useMemo(
+    () => audit.reports.filter((r) => r.undelivered && !r.supersededById).length,
+    [audit.reports],
+  );
   const sent = useMemo(
     () => audit.reports.filter((r) => r.status === "sent" && !r.supersededById).length,
     [audit.reports],
