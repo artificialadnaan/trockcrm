@@ -114,12 +114,35 @@ export type StreamEnduranceCheck = {
   /** How far into the run the LAST frame landed, or -1 if none ever did. */
   secondsToLastFrame: number;
   /**
-   * Whether any rung held the shared `AVAudioSession` at the end of the window. Optional so a
+   * Whether any rung held the shared `AVAudioSession` at any point in the window. Optional so a
    * payload from a native build that hard-coded it reads as "not observed" rather than as a
    * measurement — the old build sent a literal `false` that could not fail.
    */
   audioSessionUsed?: boolean;
+  /**
+   * The component readings the native side derived `audioSessionUsed` from.
+   *
+   * Checked here as well, rather than trusting the summary boolean, because the native half of this
+   * is compiled by NOTHING — not by CI and not locally, since the SDK arrives at prebuild. A wrong
+   * `audioSessionUsed` therefore ships unnoticed, and it already has once: it was first a hard-coded
+   * `false`, then a single end-of-window owner LEVEL, which reads zero for a rung-8 recording that
+   * started and finished inside this window. Re-deriving from the parts is the only check that runs
+   * anywhere. Absent on any build that did not report them.
+   */
+  audioOwnersAtStart?: number;
+  audioOwnersAtEnd?: number;
+  audioActivationsDuringWindow?: number;
 };
+
+/** Any reading that says a share was held at either edge of the window, or taken inside it. */
+function audioContaminated(check: StreamEnduranceCheck): boolean {
+  return (
+    check.audioSessionUsed === true
+    || (check.audioOwnersAtStart ?? 0) > 0
+    || (check.audioOwnersAtEnd ?? 0) > 0
+    || (check.audioActivationsDuringWindow ?? 0) > 0
+  );
+}
 
 /**
  * Rung 11: does glasses video sustain with NO audio session anywhere?
@@ -136,12 +159,12 @@ export function describeStreamEndurance(check: StreamEnduranceCheck): string {
   // difference" read off a run that had HFP up is not a weaker version of the answer, it is the
   // opposite one.
   //
-  // `=== true` rather than truthiness: absent means a native build that never measured this, and
-  // an unmeasured field must not manufacture an inconclusive any more than it should manufacture
-  // a pass.
-  if (check.audioSessionUsed === true) {
+  // `=== true` rather than truthiness, and `?? 0` on the counts: absent means a native build that
+  // never measured this, and an unmeasured field must not manufacture an inconclusive any more than
+  // it should manufacture a pass. A reported ZERO is a measurement and is trusted as one.
+  if (audioContaminated(check)) {
     return (
-      `INCONCLUSIVE — an audio session was in force at the end of the window, so this was not the `
+      `INCONCLUSIVE — an audio session was in force during the window, so this was not the `
       + `no-audio measurement it claims to be. Another rung took the audio session while this ran; `
       + `whichever way the frames went, HFP cannot be ruled in or out from it. Re-run it alone.`
     );

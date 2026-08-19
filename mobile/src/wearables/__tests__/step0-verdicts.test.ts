@@ -588,6 +588,56 @@ describe("describeStreamEndurance", () => {
     expect(noFrames).not.toContain("NO FRAMES AT ALL");
   });
 
+  // GREPTILE, on 61d2b76e0. The native side derived `audioSessionUsed` from an end-of-window owner
+  // LEVEL, and a level cannot see a share that was taken and given back inside the window: rung 8
+  // records for ten seconds inside this rung's sixty, so the count is back to zero by the time it is
+  // read. The run reports itself audio-free and resolves a definitive SUSTAINED — off a window that
+  // had HFP up for a sixth of its length. That verdict picks the walkthrough capture architecture.
+  //
+  // Native now spans the window with three readings. This re-derives from those components rather
+  // than trusting the summary boolean, because NOTHING compiles that Swift — not CI, not locally —
+  // so a wrong `audioSessionUsed` ships unnoticed, and it already has twice (first a hard-coded
+  // `false`, then the level). This assertion is the only check on it that runs anywhere.
+  it("refuses to conclude when a share was taken and RELEASED inside the window", () => {
+    // Exactly Greptile's case: both edges read zero, and only the edge counter saw it.
+    const contaminated = describeStreamEndurance({
+      ...sustainedRun,
+      audioSessionUsed: false, // what the old level-based native would have reported
+      audioOwnersAtStart: 0,
+      audioOwnersAtEnd: 0,
+      audioActivationsDuringWindow: 1,
+    });
+    expect(contaminated).toContain("INCONCLUSIVE");
+    expect(contaminated).not.toContain("SUSTAINED");
+    expect(contaminated).not.toContain("HFP is the difference");
+  });
+
+  it("refuses to conclude when a share was already held as the window OPENED", () => {
+    // The other blind spot of an end-only read: an owner that lets go partway through.
+    const contaminated = describeStreamEndurance({
+      ...diedRun,
+      audioSessionUsed: false,
+      audioOwnersAtStart: 1,
+      audioOwnersAtEnd: 0,
+      audioActivationsDuringWindow: 0,
+    });
+    expect(contaminated).toContain("INCONCLUSIVE");
+    expect(contaminated).not.toContain("STOPPED");
+  });
+
+  it("still concludes when every component reading says the window was genuinely clean", () => {
+    // The guard must not swallow the real result — a reported ZERO is a measurement, not an absence.
+    const clean = describeStreamEndurance({
+      ...sustainedRun,
+      audioSessionUsed: false,
+      audioOwnersAtStart: 0,
+      audioOwnersAtEnd: 0,
+      audioActivationsDuringWindow: 0,
+    });
+    expect(clean).toContain("SUSTAINED");
+    expect(clean).not.toContain("INCONCLUSIVE");
+  });
+
   // A dev client built before native measured this reports every other field and not that one.
   // Absent is "not observed", which must not manufacture an inconclusive any more than the old
   // hard-coded `false` should have manufactured a pass.

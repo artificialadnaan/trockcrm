@@ -126,12 +126,20 @@ export type StreamEnduranceMeasurement = {
   audioSessionUsed: boolean;
   /**
    * The raw readings behind `audioSessionUsed`, so a surprising verdict can be checked rather than
-   * taken on trust. The owner count is the bridge's own accounting; the category and route are what
-   * catch an owner it never counted (`WalkthroughRecorder`, expo-audio).
+   * taken on trust. The owner counts are the bridge's own accounting; the category and route are
+   * what catch an owner it never counted (`WalkthroughRecorder`, expo-audio).
+   *
+   * THREE readings, not one, because `audioSessionUsed` spans the window rather than sampling it.
+   * The two owner counts are LEVELS at each edge; `audioActivationsDuringWindow` is the difference
+   * of a monotonic edge counter, and it is the only one that can see a share taken and given back
+   * in between — rung 8 records for ten seconds inside this rung's sixty, and an end-of-window level
+   * read is back to zero by then.
    *
    * Optional: a dev client built before these were measured reports every other field and not these.
    */
+  audioOwnersAtStart?: number;
   audioOwnersAtEnd?: number;
+  audioActivationsDuringWindow?: number;
   audioCategoryAtEnd?: string;
   audioRouteAtEnd?: RouteSnapshot;
 };

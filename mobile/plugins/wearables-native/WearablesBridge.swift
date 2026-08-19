@@ -83,6 +83,17 @@ final class WearablesBridge: RCTEventEmitter {
   /// recorder behind `VoiceRecorder` — are never counted here and so are never reached into.
   private var audioSessionOwners = 0
 
+  /// MONOTONIC count of shares ever taken. Never decremented, never reset — including by a sweep.
+  ///
+  /// `audioSessionOwners` is a level, and a level read at one instant cannot see a share that was
+  /// taken and given back between two reads. Rung 8 records for ten seconds inside rung 11's sixty,
+  /// so by the time rung 11 samples the count at the end of its window it is back to zero and the
+  /// contaminated run reports itself audio-free — then resolves a definitive SUSTAINED/STOPPED
+  /// verdict that selects the walkthrough capture architecture. An edge count is what survives that:
+  /// compare it across the window and any share taken during it shows up, however briefly it was
+  /// held.
+  private var audioActivationCount = 0
+
   /// Bumped on every publish to `session`/`stream` AND by every sweep. A rung captures the value its
   /// own publish produced, so it can retract its publication ONLY while it is still the live one.
   ///
@@ -869,6 +880,9 @@ final class WearablesBridge: RCTEventEmitter {
     try activate()
     stateLock.lock()
     audioSessionOwners += 1
+    // Monotonic, so a share taken and released inside another rung's measurement window is still
+    // visible to it afterwards. See the declaration.
+    audioActivationCount += 1
     // Somebody wants it active again, so any deactivation still owed from before is moot.
     audioDeactivationOwed = false
     let epoch = audioEpoch
@@ -954,6 +968,13 @@ final class WearablesBridge: RCTEventEmitter {
     stateLock.lock()
     defer { stateLock.unlock() }
     return audioSessionOwners
+  }
+
+  /// The monotonic share count, for comparing ACROSS a measurement window rather than sampling it.
+  private func currentAudioActivationCount() -> Int {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return audioActivationCount
   }
 
   // MARK: - 7. THE photo question
@@ -1691,6 +1712,14 @@ final class WearablesBridge: RCTEventEmitter {
         // experiment: if frames sustain here and die during a walk, HFP is the difference. It is
         // READ once at the end of the window, which changes no state and is what lets the payload
         // report the claim instead of asserting it.
+        //
+        // Sampled BEFORE the window opens, so the pair below SPANS it. An owner already holding a
+        // share when the run begins is invisible to an end-of-window read if it lets go partway
+        // through, and a share taken and given back inside the window is invisible to both reads.
+        // The level catches the first, the monotonic edge count catches the second.
+        let audioOwnersAtStart = currentAudioSessionOwners()
+        let audioActivationsAtStart = currentAudioActivationCount()
+
         newStream.start()
         let startedAt = Date()
 
@@ -1706,8 +1735,11 @@ final class WearablesBridge: RCTEventEmitter {
         // the experiment. See the resolve below for why a literal would not do.
         let audioSession = AVAudioSession.sharedInstance()
         let audioOwnersAtEnd = currentAudioSessionOwners()
+        let audioActivationsDuringWindow = currentAudioActivationCount() - audioActivationsAtStart
         let audioCategoryAtEnd = audioSession.category.rawValue
         let audioRouteAtEnd = Self.routeSnapshot(audioSession)
+        // Contaminated if a share was held at EITHER edge, or taken at any point in between.
+        let audioSessionUsed = audioOwnersAtStart > 0 || audioOwnersAtEnd > 0 || audioActivationsDuringWindow > 0
 
         // Up to three minutes after this rung began — the longest window in the file for the
         // screen to have moved on to something else. Superseded runs REJECT rather than resolve:
@@ -1732,15 +1764,24 @@ final class WearablesBridge: RCTEventEmitter {
           // -1 when no frame ever arrived. Otherwise: how far into the run the LAST frame landed,
           // which is the number that says whether delivery sustained or stopped.
           "secondsToLastFrame": lastArrival.map { $0.timeIntervalSince(startedAt) } ?? -1,
-          // MEASURED, not asserted. This was a hard-coded `false`, which said only "this method
-          // contains no activation call" — a fact about the source, not about the run. The claim the
-          // rung actually makes is that no audio session was in force for the whole window, and the
-          // one thing that could falsify it (another rung activating HFP a tap away, mid-window) was
-          // the one thing a literal could not express. The count is this class's own accounting, so
-          // the raw category and route ride alongside it: an owner this class never counted —
-          // `WalkthroughRecorder`, expo-audio — shows up there and nowhere else.
-          "audioSessionUsed": audioOwnersAtEnd > 0,
+          // MEASURED ACROSS THE WINDOW, not asserted and not sampled at one instant.
+          //
+          // This was a hard-coded `false`, which said only "this method contains no activation
+          // call" — a fact about the source, not about the run. It then became `audioOwnersAtEnd > 0`,
+          // which is a LEVEL read once at the end, and a level cannot see a share that was taken and
+          // given back in between: rung 8 records for ten seconds inside this rung's sixty, so the
+          // count is back to zero by the time it is read and the contaminated run reports itself
+          // audio-free — then resolves a definitive SUSTAINED/STOPPED verdict that picks the
+          // walkthrough capture architecture. Three terms now, covering both edges and the interior.
+          //
+          // Still this class's OWN accounting, so the raw category and route ride alongside it: an
+          // owner it never counted — `WalkthroughRecorder`, expo-audio — shows up there and nowhere
+          // else. The components are reported individually so a `true` can be explained rather than
+          // just believed.
+          "audioSessionUsed": audioSessionUsed,
+          "audioOwnersAtStart": audioOwnersAtStart,
           "audioOwnersAtEnd": audioOwnersAtEnd,
+          "audioActivationsDuringWindow": audioActivationsDuringWindow,
           "audioCategoryAtEnd": audioCategoryAtEnd,
           "audioRouteAtEnd": audioRouteAtEnd,
         ])
