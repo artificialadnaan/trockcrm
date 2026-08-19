@@ -224,12 +224,24 @@ treated as a possible Meta pairing callback, and a tapped `trockcam://reports/..
 one, evicting a real held callback and leaving the glasses unpaired — is therefore already neutralised.
 
 ### What to build
-1. Verify end to end that a `trockcam://reports/...` link resolves to the report and does **not** reach
-   the pairing handler.
-2. Set `WEEKLY_REPORT_APP_DEEP_LINKS=true`.
-3. **Correct the stale comment** at `weekly-report-reminders.ts:187`, which still tells the next reader
-   that the route and the `APP_OWN_ROUTES` entry are missing. Left as is, it will talk someone out of a
-   change that is already safe.
+
+⚠️ **In this order.** Steps 1 and 2 are what make step 3 safe; done the other way round, enabling the flag
+ships a link that lands on "Draft not found" and, on any older build, unpairs the glasses.
+
+1. **Replace the emitted URL with the hub, `trockcam://reports`.** The worker emitted
+   `trockcam://reports/weekly/<weeklyReportProjectId>?weekOf=…`, which file-system-routes to
+   `reports/weekly/[draftId].tsx` — a **local draft id**, not a server project id. A server id there
+   matches nothing on the device and renders *"Draft not found. It may have been submitted or
+   discarded."* Drop the now-dead `weeklyReportProjectId` / `weekOf` inputs with it.
+2. Verify `trockcam://reports` resolves to the reports hub and does **not** reach the pairing handler.
+3. **Leave `WEEKLY_REPORT_APP_DEEP_LINKS` OFF, and hand the enable to a human.** The deny-list that
+   decides what a tapped link does is the one compiled into the build ON THE PHONE, and `"reports"`
+   entered `APP_OWN_ROUTES` in the same commit as the route (#1073) — which `mobile/` has no OTA to
+   deliver. Until the build in the field carries #1073, a tapped link is retained as a Meta pairing
+   callback and unpairs the glasses. **No test in this repo can assert what anyone is running**, which is
+   exactly why this is not an automatable step.
+4. **Correct the stale comment** at `weekly-report-reminders.ts:187`, which still tells the next reader
+   that the route and the `APP_OWN_ROUTES` entry are missing — and state the real gate, the shipped build.
 
 ### Failure modes to design against
 - **`mobile/` has no OTA.** (It *is* CI-gated — `premerge-build-gate.yml` runs `npm ci`, typecheck, jest
