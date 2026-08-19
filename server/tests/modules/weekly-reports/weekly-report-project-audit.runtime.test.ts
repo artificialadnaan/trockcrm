@@ -290,6 +290,29 @@ describe("the per-project audit trail", () => {
     expect(audit.reports).toHaveLength(1);
   });
 
+  it("never returns the stored send request, which carries the RAW share token", async () => {
+    // `send_request.shareUrl` holds the raw token — the only place it exists, since
+    // `weekly_report_tokens` stores just its SHA-256. This endpoint is open to every `rep` in the
+    // office, so returning the row would hand all of them a live client link to every report ever sent.
+    // Asserted against the SERIALISED payload rather than the typed shape, because the leak this guards
+    // against is a stray spread or a `...row`, which no interface would catch.
+    await seedFullySentReport({
+      send_request: JSON.stringify({
+        to: ["jay@mackre.com"],
+        shareUrl: "https://trockcrm.com/w/SUPER-SECRET-RAW-TOKEN",
+      }),
+    });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const serialised = JSON.stringify(audit);
+
+    expect(serialised).not.toContain("SUPER-SECRET-RAW-TOKEN");
+    expect(serialised).not.toContain("shareUrl");
+    // The control: the recipient WAS read off that same object, so a blanket failure to parse it would
+    // otherwise satisfy the two assertions above for the wrong reason.
+    expect(audit.reports[0]!.recipients).toEqual(["jay@mackre.com"]);
+  });
+
   it("survives a send_request that is not the shape it expects", async () => {
     // It is free-form jsonb written by another code path. A crash here takes down the whole record.
     await seedFullySentReport({ send_request: JSON.stringify({ to: "not-an-array" }) });

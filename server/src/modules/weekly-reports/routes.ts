@@ -270,9 +270,19 @@ router.get("/projects/:id", async (req, res, next) => {
  * The whole life of one project's reporting: every version of every week, who did what to it and when,
  * and what the mail provider said afterwards — plus the reminder, dismissal and pause ledgers.
  *
- * Read-only, and open to the same readers as the rest of this router. It exposes no client contact
- * details — the recipients it lists are the addresses a send was actually composed for, which is the
- * fact being audited.
+ * Read-only, and open to the same readers as the rest of this router (admin/director/rep).
+ *
+ * It DOES return client email addresses — the recipients each send was composed for, which is a large
+ * part of the fact being audited. That is not a widening: this router already serves every project's
+ * `clientTeam` with emails to the same three roles on `GET /projects`, and the router comment above
+ * names reading client contact details as something these roles legitimately do. Said plainly rather
+ * than claimed away, because "exposes no contact details" would be a comfortable sentence and a false
+ * one, and the next person weighing a change here needs the true version.
+ *
+ * What it does NOT return is the stored `send_request` itself. That object carries `shareUrl`, and the
+ * share URL contains the RAW token — the only place it exists, since `weekly_report_tokens` stores just
+ * its SHA-256. `recipientsOf` reads `.to` and nothing else; returning the row would hand every rep in
+ * the office a live client link to every report ever sent.
  */
 router.get("/projects/:id/audit", async (req, res, next) => {
   try {
