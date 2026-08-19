@@ -6,6 +6,7 @@ import {
   type SendSystemEmailResult,
 } from "../lib/system-email.js";
 import { escapeHtml, isSafeTenantSchema, normalizeText } from "../lib/email-format.js";
+import { acquirePgAdvisoryLock, type AdvisoryLockPool } from "../lib/advisory-lock.js";
 // Reuse the branded-email primitives (frontend URL + hosted logo) so these reminders point at
 // trockcrm.com and match the scorecard / RFP / project-number emails' look.
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
@@ -256,7 +257,7 @@ export function weeklyReportDashboardUrl(frontendUrl: string, officeId: string |
 // Email composition
 // ---------------------------------------------------------------------------------------------------
 
-interface BrandedEmailInput {
+export interface BrandedEmailInput {
   title: string;
   preheader: string;
   bodyHtml: string;
@@ -266,7 +267,13 @@ interface BrandedEmailInput {
   secondaryUrl?: string;
 }
 
-function renderBrandedEmail(input: BrandedEmailInput): string {
+/**
+ * Exported for the dead-letter sweep (`weekly-report-send-sweep.ts`), which is a second notification about
+ * the same feature to the same leadership roster. A hand-copied shell would be one more place the brand
+ * has to be changed twice, and the two emails arriving in the same inbox looking subtly different is how a
+ * recipient starts wondering which of them is the real one.
+ */
+export function renderBrandedEmail(input: BrandedEmailInput): string {
   const primaryUrl = escapeHtml(input.primaryUrl);
   const secondary =
     input.secondaryUrl && input.secondaryLabel
@@ -342,7 +349,8 @@ function renderBrandedEmail(input: BrandedEmailInput): string {
 </html>`;
 }
 
-function renderDetailRows(rows: ReadonlyArray<readonly [string, string]>): string {
+/** Exported alongside `renderBrandedEmail`, and for the same reason — the sweep renders the same table. */
+export function renderDetailRows(rows: ReadonlyArray<readonly [string, string]>): string {
   const cells = rows
     .map(
       ([label, value]) => `
@@ -1719,49 +1727,18 @@ function dedupeEmails(emails: string[]): string[] {
 /** The advisory lock's key. "WRRM" — stable and arbitrary; changing it splits the single-flight guard. */
 export const WEEKLY_REPORT_REMINDER_LOCK_KEY = 0x57_52_52_4d;
 
-/** The slice of a pg Pool the advisory lock needs. Narrowed so a test can supply one without a database. */
-interface AdvisoryLockPool {
-  connect(): Promise<{
-    query(text: string, params?: unknown[]): Promise<{ rows: any[] }>;
-    release(err?: Error): void;
-  }>;
-}
-
 /**
- * Postgres session advisory lock over a dedicated pooled client (a session lock must be acquired and
- * released on the SAME connection, so it cannot go through pool.query, which hands out arbitrary ones).
- * Global across worker instances, so a second replica's 07:00 tick skips rather than racing this one for
- * the same claims.
+ * Postgres session advisory lock, global across worker instances, so a second replica's 07:00 tick skips
+ * rather than racing this one for the same claims. It is the only thing standing between two replicas and
+ * a doubled reminder to every superintendent in the office.
  *
- * `poolLike` is a parameter purely so this can be exercised without a live Postgres — it is the only
- * thing standing between two replicas and a doubled reminder to every superintendent in the office, and
- * every run of the job in the suite injects `acquireLock`, so nothing else executes a line of it.
+ * The mechanism moved to `../lib/advisory-lock.js` when the weekly-report send sweep needed the same
+ * primitive under its own key; this keeps the name, the key and the tests that pin them. `poolLike` is a
+ * parameter purely so this can be exercised without a live Postgres — every run of the job in the suite
+ * injects `acquireLock`, so nothing else executes a line of it.
  */
 export async function acquireReminderAdvisoryLock(
   poolLike: AdvisoryLockPool = pool,
 ): Promise<null | (() => Promise<void>)> {
-  const client = await poolLike.connect();
-  try {
-    const res = await client.query("SELECT pg_try_advisory_lock($1) AS locked", [
-      WEEKLY_REPORT_REMINDER_LOCK_KEY,
-    ]);
-    if (res.rows[0]?.locked !== true) {
-      client.release();
-      return null;
-    }
-  } catch (err) {
-    client.release();
-    throw err;
-  }
-  return async () => {
-    try {
-      await client.query("SELECT pg_advisory_unlock($1)", [WEEKLY_REPORT_REMINDER_LOCK_KEY]);
-      client.release();
-    } catch (err) {
-      // The unlock failed, so this session may still hold the lock — destroy the connection rather than
-      // return a possibly-locked one to the pool. Postgres frees session advisory locks on disconnect.
-      client.release(err as Error);
-      throw err;
-    }
-  };
+  return acquirePgAdvisoryLock(WEEKLY_REPORT_REMINDER_LOCK_KEY, poolLike);
 }

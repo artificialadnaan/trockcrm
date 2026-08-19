@@ -13,6 +13,7 @@ import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 import { runWeeklyReportReminders } from "./jobs/weekly-report-reminders.js";
+import { runWeeklyReportSendSweep } from "./jobs/weekly-report-send-sweep.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
@@ -241,6 +242,26 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: weekly report reminders at 7:00 AM CT daily (catch-up 9 & 11 AM)");
+
+  // Weekly Reports dead-letter sweep: every 15 minutes, round the clock.
+  //
+  // NOT on the reminders' business-hours schedule, and not daily. This one is about a CLIENT-facing email
+  // that never went out, and the threshold it measures is thirty minutes — a daily pass would report a
+  // Monday-morning failure on Tuesday, by which point the client has spent a working day wondering where
+  // their report is. Fifteen minutes means the alert lands while the person who pressed Send is still at
+  // their desk.
+  //
+  // Cheap to run this often: the read is a partial index holding only the sends currently in flight, and
+  // the alert is claimed per report, so a pass with nothing new to say does two SELECTs per office and
+  // sends nothing. No timezone is set because the schedule has no time-of-day component.
+  cron.schedule("*/15 * * * *", async () => {
+    try {
+      await runWeeklyReportSendSweep();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report send sweep failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: weekly report send sweep every 15 minutes");
 
   // Weekly digest: Monday at 7:00 AM CT
   cron.schedule("0 7 * * 1", async () => {

@@ -564,8 +564,21 @@ export async function retryWeeklyReportSend(
   //
   // It is honest to write it here: the column records when this delivery was last attempted, and handing
   // it to the queue is the start of an attempt. The worker overwrites it when that attempt finishes.
+  //
+  // AND RE-ARM THE ALERT. `send_stall_alerted_at` (0227) is the worker sweep's memory of having already
+  // told leadership this delivery stopped moving, and it is what stops the sweep emailing about the same
+  // report every fifteen minutes. A retry is a transition OUT of stalled: somebody saw the alert and
+  // acted, so if this attempt also goes quiet that is a NEW incident and the people who acted on the first
+  // one are exactly the people who need to hear it. Left set, a report retried three times and stalled
+  // three times would be announced once and then never again.
+  //
+  // Cleared HERE and not in the worker's own attempt bookkeeping on purpose. The queue's three automatic
+  // retries all land inside 40 seconds (3s/9s/27s backoff), far inside the stall threshold, so clearing
+  // there would re-arm the alert for a failure nobody has touched — which is the mute-inducing repeat this
+  // column exists to prevent. Only a human pressing Retry clears it.
   await client.query(
-    `UPDATE weekly_reports SET send_error = NULL, send_last_attempt_at = now(), updated_at = now()
+    `UPDATE weekly_reports
+        SET send_error = NULL, send_last_attempt_at = now(), send_stall_alerted_at = NULL, updated_at = now()
       WHERE id = $1::uuid AND is_active AND status = 'sent' AND send_delivered_at IS NULL`,
     [reportId],
   );
