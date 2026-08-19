@@ -60,6 +60,15 @@ const MAX_PHOTO_SOURCE_BYTES = 40 * 1024 * 1024;
 const VIEWER_PHOTO_MAX_EDGE = 1400;
 
 /**
+ * How long the derived-photo cache lookup may take before the request gives up on it and generates live.
+ *
+ * Deliberately a small fraction of VIEWER_PHOTO_TIMEOUT_MS: the lookup is an optimisation, and the budget
+ * it is allowed to spend has to be small enough that losing all of it still leaves time to do the real
+ * work. Sharing the request's whole deadline let a stalled lookup turn an available photo into a 504.
+ */
+const VIEWER_DERIVED_LOOKUP_TIMEOUT_MS = 2_000;
+
+/**
  * Ceiling on ONE photo request, covering the HEIC permit wait, the R2 read and the re-encode together.
  *
  * A page of twenty HEIC photos fires twenty parallel requests at this route, and every HEIC decode in the
@@ -412,9 +421,18 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
       .update(`${photo.r2_key}|${VIEWER_PHOTO_MAX_EDGE}|78|v1`)
       .digest("hex")}.jpg`;
 
+    // ITS OWN SHORT BUDGET, not the request's whole deadline.
+    //
+    // Sharing `deadline` made the accelerator able to cause the failure it exists to prevent: a derived
+    // read that stalls consumes all twenty seconds, and the live path then hits an already-aborted signal
+    // and answers 504 — turning a photo that was perfectly available into an error, and only for readers
+    // unlucky enough to hit a slow lookup. A cache miss must cost a lookup, never the request.
+    //
+    // Generous enough that an ordinary hit on a ~180 kB object always lands, short enough that a stall
+    // leaves nearly the whole deadline for generating live.
     const cached = await getObjectBuffer(derivedKey, {
       maxBytes: MAX_PHOTO_SOURCE_BYTES,
-      signal: deadline,
+      signal: AbortSignal.timeout(VIEWER_DERIVED_LOOKUP_TIMEOUT_MS),
     }).catch(() => null);
 
     if (cached?.buffer) {
