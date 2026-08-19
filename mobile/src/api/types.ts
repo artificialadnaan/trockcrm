@@ -356,6 +356,36 @@ export type WeeklyReportReviewItem = {
   submittedAt: string | null;
 };
 
+/**
+ * A week this PM sent that the mail provider has not accepted.
+ *
+ * FACTS, NOT A VERDICT — the same four columns the CRM board reads. "Send failed", "Send stuck" and
+ * "Sending…" are three different situations distinguished only by whether an error was recorded and how
+ * long ago the last attempt was, and the app derives them from these in one place
+ * (`src/weekly-reports/delivery.ts`) rather than being handed a label that goes stale the moment the
+ * payload is cached.
+ *
+ * `sentAt` is not only for display: it is the age the mail provider's 24-hour idempotency window is
+ * measured against, so it decides whether a Retry needs the duplicate-risk acknowledgement.
+ *
+ * There is no `sendDeliveredAt`, because the server's predicate for this list is `send_delivered_at IS
+ * NULL` — it could only ever be null here.
+ */
+export type WeeklyReportUndeliveredSend = {
+  reportId: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  projectName: string;
+  weekOf: string;
+  version: number;
+  /** When the PM committed the send. Stamped once and never moved — see `sendLastAttemptAt`. */
+  sentAt: string | null;
+  sendError: string | null;
+  sendAttempts: number;
+  /** When delivery was last ATTEMPTED — written by the worker, and by a retry when it re-queues. */
+  sendLastAttemptAt: string | null;
+};
+
 export type WeeklyReportAssignmentsResponse = {
   asOf: string;
   projects: WeeklyReportAssignment[];
@@ -367,6 +397,20 @@ export type WeeklyReportAssignmentsResponse = {
    * read as "not truncated", which is what the app assumed before the field existed.
    */
   pendingReviewTotal?: number;
+  /**
+   * Weeks this PM SENT that have not reached the client, newest first.
+   *
+   * Deliberately its own list rather than extra rows on `pendingReview`. The two are different work — one
+   * ends in Approve, the other in Retry or a correction — and separating them is also what keeps this
+   * change safe to deploy: `mobile/` has no OTA, so the server's response is read today by builds that
+   * will never be updated, and an unknown key is ignored by all of them while a `sent` row inside
+   * `pendingReview` would render under "Waiting on your review" with a tap that dead-ends.
+   *
+   * Optional for the same reason every other addition here is: an older API build does not send it.
+   */
+  undeliveredSends?: WeeklyReportUndeliveredSend[];
+  /** The true depth of the list above, which the payload caps — same contract as `pendingReviewTotal`. */
+  undeliveredSendsTotal?: number;
 };
 
 /**
@@ -409,7 +453,39 @@ export type WeeklyReportDetailView = {
   authoredByName: string | null;
   submittedAt: string | null;
   reviewedAt: string | null;
+  /** When the PM COMMITTED the send. Not when anything was delivered — see `sendDeliveredAt`. */
   sentAt: string | null;
+  /**
+   * Whether a newer version of this week has been SENT, and which one.
+   *
+   * Read for one decision: a superseded version must never have its delivery retried. It is still `sent`,
+   * still undelivered and still carries a live share URL in its stored request, so replaying it would email
+   * a client the version they were already told was replaced. The service refuses it and the CRM's Retry
+   * button carries the same predicate; this is what lets the app not offer the button in the first place.
+   */
+  supersededById: string | null;
+  /**
+   * What the last delivery attempt reported, verbatim from the mail provider where there was one.
+   *
+   * Null on a `sent` report does NOT mean the delivery succeeded. The delivery job records its outcome in
+   * the same database whose unavailability is the likeliest reason it failed, so a job that dead-letters
+   * writes nothing at all — that row has no error, no delivery, and is indistinguishable from a send queued
+   * five seconds ago except by the clock. `src/weekly-reports/delivery.ts` is where the three are told
+   * apart; nothing should branch on this field alone.
+   */
+  sendError: string | null;
+  sendAttempts: number;
+  /**
+   * When the mail provider ACCEPTED the message — the one fact that means the client has it, and the
+   * predicate that takes a week off the hub's undelivered list.
+   *
+   * AND NOTHING MORE THAN THAT. There is no bounce webhook anywhere in this platform, so a report addressed
+   * to a mistyped domain is accepted, hard-bounces, and reads here forever as though it landed. Every
+   * sentence the app puts on screen about this field is worded accordingly.
+   */
+  sendDeliveredAt: string | null;
+  /** When delivery was last ATTEMPTED — moves on every worker attempt and on every retry. */
+  sendLastAttemptAt: string | null;
   photos: WeeklyReportPhotoView[];
 };
 

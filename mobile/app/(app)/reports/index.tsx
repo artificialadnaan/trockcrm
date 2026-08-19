@@ -16,7 +16,11 @@ import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { getWeeklyReport, getWeeklyReportAssignments } from "../../../src/api/endpoints";
-import type { WeeklyReportAssignment, WeeklyReportReviewItem } from "../../../src/api/types";
+import type {
+  WeeklyReportAssignment,
+  WeeklyReportReviewItem,
+  WeeklyReportUndeliveredSend,
+} from "../../../src/api/types";
 import { newClientUploadId, uploadOwnerKey } from "../../../src/capture/upload-queue";
 import { newSubmissionId } from "../../../src/scorecards/ids";
 import {
@@ -38,10 +42,16 @@ import {
 } from "../../../src/weekly-reports/door";
 import { weeklyReportDiscardWarning } from "../../../src/weekly-reports/reconcile";
 import {
+  weeklyReportDeliveryLabel,
+  weeklyReportDeliveryState,
+  weeklyReportUndeliveredSummary,
+} from "../../../src/weekly-reports/delivery";
+import {
   formatWeekOf,
   weeklyReportDueLabel,
   weeklyReportProjectAction,
   weeklyReportQueueTruncationNote,
+  weeklyReportUndeliveredTruncationNote,
   weeklyReportWeekStateLabel,
   weeklyReportWeekStateTone,
 } from "../../../src/weekly-reports/status";
@@ -368,6 +378,15 @@ export default function ReportsHubScreen() {
     pendingReview.length,
     assignments.data?.pendingReviewTotal,
   );
+  // Weeks this PM SENT that the client has not been shown to have received. A separate list rather than
+  // extra rows in the queue above: the two are different work ending in different buttons, and an older
+  // app build — of which there are always some, since `mobile/` has no OTA — ignores an unknown key
+  // entirely while it would have rendered a `sent` row under "Waiting on your review" with a dead tap.
+  const undeliveredSends = assignments.data?.undeliveredSends ?? [];
+  const undeliveredNote = weeklyReportUndeliveredTruncationNote(
+    undeliveredSends.length,
+    assignments.data?.undeliveredSendsTotal,
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -404,6 +423,31 @@ export default function ReportsHubScreen() {
             }
           />
         </View>
+
+        {/* ABOVE the review queue, deliberately. Everything below this block is work that has not gone out
+            yet; every row in it is a client who is already owed a report somebody believes they sent. It is
+            also the only place in T-Rock Cam that has ever said so — a `sent` week leaves the review queue
+            and its project card reads "Sent", so before this the PM who pressed the button was told
+            nothing, and the failure lived only on a CRM board they cannot open. */}
+        {undeliveredSends.length > 0 ? (
+          <View style={{ gap: theme.space.sm }}>
+            <SectionLabel>Not delivered to the client</SectionLabel>
+            {undeliveredNote ? <Text style={styles.queueNote}>{undeliveredNote}</Text> : null}
+            {undeliveredSends.map((item) => (
+              <UndeliveredSendRow
+                key={item.reportId}
+                item={item}
+                disabled={opening !== null}
+                onPress={() =>
+                  router.push({
+                    pathname: "/(app)/reports/delivery/[reportId]",
+                    params: { reportId: item.reportId, projectName: item.projectName },
+                  })
+                }
+              />
+            ))}
+          </View>
+        ) : null}
 
         {pendingReview.length > 0 ? (
           <View style={{ gap: theme.space.sm }}>
@@ -539,6 +583,56 @@ export default function ReportsHubScreen() {
         </View>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+/**
+ * One week the PM sent that has not reached the client.
+ *
+ * The chip is derived HERE, at render, from the four raw columns — not read off a label the server baked.
+ * "Sending…", "Send failed" and "Send stuck" are one stored state read against a clock, and this app caches
+ * the hub feed and paints it offline, so a server-side label would have the phone calling a half-hour-old
+ * stall "Sending…" until somebody pulled to refresh.
+ *
+ * The whole row is one tap through to the delivery screen. There is no inline Retry: past the provider's
+ * 24-hour window a retry is a genuinely second email to a paying client, and that is not a decision to
+ * offer from a list row where a mis-tap costs a client an email they did not need.
+ */
+function UndeliveredSendRow({
+  item,
+  disabled,
+  onPress,
+}: {
+  item: WeeklyReportUndeliveredSend;
+  disabled: boolean;
+  onPress: () => void;
+}) {
+  const state = weeklyReportDeliveryState(item);
+  const label = weeklyReportDeliveryLabel(state);
+  // Muted for a send still plausibly in flight; the platform's danger colour for the two that are not.
+  // A queued job is not a fault, and colouring it as one teaches the PM to ignore the colour.
+  const tone = state === "sending" ? theme.color.textMuted : theme.color.danger;
+  return (
+    <View style={styles.card}>
+      <Pressable
+        onPress={onPress}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityState={{ disabled }}
+        accessibilityLabel={`${label}: the weekly report for ${item.projectName}, week of ${formatWeekOf(item.weekOf)}. Open to retry or issue a correction.`}
+        style={({ pressed }) => [styles.cardBody, pressed && { opacity: 0.7 }]}
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={styles.cardTitle} numberOfLines={1}>
+            {item.projectName}
+          </Text>
+          <Text style={styles.cardSub}>
+            {weeklyReportUndeliveredSummary(item, formatWeekOf(item.weekOf))}
+          </Text>
+        </View>
+        <Badge label={label} color={theme.color.surfaceMuted} textColor={tone} />
+      </Pressable>
+    </View>
   );
 }
 
