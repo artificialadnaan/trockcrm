@@ -390,14 +390,17 @@ export default function WeeklyReportSendScreen() {
             style={{ marginTop: theme.space.md }}
           />
           {/* Stated before the tap, not after it. The transition is terminal: the only way to change a
-              sent report is a correction, which is a new version the client is told about. */}
-          {/* Says who can do it, not just that it is possible. The correction and retry ROUTES exist on
-              this mount, but no screen calls them yet: a sent week leaves the PM's queue, so T-Rock Cam
-              shows nothing afterwards. Promising "issue a correction" to a `construction` PM who has no
-              control here, and whom the CRM also refuses, is a promise the product does not keep. */}
+              sent report is a correction, which is a new version the client is told about.
+
+              This used to end "ask an admin or director, since that is not yet something you can do in the
+              app" — honest at the time, and a workaround rather than a feature. The correction and the
+              retry are now both reachable from here: a week whose delivery does not land appears on the hub
+              under "Not delivered to the client", and its screen carries them. So the sentence promises
+              only what the PM can actually do, on this surface, themselves. */}
           <Text style={styles.hint}>
-            Once this goes out the report is final. A mistake has to be fixed by issuing a correction —
-            ask an admin or director, since that is not yet something you can do in the app.
+            Once this goes out the report is final. To change it you issue a correction — a new version the
+            client is told about — from the report’s delivery screen on the Reports tab, which is also where
+            you retry the email if it doesn’t reach them.
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>

@@ -40,6 +40,11 @@ const REPORT: WeeklyReportDetailView = {
   submittedAt: "2026-08-13T18:00:00.000Z",
   reviewedAt: "2026-08-13T19:00:00.000Z",
   sentAt: "2026-08-13T20:00:00.000Z",
+  supersededById: null,
+  sendError: null,
+  sendAttempts: 0,
+  sendDeliveredAt: null,
+  sendLastAttemptAt: null,
   photos: [],
 };
 
@@ -347,6 +352,32 @@ describe("running the send", () => {
 
 const SEND_MODULE = path.join(__dirname, "..", "send.ts");
 const SEND_SCREEN = path.join(__dirname, "..", "..", "..", "app", "(app)", "reports", "send", "[reportId].tsx");
+const DELIVERY_MODULE = path.join(__dirname, "..", "delivery.ts");
+const DELIVERY_SCREEN = path.join(
+  __dirname,
+  "..",
+  "..",
+  "..",
+  "app",
+  "(app)",
+  "reports",
+  "delivery",
+  "[reportId].tsx",
+);
+
+/**
+ * EVERY file on the path a client link can travel, not only the one that receives it.
+ *
+ * The delivery screen never sees a `shareUrl` — the retry answers with the report alone, and a correction
+ * answers with a fresh unsent version that has no link yet. It is guarded anyway, for two reasons. It
+ * navigates the PM STRAIGHT INTO the send screen after a correction, so it is one edit away from carrying a
+ * link through a navigation param, which is exactly the shape that lands in a crash breadcrumb. And it
+ * renders `sendError` — a provider string this codebase does not control the contents of — so a `console`
+ * call added here for debugging would be the most natural way to put a client's data somewhere nobody is
+ * looking. A guard that only covers the file that currently holds the secret stops being a guard the moment
+ * the feature grows, which is the point at which it is needed.
+ */
+const LEAK_GUARDED_FILES = [SEND_MODULE, SEND_SCREEN, DELIVERY_MODULE, DELIVERY_SCREEN];
 
 function parse(file: string): ts.SourceFile {
   return ts.createSourceFile(
@@ -388,7 +419,7 @@ function callTargets(source: ts.SourceFile): string[] {
  * both "there is a log here" and "somebody wrote about logging" identically. These read the AST, so what
  * is asserted is that the CODE does it.
  */
-describe("the send screen structurally cannot leak the client link", () => {
+describe("the send and delivery surfaces structurally cannot leak the client link", () => {
   it("imports no storage module, so there is nowhere for the link to be written", () => {
     // The screen holds `shareUrl` in component state that dies with the screen. This is the guard that
     // keeps it that way: `mobile/` is not in CI and the app has no OTA, so a persisted token would ship
@@ -403,7 +434,7 @@ describe("the send screen structurally cannot leak the client link", () => {
     // cannot silently retire an alternative again.
     const STORAGE_MODULES =
       /draft-store|async-storage|expo-secure-store|expo-file-system|expo-sqlite|react-native-mmkv|@react-native-community\/cookies/i;
-    for (const file of [SEND_MODULE, SEND_SCREEN]) {
+    for (const file of LEAK_GUARDED_FILES) {
       const specifiers = importSpecifiers(parse(file));
       for (const specifier of specifiers) {
         expect(specifier).not.toMatch(STORAGE_MODULES);
@@ -412,7 +443,7 @@ describe("the send screen structurally cannot leak the client link", () => {
   });
 
   it("makes no console call, so the link cannot reach a log or crash breadcrumb", () => {
-    for (const file of [SEND_MODULE, SEND_SCREEN]) {
+    for (const file of LEAK_GUARDED_FILES) {
       const targets = callTargets(parse(file));
       expect(targets.filter((target) => target.startsWith("console."))).toEqual([]);
     }
@@ -421,7 +452,7 @@ describe("the send screen structurally cannot leak the client link", () => {
   it("found something to inspect — an unreadable file would pass the two checks above vacuously", () => {
     // The failure mode of a structural test: a moved file makes `parse` throw, but a filter over an empty
     // list is silently green. Both files are asserted to be real and non-trivial first.
-    for (const file of [SEND_MODULE, SEND_SCREEN]) {
+    for (const file of LEAK_GUARDED_FILES) {
       expect(fs.existsSync(file)).toBe(true);
       expect(importSpecifiers(parse(file)).length).toBeGreaterThan(0);
       expect(callTargets(parse(file)).length).toBeGreaterThan(0);

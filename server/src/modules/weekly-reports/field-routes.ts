@@ -158,9 +158,14 @@ async function withPhotoUrls<T extends { fileId: string }>(
 // The hub
 // ---------------------------------------------------------------------------
 
-// Everything the Reports tab needs in one round trip: the projects this user owes reports on, and
-// anything sitting in their PM queue. One call rather than two because the hub renders both together and
-// a jobsite LTE connection makes every extra request a chance to show half a screen.
+// Everything the Reports tab needs in one round trip: the projects this user owes reports on, anything
+// sitting in their PM queue, and any week they SENT that has not reached the client. One call rather than
+// three because the hub renders them together and a jobsite LTE connection makes every extra request a
+// chance to show half a screen.
+//
+// `undeliveredSends` is additive, and had to be: `mobile/` has no OTA, so this response is read today by
+// builds that will never be updated. An unknown key is ignored by every one of them; a `sent` row pushed
+// into `pendingReview` would not have been.
 router.get("/assignments", async (req, res, next) => {
   try {
     const actor = actorFrom(req);
@@ -414,12 +419,12 @@ router.post("/reports/:id/send", async (req, res, next) => {
  * idempotency window a replay is a genuinely second email, not a no-op. Default false: silence must mean
  * the safe answer, on this surface as much as on the CRM's.
  *
- * ⚠️ NO SCREEN CALLS THIS YET. The route and its client wrapper exist; the UI does not. A sent week
- * leaves the PM's review queue (`assignments-service.ts` selects only `pending_review`/`approved`) and
- * `WeeklyReportDetailView` omits `sendError`/`sendAttempts`/`sendDeliveredAt`/`sendLastAttemptAt`, which
- * the server does return — so there is currently nothing in T-Rock Cam that could show a failed send,
- * let alone offer a retry. Wiring that is a follow-up. Do not read this docblock as a description of
- * shipped behaviour.
+ * REACHED FROM THE APP, by the assigned PM, on `/(app)/reports/delivery/[reportId]`. The week gets there
+ * from `undeliveredSends` on the hub feed, which is the list `assignments-service.ts` added for exactly
+ * this: a `sent` week leaves the review queue, so before it existed nothing in T-Rock Cam could show a
+ * failed send at all. The phone asks for the acknowledgement with its own confirmation before it sets the
+ * flag — but this route trusts none of that, which is the point of the flag being a request field rather
+ * than a client-side rule.
  */
 router.post("/reports/:id/send/retry", async (req, res, next) => {
   try {
@@ -446,14 +451,16 @@ router.post("/reports/:id/send/retry", async (req, res, next) => {
  * — a correction the PM abandons half-written must not put "a newer version was issued" in front of a
  * client with nothing behind it.
  *
- * This is what will make `sent` survivable from the app — a sent report is immutable for everyone,
- * leadership included, so a correction is the only move after a wrong figure goes out.
+ * This is what makes `sent` survivable from the app — a sent report is immutable for everyone, leadership
+ * included, so a correction is the only move after a wrong figure goes out.
  *
- * ⚠️ NO SCREEN CALLS THIS YET, same as the retry above. The route exists and is tested; the app has no
- * correction control, and a `construction` PM cannot reach the CRM's either (that router is
- * `admin|director`). So today the honest answer for a PM who spots a mistake is "ask an admin or
- * director", which is what the send screen now says. Wiring it is a follow-up, and this docblock
- * describes the route, not shipped product behaviour.
+ * REACHED FROM THE APP, same screen as the retry above, and deliberately as the SECOND control rather than
+ * the first. A PM staring at a failed send reaches for the most prominent button on the row, and a
+ * correction is not how a failed delivery is fixed: it makes a v2, takes the failure off the board, and
+ * leaves the client with nothing at all if the PM is pulled away before finishing it. The refusal when a
+ * newer version already exists is the server's (`Version N … already exists`) and the app shows that
+ * sentence verbatim rather than pre-empting it — it names the version to work on, which is what the PM
+ * actually wants, and the app has no honest way to know about a v2 it was never told about.
  */
 router.post("/reports/:id/correction", async (req, res, next) => {
   try {

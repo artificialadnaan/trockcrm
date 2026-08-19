@@ -92,6 +92,10 @@ beforeAll(async () => {
   await pg.exec(migrationSql("0222_weekly_reports"));
   // 0223 adds weekly_report_pauses, which the cadence generator reads to skip paused stretches.
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
+  // 0226 adds `send_delivered_at` and `send_last_attempt_at` — the two columns that separate "the PM
+  // pressed Send" from "the client received it", and the whole basis of the undelivered list below.
+  // Read from disk like the rest, so a column that exists only in a test fixture cannot make a query pass.
+  await pg.exec(migrationSql("0226_weekly_report_send"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -550,6 +554,178 @@ describe("the PM review queue", () => {
     expect([...weeks].sort().reverse()).toEqual(weeks);
     expect(weeks[0]).toBe(addDays(first, 7 * (APP_REVIEW_QUEUE_LIMIT + overflow - 1)));
     expect(weeks).not.toContain(first);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SENDS THAT NEVER REACHED THE CLIENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A week the PM actually SENT, walked up the real ladder, with the delivery outcome applied afterwards.
+ *
+ * The ladder is driven through the service so `status`, `sent_at` and `sent_by` are written by the code
+ * that writes them in production. Only the DELIVERY columns are set directly, because in production those
+ * are the WORKER's writes and this suite has no worker — which is the honest split: the test fakes the mail
+ * provider's answer, not the CRM's behaviour.
+ */
+async function seedSent(
+  projectId: string,
+  weekOf: string,
+  delivery: {
+    deliveredAt?: string | null;
+    sendError?: string | null;
+    sendAttempts?: number;
+    lastAttemptAt?: string | null;
+    supersededById?: string | null;
+  } = {},
+): Promise<string> {
+  const id = await seedFiled(projectId, weekOf);
+  await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+  await transitionWeeklyReport(db, id, "sent", PM_ACTOR);
+  await pg.query(
+    `UPDATE office_dallas.weekly_reports
+        SET send_delivered_at = $2::timestamptz,
+            send_error = $3,
+            send_attempts = $4,
+            send_last_attempt_at = $5::timestamptz,
+            superseded_by_id = $6::uuid
+      WHERE id = $1::uuid`,
+    [
+      id,
+      delivery.deliveredAt ?? null,
+      delivery.sendError ?? null,
+      delivery.sendAttempts ?? 0,
+      delivery.lastAttemptAt ?? null,
+      delivery.supersededById ?? null,
+    ],
+  );
+  return id;
+}
+
+describe("sends that never reached the client", () => {
+  it("puts a FAILED send in front of the assigned PM", async () => {
+    // The gap this list closes. A PM sends, the provider refuses the client's address, the worker stamps
+    // `send_error` — and before this the week left the review queue, its project card read "Sent", and
+    // T-Rock Cam showed that PM nothing ever again. The failure lived only on the CRM board and in the
+    // sweep's alert email, neither of which a `construction` PM can open.
+    const project = await seedProject();
+    const id = await seedSent(project.id, WEEK_OF, {
+      sendError: "The recipient address is invalid",
+      sendAttempts: 3,
+    });
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.undeliveredSends).toHaveLength(1);
+    expect(pmView.undeliveredSends[0]).toMatchObject({
+      reportId: id,
+      weekOf: WEEK_OF,
+      projectName: "4123 Cedar Springs",
+      sendError: "The recipient address is invalid",
+      sendAttempts: 3,
+      version: 1,
+    });
+    // `sentAt` is not decoration: it is the age the provider's idempotency window is measured against, so
+    // without it the app cannot tell whether a Retry needs the duplicate-risk acknowledgement.
+    expect(pmView.undeliveredSends[0]!.sentAt).not.toBeNull();
+    expect(pmView.undeliveredSendsTotal).toBe(1);
+  });
+
+  it("does NOT list a week the client actually received — the control", async () => {
+    // THE CONTROL THAT MAKES THE TEST ABOVE MEAN ANYTHING. A list that simply returned every `sent` week
+    // would pass "shows the failed one" perfectly, and would park every delivered week on the PM's hub for
+    // ever. `send_delivered_at` is what empties this list, so an ordinary week appears for the seconds its
+    // delivery is in flight and is gone on the next refresh.
+    const project = await seedProject();
+    await seedSent(project.id, WEEK_OF, { deliveredAt: "2026-08-13T20:00:30.000Z" });
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.undeliveredSends).toEqual([]);
+    expect(pmView.undeliveredSendsTotal).toBe(0);
+  });
+
+  it("lists a send with NO error recorded, which is the failure nothing else would ever mention", async () => {
+    // The delivery job records its outcome in the same database whose unavailability is the likeliest
+    // reason it failed, so a job that dead-letters writes nothing at all: no error, no delivery, zero
+    // attempts. Keying this list on `send_error IS NOT NULL` would have been tighter and would have missed
+    // exactly the row that has nobody looking for it.
+    const project = await seedProject();
+    const id = await seedSent(project.id, WEEK_OF);
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.undeliveredSends.map((row) => row.reportId)).toEqual([id]);
+    expect(pmView.undeliveredSends[0]!.sendError).toBeNull();
+  });
+
+  it("never lists a SUPERSEDED version, whose email must not go out at all", async () => {
+    // v1 sent and undelivered, corrected, v2 sent and delivered. v1 is then still `sent`, still
+    // undelivered, and its stored request still carries a live share URL — every predicate a naive query
+    // checks is satisfied. `retryWeeklyReportSend` refuses that row outright, so listing it would put a
+    // button in front of the PM that cannot work; and if it ever did work it would email a paying client
+    // the version they were already told was replaced.
+    const project = await seedProject();
+    const live = await seedSent(project.id, PRIOR_WEEK, { deliveredAt: "2026-08-07T09:00:00.000Z" });
+    await seedSent(project.id, WEEK_OF, { supersededById: live });
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.undeliveredSends).toEqual([]);
+  });
+
+  it("keeps an undelivered send OFF the review queue, which is a different job", async () => {
+    // The obvious implementation was to widen `status IN ('pending_review','approved')` to include `sent`.
+    // That would have brought every DELIVERED week back into "waiting on your review" for ever — and,
+    // because `mobile/` has no OTA, would have pushed un-actionable `sent` rows into the review list of
+    // every app build already on a phone, where the only tap opens a wizard that refuses to edit a sent
+    // report. The two lists stay separate.
+    const project = await seedProject();
+    await seedSent(project.id, WEEK_OF, { sendError: "Refused" });
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.pendingReview).toEqual([]);
+    expect(pmView.undeliveredSends).toHaveLength(1);
+  });
+
+  it("shows it to the assigned PM and to leadership, and to nobody else", async () => {
+    const project = await seedProject();
+    await seedSent(project.id, WEEK_OF, { sendError: "Refused" });
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.undeliveredSends).toHaveLength(1);
+
+    const directorView = await listWeeklyReportAssignments(db, {
+      userId: DIRECTOR,
+      role: "director",
+      asOf: WEEK_OF,
+    });
+    expect(directorView.undeliveredSends).toHaveLength(1);
+
+    // The superintendent who WROTE the report is not the person who sent it and cannot retry it — the
+    // service refuses them regardless, and the hub must not imply otherwise.
+    const superView = await listWeeklyReportAssignments(db, {
+      userId: SUPER,
+      role: "construction",
+      asOf: WEEK_OF,
+    });
+    expect(superView.undeliveredSends).toEqual([]);
+
+    const strangerView = await listWeeklyReportAssignments(db, {
+      userId: OTHER_SUPER,
+      role: "construction",
+      asOf: WEEK_OF,
+    });
+    expect(strangerView.undeliveredSends).toEqual([]);
+  });
+
+  it("still lists an undelivered send after the project is paused", async () => {
+    // Pausing a job stops the cadence generating weeks; it does not un-send an email. A client owed a
+    // report they never received is owed it whatever the project's status says.
+    const project = await seedProject();
+    const id = await seedSent(project.id, WEEK_OF, { sendError: "Refused" });
+    await updateWeeklyReportProject(db, project.id, { status: "paused" }, OFFICE);
+
+    const pmView = await listWeeklyReportAssignments(db, { userId: PM, role: "construction", asOf: WEEK_OF });
+    expect(pmView.projects).toEqual([]);
+    expect(pmView.undeliveredSends.map((row) => row.reportId)).toEqual([id]);
   });
 });
 

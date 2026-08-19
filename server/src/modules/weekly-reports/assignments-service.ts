@@ -115,6 +115,41 @@ export interface WeeklyReportReviewItem {
   submittedAt: string | null;
 }
 
+/**
+ * A week the PM SENT that the mail provider has not accepted — the state nothing on this surface used to
+ * mention at all.
+ *
+ * Carries FACTS, not a verdict. `sendError` / `sendAttempts` / `sendLastAttemptAt` / `sentAt` are the four
+ * columns the CRM board derives "Send failed", "Send stuck" and "Sending…" from, and they travel raw so the
+ * phone can draw the same three-way distinction from the same evidence. Deriving the verdict here instead
+ * would have to be recomputed on every poll to stay true — the stall case is a CLOCK reading, not a stored
+ * fact — and would have left the app unable to say anything at all about a payload it had cached for ten
+ * minutes.
+ *
+ * `sentAt` is here for a second reason beyond display: it is the age the mail provider's idempotency window
+ * is measured against, so it is what tells the app whether a Retry needs the duplicate-risk acknowledgement
+ * the send service refuses to proceed without.
+ *
+ * There is deliberately no `sendDeliveredAt`: the query's own predicate is `send_delivered_at IS NULL`, so
+ * the field could only ever be null here, and a structurally-null field is an invitation to key a branch on
+ * something that can never change.
+ */
+export interface WeeklyReportUndeliveredSend {
+  reportId: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  projectName: string;
+  weekOf: string;
+  /** Shown alongside the week, because a v2 that has not landed reads very differently from a v1. */
+  version: number;
+  /** When the PM committed the send. Stamped once and never moved — see `sendLastAttemptAt`. */
+  sentAt: string | null;
+  sendError: string | null;
+  sendAttempts: number;
+  /** When the delivery was last ATTEMPTED — written by the worker, and by a retry when it re-queues. */
+  sendLastAttemptAt: string | null;
+}
+
 export interface WeeklyReportAssignments {
   asOf: string;
   projects: WeeklyReportAssignment[];
@@ -126,6 +161,15 @@ export interface WeeklyReportAssignments {
    * of somebody's workload.
    */
   pendingReviewTotal: number;
+  /**
+   * Weeks this PM sent that have not reached the client. Newest first, capped, counted.
+   *
+   * A SEPARATE LIST RATHER THAN A WIDER `pendingReview` PREDICATE, which is the obvious move and is wrong
+   * here twice over. See `listUndeliveredWeeklyReportSends`.
+   */
+  undeliveredSends: WeeklyReportUndeliveredSend[];
+  /** The true depth of the list above, which the payload caps — same contract as `pendingReviewTotal`. */
+  undeliveredSendsTotal: number;
 }
 
 function toIsoDate(value: unknown): string | null {
@@ -181,11 +225,21 @@ export async function listWeeklyReportAssignments(
     [input.userId, elevated],
   );
   if (projectsResult.rows.length === 0) {
-    // Still ask for the review queue. The projects query is scoped to `status = 'active'`, the queue is
-    // not — a PM whose only project has since been paused or completed can still be holding a submitted
-    // report on it, and returning an empty queue here would hide it with nobody responsible for it.
+    // Still ask for BOTH lists. The projects query is scoped to `status = 'active'` and neither list is —
+    // a PM whose only project has since been paused or completed can still be holding a submitted report
+    // on it, and can still have sent a client an email that never arrived. Pausing a job stops the cadence
+    // generating weeks; it does not un-send an email, and returning empty lists here would hide both with
+    // nobody responsible for them.
     const queue = await listWeeklyReportsAwaitingReview(client, input);
-    return { asOf: input.asOf, projects: [], pendingReview: queue.items, pendingReviewTotal: queue.total };
+    const undelivered = await listUndeliveredWeeklyReportSends(client, input);
+    return {
+      asOf: input.asOf,
+      projects: [],
+      pendingReview: queue.items,
+      pendingReviewTotal: queue.total,
+      undeliveredSends: undelivered.items,
+      undeliveredSendsTotal: undelivered.total,
+    };
   }
 
   const projectIds = projectsResult.rows.map((row) => row.id);
@@ -365,11 +419,14 @@ export async function listWeeklyReportAssignments(
   }
 
   const queue = await listWeeklyReportsAwaitingReview(client, input);
+  const undelivered = await listUndeliveredWeeklyReportSends(client, input);
   return {
     asOf: input.asOf,
     projects,
     pendingReview: queue.items,
     pendingReviewTotal: queue.total,
+    undeliveredSends: undelivered.items,
+    undeliveredSendsTotal: undelivered.total,
   };
 }
 
@@ -380,6 +437,11 @@ export async function listWeeklyReportAssignments(
  * PM's move: the send is the step after it, and it is now on this surface too (field-routes.ts), so a row
  * sitting here approved is work the person reading it can actually finish. Leaving it off would make an
  * approval look like the end of the line.
+ *
+ * `sent` IS NOT AND MUST NOT BE ADDED HERE. A week whose send failed is still the PM's move, but it is a
+ * different move with different controls, and adding the status to this list would also bring every
+ * successfully delivered week back into "waiting on your review" for ever. It travels as its own list —
+ * see `listUndeliveredWeeklyReportSends`, which explains why a separate key rather than a wider predicate.
  *
  * NEWEST FIRST, and counted.
  *
@@ -427,6 +489,89 @@ async function listWeeklyReportsAwaitingReview(
     status: row.status as WeeklyReportStatus,
     authoredByName: row.authored_by_name ?? null,
     submittedAt: toIsoTimestamp(row.submitted_at),
+  }));
+  return { items, total };
+}
+
+/**
+ * The PM's sends that never reached the client — the half of their own work the app could not show them.
+ *
+ * A PM presses Send, the provider refuses the client's address, the worker stamps `send_error`, and from
+ * T-Rock Cam that week simply ends: it leaves the review queue (which selects `pending_review`/`approved`)
+ * and its project card reads "Sent". The only surfaces that ever said otherwise are the CRM board and the
+ * sweep's alert email, and the ordinary `construction` PM can reach neither. This list is what makes the
+ * failure visible to the one person who pressed the button.
+ *
+ * WHY NOT SIMPLY WIDEN THE REVIEW QUEUE'S `status IN (...)`. That is the obvious change and it is wrong for
+ * two independent reasons.
+ *
+ *   1. `mobile/` HAS NO OTA. A server change reaches every phone already carrying the old binary, at once
+ *      and with no way to follow it. Widening `pendingReview` would push `sent` rows into a list that build
+ *      renders under "Waiting on your review" and whose only tap opens the review wizard — which reads the
+ *      report, finds `canEdit: false` at `sent`, and dead-ends in a refusal dialog. A separate key is
+ *      ignored outright by an older build, which is exactly the additive shape `pendingReviewTotal` and
+ *      `outstandingWeekReportIds` already use here for the same reason.
+ *   2. They are different work needing different controls. "Somebody wrote this, read it" ends in Approve;
+ *      "the client never got this" ends in Retry or a correction. Merging them would put one list in front
+ *      of the PM whose rows disagree about what the button under them does.
+ *
+ * AND IT EMPTIES ITSELF, which is the property that makes this safe to leave on the hub. The predicate is
+ * `send_delivered_at IS NULL` — the stamp the worker writes when the provider accepts the message — so an
+ * ordinary week appears for the seconds its delivery is in flight and is gone on the next refresh. Keying
+ * on `send_error IS NOT NULL` instead would have been tighter and would have missed the worse case: a
+ * delivery job that dead-letters having written nothing at all leaves NO error, and that row is a client
+ * owed a report with nobody looking for it (see WEEKLY_REPORT_SEND_STALL_MINUTES in dashboard-service.ts).
+ *
+ * `superseded_by_id IS NULL` is the same predicate the board's undelivered query and the CRM's Retry button
+ * carry, and it is load-bearing rather than tidy: a v1 whose delivery failed and which a delivered v2 has
+ * since replaced is still `sent`, still undelivered, and still holds a live share URL in its stored
+ * request. `retryWeeklyReportSend` refuses that row outright, so listing it would be an invitation to press
+ * a button that cannot work — and if it ever did work it would email a client the version they were already
+ * told was replaced.
+ *
+ * Scoped, capped and ordered exactly like the review queue above: the PM's own projects unless elevated,
+ * newest week first, `APP_REVIEW_QUEUE_LIMIT` rows, and the true total alongside so the app can say what it
+ * is not showing rather than present a truncated list as the whole of somebody's problem.
+ *
+ * No migration is needed for it: `weekly_reports_send_undelivered_idx` (0226) is partial on exactly
+ * `is_active AND status = 'sent' AND send_delivered_at IS NULL`, which is this query's leading predicate.
+ */
+async function listUndeliveredWeeklyReportSends(
+  client: QueryExecutor,
+  input: { userId: string; role: string },
+): Promise<{ items: WeeklyReportUndeliveredSend[]; total: number }> {
+  const elevated = ELEVATED_ROLES.has(input.role);
+  const result = await client.query(
+    `SELECT wr.id, wr.weekly_report_project_id, wr.deal_id, wr.week_of, wr.version,
+            wr.sent_at, wr.send_error, wr.send_attempts, wr.send_last_attempt_at,
+            wrp.property_display_name, d.name AS deal_name,
+            COUNT(*) OVER () AS total_count
+       FROM weekly_reports wr
+       JOIN weekly_report_projects wrp ON wrp.id = wr.weekly_report_project_id
+       JOIN deals d ON d.id = wrp.deal_id
+      WHERE wr.is_active
+        AND wr.status = 'sent'
+        AND wr.send_delivered_at IS NULL
+        AND wr.superseded_by_id IS NULL
+        AND wrp.is_active
+        AND ($2::boolean OR wrp.trock_pm_user_id = $1::uuid)
+      ORDER BY wr.week_of DESC, wr.sent_at DESC NULLS LAST, wr.id
+      LIMIT ${APP_REVIEW_QUEUE_LIMIT}`,
+    [input.userId, elevated],
+  );
+
+  const total = Number(result.rows[0]?.total_count ?? 0);
+  const items = result.rows.map((row) => ({
+    reportId: row.id,
+    weeklyReportProjectId: row.weekly_report_project_id,
+    dealId: row.deal_id,
+    projectName: row.property_display_name ?? row.deal_name ?? "Untitled project",
+    weekOf: toIsoDate(row.week_of)!,
+    version: Number(row.version ?? 1),
+    sentAt: toIsoTimestamp(row.sent_at),
+    sendError: row.send_error ?? null,
+    sendAttempts: Number(row.send_attempts ?? 0),
+    sendLastAttemptAt: toIsoTimestamp(row.send_last_attempt_at),
   }));
   return { items, total };
 }

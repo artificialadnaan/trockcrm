@@ -124,6 +124,23 @@ export function weeklyReportQueueTruncationNote(shown: number, total: number | u
 }
 
 /**
+ * What to say when the undelivered-send list came back capped, or null when it holds all of them.
+ *
+ * Same contract as the review queue above, and worded for a sharper case: every row it is hiding is a
+ * client who has not received a report somebody already believes was sent. Naming the count and where the
+ * rest live beats implying that what is on screen is the whole problem.
+ */
+export function weeklyReportUndeliveredTruncationNote(
+  shown: number,
+  total: number | undefined,
+): string | null {
+  if (typeof total !== "number" || !Number.isFinite(total)) return null;
+  const hidden = Math.max(0, Math.trunc(total) - shown);
+  if (hidden <= 0) return null;
+  return `Showing the ${shown} most recent of ${Math.trunc(total)}. The ${hidden} older ${hidden === 1 ? "one is" : "ones are"} on the weekly report board in the CRM.`;
+}
+
+/**
  * What to say when the photo window came back capped, or null when the grid holds all of it.
  *
  * Same standard as the review queue above, and for a sharper reason. The window is anchored on the
