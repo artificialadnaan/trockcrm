@@ -24,8 +24,9 @@ const net = require("net");
  *
  * The claim was that keying off the build profile alone "would abort every
  * `eas build --profile production` on the developer's laptop". It would not: eas-cli never sets
- * `EAS_BUILD_PROFILE` in the local process (verified against eas-cli 20.1.0, which `eas.json` pins —
- * the string appears nowhere in the package), and `app.config.ts` already ships a profile-only guard
+ * `EAS_BUILD_PROFILE` in the local process (verified against eas-cli 20.1.0 — the string appears
+ * nowhere in the package; note `eas.json` sets a FLOOR of `>= 20.1.0`, not a pin, so a newer CLI is
+ * permitted and this was not checked against one), and `app.config.ts` already ships a profile-only guard
  * of exactly that shape driving `requireRegisteredMetaApp`. Recommending `--visibility plaintext`
  * removes the other half of the worry, since a plaintext variable IS readable during local config
  * evaluation.
@@ -244,11 +245,12 @@ function assertProductionBuildEnv(env) {
         "variable:\n\n" +
         "  eas env:create production --scope project --name EXPO_PUBLIC_API_BASE_URL " +
         "--value <https-host> --visibility plaintext\n\n" +
-        "The `production` environment and `--visibility` are both required: without the " +
-        "environment the variable is created somewhere this build will not read it, and you get " +
-        "this identical error on the next twenty-minute build. `plaintext` is correct because " +
-        "EXPO_PUBLIC_* values are inlined into the bundle and can be read straight out of the app, " +
-        "so secret visibility buys nothing and would hide the value from local config evaluation."
+        "Give the environment explicitly: non-interactively `eas env:create` REFUSES without it " +
+        "(\"the --environment flag must be set\"), and interactively it prompts — pick the wrong one " +
+        "there and you get this identical error on the next twenty-minute build. `plaintext` is " +
+        "correct because EXPO_PUBLIC_* values are inlined into the bundle and can be read straight " +
+        "out of the app, so secret visibility buys nothing and would hide the value from local " +
+        "config evaluation."
     );
   }
 

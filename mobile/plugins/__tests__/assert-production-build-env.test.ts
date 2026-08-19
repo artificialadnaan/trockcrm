@@ -152,6 +152,16 @@ describe("assertProductionBuildEnv", () => {
     // before parsing, so the parser sees a clean URL and the raw string still carries the junk.
     "https://\tapi.example.com",
     "https://api.example\n.com",
+    "https://api.example\r.com",
+    // THE REST OF THE CLASS. The check is a control-character RANGE (U+0000-U+0020 plus U+007F), and
+    // only tab and newline were ever asserted — narrowing it to just those three left the whole suite
+    // green. These pin the range's ends and its interior, so the bound cannot be quietly shrunk.
+    // (They must sit MID-host: a trailing one is stripped by the `.trim()` that runs first, which is
+    // correct behaviour and a different case.)
+    "https://api\u0000.example.com",
+    "https://api\u001f.example.com",
+    "https://api\u007f.example.com",
+    "https://api example.com",
   ])("REGRESSION: rejects %j, which the parser repairs into a host the app never sends", (url) => {
     expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
       /must begin with/
