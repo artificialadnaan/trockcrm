@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Info, Loader2, Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   createWeeklyReportProject,
   deleteWeeklyReportProject,
@@ -229,9 +235,9 @@ export function WeeklyReportProjectDialog({
           <DialogTitle className="text-[16px] font-extrabold tracking-tight text-slate-950">
             {project ? "Edit weekly report project" : "New weekly report project"}
           </DialogTitle>
-          <p className="mt-0.5 text-[13.5px] text-slate-500">
+          <DialogDescription className="mt-0.5 text-[13.5px] text-slate-500">
             Who receives the client's weekly progress report, what prints on it, and how often it is due.
-          </p>
+          </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">

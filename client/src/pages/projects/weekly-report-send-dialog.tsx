@@ -6,7 +6,13 @@ import {
   weeklyReportGreetingNameFor,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   fetchWeeklyReportSendDraft,
   sendWeeklyReport,
@@ -147,9 +153,9 @@ export function WeeklyReportSendDialog({
           <DialogTitle className="text-[16px] font-extrabold tracking-tight text-slate-950">
             {draft?.isCorrection ? "Send correction to client" : "Send weekly report to client"}
           </DialogTitle>
-          <p className="mt-0.5 text-[13.5px] text-slate-500">
+          <DialogDescription className="mt-0.5 text-[13.5px] text-slate-500">
             Check the recipients and the note before this leaves for the client.
-          </p>
+          </DialogDescription>
         </DialogHeader>
 
         {loadError ? (

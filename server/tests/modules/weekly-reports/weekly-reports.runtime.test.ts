@@ -9,7 +9,7 @@
 // SECOND time to prove the replayability the migration claims.
 
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
@@ -218,6 +218,22 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await pg.close();
+});
+
+/**
+ * Undo actions for anything a test adds to the SHARED fixture.
+ *
+ * The office, users and roster are seeded once in `beforeAll` and `beforeEach` resets only the report
+ * and project tables, so a test that adds a roster row or a user must remove it — and must do so even
+ * when an assertion throws partway through, or every later test in the file inherits the leftover and
+ * fails downstream, burying the one that actually broke.
+ */
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  while (cleanups.length > 0) {
+    await cleanups.pop()!().catch(() => {});
+  }
 });
 
 beforeEach(async () => {
@@ -1646,13 +1662,19 @@ describe("review findings, round two", () => {
   it("refuses an assignee who has been removed from the roster", async () => {
     // Deactivating the ROSTER row is how a director takes somebody off the field team, and it is what
     // must block a new assignment — not the login's own is_active, which nobody edits for this reason.
+    // try/finally, because the roster is seeded ONCE in beforeAll and `beforeEach` does not reset it.
+    // A failing assertion here would otherwise leave PM_RESPONDER inactive for every later test in the
+    // file — a cascade of failures that buries the one that actually broke.
     await pg.query(`UPDATE office_dallas.field_responders SET is_active = false WHERE id = $1::uuid`, [
       PM_RESPONDER,
     ]);
-    await expectAppError(seedProject(), 400, /removed from the field team/i);
-    await pg.query(`UPDATE office_dallas.field_responders SET is_active = true WHERE id = $1::uuid`, [
-      PM_RESPONDER,
-    ]);
+    try {
+      await expectAppError(seedProject(), 400, /removed from the field team/i);
+    } finally {
+      await pg.query(`UPDATE office_dallas.field_responders SET is_active = true WHERE id = $1::uuid`, [
+        PM_RESPONDER,
+      ]);
+    }
   });
 
   it("re-validates the assignee on PATCH, not just on create", async () => {
@@ -1858,6 +1880,15 @@ describe("review findings, round three", () => {
     // them selectable, and the email lookup is what turns them into somebody who can actually approve.
     // Getting it wrong is silent — the project saves, prints the right name, and nobody can approve it.
     const VISITING_RESPONDER = U("44444");
+    // Same reason as the roster-deactivation test below: the fixture is shared across the file, and a
+    // failing assertion partway through would leave a Visiting PM on the roster for every later
+    // picker assertion. Registered before the first write so nothing can leak past a throw.
+    cleanups.push(async () => {
+      await pg.query(`DELETE FROM public.user_office_access WHERE user_id = $1::uuid`, [GRANTED]);
+      await pg.query(`DELETE FROM office_dallas.field_responders WHERE id = $1::uuid`, [VISITING_RESPONDER]);
+      await pg.query(`DELETE FROM public.users WHERE id = $1::uuid`, [GRANTED]);
+      await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [OTHER_OFFICE]);
+    });
     await pg.query(`INSERT INTO public.offices (id, name, slug) VALUES ($1::uuid, 'Atlanta', 'atl2')`, [OTHER_OFFICE]);
     await pg.query(
       `INSERT INTO public.users (id, display_name, email, role, office_id)
@@ -1890,11 +1921,6 @@ describe("review findings, round three", () => {
     // The picker must agree with the write path, or the form promises a login the server declines.
     expect((await listWeeklyReportAssignableResponders(db, OFFICE)).find((r) => r.id === VISITING_RESPONDER))
       .toMatchObject({ hasLogin: true });
-
-    await pg.query(`DELETE FROM public.user_office_access WHERE user_id = $1::uuid`, [GRANTED]);
-    await pg.query(`DELETE FROM office_dallas.field_responders WHERE id = $1::uuid`, [VISITING_RESPONDER]);
-    await pg.query(`DELETE FROM public.users WHERE id = $1::uuid`, [GRANTED]);
-    await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [OTHER_OFFICE]);
   });
 
   it("applies a grant's role_override when deciding assignability", async () => {
