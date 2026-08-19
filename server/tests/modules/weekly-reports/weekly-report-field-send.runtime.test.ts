@@ -227,6 +227,12 @@ beforeAll(async () => {
   await pg.exec(migrationSql("0222_weekly_reports"));
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
+  // 0227 too, even though this suite tests SENDING rather than the stall sweep. `retryWeeklyReportSend`
+  // clears `send_stall_alerted_at` in the same statement that moves the stall clock — re-arming the alert
+  // is the whole point of a human retry — so without this column every retry here dies on an undefined
+  // column rather than on its subject. Neither branch could have written this line: the sweep never saw
+  // this file, and this file predates the sweep.
+  await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
