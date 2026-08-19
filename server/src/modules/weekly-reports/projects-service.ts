@@ -167,6 +167,9 @@ export interface WeeklyReportProjectInput {
   status?: WeeklyReportProjectStatus;
 }
 
+/** Canonical uuid shape — guards the roster lookup against a 22P02 on a malformed id. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
@@ -858,6 +861,14 @@ async function resolveRosterAssignee(
   label: string,
 ): Promise<ResolvedTrockAssignee | null> {
   if (!responderId) return null;
+
+  // Shape-checked BEFORE the query. `id = $1::uuid` raises 22P02 on anything that is not a uuid, which
+  // surfaces as a 500 — the route validates `dealId` with requireUuid and nothing validates these two,
+  // so a typo'd id from any caller was an unhandled server error rather than a refusal naming the field.
+  // Same guard, same reason, as resolveScorecardResponderPick's UUID_SHAPE.
+  if (!UUID_SHAPE.test(responderId)) {
+    throw new AppError(400, `${label} must be a valid field-team id`);
+  }
 
   const roster = await client.query(
     `SELECT id, name, email, role, is_active FROM field_responders WHERE id = $1::uuid LIMIT 1`,

@@ -1603,6 +1603,19 @@ describe("review findings, round two", () => {
     await expectAppError(seedProject({ trockPmResponderId: STRANGER }), 400, /field team/i);
   });
 
+  it("refuses a MALFORMED responder id with a 400, not a 500", async () => {
+    // `WHERE id = $1::uuid` raises 22P02 on anything that is not a uuid, and the route validates only
+    // `dealId`. So a typo'd id was an unhandled server error rather than a refusal naming the field —
+    // the same failure `resolveScorecardResponderPick`'s UUID_SHAPE guard exists to prevent, and worth
+    // pinning because the difference between 400 and 500 here is invisible until somebody hits it.
+    await expectAppError(seedProject({ trockPmResponderId: "not-a-uuid" }), 400, /valid field-team id/i);
+    await expectAppError(
+      updateWeeklyReportProject(db, (await seedProject()).id, { trockSuperResponderId: "nope" }, OFFICE),
+      400,
+      /valid field-team id/i,
+    );
+  });
+
   it("refuses a roster person whose role does not match the slot", async () => {
     // The direction that hands out approval rights: installing a superintendent as the PM would give
     // them the review gate's powers over their own reports.
