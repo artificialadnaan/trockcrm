@@ -756,23 +756,21 @@ export async function deactivateWeeklyReportProject(client: QueryExecutor, id: s
 }
 
 /**
- * Roles that can hold the PM or superintendent slot on a weekly report.
+ * Roles the LEGACY `/assignable-users` feed returns.
+ *
+ * NO LONGER "who may hold the PM slot" — 0228 moved that to the field-team roster, and this constant does
+ * not describe it any more. Read `resolveRosterAssignee` for the live rule. The distinction is not
+ * pedantic: the roster contains people whose login role is `rep` (Adam Sherwood is one) and people with
+ * no login at all, and both can now hold the slot. Any reasoning that still treats this list as the set
+ * of possible PMs reaches a conclusion about a smaller, wrong set.
+ *
+ * It is kept, and this feed is kept, so a browser running the previous bundle through a deploy renders a
+ * populated picker rather than an empty one. Once that window has passed both can go.
  *
  * `field_contractor` is the T-Rock Cam login role, `construction` is its CRM-side counterpart, and
- * admin/director are included because leadership genuinely does carry projects. `rep` is excluded: the
- * sales roster would bury the handful of real candidates.
- *
- * Deliberately NOT sourced from `field_responders` (0198), whose ids belong to a per-office roster table
- * rather than to `public.users` — and `weekly_report_projects.trock_*_user_id` is a `public.users` FK
- * that the authorisation check compares against the acting user's id. Nor from `deal_team_members`,
- * which is empty in production.
- */
-/**
- * Who may hold the PM slot on a weekly-report project.
- *
- * Exported so the test that pins the CRM send boundary can INTERSECT it with the sender roles rather than
- * re-typing both lists. It used to assert two hand-written literals were disjoint, which no source change
- * could ever falsify — widening the send gate to admit `construction` left it green.
+ * admin/director are included because leadership genuinely does carry projects. `rep` was excluded on the
+ * grounds that the sales roster would bury the handful of real candidates — which was true, and which is
+ * exactly how four real PMs and superintendents ended up unselectable.
  */
 export const ASSIGNABLE_ROLES = ["field_contractor", "construction", "admin", "director"] as const;
 
@@ -817,21 +815,11 @@ function officeMemberSql(officeParam: number, rolesParam: number): string {
   return OFFICE_MEMBER_SQL.replaceAll("$OFFICE$", `$${officeParam}`).replaceAll("$ROLES$", `$${rolesParam}`);
 }
 
-async function assertAssignableUser(
-  client: QueryExecutor,
-  officeId: string,
-  userId: string | null,
-  label: string,
-): Promise<void> {
-  if (!userId) return;
-  const result = await client.query(
-    `SELECT 1 ${officeMemberSql(2, 3)} AND u.id = $1::uuid LIMIT 1`,
-    [userId, officeId, [...ASSIGNABLE_ROLES]],
-  );
-  if (result.rows.length === 0) {
-    throw new AppError(400, `${label} must be an active member of this office's project team`);
-  }
-}
+// `assertAssignableUser` lived here and is GONE. It validated a caller-supplied `public.users` id against
+// ASSIGNABLE_ROLES, and after 0228 no caller supplies one — the id is derived from the roster row's email
+// by resolveRosterAssignee, which is now the gate. Left in place it would have been a dead function that
+// reads like a live guard: the next person to add a user-id path would find it, call it, and believe the
+// slot was protected by it.
 
 /** The roster row behind one slot, plus the login it resolves to (null when that person has none). */
 export interface ResolvedTrockAssignee {

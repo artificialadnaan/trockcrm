@@ -1111,24 +1111,38 @@ describe("the assigned PM sends from the FIELD mount, not this one", () => {
     expect(canPublishWeeklyReport(row.rows[0] as Record<string, any>, PM_ACTOR)).toBe(true);
   });
 
-  it("but reaches no CRM endpoint, because that router admits neither of the roles a PM holds", async () => {
-    // `ASSIGNABLE_ROLES` (projects-service.ts) is field_contractor/construction/admin/director — the roles
-    // that may hold the PM slot. The CRM send routes require admin/director. So the assigned-PM arm of
-    // `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not already leadership; it is
-    // reachable on /api/field, where that PM authenticates and where the mount carries only their own
-    // reports. The CRM refusal is asserted end-to-end in tests/weekly-report-send-route.test.ts and the
-    // field capability in weekly-report-field-send.runtime.test.ts; asserted here is that the two role
-    // sets genuinely disjoin, which is what makes a second mount necessary rather than merely convenient.
+  it("but reaches no CRM endpoint, because that router admits ONLY leadership", async () => {
+    // The assigned-PM arm of `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not
+    // already leadership; it is reachable on /api/field, where that PM authenticates and where the mount
+    // carries only their own reports. The CRM refusal is asserted end-to-end in
+    // tests/weekly-report-send-route.test.ts and the field capability in
+    // weekly-report-field-send.runtime.test.ts. Asserted HERE is the property that makes a second mount
+    // necessary rather than merely convenient.
     //
-    // Read from SOURCE, both sides. This previously compared two hand-typed literals, so it asserted a
-    // property of the test file rather than of the code — widening the send gate to admit `construction`
-    // left it green while its comment claimed to pin exactly that.
+    // THE PREMISE CHANGED IN 0228, AND THIS TEST HAD TO CHANGE WITH IT. It used to intersect
+    // `ASSIGNABLE_ROLES` with the sender roles, on the grounds that the former was "who may hold the PM
+    // slot". That is no longer true: the field-team ROSTER decides the slot now, and the roster holds
+    // people whose login role is `rep` and people with no login at all. Intersecting the old constant
+    // would still have passed — while reasoning about a set that no longer describes anything.
+    //
+    // So the property is stated the way it now has to be: the gate is leadership ONLY, whatever role the
+    // roster person turns out to hold. That is strictly stronger than the old disjointness claim, and it
+    // is what actually keeps a `rep` PM — a thing that can exist for the first time after 0228 — out of
+    // the office-wide leadership surface.
     const leadership: readonly string[] = WEEKLY_REPORT_SENDER_ROLES;
-    const assignableButNotLeadership = ASSIGNABLE_ROLES.filter((role) => !leadership.includes(role));
+    expect([...leadership].sort()).toEqual(["admin", "director"]);
 
-    // The control: the filter must actually leave something, or the disjointness below is vacuous.
-    expect(assignableButNotLeadership).toEqual(["field_contractor", "construction"]);
-    expect(assignableButNotLeadership.some((role) => leadership.includes(role))).toBe(false);
+    // Every role a roster-linked login can hold. `rep` is the one 0228 admits and the reason this matters.
+    const POSSIBLE_PM_LOGIN_ROLES = ["field_contractor", "construction", "rep", "admin", "director"];
+    const nonLeadershipPms = POSSIBLE_PM_LOGIN_ROLES.filter((role) => !leadership.includes(role));
+
+    // The control: the filter must actually leave something, or the check below is vacuous.
+    expect(nonLeadershipPms).toEqual(["field_contractor", "construction", "rep"]);
+    expect(nonLeadershipPms.some((role) => leadership.includes(role))).toBe(false);
+
+    // And the legacy constant is no longer load-bearing for this boundary — pinned so that widening it
+    // cannot quietly re-enter the reasoning above.
+    expect(ASSIGNABLE_ROLES).not.toContain("rep");
   });
 });
 

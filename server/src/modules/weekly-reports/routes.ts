@@ -476,10 +476,16 @@ router.post("/reports/:id/transition", async (req, res, next) => {
  *
  * Stated as a role gate rather than left implicit, because implicit it was WRONG in a way that read as
  * right. `canPublishWeeklyReport` allows "the assigned PM or an admin/director"; the router above admits
- * admin/director/rep; and `ASSIGNABLE_ROLES` (projects-service.ts) — who may hold the PM slot at all —
- * is field_contractor/construction/admin/director. Intersect those and the assigned-PM arm can only ever
- * fire for somebody who is ALREADY an admin or director. A `construction` PM, which is the normal case,
- * gets 403 at the router before any of it runs.
+ * admin/director/rep; and this gate narrows the send routes to admin/director. So the assigned-PM arm can
+ * only ever fire for somebody who is ALREADY an admin or director. A `construction` PM, which is the
+ * normal case, gets 403 at the router before any of it runs.
+ *
+ * 0228 MADE THIS GATE MATTER MORE, not less. The PM slot used to be restricted to
+ * field_contractor/construction/admin/director, so `rep` — the one role the outer router admits and this
+ * one does not — could never be the assigned PM, and the arm was unreachable for a second reason. Now the
+ * field-team roster decides the slot, and it contains people whose login is a `rep` (Adam Sherwood is
+ * one). This line is the only thing still standing between such a PM and the office-wide leadership
+ * surface. Do not widen it without moving that reasoning somewhere.
  *
  * So the shipped CRM capability is exactly "an admin or director in this office may send any of that
  * office's client reports", and this line says so. The alternative — widening the router to admit
