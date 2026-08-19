@@ -40,6 +40,7 @@ import type {
   CorrectiveActionConfirmUploadResponse,
   WeeklyReportAssignmentsResponse,
   WeeklyReportDetailResponse,
+  WeeklyReportDictationResponse,
   WeeklyReportPhotoCandidatesResponse,
   WeeklyReportResponse,
   WeeklyReportStatusValue,
@@ -306,6 +307,37 @@ export const replaceWeeklyReportPhotos = (
 // `{"to":"approved"}` is refused regardless of what this app's buttons allow.
 export const transitionWeeklyReport = (f: Fetcher, id: string, to: WeeklyReportStatusValue) =>
   f<WeeklyReportResponse>(`/field/weekly-reports/reports/${id}/transition`, { method: "POST", body: { to } });
+
+/**
+ * Clean a dictated transcript into report bullets, server-side.
+ *
+ * Sends the TRANSCRIPT and a CHARACTER COUNT — never the section the superintendent has already written.
+ * The server therefore cannot return a rewritten section, and what comes back is only ever appended.
+ * `existingChars` is what lets the server cap the addition so the two together stay inside the section
+ * limit, which matters because dictation appends programmatically and no TextInput `maxLength` applies.
+ *
+ * `timeoutMs` is deliberately shorter than the 30s default. Somebody is standing on a jobsite holding the
+ * phone while this runs, and there is a perfectly good answer waiting locally — waiting half a minute for
+ * a nicer version of text we can already produce is the wrong trade. The caller
+ * (weekly-reports/dictation.ts) falls back to the on-device split on any failure, including this timeout.
+ *
+ * IT MUST STAY STRICTLY LARGER THAN THE SERVER'S OWN DEADLINE, which is `TOTAL_DEADLINE_MS` in
+ * server/src/modules/weekly-reports/dictation-service.ts and is 15s. The two were both 20s, and because
+ * the server's clock only starts when the request ARRIVES, its answer was necessarily later than this
+ * abort by however long the upload took — so a response produced just inside the server's budget was
+ * always thrown away in favour of the local split, while the model call it paid for ran to completion
+ * (nothing cancels it on disconnect). This budget has to cover upload + server deadline + download; 20
+ * against 15 leaves 5s for the two network legs on LTE.
+ */
+export const formatWeeklyReportDictation = (
+  f: Fetcher,
+  body: { transcript: string; existingChars: number },
+) =>
+  f<WeeklyReportDictationResponse>("/field/weekly-reports/dictation", {
+    method: "POST",
+    body,
+    timeoutMs: 20_000,
+  });
 
 // ── Corrective actions ────────────────────────────────────────────────────────
 // Read a below-band scorecard's corrective-action items + their inline responses. Session auth in-app
