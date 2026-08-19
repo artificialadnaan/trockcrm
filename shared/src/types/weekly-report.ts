@@ -20,9 +20,34 @@ export type WeeklyReportStatus = (typeof WEEKLY_REPORT_STATUSES)[number];
 export const WEEKLY_REPORT_PROJECT_STATUSES = ["active", "paused", "completed"] as const;
 export type WeeklyReportProjectStatus = (typeof WEEKLY_REPORT_PROJECT_STATUSES)[number];
 
-/** Reminder kinds, matching the `weekly_report_reminders_sent.kind` CHECK. */
-export const WEEKLY_REPORT_REMINDER_KINDS = ["t_minus_2", "t_minus_1", "due_digest"] as const;
+/**
+ * Reminder kinds, matching the `weekly_report_reminders_sent.kind` CHECK (widened by migration 0229).
+ *
+ * `rep_escalation` is scheduled on a DIFFERENT AXIS from the other three, which is why the lead-day
+ * table below no longer covers this whole union — see WEEKLY_REPORT_LEAD_DAY_REMINDER_KINDS.
+ */
+export const WEEKLY_REPORT_REMINDER_KINDS = [
+  "t_minus_2",
+  "t_minus_1",
+  "due_digest",
+  "rep_escalation",
+] as const;
 export type WeeklyReportReminderKind = (typeof WEEKLY_REPORT_REMINDER_KINDS)[number];
+
+/**
+ * The kinds selected by HOW MANY DAYS ARE LEFT until the report is due.
+ *
+ * `rep_escalation` is deliberately absent. It fires on the due day, like `due_digest`, but is chosen by
+ * the CLOCK — 17:00 CT, after the day's 07:00/09:00/11:00 ticks have been and gone. Putting it in the
+ * offset table below would give two kinds an offset of 0, and `reminderKindForLeadDays` returns the
+ * FIRST match: the due-day digest and the evening escalation would become the same slot, and whichever
+ * lost the iteration order would silently never fire again.
+ *
+ * Two axes, two lists. The full union above is what the database constrains; this narrower one is what
+ * the day scheduler may choose from.
+ */
+export const WEEKLY_REPORT_LEAD_DAY_REMINDER_KINDS = ["t_minus_2", "t_minus_1", "due_digest"] as const;
+export type WeeklyReportLeadDayReminderKind = (typeof WEEKLY_REPORT_LEAD_DAY_REMINDER_KINDS)[number];
 
 /**
  * What the dashboard shows for one expected week. `not_started` and `dismissed` are NOT report statuses —
@@ -79,7 +104,7 @@ export const WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS = 250;
 export const WEEKLY_REPORT_MAX_PHOTOS = 60;
 
 /** Days before the due date that each reminder fires. `due_digest` fires ON the due date. */
-export const WEEKLY_REPORT_REMINDER_OFFSET_DAYS: Record<WeeklyReportReminderKind, number> = {
+export const WEEKLY_REPORT_REMINDER_OFFSET_DAYS: Record<WeeklyReportLeadDayReminderKind, number> = {
   t_minus_2: 2,
   t_minus_1: 1,
   due_digest: 0,

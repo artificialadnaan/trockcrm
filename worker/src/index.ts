@@ -12,7 +12,10 @@ import { runEmailSync } from "./jobs/email-sync.js";
 import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
-import { runWeeklyReportReminders } from "./jobs/weekly-report-reminders.js";
+import {
+  runWeeklyReportRepEscalations,
+  runWeeklyReportReminders,
+} from "./jobs/weekly-report-reminders.js";
 import { runWeeklyReportSendSweep } from "./jobs/weekly-report-send-sweep.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
@@ -242,6 +245,27 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: weekly report reminders at 7:00 AM CT daily (catch-up 9 & 11 AM)");
+
+  // Weekly Reports SALES-REP ESCALATION: 17:00 CT, on the due day only.
+  //
+  // A SEPARATE tick, not a fourth entry on the line above, because it is selected by the CLOCK rather
+  // than by days-until-due. The 07/09/11 pass has claimed t−2, t−1 and the digest hours before this runs;
+  // this one computes ONLY `rep_escalation` (see WeeklyReportReminderMode), so it cannot re-send the
+  // day's digest to leadership every evening.
+  //
+  // NO CATCH-UP TICK, deliberately. This is the last word on a day that has already produced three
+  // reminders, and the failure it guards against — nobody knowing the client will not get their report —
+  // is not made worse by arriving tomorrow morning instead. A second evening tick would mostly be a
+  // second chance to annoy a sales rep about a report that was filed at 17:30.
+  cron.schedule("0 17 * * *", async () => {
+    console.log("[Worker:cron] Running weekly report sales-rep escalations...");
+    try {
+      await runWeeklyReportRepEscalations();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report escalations failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: weekly report sales-rep escalation at 5:00 PM CT daily");
 
   // Weekly Reports dead-letter sweep: every 15 minutes, round the clock.
   //
