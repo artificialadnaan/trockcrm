@@ -18,7 +18,7 @@ which is not merged. Two do not.
 |---|---|---|---|
 | 1 | Field-route send | **PR5** | needs `send-service.ts`, `send_request`, migration 0226 |
 | 2 | Bounce webhook | **PR5** | correlates on `send_delivery_key`, added by 0226 |
-| 3 | Dead-letter sweep | **PR5** | sweeps 0226's partial index, ages on `send_last_attempt_at` |
+| 3 | Dead-letter sweep | **PR5** | sweeps 0226's partial index, ages on `GREATEST(sent_at, send_last_attempt_at)` |
 | 4 | Server-side dictation | `main` | touches the #1073 wizard only |
 | 5 | Deep-link flag | `main` | touches `weekly-report-reminders.ts` (#1072) and mobile only |
 
