@@ -62,6 +62,20 @@ export interface WeeklyReportDetail {
   sentAt: string | null;
   sendError: string | null;
   sendAttempts: number;
+  /**
+   * When the mail provider ACCEPTED the message — a different fact from `sentAt`, which is stamped when
+   * the PM commits. Null on a `sent` report means the delivery is still in flight or has failed, which is
+   * exactly the state the dashboard's "Send failed" chip exists to surface.
+   *
+   * AND NOTHING MORE THAN THAT. There is no bounce webhook anywhere in this codebase (no svix handler, no
+   * resend-signature verification), and client addresses are hand-typed with no verification — so a report
+   * addressed to `jay@examle.com` is accepted, hard-bounces, and reads here forever as though it landed.
+   * Every surface that consumes this field is worded accordingly. Ingesting Resend's delivery/bounce
+   * webhooks is the real fix and is deliberately out of scope for this PR: it needs a public unauthenticated
+   * endpoint, signature verification, and an event table, which is a feature rather than a correction.
+   */
+  sendDeliveredAt: string | null;
+  sendLastAttemptAt: string | null;
   pdfAvailable: boolean;
   photos: WeeklyReportPhoto[];
 }
@@ -113,6 +127,8 @@ function mapReportRow(row: Record<string, any>, photos: WeeklyReportPhoto[]): We
     sentAt: toIsoTimestamp(row.sent_at),
     sendError: row.send_error ?? null,
     sendAttempts: Number(row.send_attempts ?? 0),
+    sendDeliveredAt: toIsoTimestamp(row.send_delivered_at),
+    sendLastAttemptAt: toIsoTimestamp(row.send_last_attempt_at),
     pdfAvailable: Boolean(row.pdf_r2_key),
     photos,
   };
@@ -861,11 +877,23 @@ export async function listWeeklyReportPhotoCandidates(
  * `remaining_weeks` is computed and STORED on submit rather than at render time, so a report already in
  * the PM's queue keeps the arithmetic it was written with even if the projected duration is revised.
  */
+export interface WeeklyReportTransitionOptions {
+  /**
+   * The composed email, written in the SAME statement that moves the report to `sent`.
+   *
+   * Supplied only by the send flow (send-service.ts). Keeping it here rather than in a follow-up UPDATE is
+   * what makes "a `sent` report always records what was sent" true under concurrency: the status write is
+   * already conditioned on the status it validated, so a request that loses that race writes neither.
+   */
+  sendRequest?: { request: Record<string, unknown>; deliveryKey: string };
+}
+
 export async function transitionWeeklyReport(
   client: QueryExecutor,
   id: string,
   to: WeeklyReportStatus,
   actor: WeeklyReportActor,
+  options: WeeklyReportTransitionOptions = {},
 ): Promise<WeeklyReportDetail> {
   if (!isWeeklyReportStatus(to)) {
     throw new AppError(400, "Unknown report status");
@@ -923,6 +951,21 @@ export async function transitionWeeklyReport(
     // 180-day link, which they may already have read.
     params.push(JSON.stringify(await buildWeeklyReportSnapshot(client, projectRow)));
     assignments.push(`snapshot = $${params.length}::jsonb`);
+
+    if (options.sendRequest) {
+      params.push(JSON.stringify(options.sendRequest.request));
+      assignments.push(`send_request = $${params.length}::jsonb`);
+      params.push(options.sendRequest.deliveryKey);
+      assignments.push(`send_delivery_key = $${params.length}::uuid`);
+      // A fresh send starts from a clean delivery record. These are all already at their defaults for a
+      // first send; stating them keeps the invariant true for any future path that reuses this row.
+      assignments.push(
+        `send_attempts = 0`,
+        `send_error = NULL`,
+        `send_delivered_at = NULL`,
+        `send_last_attempt_at = NULL`,
+      );
+    }
   }
   // Any move BACKWARDS out of `approved` clears the review stamps — bounced to draft, or approval
   // withdrawn back into review. Clearing only on the draft path left a report reading "pending review"

@@ -1,0 +1,314 @@
+// @vitest-environment jsdom
+
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The History tab is where a PM lands when they go looking for a report that did not arrive, so the
+// controls it offers decide what they do next. Offering "Send correction" as the only action on a failed
+// send is how a client ended up receiving nothing at all: the clone becomes the week's live version, the
+// failure comes off the board with it, and a PM pulled away mid-draft leaves the board reading "approved,
+// waiting on the PM" — indistinguishable from a Send button nobody has pressed.
+
+const mocks = vi.hoisted(() => ({
+  reports: [] as any[],
+  refetch: vi.fn(),
+  fetchWeeklyReportDetail: vi.fn(),
+  createWeeklyReportCorrection: vi.fn(),
+  retryWeeklyReportSend: vi.fn(),
+  toastError: vi.fn(),
+  toastSuccess: vi.fn(),
+}));
+
+vi.mock("@/hooks/use-weekly-reports", () => ({
+  useWeeklyReportHistory: () => ({
+    reports: mocks.reports,
+    loading: false,
+    error: null,
+    refetch: mocks.refetch,
+  }),
+  fetchWeeklyReportDetail: mocks.fetchWeeklyReportDetail,
+  createWeeklyReportCorrection: mocks.createWeeklyReportCorrection,
+  retryWeeklyReportSend: mocks.retryWeeklyReportSend,
+}));
+vi.mock("sonner", () => ({ toast: { error: mocks.toastError, success: mocks.toastSuccess } }));
+
+import { WeeklyReportHistoryPanel } from "./weekly-report-history-panel";
+
+const PROJECT = {
+  id: "p1",
+  propertyDisplayName: "4123 Cedar Springs",
+  dealName: "4123 Cedar Springs",
+  clientName: "Mack Real Estate Group",
+} as any;
+
+function report(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "r1",
+    weekOf: "2026-08-13",
+    version: 1,
+    status: "sent",
+    authoredByName: "Steve Sanchez",
+    completionPercent: 42,
+    photos: [],
+    supersededById: null,
+    sentAt: new Date().toISOString(),
+    sendDeliveredAt: null,
+    sendError: null,
+    sendAttempts: 0,
+    ...overrides,
+  };
+}
+
+let container: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  mocks.reports = [];
+  mocks.refetch.mockReset();
+  mocks.createWeeklyReportCorrection.mockReset();
+  mocks.retryWeeklyReportSend.mockReset();
+  mocks.toastError.mockReset();
+  mocks.toastSuccess.mockReset();
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  vi.restoreAllMocks();
+});
+
+function render() {
+  act(() => {
+    root.render(
+      <WeeklyReportHistoryPanel
+        projects={[PROJECT]}
+        refreshSignal={0}
+        onSend={vi.fn()}
+        onChanged={vi.fn()}
+      />,
+    );
+  });
+}
+
+function button(label: string): HTMLButtonElement | undefined {
+  return Array.from(container.querySelectorAll("button")).find(
+    (element) => element.textContent?.trim() === label,
+  ) as HTMLButtonElement | undefined;
+}
+
+describe("a sent report the client has not received", () => {
+  it("offers Retry send, not only a correction", () => {
+    mocks.reports = [report({ sendError: "Resend timed out" })];
+    render();
+    expect(button("Retry send")).toBeDefined();
+  });
+
+  it("retries that exact report, inside the provider's dedupe window", async () => {
+    mocks.retryWeeklyReportSend.mockResolvedValue({});
+    mocks.reports = [report({ id: "v1", sendError: "Resend timed out" })];
+    render();
+    await act(async () => {
+      button("Retry send")!.click();
+    });
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+  });
+
+  // The three below cover the duplicate-risk confirmation, which had NO test at all: the shared `report()`
+  // fixture stamps `sentAt: new Date().toISOString()`, so every other test in this file sits inside the
+  // provider window and never reaches the dialog. Deleting the `window.confirm` from RetryButton outright
+  // left both client suites green.
+  //
+  // What that hides is the worst outcome this feature has: past the window the provider no longer dedupes
+  // the key, `retryWeeklyReportSend(reportId, true)` is exactly the flag that disables the server's 409
+  // gate, and History is the surface a PM lands on when chasing a failed send. So a >24h retry would post
+  // the acknowledgement with nobody having been asked, and the client gets a second copy of the report.
+  //
+  // Time is pinned with an absolute `now` AND an absolute `sentAt`. A fixture that is merely "long ago"
+  // decays: the one relied on elsewhere sits ~424h in the past, which only ever caught a window above 424,
+  // and that bound grows by 24 every real day.
+  const NOW = new Date("2026-08-18T12:00:00.000Z");
+  const SENT_25H_AGO = "2026-08-17T11:00:00.000Z";
+  const SENT_23H_AGO = "2026-08-17T13:00:00.000Z";
+
+  it("warns before retrying a send the provider will no longer dedupe, and obeys a refusal", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("acknowledges the duplicate risk explicitly once the PM accepts it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      // `true` is what disables the server's 409 gate. It must only ever follow a dialog the PM saw, so
+      // assert the dialog as well as the flag — checking the flag alone still passes if the confirm is
+      // deleted, because `!deduped` is true either way.
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", true);
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks nothing inside the window, where the key really does dedupe", async () => {
+    // The CONTROL. Without it, a RetryButton that confirmed unconditionally — or one whose predicate
+    // always returned false — would satisfy both tests above.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_23H_AGO, sendError: "Resend timed out" })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("warns before a correction that the send never reached the client", async () => {
+    // The old confirm text described what a correction does to a client who HAS the report, which is the
+    // wrong client entirely when the email failed. A PM reading it had no way to know this is not how a
+    // failed send is fixed.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mocks.reports = [report({ sendError: "Resend timed out" })];
+    render();
+    await act(async () => {
+      button("Send correction")!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/never reached the client/i));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/Retry send instead/i));
+    expect(mocks.createWeeklyReportCorrection).not.toHaveBeenCalled();
+  });
+});
+
+describe("a sent report the provider accepted", () => {
+  it("offers a correction and no retry", () => {
+    mocks.reports = [report({ sendDeliveredAt: "2026-08-13T22:00:00.000Z" })];
+    render();
+    expect(button("Retry send")).toBeUndefined();
+    expect(button("Send correction")).toBeDefined();
+  });
+
+  it("uses the wording that fits a client who already has a copy", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mocks.reports = [report({ sendDeliveredAt: "2026-08-13T22:00:00.000Z" })];
+    render();
+    await act(async () => {
+      button("Send correction")!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/replaces the copy they already have/i));
+  });
+});
+
+describe("a superseded version is never re-sent", () => {
+  // THE STATE: v1 goes out Monday and its delivery fails. The PM issues a correction. v2 is sent and
+  // DELIVERED on Tuesday, which stamps `superseded_by_id` on v1. v1 is now `sent`, superseded, and still
+  // `sendDeliveredAt: null` — every predicate the Retry branch used to check is satisfied — and its
+  // stored send request still carries the live share URL, because that is only dropped on delivery.
+  //
+  // Clicking Retry there emails a paying client the version they were already told was replaced, with
+  // `isCorrection: false` so the message says nothing about it, linking to a page that then shows them a
+  // superseded notice. Irreversible, and nothing on any dashboard reports it: the board's undelivered
+  // query carries `superseded_by_id IS NULL`, so it is silent on this row by construction. History was
+  // the one surface offering the action.
+  function correctedWeek() {
+    return [
+      report({ id: "v2", version: 2, sendDeliveredAt: "2026-08-14T22:00:00.000Z" }),
+      report({
+        id: "v1",
+        version: 1,
+        supersededById: "v2",
+        // The whole trap: undelivered, so the guard the button DID have passes.
+        sendDeliveredAt: null,
+        sendError: "Resend timed out",
+        sendAttempts: 3,
+      }),
+    ];
+  }
+
+  it("offers no Retry on the superseded version", () => {
+    mocks.reports = correctedWeek();
+    render();
+    expect(button("Retry send")).toBeUndefined();
+  });
+
+  it("still offers the correction on the version that replaced it, so the row is not left dead", () => {
+    // Guards against "fixed" by hiding every control on the week. The newest version keeps its action.
+    mocks.reports = correctedWeek();
+    render();
+    expect(button("Send correction")).toBeDefined();
+  });
+
+  it("keeps Retry on an undelivered version nothing has replaced yet", () => {
+    // The other direction, and the reason the predicate is `supersededById` rather than "a v2 exists":
+    // superseding happens at SEND, so a v1 with an unsent v2 drafted beside it is still the version the
+    // client is owed, and retrying it is exactly right. The board points its own Retry at v1 here too.
+    mocks.reports = [
+      report({ id: "v2", version: 2, status: "approved", sentAt: null, sendDeliveredAt: null }),
+      report({ id: "v1", version: 1, supersededById: null, sendError: "Resend timed out" }),
+    ];
+    render();
+    expect(button("Retry send")).toBeDefined();
+  });
+});
+
+describe("only the newest version of a week may be corrected", () => {
+  it("hides the button on an older version once a correction exists", () => {
+    // A report is only marked superseded when its replacement is SENT, so a v1 with an unsent v2 sitting
+    // beside it is still un-superseded — and used to be offered the button a second time, producing a v3
+    // that leaves the week reporting a report the client already received. The server refuses that
+    // outright; this stops the UI inviting it.
+    mocks.reports = [
+      report({ id: "v2", version: 2, status: "approved", sendDeliveredAt: null }),
+      report({ id: "v1", version: 1, sendDeliveredAt: "2026-08-13T22:00:00.000Z" }),
+    ];
+    render();
+    expect(button("Send correction")).toBeUndefined();
+  });
+
+  it("keeps it on the newest sent version", () => {
+    mocks.reports = [
+      report({ id: "v2", version: 2, sendDeliveredAt: "2026-08-14T22:00:00.000Z" }),
+      report({
+        id: "v1",
+        version: 1,
+        supersededById: "v2",
+        sendDeliveredAt: "2026-08-13T22:00:00.000Z",
+      }),
+    ];
+    render();
+    expect(button("Send correction")).toBeDefined();
+  });
+});

@@ -18,6 +18,7 @@ const {
   pollBidBoardIngestJobs,
   pollAiReportJobs,
   pollGlassesWalkthroughForwardJobs,
+  pollWeeklyReportSendJobs,
   registerJobHandler,
   recoverStaleJobs,
   __resetQueueStateForTest,
@@ -849,6 +850,9 @@ describe("worker queue", () => {
     // glasses_walkthrough_forward relays a walk's clips (potentially gigabytes) via ranged R2 reads — same
     // starvation risk, so it must also be excluded from the main poller's claim.
     expect(claim![0]).toContain("glasses_walkthrough_forward");
+    // weekly_report_send renders the client PDF first, decoding every photo on the report into memory and
+    // uploading to R2 — the same shape as ai_report_generation, and the same exclusion.
+    expect(claim![0]).toContain("weekly_report_send");
     expect(claim![0]).toContain("NOT IN");
   });
 
@@ -863,6 +867,21 @@ describe("worker queue", () => {
     expect(claim![0]).toContain("job_type = 'ai_report_generation'");
     expect(claim![0]).not.toContain("NOT IN"); // only-this-type, not exclude-these-types
     expect(claim![1]).toEqual([1]); // AI_REPORT_CONCURRENCY — one report at a time
+  });
+
+  it("pollWeeklyReportSendJobs claims ONLY weekly_report_send, one at a time (LIMIT 1)", async () => {
+    // Serialized for the same two reasons as the AI report above. A send renders the report's PDF before it
+    // can send, which decodes every photo on it into memory and uploads to R2 — so three on the main
+    // poller's shared slots is the OOM shape, and it is also a starvation shape, because that poller also
+    // carries RFP delivery and email sync while a Monday morning sends many reports at once.
+    const { queries } = installPool(claimRouter(() => []));
+
+    await pollWeeklyReportSendJobs();
+
+    const claim = queries.find(([sql]) => sql.includes("SELECT * FROM public.job_queue"));
+    expect(claim![0]).toContain("job_type = 'weekly_report_send'");
+    expect(claim![0]).not.toContain("NOT IN"); // only-this-type, not exclude-these-types
+    expect(claim![1]).toEqual([1]); // WEEKLY_REPORT_SEND_CONCURRENCY — one client report at a time
   });
 
   it("pollBidBoardIngestJobs claims ONLY bid_board_ingest, one at a time (LIMIT 1)", async () => {

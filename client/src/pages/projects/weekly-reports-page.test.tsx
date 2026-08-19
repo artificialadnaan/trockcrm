@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   useWeeklyReportProjects: vi.fn(),
   dismissWeeklyReportWeek: vi.fn(),
   historyRefetch: vi.fn(),
+  retryWeeklyReportSend: vi.fn(),
+  sendDialogReportId: null as string | null,
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
@@ -29,8 +31,24 @@ vi.mock("@/hooks/use-weekly-reports", () => ({
   createWeeklyReportProject: vi.fn(),
   updateWeeklyReportProject: vi.fn(),
   deleteWeeklyReportProject: vi.fn(),
+  // The send flow's exports. vi.mock replaces the WHOLE module, so anything the page or the panels
+  // import has to appear here or the import resolves to undefined at render time.
+  retryWeeklyReportSend: mocks.retryWeeklyReportSend,
+  fetchWeeklyReportSendDraft: vi.fn(),
+  sendWeeklyReport: vi.fn(),
+  createWeeklyReportCorrection: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+// Stand-in for the send dialog, so a Send click can be asserted by WHICH report it opens for. The real
+// dialog fetches a draft on mount, and the id it is handed is the whole point: on a row carrying both a
+// correction and a failed send, a Send pointed at the failed report renders identically to one pointed at
+// the correction.
+vi.mock("./weekly-report-send-dialog", () => ({
+  WeeklyReportSendDialog: ({ reportId }: { reportId: string }) => {
+    mocks.sendDialogReportId = reportId;
+    return null;
+  },
+}));
 
 import WeeklyReportsPage, { fmtWeek, latenessLabel } from "./weekly-reports-page";
 
@@ -56,6 +74,18 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     reportVersion: null,
     sentAt: null,
     sendError: null,
+    // Added with migration 0226. All three verdicts are derived on the SERVER — the CRM and the app must
+    // not each decide what "Send failed" means — so the fixture carries them rather than the page
+    // inferring anything. `sendRetryReportId` is which report a Retry addresses, which is NOT always the
+    // week's live report once a correction has been drafted over a failed send — and `sendRetrySentAt`
+    // is THAT report's `sent_at`, which is what the provider's 24-hour dedupe window is measured against.
+    sendDeliveredAt: null,
+    sendAttempts: 0,
+    sendFailed: false,
+    sendStalled: false,
+    sendPending: false,
+    sendRetryReportId: null,
+    sendRetrySentAt: null,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
     ...overrides,
@@ -80,6 +110,9 @@ beforeEach(() => {
   root = createRoot(container);
   mocks.useWeeklyReportDashboard.mockReset();
   mocks.useWeeklyReportProjects.mockReset();
+  // Plain state, not a vi.fn, so mockReset does not clear it — a stale id would let a test that opens no
+  // dialog at all inherit the previous one's and pass.
+  mocks.sendDialogReportId = null;
   mocks.useWeeklyReportProjects.mockReturnValue({
     projects: [],
     loading: false,
@@ -87,6 +120,7 @@ beforeEach(() => {
     refetch: vi.fn(),
   });
   mocks.historyRefetch.mockReset();
+  mocks.retryWeeklyReportSend.mockReset();
 });
 
 afterEach(() => {
@@ -158,9 +192,245 @@ describe("This Week board", () => {
   });
 
   it("surfaces a send failure rather than showing the week as done", () => {
-    mockDashboard([dashboardRow({ state: "sent", sendError: "SMTP timeout" })]);
+    // Keyed on `sendFailed`, which the server derives, rather than on `sendError` alone: the error text
+    // is deliberately LEFT in place after a retry succeeds, as the record of what happened, so a chip
+    // reading the raw error would keep shouting about a delivery that has since reached the client.
+    // `reportId` is present because a `sent` week always has a report behind it — and the retry has to
+    // address one. A fixture without it would render the chip and silently no retry button.
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sendError: "SMTP timeout",
+        sendAttempts: 2,
+        sendFailed: true,
+      }),
+    ]);
     const text = renderPage();
     expect(text).toContain("Send failed");
+    expect(text).toContain("Retry send");
+  });
+
+  it("surfaces a send that failed with NO error recorded at all", () => {
+    // The delivery job writes its own outcome to the same database whose absence is the likeliest reason
+    // it failed, so "committed, never delivered, nothing written down" is an ordinary end state. Keyed on
+    // the error text it looked exactly like a send queued five seconds ago, and the row then disappeared
+    // from the board entirely the following week.
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sendError: null,
+        sendAttempts: 0,
+        sendStalled: true,
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).toContain("Send stuck");
+    expect(text).toContain("Retry send");
+  });
+
+  it("does not tell the PM nothing was recorded when three attempts were", async () => {
+    // "Send stuck" replaces "Send failed" once a retry clears the error, and its title used to read
+    // flatly "This report was marked sent but no delivery was ever recorded" — which contradicted the
+    // "· 3 attempts" the PM was reading a moment earlier, on a row whose error text this platform had
+    // itself just erased. The chip now carries the count and the title says what actually happened.
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sendError: null,
+        sendAttempts: 3,
+        sendStalled: true,
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).toContain("Send stuck");
+    expect(text).toContain("3 attempts");
+
+    const chip = Array.from(container.querySelectorAll("div[title]")).find((element) =>
+      (element.textContent ?? "").includes("Send stuck"),
+    );
+    if (!chip) throw new Error("Send stuck chip not found");
+    const title = chip.getAttribute("title") ?? "";
+    expect(title).toMatch(/attempted 3 times/i);
+    expect(title).not.toMatch(/no delivery was ever/i);
+  });
+
+  it("points Retry at the undelivered report, not at the correction drafted over it", async () => {
+    // The live row is the unsent v2; the report that needs retrying is v1. Retrying the live row would
+    // replay a report nobody ever sent — so this asserts the ID THE CALL CARRIES, not merely that a
+    // button rendered. A button pointed at the wrong report renders exactly the same.
+    mocks.retryWeeklyReportSend.mockResolvedValue({});
+    mockDashboard([
+      dashboardRow({
+        state: "approved",
+        reportId: "v2",
+        sendRetryReportId: "v1",
+        // The LIVE row is the unsent clone, so it has no `sent_at` at all — the real shape of this state,
+        // and the reason the age of the send has to come off `sendRetrySentAt` instead.
+        sentAt: null,
+        sendRetrySentAt: new Date().toISOString(),
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).toContain("Send failed");
+
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    if (!retry) throw new Error("Retry send button not found");
+    await act(async () => {
+      retry.click();
+    });
+    // Inside the provider's idempotency window, so no duplicate-risk acknowledgement is claimed — and no
+    // confirmation was raised. Measured off `row.sentAt` the clone's null reads as "outside the window",
+    // and the PM is warned about a second copy the provider provably will not send: a false alarm on the
+    // one dialog on this page that is ever real.
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+  });
+
+  it("ALSO offers Send for the correction, which Retry used to hide", async () => {
+    // Same state as the test above, asserted from the other side. The actions cell was an if/else chain
+    // with Retry first, so this row — `approved` AND carrying a "Send failed" chip — rendered Retry alone.
+    // The PM had just written a correction and the only button on the row replayed the OLD content; the
+    // correction had no path off This Week at all, only through the History tab.
+    //
+    // Both belong here and they do different jobs: Retry replays the send that failed, for a transport
+    // problem; Send delivers the correction, for a content one.
+    mockDashboard([
+      dashboardRow({
+        state: "approved",
+        reportId: "v2",
+        sendRetryReportId: "v1",
+        sentAt: null,
+        sendRetrySentAt: new Date().toISOString(),
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+
+    const labels = Array.from(container.querySelectorAll("button")).map((button) =>
+      button.textContent?.trim(),
+    );
+    expect(labels).toContain("Retry send");
+    expect(labels).toContain("Send");
+
+    const send = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Send",
+    );
+    if (!send) throw new Error("Send button not found");
+    await act(async () => {
+      send.click();
+    });
+    // The CORRECTION, not the report that failed. A Send pointed at v1 renders identically.
+    expect(mocks.sendDialogReportId).toBe("v2");
+  });
+
+  it("still offers Send alone when nothing has failed", async () => {
+    // The control for the case above. Without it, a cell that rendered Retry unconditionally — or one
+    // that dropped the failure branch entirely — would satisfy it.
+    mockDashboard([dashboardRow({ state: "approved", reportId: "v2" })]);
+    renderPage();
+
+    const labels = Array.from(container.querySelectorAll("button")).map((button) =>
+      button.textContent?.trim(),
+    );
+    expect(labels).toContain("Send");
+    expect(labels).not.toContain("Retry send");
+  });
+
+  it("makes the PM acknowledge the duplicate risk on a send too old to be deduped", async () => {
+    // Resend forgets an idempotency key after 24 hours while this chip lives on the board for 26 weeks,
+    // so a replay past the window is a genuinely second email. The server refuses without the
+    // acknowledgement; this is the UI that earns it.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mocks.retryWeeklyReportSend.mockResolvedValue({});
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("r1", true);
+    confirm.mockRestore();
+  });
+
+  it("sends nothing when the PM declines that confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("does not call a send that is merely still queued a failure", () => {
+    // No error yet — the job was enqueued seconds ago. Calling that "Send failed" would have PMs
+    // re-sending on top of deliveries that are simply in flight.
+    mockDashboard([
+      dashboardRow({ state: "sent", sendFailed: false, sendPending: true, sendDeliveredAt: null }),
+    ]);
+    const text = renderPage();
+    expect(text).not.toContain("Send failed");
+    expect(text).not.toContain("Send stuck");
+    expect(text).toContain("Sending…");
+  });
+
+  it("stops calling it a failure once the retry has delivered it", () => {
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        sendError: "SMTP timeout",
+        sendFailed: false,
+        sendStalled: false,
+        sendPending: false,
+        sendDeliveredAt: "2026-08-13T22:00:00.000Z",
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).not.toContain("Send failed");
+    expect(text).not.toContain("Send stuck");
+    expect(text).not.toContain("Sending…");
+  });
+
+  it("offers Send on an approved week, so the PM never has to leave the board", () => {
+    mockDashboard([dashboardRow({ state: "approved", reportId: "r1", waitingOn: "Adam Sherwood" })]);
+    expect(renderPage()).toContain("Send");
   });
 
   it("declares outstanding weeks hidden by the lookback window", () => {
@@ -175,6 +445,16 @@ describe("This Week board", () => {
     mockDashboard([]);
     const text = renderPage();
     expect(text).toContain("Nothing is due");
+  });
+
+  it("does NOT say nothing is due when every outstanding week is older than the window", () => {
+    // The banner that declares hidden weeks sits under the table, so an empty board returned before it and
+    // reported "Nothing is due" over weeks that are genuinely owed — the exact all-caught-up misreading the
+    // banner exists to prevent. Reachable: an undelivered send on a stopped setup lands only in this tally.
+    mockDashboard([], { olderOutstandingCounts: { p1: 3 } });
+    const text = renderPage();
+    expect(text).not.toContain("Nothing is due");
+    expect(text).toContain("3 outstanding weeks are older");
   });
 
   it("marks a backlog week so it is not mistaken for this week's", () => {
