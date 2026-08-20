@@ -596,6 +596,26 @@ describe("opening a project's record from This Week", () => {
     expect(mocks.auditDialogProjectId).toBe("p-first");
   });
 
+  it("offers the record through a real button, not a row click a keyboard cannot reach", () => {
+    // A bare `<tr onClick>` is a mouse affordance and nothing else: no focus, no Enter, no announcement.
+    // Wiring the row without this left keyboard users with NO way into the record at all, which is worse
+    // than the Projects-tab-only drill-in it was fixing. Asserting the element is a BUTTON is the point —
+    // a div with the same handler passes any test that only clicks it.
+    mockDashboard([dashboardRow({ weeklyReportProjectId: "p-keyboard", projectName: "4123 Cedar Springs" })]);
+    renderPage();
+
+    const named = Array.from(container.querySelectorAll("tbody button")).find(
+      (element) => element.textContent?.trim() === "4123 Cedar Springs",
+    );
+    expect(named).toBeTruthy();
+
+    act(() => {
+      (named as HTMLButtonElement).click();
+    });
+
+    expect(mocks.auditDialogProjectId).toBe("p-keyboard");
+  });
+
   it("does not open it when the row's own Send button was the target", () => {
     // Send opens the send dialog. Without stopPropagation the click also bubbles to the row, so a PM
     // pressing Send would get the record dialog stacked over the thing they actually asked for.

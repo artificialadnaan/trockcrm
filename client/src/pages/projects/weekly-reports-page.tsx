@@ -380,7 +380,23 @@ function ThisWeekTable({
                 }`}
               >
                 <td className="px-3.5 py-3">
-                  <div className="font-semibold text-slate-950">{row.projectName}</div>
+                  <div className="font-semibold text-slate-950">
+                    {/* A real button, so the record is reachable and announced to a keyboard and a
+                        screen reader — the <tr> handler above is the mouse affordance only. This is the
+                        same pattern the Projects tab already uses; wiring the row here without it left
+                        keyboard users with no way in at all, which is worse than the tab-only drill-in
+                        it was fixing. Caught by Greptile. */}
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpen(row.weeklyReportProjectId);
+                      }}
+                      className="text-left hover:text-brand-red hover:underline"
+                    >
+                      {row.projectName}
+                    </button>
+                  </div>
                   <div className="mt-0.5 text-[11.5px] font-semibold text-slate-400">
                     {[row.projectNumber, row.clientName].filter(Boolean).join(" · ") || "—"}
                   </div>
