@@ -19,7 +19,7 @@ import {
   type WeeklyReportPdfPhoto,
 } from "./pdf.js";
 import { buildWeeklyReportView, type WeeklyReportView } from "./report-view.js";
-import type { QueryExecutor } from "./projects-service.js";
+import { trockTeamColumns, trockTeamJoins, type QueryExecutor } from "./projects-service.js";
 
 // Read → render → upload → publish, with the DB connection released across the slow middle.
 //
@@ -105,8 +105,14 @@ export async function loadWeeklyReportPdfSource(
             -- is conditional and why it counts even for a frozen report.
             ${weeklyReportGenerationSql("d.updated_at")}    AS deal_generation,
             ${weeklyReportGenerationSql("proj.updated_at")} AS project_generation,
-            ${weeklyReportGenerationSql("pm.updated_at")}   AS trock_pm_generation,
-            ${weeklyReportGenerationSql("sup.updated_at")}  AS trock_super_generation,
+            -- GREATEST of the ROSTER row and the login, because after 0228 the name that prints comes
+            -- from the roster and falls back to the login. Stamping only the login would leave a cached
+            -- PDF showing the old name after a director corrects a roster spelling — the document would
+            -- keep disagreeing with the CRM until something unrelated invalidated it. Postgres's GREATEST
+            -- ignores NULLs and returns NULL only when every argument is NULL, which is exactly right for
+            -- an unassigned slot and for a roster person who holds no login.
+            ${weeklyReportGenerationSql("GREATEST(pm_fr.updated_at, pm_u.updated_at)")}   AS trock_pm_generation,
+            ${weeklyReportGenerationSql("GREATEST(sup_fr.updated_at, sup_u.updated_at)")} AS trock_super_generation,
             -- Deliberately NOT filtered to the photos the render keeps. A soft delete leaves the row in
             -- place and stamps deleted_at without touching updated_at, so counting only live photos would
             -- miss the very change that removes one from the document.
@@ -118,13 +124,11 @@ export async function loadWeeklyReportPdfSource(
             proj.project_start_date, proj.project_start_date_note,
             proj.project_completion_date, proj.project_completion_date_note,
             proj.projected_duration_weeks AS project_projected_duration_weeks,
-            pm.display_name  AS trock_pm_name,
-            sup.display_name AS trock_super_name
+${trockTeamColumns()}
        FROM weekly_reports wr
        JOIN deals d ON d.id = wr.deal_id
        LEFT JOIN weekly_report_projects proj ON proj.id = wr.weekly_report_project_id
-       LEFT JOIN public.users pm  ON pm.id = proj.trock_pm_user_id
-       LEFT JOIN public.users sup ON sup.id = proj.trock_super_user_id
+${trockTeamJoins("proj")}
       WHERE wr.id = $1::uuid AND wr.is_active
       LIMIT 1`,
     [reportId],

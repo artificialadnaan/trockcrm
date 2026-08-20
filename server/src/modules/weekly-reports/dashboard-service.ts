@@ -12,7 +12,7 @@ import {
   weeklyReportSendHasStalled,
 } from "@trock-crm/shared/lib/weeklyReportSendStall";
 import { AppError } from "../../middleware/error-handler.js";
-import type { QueryExecutor } from "./projects-service.js";
+import { trockTeamColumns, trockTeamJoins, type QueryExecutor } from "./projects-service.js";
 
 /**
  * How many weeks of OUTSTANDING history the dashboard renders by default.
@@ -264,12 +264,12 @@ export async function getWeeklyReportDashboard(
     `SELECT wrp.id, wrp.deal_id, wrp.property_display_name, wrp.client_name, wrp.status,
             wrp.cadence_weekday, wrp.cadence_start_date, wrp.cadence_end_date,
             wrp.trock_pm_user_id, wrp.trock_super_user_id,
+            wrp.trock_pm_responder_id, wrp.trock_super_responder_id,
             d.name AS deal_name, d.project_number,
-            pm.display_name AS trock_pm_name, sup.display_name AS trock_super_name
+${trockTeamColumns()}
        FROM weekly_report_projects wrp
        JOIN deals d ON d.id = wrp.deal_id
-       LEFT JOIN public.users pm  ON pm.id = wrp.trock_pm_user_id
-       LEFT JOIN public.users sup ON sup.id = wrp.trock_super_user_id
+${trockTeamJoins("wrp")}
       WHERE wrp.is_active`,
   );
   if (projectsResult.rows.length === 0) {

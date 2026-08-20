@@ -94,6 +94,12 @@ describe("the send routes sit behind the role gate", () => {
     // A rep passes the ROUTER's own allow-list (admin/director/rep) — this refusal comes from the send
     // routes' own narrower gate. Without it a rep reached the handler and was refused only after
     // `loadSendTarget` had taken FOR UPDATE on two rows, and only because they happen not to be the PM.
+    //
+    // 0228 TURNED THAT "HAPPEN NOT TO BE" INTO A REAL CASE. The PM slot used to be closed to `rep`, so a
+    // rep could never satisfy the assigned-PM arm of `canPublishWeeklyReport` and this gate was belt over
+    // braces. The field-team roster decides the slot now and it contains `rep` logins — Adam Sherwood is
+    // one — so a rep CAN be the assigned PM, and this 403 is the only thing keeping them off the
+    // office-wide leadership surface. It is load-bearing from here on.
     expect((await request(appAs("rep"))[method](path)).status).toBe(403);
   });
 

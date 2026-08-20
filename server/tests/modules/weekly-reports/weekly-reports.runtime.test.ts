@@ -9,8 +9,8 @@
 // SECOND time to prove the replayability the migration claims.
 
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -20,6 +20,7 @@ import {
   deactivateWeeklyReportProject,
   getWeeklyReportProject,
   getWeeklyReportSettings,
+  listWeeklyReportAssignableResponders,
   listWeeklyReportAssignableUsers,
   listWeeklyReportProjects,
   updateWeeklyReportProject,
@@ -52,6 +53,13 @@ const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
 const STRANGER = U("22224");
+// Field-team roster rows (0228). A project points at ONE of these; the login above is derived from the
+// roster row's email. Kept as separate ids on purpose — a test that passed a user id where a roster id
+// belongs must fail, because that is the escalation resolveRosterAssignee exists to refuse.
+const PM_RESPONDER = U("44441");
+const SUPER_RESPONDER = U("44442");
+const DIRECTOR_RESPONDER = U("44443");
+const OFF_ROSTER = U("44449");
 const OPEN_DEAL = U("11113");
 const WON_STAGE = U("33331");
 const OPEN_STAGE = U("33332");
@@ -160,7 +168,7 @@ beforeAll(async () => {
   // hand-rolled, so a column type here cannot drift from production.
   // user_office_access carries the multi-office grants the assignee roster must honour.
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
   // Weekly reports may only be set up on a WON deal, so the suite needs the stage graph the check reads.
   await pg.exec(
     `CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`,
@@ -178,6 +186,10 @@ beforeAll(async () => {
   // selects `send_delivery_status`, and `priorVersionReachedClient` binds it — a suite that stops at 0226
   // fails on a missing column rather than on its subject.
   await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER, so every read of a project now
+  // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
+  // missing column rather than on its subject.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -189,6 +201,13 @@ beforeAll(async () => {
     INSERT INTO public.pipeline_stage_config (id, slug) VALUES
       ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}'),
       ('${OPEN_STAGE}', 'estimating');
+    -- The field-team roster the PM/superintendent slots are chosen from. The EMAILS match the logins
+    -- above, which is the only link between the two tables and what resolveRosterAssignee derives
+    -- trock_*_user_id from — so asserting a resolved user id here is asserting that link works.
+    INSERT INTO office_dallas.field_responders (id, name, email, role, is_active) VALUES
+      ('${PM_RESPONDER}', 'Adam Sherwood', 'pm@example.com', 'project_manager', true),
+      ('${SUPER_RESPONDER}', 'Steve Sanchez', 'super@example.com', 'superintendent', true),
+      ('${DIRECTOR_RESPONDER}', 'Takashi', 'director@example.com', 'project_manager', true);
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
       ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432'),
       ('${OTHER_DEAL}', 'Some Other Job', 'DFW-10433', '${WON_STAGE}', 'DFW-10433'),
@@ -199,6 +218,22 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await pg.close();
+});
+
+/**
+ * Undo actions for anything a test adds to the SHARED fixture.
+ *
+ * The office, users and roster are seeded once in `beforeAll` and `beforeEach` resets only the report
+ * and project tables, so a test that adds a roster row or a user must remove it — and must do so even
+ * when an assertion throws partway through, or every later test in the file inherits the leftover and
+ * fails downstream, burying the one that actually broke.
+ */
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  while (cleanups.length > 0) {
+    await cleanups.pop()!().catch(() => {});
+  }
 });
 
 beforeEach(async () => {
@@ -223,8 +258,8 @@ function baseProjectInput(overrides: Record<string, unknown> = {}) {
       doc: { name: "Jay Stauble", email: "jay@example.com" },
       pm: { name: "Melissa Garcia", email: "melissa@example.com" },
     },
-    trockPmUserId: PM,
-    trockSuperUserId: SUPER,
+    trockPmResponderId: PM_RESPONDER,
+    trockSuperResponderId: SUPER_RESPONDER,
     contractDate: "2026-07-08",
     projectStartDateNote: "TBD Permit",
     projectedDurationWeeks: 19,
@@ -348,6 +383,11 @@ describe("migration 0224", () => {
 describe("migration 0223", () => {
   it("is replayable — running it a second time is a no-op, not an error", async () => {
     await expect(pg.exec(migrationSql("0223_weekly_report_pauses"))).resolves.toBeDefined();
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
   });
 
   it("allows only ONE open pause per project", async () => {
@@ -426,6 +466,9 @@ describe("project setup", () => {
     expect(updated.clientName).toBe("New Client LLC");
     // The bug this guards: a PATCH built from the patch alone nulls every column the caller omitted.
     expect(updated.propertyDisplayName).toBe("4123 Cedar Springs");
+    // Still the resolved LOGIN, which after 0228 also proves the roster->user email link survived a
+    // patch that never mentioned the team at all.
+    expect(updated.trockPmResponderId).toBe(PM_RESPONDER);
     expect(updated.trockPmUserId).toBe(PM);
     expect(updated.projectedDurationWeeks).toBe(19);
     expect(updated.clientTeam.doc.name).toBe("Jay Stauble");
@@ -450,7 +493,12 @@ describe("project setup", () => {
 
   it("swapping the PM mid-project changes who is assigned, not the history", async () => {
     const created = await seedProject();
-    const updated = await updateWeeklyReportProject(db, created.id, { trockPmUserId: DIRECTOR }, OFFICE);
+    const updated = await updateWeeklyReportProject(
+      db, created.id, { trockPmResponderId: DIRECTOR_RESPONDER }, OFFICE,
+    );
+    expect(updated.trockPmResponderId).toBe(DIRECTOR_RESPONDER);
+    // The two move together. A patch that set the roster row and left the login behind would leave a
+    // project whose printed PM is one person and whose approver is still the previous one.
     expect(updated.trockPmUserId).toBe(DIRECTOR);
     expect(updated.trockPmName).toBe("Takashi");
   });
@@ -1432,7 +1480,9 @@ describe("review findings", () => {
     });
 
     // Swap the PM and the client AFTER delivery. The client already read the old header.
-    await updateWeeklyReportProject(db, project.id, { trockPmUserId: DIRECTOR, clientName: "New Owner LLC" }, OFFICE);
+    await updateWeeklyReportProject(
+      db, project.id, { trockPmResponderId: DIRECTOR_RESPONDER, clientName: "New Owner LLC" }, OFFICE,
+    );
     const reread = await getWeeklyReportDetail(db, id);
     expect(reread!.snapshot).toMatchObject({
       clientName: "Mack Real Estate Group",
@@ -1565,38 +1615,79 @@ describe("review findings", () => {
 
 // Second Codex pass on the fixed commit. Nine further findings, all real.
 describe("review findings, round two", () => {
-  it("refuses an assignee who is not on the office roster", async () => {
+  it("refuses an assignee who is not on the field-team roster", async () => {
     // THE ESCALATION: the project PATCH route is open to `rep`, and trock_pm_user_id is what decides
-    // who may approve and send. Without this a rep sets themselves PM and unlocks the review gate.
-    await expectAppError(seedProject({ trockPmUserId: STRANGER }), 400, /project team/i);
+    // who may approve and send. The gate is now TIGHTER than the roles check it replaced — the id must
+    // name a row on the director-managed roster, so a rep cannot nominate themselves (or anyone) by
+    // sending their own user id, which is not a roster id at all.
+    await expectAppError(seedProject({ trockPmResponderId: OFF_ROSTER }), 400, /field team/i);
+    await expectAppError(seedProject({ trockPmResponderId: STRANGER }), 400, /field team/i);
   });
 
-  it("refuses an assignee from another office", async () => {
-    const otherOffice = U("00003");
-    const outsider = U("22225");
-    await pg.query(`INSERT INTO public.offices (id, name, slug) VALUES ($1::uuid, 'Atlanta', 'atl')`, [otherOffice]);
-    await pg.query(
-      `INSERT INTO public.users (id, display_name, email, role, office_id)
-       VALUES ($1::uuid, 'Other Office PM', 'other@example.com', 'construction', $2::uuid)`,
-      [outsider, otherOffice],
+  it("refuses a MALFORMED responder id with a 400, not a 500", async () => {
+    // `WHERE id = $1::uuid` raises 22P02 on anything that is not a uuid, and the route validates only
+    // `dealId`. So a typo'd id was an unhandled server error rather than a refusal naming the field —
+    // the same failure `resolveScorecardResponderPick`'s UUID_SHAPE guard exists to prevent, and worth
+    // pinning because the difference between 400 and 500 here is invisible until somebody hits it.
+    await expectAppError(seedProject({ trockPmResponderId: "not-a-uuid" }), 400, /valid field-team id/i);
+    await expectAppError(
+      updateWeeklyReportProject(db, (await seedProject()).id, { trockSuperResponderId: "nope" }, OFFICE),
+      400,
+      /valid field-team id/i,
     );
-    await expectAppError(seedProject({ trockPmUserId: outsider }), 400, /project team/i);
-    await pg.query(`DELETE FROM public.users WHERE id = $1::uuid`, [outsider]);
-    await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [otherOffice]);
   });
 
-  it("refuses a deactivated assignee", async () => {
-    await pg.query(`UPDATE public.users SET is_active = false WHERE id = $1::uuid`, [PM]);
-    await expectAppError(seedProject(), 400, /project team/i);
-    await pg.query(`UPDATE public.users SET is_active = true WHERE id = $1::uuid`, [PM]);
+  it("refuses a roster person whose role does not match the slot", async () => {
+    // The direction that hands out approval rights: installing a superintendent as the PM would give
+    // them the review gate's powers over their own reports.
+    await expectAppError(
+      seedProject({ trockPmResponderId: SUPER_RESPONDER }),
+      400,
+      /not a project manager/i,
+    );
+  });
+
+  it("refuses an assignee from another office's roster", async () => {
+    // `field_responders` is a TENANT table reached through the office's search_path, so another
+    // office's roster row is not visible here at all — the id resolves to nothing and is refused.
+    // Asserted rather than assumed: the lookup is by id, and an id is globally unique-looking.
+    await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_atlanta;
+      CREATE TABLE IF NOT EXISTS office_atlanta.field_responders (
+        id uuid PRIMARY KEY, name text NOT NULL, email text NOT NULL,
+        role text NOT NULL, is_active boolean NOT NULL DEFAULT true);`);
+    const outsider = U("44448");
+    await pg.query(
+      `INSERT INTO office_atlanta.field_responders (id, name, email, role)
+       VALUES ($1::uuid, 'Atlanta PM', 'atl-pm@example.com', 'project_manager')`,
+      [outsider],
+    );
+    await expectAppError(seedProject({ trockPmResponderId: outsider }), 400, /field team/i);
+  });
+
+  it("refuses an assignee who has been removed from the roster", async () => {
+    // Deactivating the ROSTER row is how a director takes somebody off the field team, and it is what
+    // must block a new assignment — not the login's own is_active, which nobody edits for this reason.
+    // try/finally, because the roster is seeded ONCE in beforeAll and `beforeEach` does not reset it.
+    // A failing assertion here would otherwise leave PM_RESPONDER inactive for every later test in the
+    // file — a cascade of failures that buries the one that actually broke.
+    await pg.query(`UPDATE office_dallas.field_responders SET is_active = false WHERE id = $1::uuid`, [
+      PM_RESPONDER,
+    ]);
+    try {
+      await expectAppError(seedProject(), 400, /removed from the field team/i);
+    } finally {
+      await pg.query(`UPDATE office_dallas.field_responders SET is_active = true WHERE id = $1::uuid`, [
+        PM_RESPONDER,
+      ]);
+    }
   });
 
   it("re-validates the assignee on PATCH, not just on create", async () => {
     const project = await seedProject();
     await expectAppError(
-      updateWeeklyReportProject(db, project.id, { trockPmUserId: STRANGER }, OFFICE),
+      updateWeeklyReportProject(db, project.id, { trockPmResponderId: OFF_ROSTER }, OFFICE),
       400,
-      /project team/i,
+      /field team/i,
     );
   });
 
@@ -1785,29 +1876,56 @@ describe("review findings, round three", () => {
   const GRANTED = U("22226");
   const OTHER_OFFICE = U("00004");
 
-  it("includes a multi-office member holding a user_office_access grant", async () => {
+  it("resolves the login of a multi-office member holding a user_office_access grant", async () => {
     // Office membership is not just users.office_id. A PM whose primary office is elsewhere but who
     // holds a grant here is exactly the person most likely to run a second office's projects — and
     // authentication already lets them act in it. The same omission has bitten the deal-reassign guard.
+    //
+    // After 0228 this decides the LOGIN half rather than assignability: the roster row is what makes
+    // them selectable, and the email lookup is what turns them into somebody who can actually approve.
+    // Getting it wrong is silent — the project saves, prints the right name, and nobody can approve it.
+    const VISITING_RESPONDER = U("44444");
+    // Same reason as the roster-deactivation test below: the fixture is shared across the file, and a
+    // failing assertion partway through would leave a Visiting PM on the roster for every later
+    // picker assertion. Registered before the first write so nothing can leak past a throw.
+    cleanups.push(async () => {
+      await pg.query(`DELETE FROM public.user_office_access WHERE user_id = $1::uuid`, [GRANTED]);
+      await pg.query(`DELETE FROM office_dallas.field_responders WHERE id = $1::uuid`, [VISITING_RESPONDER]);
+      await pg.query(`DELETE FROM public.users WHERE id = $1::uuid`, [GRANTED]);
+      await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [OTHER_OFFICE]);
+    });
     await pg.query(`INSERT INTO public.offices (id, name, slug) VALUES ($1::uuid, 'Atlanta', 'atl2')`, [OTHER_OFFICE]);
     await pg.query(
       `INSERT INTO public.users (id, display_name, email, role, office_id)
        VALUES ($1::uuid, 'Visiting PM', 'visiting@example.com', 'construction', $2::uuid)`,
       [GRANTED, OTHER_OFFICE],
     );
-    // Without the grant they are correctly rejected.
-    await expectAppError(seedProject({ trockPmUserId: GRANTED }), 400, /project team/i);
+    await pg.query(
+      `INSERT INTO office_dallas.field_responders (id, name, email, role)
+       VALUES ($1::uuid, 'Visiting PM', 'visiting@example.com', 'project_manager')`,
+      [VISITING_RESPONDER],
+    );
+
+    // Without the grant they are still ASSIGNABLE — they are on this office's roster — but no login in
+    // this office matches, so nothing authorises them and the slot resolves to a null user id.
+    const ungranted = await seedProject({ trockPmResponderId: VISITING_RESPONDER });
+    expect(ungranted.trockPmResponderId).toBe(VISITING_RESPONDER);
+    expect(ungranted.trockPmUserId).toBeNull();
+    expect((await listWeeklyReportAssignableResponders(db, OFFICE)).find((r) => r.id === VISITING_RESPONDER))
+      .toMatchObject({ hasLogin: false });
+    await pg.query(`DELETE FROM office_dallas.weekly_report_projects`);
 
     await pg.query(
       `INSERT INTO public.user_office_access (user_id, office_id) VALUES ($1::uuid, $2::uuid)`,
       [GRANTED, OFFICE],
     );
-    expect((await listWeeklyReportAssignableUsers(db, OFFICE)).map((u) => u.id)).toContain(GRANTED);
-    await expect(seedProject({ trockPmUserId: GRANTED })).resolves.toMatchObject({ trockPmUserId: GRANTED });
-
-    await pg.query(`DELETE FROM public.user_office_access WHERE user_id = $1::uuid`, [GRANTED]);
-    await pg.query(`DELETE FROM public.users WHERE id = $1::uuid`, [GRANTED]);
-    await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [OTHER_OFFICE]);
+    // With it, the same roster row now resolves to the visiting PM's login and they can approve.
+    await expect(seedProject({ trockPmResponderId: VISITING_RESPONDER })).resolves.toMatchObject({
+      trockPmUserId: GRANTED,
+    });
+    // The picker must agree with the write path, or the form promises a login the server declines.
+    expect((await listWeeklyReportAssignableResponders(db, OFFICE)).find((r) => r.id === VISITING_RESPONDER))
+      .toMatchObject({ hasLogin: true });
   });
 
   it("applies a grant's role_override when deciding assignability", async () => {

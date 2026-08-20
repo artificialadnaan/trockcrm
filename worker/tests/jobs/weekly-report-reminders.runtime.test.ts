@@ -11,7 +11,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { deals, files, offices, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, users } from "@trock-crm/shared/schema";
 import { weeklyReportExpectedWeeks } from "@trock-crm/shared/types";
 import { migrationSql } from "../../../server/tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../server/tests/helpers/tenant-schema-from-drizzle.js";
@@ -207,11 +207,15 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(tenantSchemaSql("public", [offices, users]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   await pg.exec(migrationSql("0222_weekly_reports"));
   // 0223 adds weekly_report_pauses, which the cadence regeneration reads to skip paused stretches.
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER. The reminder job PROBES for these
+  // columns and skips any office without them (migrations do not run on the worker), so a fixture that
+  // stops short makes every office silently skip and every assertion read zero.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -2249,9 +2253,18 @@ describe("office guards", () => {
     // so the office silently lost its t-2, its t-1 AND its digest, visible only as one logger.error.
     // Any database where 0222 applied and 0223 did not: a branch, a restore, a 0223 that errored.
     await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_austin;`);
-    await pg.exec(tenantSchemaSql("office_austin", [deals, files]));
+    await pg.exec(tenantSchemaSql("office_austin", [deals, fieldResponders, files]));
     // 0222's DO-loop walks every office_ schema, so this gives Austin the 0222 tables. 0223 is withheld.
     await pg.exec(migrationSql("0222_weekly_reports"));
+    // 0228 as well, so 0223 is the ONLY thing this office is missing. Without it the office would be
+    // skipped for want of the roster columns instead, and this test would pass for the wrong reason —
+    // still green with the 0223 probe it exists to prove deleted outright.
+    await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
     await pg.exec(`
       INSERT INTO public.offices (id, name, slug) VALUES ('${U("00002")}', 'Austin', 'austin')
         ON CONFLICT (id) DO NOTHING;

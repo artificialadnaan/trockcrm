@@ -23,7 +23,12 @@ import {
 import { canTransitionWeeklyReport } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { registerWeeklyReportSendDelivery } from "./delivery-service.js";
-import { WEEKLY_REPORT_CLIENT_ROLES, type QueryExecutor } from "./projects-service.js";
+import {
+  WEEKLY_REPORT_CLIENT_ROLES,
+  trockTeamColumns,
+  trockTeamJoins,
+  type QueryExecutor,
+} from "./projects-service.js";
 import {
   canPublishWeeklyReport,
   getWeeklyReportDetail,
@@ -130,12 +135,13 @@ async function loadSendTarget(client: QueryExecutor, reportId: string) {
   if (!reportRow) throw new AppError(404, "Weekly report not found");
 
   const lockedProject = await client.query(
+    // `phone` stays on the LOGIN: the field-team roster carries a name and an email and no number, so
+    // there is nothing to coalesce it with.
     `SELECT wrp.*,
-            pm.display_name AS trock_pm_name,
-            pm.email        AS trock_pm_email,
-            pm.phone        AS trock_pm_phone
+${trockTeamColumns()},
+            pm_u.phone AS trock_pm_phone
        FROM weekly_report_projects wrp
-       LEFT JOIN public.users pm ON pm.id = wrp.trock_pm_user_id
+${trockTeamJoins("wrp")}
       WHERE wrp.id = $1::uuid AND wrp.is_active
       FOR UPDATE OF wrp`,
     [reportRow.weekly_report_project_id],

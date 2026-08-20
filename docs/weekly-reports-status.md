@@ -1,0 +1,202 @@
+# Weekly Reports — running status
+
+Living document. Update it when something lands; do not date-stamp it.
+
+Verified against GitHub and the working tree on **2026-08-20**.
+
+**No commit SHAs for live PR state below, on purpose.** An earlier version of this file pinned #1089 to a
+tip and a check count, and both were wrong within the hour — every push during a review loop invalidates
+them, including the push that updates this file. For anything that moves, the commands are given instead.
+Run them; do not trust a remembered number.
+
+```
+gh pr view 1089 --json state,headRefOid,mergeStateStatus
+gh pr checks 1089
+gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){pullRequest(number:1089){
+  reviewThreads(last:40){nodes{isResolved path comments(first:1){nodes{author{login}body}}}}}}}' \
+  --jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)]'
+```
+
+---
+
+## State at a glance
+
+| | Where it is |
+|---|---|
+| `origin/main` | `20ab7cb5b` — the merge of **#1088**. Everything through the 19 Aug batch is on main. *(A merged SHA is safe to name; it does not move.)* |
+| **PR #1089** `feat/weekly-report-setup-roster` | **OPEN**, and the whole of this batch sits behind it. Check its tip, checks and threads with the commands above. |
+| **PR #1090** | MERGED — but into **#1089's branch**, not main. It ships when #1089 does. |
+| `feat/weekly-report-open-tracking` | 3 commits, **never pushed**, no upstream, based on `8fb22cfb5` (pre-#1090-merge). |
+| Migrations on main | `0222`–`0227`. |
+| Migrations NOT on main | `0228`, `0229`, `0230` (in #1089) · `0231` (unpushed branch). |
+
+**Nothing in #1089 or #1090 is in production.** Two full batches of work are sitting behind one PR.
+
+---
+
+## Open work
+
+### Blocking the merge
+
+- [ ] **1. The review loop must land clean on the CURRENT tip.**
+  Three rounds of findings have been fixed (see *Recently completed*), and every one of the last three
+  tips produced a real defect — so "the last round was clean" is not evidence about this round.
+  The bar: `gh pr checks 1089` all green with **`build-gate` SUCCESS, not CANCELLED**, and zero
+  unresolved threads, both **on the tip that will actually be merged**.
+
+### Then, in order
+
+- [ ] **2. Merge #1089 → deploy → verify.** **Adnaan merges this one** — the merge authorisation given this
+  session was for #1090 specifically.
+  **Merge before 11:00 CT.** The reminder cron runs 07:00 with catch-up at 09:00 and 11:00; a later deploy
+  costs that day's t−2/t−1 nudges and the digest.
+  Deploy order does not matter — the worker probes for every column it needs and skips offices cleanly
+  until the API migrates.
+  After deploy, verify against production rather than assuming:
+  - `0228`/`0229`/`0230` applied in **all three** office schemas (`dallas`, `atlanta`, `pwauditoffice`)
+  - the PM picker offers all **15** roster people (it offered 6 before this work)
+  - worker logs show the **17:00 CT** escalation cron registered
+  - **be present for that cron's first firing.** It is new and it emails a sales rep.
+
+- [ ] **3. Ship open-tracking.** Branch is built and tested but **not pushed** and its base predates the
+  #1090 merge — **rebase onto main after #1089 lands**, do not merge the old base forward.
+  Built: migration `0231` (`public.weekly_report_views`), the classifier in `shared/lib/weeklyReportViews`,
+  logging on all three public routes, the audit-dialog panel.
+  Decisions already taken, **do not relitigate**: log raw and classify at read time · full IP + user agent ·
+  24-month retention · **no client-facing disclosure** (Adnaan decided this explicitly).
+
+- [ ] **4. The 24-month retention purge.** The one piece of open-tracking that is not built. Worker job,
+  beside the dead-letter sweep, with the same table-exists probe the other jobs use.
+
+- [ ] **5. Playwright E2E against the deployed app.** Cannot start until #1089 deploys.
+
+- [ ] **6. Clean up the merged weekly-report worktrees and stale branches.** ~18 branches, most merged.
+  Judge by PR state; never remove a dirty tree.
+
+### Older follow-ups, still open
+
+- [ ] **7.** The duplicate-risk warning gates on **age alone**; it should gate on **outcome**.
+- [ ] **8.** Decide whether the dictation endpoint needs **rate limiting**.
+- [ ] **9.** A field PM **cannot re-mint a share link** they just sent.
+
+---
+
+## Decisions waiting on Adnaan — not code tasks
+
+- [ ] **10. PDF layout pass.** He wants to review on his phone and list his changes **first** — he asked for
+  exactly that order. One defect already confirmed: the Issues/Concerns box is 84pt inside a 130pt row and
+  the reference document's own text overflows onto page 2.
+
+- [ ] **11. Fifteen dialogs app-wide still render at 384px** regardless of the width they request.
+  `DialogContent` pins `sm:max-w-sm`, and tailwind-merge keeps an unprefixed `max-w-*` alongside it rather
+  than replacing it. The four weekly-report dialogs are fixed with `sm:!max-w-*`. The real fix is one line
+  in the primitive — but it resizes 15 surfaces at once, several presumably laid out against the 384px they
+  actually got. Own PR, own visual pass.
+
+- [ ] **12. Five roster people have no CRM login** — Corey McShane, Eric Burnett, Kevin Posey, Nick Cheatam,
+  Triston Mitchell. They can hold PM/super slots, print on reports and receive reminders, but cannot
+  approve or send; a director approves on their behalf and the form says so. Giving them logins is admin
+  provisioning, not a code change.
+
+- [ ] **13. Credential rotation — the one item here that is not a preference.** `JWT_SECRET`,
+  `ENCRYPTION_KEY`, `RESEND_API_KEY` and the Procore client secret were printed into a session transcript.
+  Printed is disclosed; all four are compromised and all four have to be rotated. **Raised four times, and
+  what is unanswered is the scheduling, not the whether.** Costs, because they want scheduling rather than
+  discovering: `JWT_SECRET` kills every session at once (off-hours) · `ENCRYPTION_KEY` decrypts the stored
+  Procore and Microsoft Graph OAuth tokens, so rotating without re-encrypting those rows breaks both
+  integrations until each is re-authorised · `RESEND_API_KEY` is cheapest and carries client email, so do
+  it first · the Procore secret rotates in Procore, then the CRM side. Then scrub the transcript.
+
+---
+
+## Recently completed
+
+### On `main` (17–19 Aug) — the module itself
+
+| PR | What |
+|---|---|
+| **#1070** | Migration 0222 + the weekly-reports server module |
+| **#1071** | CRM dashboard at `/projects/weekly-reports` |
+| **#1072** | Reminder cron + leadership digest |
+| **#1073** | T-Rock Cam Reports tab + superintendent wizard |
+| **#1075** | PDF renderer + public viewer + token minting |
+| **#1076** | Forward transition conditioned on **content**, not just status |
+| **#1081** | The send flow — server-composed email, delivery job, corrections |
+| **#1082** | Reminders deep-link into T-Rock Cam, gated on the **shipped** app |
+| **#1083** | Spec + plan for the five deferred follow-ups |
+| **#1084** | Dictation moved server-side |
+| **#1085** | The field send — the assigned PM can actually send |
+| **#1086** | Dead-letter sweep — somebody is told when a send never left the building |
+| **#1087** | Delivery made a **real fact**, not "the provider accepted the call" |
+| **#1088** | The PM has somewhere to go when their send fails |
+
+### Built and reviewed, sitting in #1089 — **not on main**
+
+**#1090 — week-to-week continuity, escalation, duration, photo speed**
+
+- Percent complete and total weather-delay days **carry forward** from the last submitted report
+- Next week's Work Completed **prefills** from last week's Look Ahead — and the carry pointer is
+  cleared the moment the text is edited, so rewritten text is never labelled "last week's plan"
+- **17:00 CT escalation** to the assigned sales rep when a report is past due, with a claim ledger for
+  idempotency and a leadership fallback when the rep's address is missing *or malformed*
+- Projected duration reaches the report that prints it
+- Public-link photos: derived-JPEG R2 cache, content-addressed, with lookup and write timeouts
+
+**#1089 — roster, pickers, audit trail**
+
+- PM/Super pickers sourced from the **Field Team roster** — the Adam Sherwood bug; coverage went 6 → 15
+- Client and contract date auto-populate from the picked deal
+- Project picker restricted to **Won** deals
+- Per-project drill-in with the full audit trail — submitted, approved, sent, reminded, dismissed, paused
+- Weekly-report modals resized and re-laid-out for hierarchy
+
+### The #1089 review loop — three rounds, three real defects
+
+Each landed on a tip whose predecessor had been called clean, which is why the bar in item 1 is the
+*current* tip and not the last verdict.
+
+1. **Greptile P1 — an accepted correction hid a failure.** `v1 bounced → v2 accepted-but-unverified` read
+   as a settled week; the provider taking a correction is not the client receiving it.
+2. **Greptile P1 — a delivered correction left a stale failure.** The fix for (1), asking "did anything
+   fail" when the question is "is anything still *unanswered*". `v1 bounced → v2 delivered → v3 accepted`
+   was flagged off a bounce the client's copy of v2 had already answered. Now compares the newest failure
+   against the newest confirmed receipt.
+3. **CodeRabbit — the credential language, and this file's own staleness.** Both fixed; the second is why
+   there are no live SHAs at the top any more.
+
+Two structural changes came out of it, and they matter more than the bugs: `outstanding` is now **decided
+on the server** so the count, chip and border cannot disagree again, and **two guards that could not fail**
+were found by mutation testing and given cases that reach them.
+
+### Built, tested, **unpushed** — `feat/weekly-report-open-tracking`
+
+- Migration `0231` — `public.weekly_report_views`
+- Open logging on the page, PDF and photo routes
+- The scanner-vs-person classifier: groups on IP **and** user agent within 30 min; engagement
+  (PDF download, photo loads) outranks the agent string
+- The opens panel in the audit dialog
+
+---
+
+## How this feature has been going wrong
+
+Across #1089 and #1090 the review bots found **seven real defects that a green suite did not**, in three
+shapes that repeated:
+
+- **Three were comments asserting behaviour that did not exist** — a carry-label that was never cleared, a
+  route claiming it exposed no contact details, a deploy note claiming a skipped tick "loses nothing".
+- **Two were tests that could not fail.** One asserted a subject string no code path emits — inside the
+  guard for the exact regression the design exists to prevent.
+- **Two were one fact rendered inconsistently across three surfaces**, each time with only one of the three
+  fixed.
+
+Mutation testing caught what review did not: it **deleted** a predicate documented as load-bearing
+(`superseded_by_id IS NULL`, which could not fire and was wrong in the one case it changed), and it exposed
+a migration suite that stayed fully green with the migration's core statement removed.
+
+So, concretely:
+
+1. **Break the source and watch the test fail.** Every guard, every time.
+2. **A comment is a claim.** If it says "cleared when X", grep for the clear.
+3. **One fact, three surfaces.** Count, chip, border — fix all three or none.
+4. **A `CANCELLED` check is not a pass.** That nearly caused a merge on an ungated tip.

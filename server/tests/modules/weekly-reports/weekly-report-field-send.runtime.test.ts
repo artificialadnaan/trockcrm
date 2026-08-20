@@ -23,7 +23,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -50,6 +50,12 @@ const DEAL = U("11111");
 const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
+// Field-team roster rows (0228): what the PM/superintendent slots now name. The LOGIN each
+// resolves to is derived from the roster row's email, so these are seeded from public.users
+// below rather than carrying a hand-typed address that could drift out of step.
+const PM_RESPONDER = U("44441");
+const SUPER_RESPONDER = U("44442");
+const OTHER_SUPER_RESPONDER = U("44445");
 /** A `construction` user on the payroll who is on NO part of this project. The role is not the grant. */
 const OTHER_SUPER = U("22225");
 const WON_STAGE = U("33331");
@@ -200,7 +206,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   // The real job_queue shape from migration 0001, minus the enum (created here so the DDL runs
   // standalone). "the delivery was queued" is half of what the send promises, and asserting it against a
@@ -236,6 +242,15 @@ beforeAll(async () => {
   // saw this file, and this file predates the webhook.
   await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
   await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER, so every read of a project now
+  // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
+  // missing column rather than on its subject.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -244,6 +259,12 @@ beforeAll(async () => {
       ('${SUPER}', 'Steve Sanchez', 'super@example.com', 'construction', '${OFFICE}', NULL),
       ('${DIRECTOR}', 'Takashi', 'director@example.com', 'director', '${OFFICE}', NULL),
       ('${OTHER_SUPER}', 'Someone Else', 'other@example.com', 'construction', '${OFFICE}', NULL);
+    INSERT INTO office_dallas.field_responders (id, name, email, role)
+SELECT '${PM_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${PM}'
+      UNION ALL
+      SELECT '${SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${SUPER}'
+      UNION ALL
+      SELECT '${OTHER_SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${OTHER_SUPER}';
     INSERT INTO public.pipeline_stage_config (id, slug) VALUES ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}');
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
       ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432');
@@ -283,8 +304,8 @@ async function seedProject(overrides: Record<string, unknown> = {}) {
         doc: { name: "Jay Stauble", email: "jay@example.com" },
         pm: { name: "Melissa Garcia", email: "melissa@example.com" },
       },
-      trockPmUserId: PM,
-      trockSuperUserId: SUPER,
+      trockPmResponderId: PM_RESPONDER,
+      trockSuperResponderId: SUPER_RESPONDER,
       contractDate: "2026-07-08",
       projectedDurationWeeks: 19,
       cadenceWeekday: THURSDAY,

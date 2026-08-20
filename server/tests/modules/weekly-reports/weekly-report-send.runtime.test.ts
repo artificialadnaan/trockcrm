@@ -11,7 +11,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import {
   WEEKLY_REPORT_SEND_REQUEST_KEYS,
   weeklyReportRetryIsProviderDeduped,
@@ -56,6 +56,11 @@ const DEAL = U("11111");
 const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
+// Field-team roster rows (0228): what the PM/superintendent slots now name. The LOGIN each
+// resolves to is derived from the roster row's email, so these are seeded from public.users
+// below rather than carrying a hand-typed address that could drift out of step.
+const PM_RESPONDER = U("44441");
+const SUPER_RESPONDER = U("44442");
 const STRANGER = U("22224");
 const WON_STAGE = U("33331");
 
@@ -207,7 +212,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   // The real job_queue shape from migration 0001, minus the job_status enum (created here so the DDL
   // runs standalone). `sendWeeklyReport` inserts into this table inside the caller's transaction, and
@@ -248,6 +253,10 @@ beforeAll(async () => {
   // suite's schema identical to production's rather than merely equivalent.
   await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
   await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER, so every read of a project now
+  // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
+  // missing column rather than on its subject.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -256,6 +265,10 @@ beforeAll(async () => {
       ('${SUPER}', 'Steve Sanchez', 'super@example.com', 'construction', '${OFFICE}', NULL),
       ('${DIRECTOR}', 'Takashi', 'director@example.com', 'director', '${OFFICE}', NULL),
       ('${STRANGER}', 'Nobody', 'nobody@example.com', 'rep', '${OFFICE}', NULL);
+    INSERT INTO office_dallas.field_responders (id, name, email, role)
+SELECT '${PM_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${PM}'
+      UNION ALL
+      SELECT '${SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${SUPER}';
     INSERT INTO public.pipeline_stage_config (id, slug) VALUES ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}');
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
       ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432');
@@ -292,8 +305,8 @@ async function seedProject(overrides: Record<string, unknown> = {}) {
         // An RM with a NAME but no address: the modal must not offer an empty recipient row.
         rm: { name: "Dana Reyes", email: null },
       },
-      trockPmUserId: PM,
-      trockSuperUserId: SUPER,
+      trockPmResponderId: PM_RESPONDER,
+      trockSuperResponderId: SUPER_RESPONDER,
       contractDate: "2026-07-08",
       projectedDurationWeeks: 19,
       cadenceWeekday: THURSDAY,
@@ -402,6 +415,11 @@ async function sendJobs(): Promise<Array<Record<string, any>>> {
 describe("migration 0226", () => {
   it("is replayable — running it a second time is a no-op, not an error", async () => {
     await expect(pg.exec(migrationSql("0226_weekly_report_send"))).resolves.toBeDefined();
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
   });
 
   it("gives a NEW tenant the same columns the DO-loop gives an existing one", async () => {
@@ -1098,24 +1116,38 @@ describe("the assigned PM sends from the FIELD mount, not this one", () => {
     expect(canPublishWeeklyReport(row.rows[0] as Record<string, any>, PM_ACTOR)).toBe(true);
   });
 
-  it("but reaches no CRM endpoint, because that router admits neither of the roles a PM holds", async () => {
-    // `ASSIGNABLE_ROLES` (projects-service.ts) is field_contractor/construction/admin/director — the roles
-    // that may hold the PM slot. The CRM send routes require admin/director. So the assigned-PM arm of
-    // `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not already leadership; it is
-    // reachable on /api/field, where that PM authenticates and where the mount carries only their own
-    // reports. The CRM refusal is asserted end-to-end in tests/weekly-report-send-route.test.ts and the
-    // field capability in weekly-report-field-send.runtime.test.ts; asserted here is that the two role
-    // sets genuinely disjoin, which is what makes a second mount necessary rather than merely convenient.
+  it("but reaches no CRM endpoint, because that router admits ONLY leadership", async () => {
+    // The assigned-PM arm of `canPublishWeeklyReport` is unreachable from the CRM for anyone who is not
+    // already leadership; it is reachable on /api/field, where that PM authenticates and where the mount
+    // carries only their own reports. The CRM refusal is asserted end-to-end in
+    // tests/weekly-report-send-route.test.ts and the field capability in
+    // weekly-report-field-send.runtime.test.ts. Asserted HERE is the property that makes a second mount
+    // necessary rather than merely convenient.
     //
-    // Read from SOURCE, both sides. This previously compared two hand-typed literals, so it asserted a
-    // property of the test file rather than of the code — widening the send gate to admit `construction`
-    // left it green while its comment claimed to pin exactly that.
+    // THE PREMISE CHANGED IN 0228, AND THIS TEST HAD TO CHANGE WITH IT. It used to intersect
+    // `ASSIGNABLE_ROLES` with the sender roles, on the grounds that the former was "who may hold the PM
+    // slot". That is no longer true: the field-team ROSTER decides the slot now, and the roster holds
+    // people whose login role is `rep` and people with no login at all. Intersecting the old constant
+    // would still have passed — while reasoning about a set that no longer describes anything.
+    //
+    // So the property is stated the way it now has to be: the gate is leadership ONLY, whatever role the
+    // roster person turns out to hold. That is strictly stronger than the old disjointness claim, and it
+    // is what actually keeps a `rep` PM — a thing that can exist for the first time after 0228 — out of
+    // the office-wide leadership surface.
     const leadership: readonly string[] = WEEKLY_REPORT_SENDER_ROLES;
-    const assignableButNotLeadership = ASSIGNABLE_ROLES.filter((role) => !leadership.includes(role));
+    expect([...leadership].sort()).toEqual(["admin", "director"]);
 
-    // The control: the filter must actually leave something, or the disjointness below is vacuous.
-    expect(assignableButNotLeadership).toEqual(["field_contractor", "construction"]);
-    expect(assignableButNotLeadership.some((role) => leadership.includes(role))).toBe(false);
+    // Every role a roster-linked login can hold. `rep` is the one 0228 admits and the reason this matters.
+    const POSSIBLE_PM_LOGIN_ROLES = ["field_contractor", "construction", "rep", "admin", "director"];
+    const nonLeadershipPms = POSSIBLE_PM_LOGIN_ROLES.filter((role) => !leadership.includes(role));
+
+    // The control: the filter must actually leave something, or the check below is vacuous.
+    expect(nonLeadershipPms).toEqual(["field_contractor", "construction", "rep"]);
+    expect(nonLeadershipPms.some((role) => leadership.includes(role))).toBe(false);
+
+    // And the legacy constant is no longer load-bearing for this boundary — pinned so that widening it
+    // cannot quietly re-enter the reasoning above.
+    expect(ASSIGNABLE_ROLES).not.toContain("rep");
   });
 });
 

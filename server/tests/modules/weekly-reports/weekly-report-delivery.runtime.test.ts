@@ -13,7 +13,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { WEEKLY_REPORT_DELIVERY_TAG, parseWeeklyReportDeliveryEvent } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
@@ -47,6 +47,11 @@ const ATLANTA_PROJECT = U("11113");
 const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
+// Field-team roster rows (0228): what the PM/superintendent slots now name. The LOGIN each
+// resolves to is derived from the roster row's email, so these are seeded from public.users
+// below rather than carrying a hand-typed address that could drift out of step.
+const PM_RESPONDER = U("44441");
+const SUPER_RESPONDER = U("44442");
 const WON_STAGE = U("33331");
 
 const PM_ACTOR = { id: PM, role: "construction" };
@@ -163,8 +168,8 @@ beforeAll(async () => {
   // Both offices get `deals`/`files` BEFORE 0222 runs — that migration skips any office schema lacking
   // them, so a second office created afterwards would silently have no weekly_reports at all and the
   // cross-office case would quietly degrade into a single-office one.
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
-  await pg.exec(tenantSchemaSql("office_atlanta", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
+  await pg.exec(tenantSchemaSql("office_atlanta", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   await pg.exec(`
     DO $$ BEGIN
@@ -193,6 +198,15 @@ beforeAll(async () => {
   // `send_stall_alerted_at` in the same statement that moves the stall clock, so a retry here fails on
   // an undefined column without it.
   await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER, so every read of a project now
+  // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
+  // missing column rather than on its subject.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES
@@ -201,6 +215,10 @@ beforeAll(async () => {
       ('${PM}', 'Adam Sherwood', 'adam@trockconstruction.com', 'construction', '${OFFICE}', '(214) 555-0142'),
       ('${SUPER}', 'Steve Sanchez', 'super@example.com', 'construction', '${OFFICE}', NULL),
       ('${DIRECTOR}', 'Takashi', 'director@example.com', 'director', '${OFFICE}', NULL);
+    INSERT INTO office_dallas.field_responders (id, name, email, role)
+SELECT '${PM_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${PM}'
+      UNION ALL
+      SELECT '${SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${SUPER}';
     INSERT INTO public.pipeline_stage_config (id, slug) VALUES ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}');
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
       ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432');
@@ -238,8 +256,8 @@ async function seedApprovedReport(options: { weekOf?: string; projectId?: string
           propertyDisplayName: "4123 Cedar Springs",
           clientName: "Mack Real Estate Group",
           clientTeam: { doc: { name: "Jay Stauble", email: "jay@example.com" } },
-          trockPmUserId: PM,
-          trockSuperUserId: SUPER,
+          trockPmResponderId: PM_RESPONDER,
+          trockSuperResponderId: SUPER_RESPONDER,
           contractDate: "2026-07-08",
           projectedDurationWeeks: 19,
           cadenceWeekday: THURSDAY,

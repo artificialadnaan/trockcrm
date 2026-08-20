@@ -2,6 +2,7 @@ import { Router, type Request } from "express";
 import { businessToday } from "../../lib/period.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireRole } from "../../middleware/rbac.js";
+import { getWeeklyReportProjectAudit } from "./project-audit-service.js";
 import {
   createWeeklyReportProject,
   deactivateWeeklyReportProject,
@@ -9,6 +10,8 @@ import {
   getWeeklyReportProjectRow,
   getWeeklyReportSettings,
   listWeeklyReportAssignableUsers,
+  listWeeklyReportAssignableResponders,
+  listWeeklyReportEligibleDeals,
   listWeeklyReportProjects,
   updateWeeklyReportProject,
   updateWeeklyReportSettings,
@@ -192,14 +195,44 @@ router.get("/projects", async (req, res, next) => {
 });
 
 /**
- * The PM / superintendent picker feed. Any CRM user may read it — a PM setting up their own project
- * cannot be sent through the admin-only `/admin/field-users` route.
+ * The PM / superintendent picker feed — the office's FIELD TEAM ROSTER, the same list the deal Team tab
+ * and the QC scorecards pick from. Any CRM user may read it: a PM setting up their own project cannot be
+ * sent through the admin-only `/admin/field-users` route.
+ *
+ * `responders` is a new key alongside the old `users` one rather than a rename. A browser holding the
+ * previous bundle keeps working through the deploy instead of rendering an empty picker, and the two are
+ * genuinely different things — one is a roster row, the other a login — so collapsing them onto one key
+ * would make a stale client submit a `public.users` id into a column that now expects a roster id.
  */
 router.get("/assignable-users", async (req, res, next) => {
   try {
-    const users = await listWeeklyReportAssignableUsers(req.tenantClient!, officeIdFrom(req));
+    const officeId = officeIdFrom(req);
+    // Sequential, not Promise.all: both run on the ONE tenant client inside this request's transaction,
+    // where pg queues them anyway. Parallel here buys nothing and reads as if it did.
+    const users = await listWeeklyReportAssignableUsers(req.tenantClient!, officeId);
+    const responders = await listWeeklyReportAssignableResponders(req.tenantClient!, officeId);
     await req.commitTransaction!();
-    res.json({ users });
+    res.json({ users, responders });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * The project picker's feed — Won jobs that can still be given a cadence. See
+ * listWeeklyReportEligibleDeals for why this is not a filter on `GET /deals`.
+ */
+router.get("/eligible-deals", async (req, res, next) => {
+  try {
+    const search = typeof req.query.search === "string" ? req.query.search : null;
+    const limit = Number.parseInt(String(req.query.limit ?? ""), 10);
+    const deals = await listWeeklyReportEligibleDeals(
+      req.tenantClient!,
+      search,
+      Number.isFinite(limit) ? limit : 20,
+    );
+    await req.commitTransaction!();
+    res.json({ deals });
   } catch (error) {
     next(error);
   }
@@ -228,6 +261,34 @@ router.get("/projects/:id", async (req, res, next) => {
     if (!project) throw new AppError(404, "Weekly report project not found");
     await req.commitTransaction!();
     res.json(project);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * The whole life of one project's reporting: every version of every week, who did what to it and when,
+ * and what the mail provider said afterwards — plus the reminder, dismissal and pause ledgers.
+ *
+ * Read-only, and open to the same readers as the rest of this router (admin/director/rep).
+ *
+ * It DOES return client email addresses — the recipients each send was composed for, which is a large
+ * part of the fact being audited. That is not a widening: this router already serves every project's
+ * `clientTeam` with emails to the same three roles on `GET /projects`, and the router comment above
+ * names reading client contact details as something these roles legitimately do. Said plainly rather
+ * than claimed away, because "exposes no contact details" would be a comfortable sentence and a false
+ * one, and the next person weighing a change here needs the true version.
+ *
+ * What it does NOT return is the stored `send_request` itself. That object carries `shareUrl`, and the
+ * share URL contains the RAW token — the only place it exists, since `weekly_report_tokens` stores just
+ * its SHA-256. `recipientsOf` reads `.to` and nothing else; returning the row would hand every rep in
+ * the office a live client link to every report ever sent.
+ */
+router.get("/projects/:id/audit", async (req, res, next) => {
+  try {
+    const audit = await getWeeklyReportProjectAudit(req.tenantClient!, requireUuid(req.params.id, "id"));
+    await req.commitTransaction!();
+    res.json(audit);
   } catch (error) {
     next(error);
   }
@@ -425,10 +486,16 @@ router.post("/reports/:id/transition", async (req, res, next) => {
  *
  * Stated as a role gate rather than left implicit, because implicit it was WRONG in a way that read as
  * right. `canPublishWeeklyReport` allows "the assigned PM or an admin/director"; the router above admits
- * admin/director/rep; and `ASSIGNABLE_ROLES` (projects-service.ts) — who may hold the PM slot at all —
- * is field_contractor/construction/admin/director. Intersect those and the assigned-PM arm can only ever
- * fire for somebody who is ALREADY an admin or director. A `construction` PM, which is the normal case,
- * gets 403 at the router before any of it runs.
+ * admin/director/rep; and this gate narrows the send routes to admin/director. So the assigned-PM arm can
+ * only ever fire for somebody who is ALREADY an admin or director. A `construction` PM, which is the
+ * normal case, gets 403 at the router before any of it runs.
+ *
+ * 0228 MADE THIS GATE MATTER MORE, not less. The PM slot used to be restricted to
+ * field_contractor/construction/admin/director, so `rep` — the one role the outer router admits and this
+ * one does not — could never be the assigned PM, and the arm was unreachable for a second reason. Now the
+ * field-team roster decides the slot, and it contains people whose login is a `rep` (Adam Sherwood is
+ * one). This line is the only thing still standing between such a PM and the office-wide leadership
+ * surface. Do not widen it without moving that reasoning somewhere.
  *
  * So the shipped CRM capability is exactly "an admin or director in this office may send any of that
  * office's client reports", and this line says so. The alternative — widening the router to admit

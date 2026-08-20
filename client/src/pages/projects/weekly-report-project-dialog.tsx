@@ -1,14 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Search } from "lucide-react";
+import { AlertTriangle, Info, Loader2, Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useDeals } from "@/hooks/use-deals";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   createWeeklyReportProject,
   deleteWeeklyReportProject,
   updateWeeklyReportProject,
   useWeeklyReportAssignableUsers,
+  useWeeklyReportEligibleDeals,
+  type WeeklyReportAssignableResponder,
+  type WeeklyReportEligibleDeal,
   type WeeklyReportProject,
   type WeeklyReportProjectPayload,
 } from "@/hooks/use-weekly-reports";
@@ -24,10 +32,10 @@ const WEEKDAYS = [
 ];
 
 const CLIENT_ROLES = [
-  { key: "doc", label: "DOC" },
-  { key: "pm", label: "PM" },
-  { key: "rm", label: "RM" },
-  { key: "cm", label: "CM" },
+  { key: "doc", label: "DOC", hint: "Director of construction" },
+  { key: "pm", label: "PM", hint: "Project manager" },
+  { key: "rm", label: "RM", hint: "Regional manager" },
+  { key: "cm", label: "CM", hint: "Construction manager" },
 ] as const;
 
 type ClientRole = (typeof CLIENT_ROLES)[number]["key"];
@@ -38,8 +46,8 @@ interface FormState {
   propertyDisplayName: string;
   clientName: string;
   clientTeam: Record<ClientRole, { name: string; email: string }>;
-  trockPmUserId: string;
-  trockSuperUserId: string;
+  trockPmResponderId: string;
+  trockSuperResponderId: string;
   contractDate: string;
   contractDateNote: string;
   projectStartDate: string;
@@ -70,8 +78,8 @@ function emptyForm(): FormState {
       rm: { name: "", email: "" },
       cm: { name: "", email: "" },
     },
-    trockPmUserId: "",
-    trockSuperUserId: "",
+    trockPmResponderId: "",
+    trockSuperResponderId: "",
     contractDate: "",
     contractDateNote: "",
     projectStartDate: "",
@@ -98,8 +106,8 @@ function formFromProject(project: WeeklyReportProject): FormState {
       rm: { name: project.clientTeam.rm.name ?? "", email: project.clientTeam.rm.email ?? "" },
       cm: { name: project.clientTeam.cm.name ?? "", email: project.clientTeam.cm.email ?? "" },
     },
-    trockPmUserId: project.trockPmUserId ?? "",
-    trockSuperUserId: project.trockSuperUserId ?? "",
+    trockPmResponderId: project.trockPmResponderId ?? "",
+    trockSuperResponderId: project.trockSuperResponderId ?? "",
     contractDate: project.contractDate ?? "",
     contractDateNote: project.contractDateNote ?? "",
     projectStartDate: project.projectStartDate ?? "",
@@ -133,8 +141,10 @@ function toPayload(form: FormState, includeDeal: boolean): WeeklyReportProjectPa
       rm: { name: nullable(form.clientTeam.rm.name), email: nullable(form.clientTeam.rm.email) },
       cm: { name: nullable(form.clientTeam.cm.name), email: nullable(form.clientTeam.cm.email) },
     },
-    trockPmUserId: nullable(form.trockPmUserId),
-    trockSuperUserId: nullable(form.trockSuperUserId),
+    // Roster ids, not user ids. The server derives the login from the roster row's email — a client
+    // cannot nominate an arbitrary account into the slot that decides who may approve and send.
+    trockPmResponderId: nullable(form.trockPmResponderId),
+    trockSuperResponderId: nullable(form.trockSuperResponderId),
     contractDate: nullable(form.contractDate),
     contractDateNote: nullable(form.contractDateNote),
     projectStartDate: nullable(form.projectStartDate),
@@ -151,18 +161,16 @@ function toPayload(form: FormState, includeDeal: boolean): WeeklyReportProjectPa
 
 export function WeeklyReportProjectDialog({
   project,
-  existingDealIds = [],
   onClose,
   onSaved,
 }: {
   project: WeeklyReportProject | null;
-  /** Deals that already have a live setup. Offering one leads to a 409 after the form is filled in. */
-  existingDealIds?: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [form, setForm] = useState<FormState>(() => (project ? formFromProject(project) : emptyForm()));
   const [saving, setSaving] = useState(false);
+  const { responders, loading: rosterLoading, error: rosterError } = useWeeklyReportAssignableUsers();
 
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -218,190 +226,242 @@ export function WeeklyReportProjectDialog({
     // creating/editing state and would therefore close whichever project dialog the user opened in the
     // meantime, discarding that form instead.
     <Dialog open onOpenChange={(open) => !open && !saving && onClose()}>
-      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{project ? "Edit weekly report project" : "New weekly report project"}</DialogTitle>
+      <DialogContent
+        // Wide enough for a two-column body at desktop and for the date+note pairs to sit on one line.
+        // `!max-w-*` because the primitive pins `sm:max-w-sm`, which a plain utility loses to.
+        className="flex max-h-[92vh] w-full flex-col gap-0 overflow-hidden p-0 sm:!max-w-5xl"
+      >
+        <DialogHeader className="border-b border-slate-200 px-6 py-4">
+          <DialogTitle className="text-[16px] font-extrabold tracking-tight text-slate-950">
+            {project ? "Edit weekly report project" : "New weekly report project"}
+          </DialogTitle>
+          <DialogDescription className="mt-0.5 text-[13.5px] text-slate-500">
+            Who receives the client's weekly progress report, what prints on it, and how often it is due.
+          </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={onSubmit} className="space-y-5">
-          {project ? (
-            <Field label="Project">
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[13.5px] font-semibold text-slate-700">
-                {form.dealLabel || form.propertyDisplayName || "—"}
-              </div>
-            </Field>
-          ) : (
-            <DealPicker
-              value={form.dealId}
-              label={form.dealLabel}
-              excludeDealIds={existingDealIds}
-              onPick={(deal) =>
-                setForm((prev) => ({
-                  ...prev,
-                  dealId: deal.id,
-                  dealLabel: deal.label,
-                  // Seed the display name from the deal so the common case needs no typing, while
-                  // staying independently editable — the report header is the property, not the deal.
-                  propertyDisplayName: prev.propertyDisplayName || deal.name,
-                }))
-              }
-            />
-          )}
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Property name (as it prints)">
-              <TextInput
-                value={form.propertyDisplayName}
-                onChange={(value) => setField("propertyDisplayName", value)}
-                placeholder="4123 Cedar Springs"
-              />
-            </Field>
-            <Field label="Client">
-              <TextInput
-                value={form.clientName}
-                onChange={(value) => setField("clientName", value)}
-                placeholder="Mack Real Estate Group"
-              />
-            </Field>
-          </div>
-
-          <Fieldset legend="Client team">
-            <div className="space-y-2">
-              {CLIENT_ROLES.map((role) => (
-                <div key={role.key} className="grid gap-2 sm:grid-cols-[64px_1fr_1fr] sm:items-center">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{role.label}</span>
-                  <TextInput
-                    value={form.clientTeam[role.key].name}
-                    onChange={(value) => setContact(role.key, "name", value)}
-                    placeholder="Name"
-                    ariaLabel={`${role.label} name`}
+        <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+            <div className="space-y-7">
+              <Section
+                title="Project"
+                hint="Only Won jobs without an existing weekly report setup can be selected."
+              >
+                {project ? (
+                  <Field label="Project">
+                    <ReadOnlyValue>{form.dealLabel || form.propertyDisplayName || "—"}</ReadOnlyValue>
+                  </Field>
+                ) : (
+                  <DealPicker
+                    value={form.dealId}
+                    label={form.dealLabel}
+                    onPick={(deal) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        dealId: deal.id,
+                        dealLabel: [deal.projectNumber ?? deal.dealNumber, deal.name]
+                          .filter(Boolean)
+                          .join(" · "),
+                        // Seed from the job so the common case needs no typing, while each field stays
+                        // independently editable. Only fills a field the user has left EMPTY — re-picking
+                        // a job must not silently overwrite something they typed themselves.
+                        propertyDisplayName: prev.propertyDisplayName || deal.name,
+                        clientName: prev.clientName || deal.clientName || "",
+                        contractDate: prev.contractDate || deal.contractSignedDate || "",
+                      }))
+                    }
+                    onClear={() =>
+                      setForm((prev) => ({ ...prev, dealId: "", dealLabel: "" }))
+                    }
                   />
-                  <TextInput
-                    type="email"
-                    value={form.clientTeam[role.key].email}
-                    onChange={(value) => setContact(role.key, "email", value)}
-                    placeholder="Email (optional)"
-                    ariaLabel={`${role.label} email`}
+                )}
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Property name" hint="Prints as the report header">
+                    <TextInput
+                      value={form.propertyDisplayName}
+                      onChange={(value) => setField("propertyDisplayName", value)}
+                      placeholder="4123 Cedar Springs"
+                    />
+                  </Field>
+                  <Field label="Client" hint="The company the work is for">
+                    <TextInput
+                      value={form.clientName}
+                      onChange={(value) => setField("clientName", value)}
+                      placeholder="Mack Real Estate Group"
+                    />
+                  </Field>
+                </div>
+              </Section>
+
+              <Section
+                title="T-Rock project team"
+                hint="These two decide who can author, who must approve, and who gets the reminder emails."
+              >
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Project manager">
+                    <RosterSelect
+                      value={form.trockPmResponderId}
+                      onChange={(value) => setField("trockPmResponderId", value)}
+                      responders={responders}
+                      role="project_manager"
+                      loading={rosterLoading}
+                      error={rosterError}
+                      ariaLabel="T-Rock project manager"
+                      currentName={project?.trockPmName ?? null}
+                    />
+                  </Field>
+                  <Field label="Superintendent">
+                    <RosterSelect
+                      value={form.trockSuperResponderId}
+                      onChange={(value) => setField("trockSuperResponderId", value)}
+                      responders={responders}
+                      role="superintendent"
+                      loading={rosterLoading}
+                      error={rosterError}
+                      ariaLabel="T-Rock superintendent"
+                      currentName={project?.trockSuperName ?? null}
+                    />
+                  </Field>
+                </div>
+                <p className="text-[11.5px] text-slate-500">
+                  This list is the Field Team roster — the same one used for corrective actions and QC
+                  scorecards. Add or remove people there.
+                </p>
+              </Section>
+
+              <Section title="Client team" hint="Who at the client's office appears on the report.">
+                <div className="space-y-2.5">
+                  {CLIENT_ROLES.map((role) => (
+                    <div key={role.key} className="grid gap-2 sm:grid-cols-[72px_1fr_1fr] sm:items-center">
+                      <span
+                        className="text-[11px] font-bold uppercase tracking-wider text-slate-500"
+                        title={role.hint}
+                      >
+                        {role.label}
+                      </span>
+                      <TextInput
+                        value={form.clientTeam[role.key].name}
+                        onChange={(value) => setContact(role.key, "name", value)}
+                        placeholder="Name"
+                        ariaLabel={`${role.label} name`}
+                      />
+                      <TextInput
+                        type="email"
+                        value={form.clientTeam[role.key].email}
+                        onChange={(value) => setContact(role.key, "email", value)}
+                        placeholder="Email (optional)"
+                        ariaLabel={`${role.label} email`}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </Section>
+
+              <Section
+                title="Schedule"
+                hint="A note prints in place of the date when the date isn't known yet — e.g. “TBD Permit”."
+              >
+                <div className="space-y-2.5">
+                  <DateWithNote
+                    label="Contract date"
+                    date={form.contractDate}
+                    note={form.contractDateNote}
+                    onDate={(value) => setField("contractDate", value)}
+                    onNote={(value) => setField("contractDateNote", value)}
+                  />
+                  <DateWithNote
+                    label="Project start"
+                    date={form.projectStartDate}
+                    note={form.projectStartDateNote}
+                    onDate={(value) => setField("projectStartDate", value)}
+                    onNote={(value) => setField("projectStartDateNote", value)}
+                  />
+                  <DateWithNote
+                    label="Project completion"
+                    date={form.projectCompletionDate}
+                    note={form.projectCompletionDateNote}
+                    onDate={(value) => setField("projectCompletionDate", value)}
+                    onNote={(value) => setField("projectCompletionDateNote", value)}
                   />
                 </div>
-              ))}
-            </div>
-          </Fieldset>
+                <div className="sm:max-w-[320px]">
+                  <Field label="Projected duration" hint="Weeks">
+                    <TextInput
+                      type="number"
+                      value={form.projectedDurationWeeks}
+                      onChange={(value) => setField("projectedDurationWeeks", value)}
+                      placeholder="19"
+                    />
+                  </Field>
+                  {/* Left blank, the client's PDF prints an empty Projected/Remaining pair — a pair of
+                      bars with no numbers in them, which reads as a job with no time left rather than
+                      as a field nobody filled in. Said here, where it can still be fixed for free. */}
+                  {!form.projectedDurationWeeks.trim() && (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] text-amber-700">
+                      <Info className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        Without this, the Projected and Remaining bars print empty on the client's report.
+                      </span>
+                    </p>
+                  )}
+                </div>
+              </Section>
 
-          <Fieldset legend="T-Rock project team">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Project manager">
-                <FieldUserSelect
-                  value={form.trockPmUserId}
-                  onChange={(value) => setField("trockPmUserId", value)}
-                  ariaLabel="T-Rock project manager"
-                />
-              </Field>
-              <Field label="Superintendent">
-                <FieldUserSelect
-                  value={form.trockSuperUserId}
-                  onChange={(value) => setField("trockSuperUserId", value)}
-                  ariaLabel="T-Rock superintendent"
-                />
-              </Field>
+              <Section title="Reporting cadence">
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <Field label="Due every">
+                    <SelectInput
+                      value={String(form.cadenceWeekday)}
+                      onChange={(value) => setField("cadenceWeekday", Number(value))}
+                      ariaLabel="Report due day"
+                    >
+                      {WEEKDAYS.map((day) => (
+                        <option key={day.value} value={day.value}>
+                          {day.label}
+                        </option>
+                      ))}
+                    </SelectInput>
+                  </Field>
+                  <Field label="Reporting starts">
+                    <TextInput
+                      type="date"
+                      value={form.cadenceStartDate}
+                      onChange={(value) => setField("cadenceStartDate", value)}
+                    />
+                  </Field>
+                  <Field label="Reporting ends" hint="Optional">
+                    <TextInput
+                      type="date"
+                      value={form.cadenceEndDate}
+                      onChange={(value) => setField("cadenceEndDate", value)}
+                    />
+                  </Field>
+                </div>
+                {project && (
+                  <div className="sm:max-w-[280px]">
+                    <Field label="Status">
+                      <SelectInput
+                        value={form.status}
+                        onChange={(value) => setField("status", value as FormState["status"])}
+                        ariaLabel="Reporting status"
+                      >
+                        <option value="active">Active</option>
+                        <option value="paused">Paused</option>
+                        <option value="completed">Completed</option>
+                      </SelectInput>
+                    </Field>
+                    <p className="mt-1.5 text-[11.5px] text-slate-500">
+                      Paused and completed projects stop generating weeks and stop sending reminders.
+                      Weeks missed before the pause stay on the board.
+                    </p>
+                  </div>
+                )}
+              </Section>
             </div>
-            <p className="mt-2 text-[11.5px] font-semibold text-slate-400">
-              These two decide who can author, who must approve, and who gets the reminder emails.
-            </p>
-          </Fieldset>
+          </div>
 
-          <Fieldset legend="Schedule">
-            <div className="space-y-3">
-              <DateWithNote
-                label="Contract date"
-                date={form.contractDate}
-                note={form.contractDateNote}
-                onDate={(value) => setField("contractDate", value)}
-                onNote={(value) => setField("contractDateNote", value)}
-              />
-              <DateWithNote
-                label="Project start"
-                date={form.projectStartDate}
-                note={form.projectStartDateNote}
-                onDate={(value) => setField("projectStartDate", value)}
-                onNote={(value) => setField("projectStartDateNote", value)}
-              />
-              <DateWithNote
-                label="Project completion"
-                date={form.projectCompletionDate}
-                note={form.projectCompletionDateNote}
-                onDate={(value) => setField("projectCompletionDate", value)}
-                onNote={(value) => setField("projectCompletionDateNote", value)}
-              />
-              <Field label="Projected duration (weeks)">
-                <TextInput
-                  type="number"
-                  value={form.projectedDurationWeeks}
-                  onChange={(value) => setField("projectedDurationWeeks", value)}
-                  placeholder="19"
-                />
-              </Field>
-            </div>
-            <p className="mt-2 text-[11.5px] font-semibold text-slate-400">
-              A note prints in place of the date when the date isn’t known yet — e.g. “TBD Permit”.
-            </p>
-          </Fieldset>
-
-          <Fieldset legend="Reporting cadence">
-            <div className="grid gap-4 sm:grid-cols-3">
-              <Field label="Due every">
-                <select
-                  value={form.cadenceWeekday}
-                  onChange={(event) => setField("cadenceWeekday", Number(event.target.value))}
-                  aria-label="Report due day"
-                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[13.5px] font-semibold text-slate-700"
-                >
-                  {WEEKDAYS.map((day) => (
-                    <option key={day.value} value={day.value}>
-                      {day.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Reporting starts">
-                <TextInput
-                  type="date"
-                  value={form.cadenceStartDate}
-                  onChange={(value) => setField("cadenceStartDate", value)}
-                />
-              </Field>
-              <Field label="Reporting ends (optional)">
-                <TextInput
-                  type="date"
-                  value={form.cadenceEndDate}
-                  onChange={(value) => setField("cadenceEndDate", value)}
-                />
-              </Field>
-            </div>
-            {project && (
-              <div className="mt-3">
-                <Field label="Status">
-                  <select
-                    value={form.status}
-                    onChange={(event) => setField("status", event.target.value as FormState["status"])}
-                    aria-label="Reporting status"
-                    className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[13.5px] font-semibold text-slate-700"
-                  >
-                    <option value="active">Active</option>
-                    <option value="paused">Paused</option>
-                    <option value="completed">Completed</option>
-                  </select>
-                </Field>
-                <p className="mt-1.5 text-[11.5px] font-semibold text-slate-400">
-                  Paused and completed projects stop generating weeks and stop sending reminders. Those
-                  weeks are not asked for again when reporting resumes — anything already missed before
-                  the pause stays on the board.
-                </p>
-              </div>
-            )}
-          </Fieldset>
-
-          <div className="flex items-center gap-2 border-t border-slate-200 pt-4">
+          <div className="flex items-center gap-2 border-t border-slate-200 bg-slate-50/60 px-6 py-3.5">
             {project && (
               <Button type="button" variant="ghost" onClick={onDelete} disabled={saving}>
                 Stop reporting
@@ -423,23 +483,81 @@ export function WeeklyReportProjectDialog({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+/**
+ * A titled group of related fields.
+ *
+ * The form was previously a flat stack of `fieldset`s whose legends and field labels used the SAME
+ * 11px all-caps token, so nothing on the page outranked anything else and there were sixteen equally
+ * loud labels to read. Section titles now sit a full step above field labels, and the space above a
+ * title is larger than the space below it, so the grouping is visible before any of it is read.
+ */
+function Section({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <label className="block">
-      <span className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-slate-400">{label}</span>
+    <section className="space-y-3.5">
+      <div className="border-b border-slate-200 pb-2">
+        <h3 className="text-[13.5px] font-bold tracking-tight text-slate-900">{title}</h3>
+        {hint && <p className="mt-0.5 text-[11.5px] text-slate-500">{hint}</p>}
+      </div>
       {children}
-    </label>
+    </section>
   );
 }
 
-function Fieldset({ legend, children }: { legend: string; children: React.ReactNode }) {
+function Field({
+  label,
+  hint,
+  children,
+  /**
+   * Render a <div> instead of a <label>.
+   *
+   * A <label> forwards a click to its first labelable descendant and may legally wrap at most ONE form
+   * control. The project picker puts a search input AND a button per result inside its field, so as a
+   * <label> it was both non-conforming and actively wrong: clicking a result row also activated the
+   * search box. Anything with more than one control in it passes `asFieldset`.
+   */
+  asFieldset = false,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+  asFieldset?: boolean;
+}) {
+  const Wrapper = asFieldset ? "div" : "label";
   return (
-    <fieldset className="rounded-xl border border-slate-200 p-4">
-      <legend className="px-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500">{legend}</legend>
+    <Wrapper className="block">
+      <span className="mb-1.5 flex items-baseline gap-1.5">
+        {/* slate-600, not the slate-400 this form used throughout: at 12px that was roughly 2.8:1 on
+            white, under the 4.5:1 floor for text somebody has to read to fill the field in. */}
+        <span className="text-[11.5px] font-semibold text-slate-700">{label}</span>
+        {hint && <span className="text-[11.5px] font-normal text-slate-500">{hint}</span>}
+      </span>
       {children}
-    </fieldset>
+    </Wrapper>
   );
 }
+
+function ReadOnlyValue({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[13.5px] font-semibold text-slate-700">
+      {children}
+    </div>
+  );
+}
+
+const INPUT_CLASS =
+  "w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-[13.5px] text-slate-900 outline-none " +
+  // placeholder was slate-300 (~1.9:1) — invisible in daylight on a jobsite laptop, which is the scene
+  // this form is actually used in.
+  "placeholder:text-slate-400 transition-colors hover:border-slate-400 " +
+  "focus:border-brand-red/50 focus:ring-2 focus:ring-brand-red/15 disabled:bg-slate-50 disabled:text-slate-500";
 
 function TextInput({
   value,
@@ -461,8 +579,34 @@ function TextInput({
       aria-label={ariaLabel}
       onChange={(event) => onChange(event.target.value)}
       placeholder={placeholder}
-      className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[13.5px] text-slate-800 outline-none placeholder:text-slate-300 focus:border-brand-red/40"
+      className={INPUT_CLASS}
     />
+  );
+}
+
+function SelectInput({
+  value,
+  onChange,
+  ariaLabel,
+  disabled,
+  children,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      className={`${INPUT_CLASS} font-semibold`}
+    >
+      {children}
+    </select>
   );
 }
 
@@ -480,31 +624,37 @@ function DateWithNote({
   onNote: (value: string) => void;
 }) {
   return (
-    <div className="grid gap-2 sm:grid-cols-[150px_1fr_1fr] sm:items-center">
-      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{label}</span>
+    <div className="grid gap-2 sm:grid-cols-[150px_minmax(0,1fr)_minmax(0,1.3fr)] sm:items-center">
+      <span className="text-[11.5px] font-semibold text-slate-700">{label}</span>
       <TextInput type="date" value={date} onChange={onDate} ariaLabel={`${label} date`} />
-      <TextInput value={note} onChange={onNote} placeholder="or a note, e.g. TBD Permit" ariaLabel={`${label} note`} />
+      <TextInput
+        value={note}
+        onChange={onNote}
+        placeholder="or a note, e.g. TBD Permit"
+        ariaLabel={`${label} note`}
+      />
     </div>
   );
 }
 
 /**
- * Deal picker.
+ * Project picker.
  *
- * `scope: "all"` is REQUIRED. `GET /deals` silently defaults to `scope=mine`, which has already shipped
- * as a bug in two other pickers — a director setting up a superintendent's project would simply not find
- * it in the list.
+ * Backed by `/weekly-reports/eligible-deals`, which applies the SAME Won predicate the create path
+ * enforces and drops jobs that already have a setup. The previous picker searched every active deal
+ * (1,445 of them against live data) with no stage filter, so it happily offered a job the server then
+ * refused with a 400 once the whole form had been filled in.
  */
 function DealPicker({
   value,
   label,
-  excludeDealIds,
   onPick,
+  onClear,
 }: {
   value: string;
   label: string;
-  excludeDealIds: string[];
-  onPick: (deal: { id: string; name: string; label: string }) => void;
+  onPick: (deal: WeeklyReportEligibleDeal) => void;
+  onClear: () => void;
 }) {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -515,28 +665,17 @@ function DealPicker({
     return () => clearTimeout(timer);
   }, [search]);
 
-  const { deals, loading } = useDeals(
-    { search: debounced, scope: "all", limit: 20, isActive: true },
-    { enabled: debounced.length >= 2 },
-  );
-
-  // A deal that already has a live setup cannot get a second one — the server answers 409 on the
-  // unique index. Offering it anyway lets someone pick it, fill in the whole form, and only then be
-  // told no. Filtered here rather than server-side because /deals is a general endpoint this feature
-  // does not own.
-  const selectable = useMemo(() => {
-    const taken = new Set(excludeDealIds);
-    return deals.filter((deal) => !taken.has(deal.id));
-  }, [deals, excludeDealIds]);
+  const { deals, loading } = useWeeklyReportEligibleDeals(debounced, !value && debounced.length >= 2);
 
   if (value) {
     return (
-      <Field label="Project">
+      <Field label="Project" asFieldset>
         <div className="flex items-center gap-2">
-          <div className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[13.5px] font-semibold text-slate-700">
-            {label}
+          <div className="min-w-0 flex-1">
+            <ReadOnlyValue>{label}</ReadOnlyValue>
           </div>
-          <Button type="button" variant="outline" size="sm" onClick={() => onPick({ id: "", name: "", label: "" })}>
+          <Button type="button" variant="outline" size="sm" onClick={onClear}>
+            <X className="mr-1 h-3.5 w-3.5" />
             Change
           </Button>
         </div>
@@ -545,46 +684,46 @@ function DealPicker({
   }
 
   return (
-    <Field label="Project">
+    <Field label="Project" hint="Required" asFieldset>
       <div className="relative">
-        <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2">
-          <Search className="h-4 w-4 text-slate-400" />
+        <div className="flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 focus-within:border-brand-red/50 focus-within:ring-2 focus-within:ring-brand-red/15">
+          <Search className="h-4 w-4 shrink-0 text-slate-400" />
           <input
             value={search}
             onChange={(event) => {
               setSearch(event.target.value);
               setOpen(true);
             }}
-            placeholder="Search by project name or number"
+            placeholder="Search Won jobs by name or project number"
             aria-label="Search for a project"
-            className="w-full bg-transparent text-[13.5px] outline-none placeholder:text-slate-300"
+            className="w-full bg-transparent text-[13.5px] text-slate-900 outline-none placeholder:text-slate-400"
           />
-          {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />}
+          {loading && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />}
         </div>
         {open && debounced.length >= 2 && (
-          <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-xl">
-            {selectable.length === 0 && !loading ? (
-              <p className="px-3 py-2.5 text-[13px] font-semibold text-slate-400">
-                {deals.length > 0 ? "Those projects already have a weekly report setup" : "No matching projects"}
+          <div className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-slate-200 bg-white shadow-lg">
+            {deals.length === 0 && !loading ? (
+              <p className="px-3 py-3 text-[13.5px] text-slate-500">
+                No Won jobs match that. Jobs that already have a weekly report setup aren't listed.
               </p>
             ) : (
-              selectable.map((deal) => (
+              deals.map((deal) => (
                 <button
                   key={deal.id}
                   type="button"
                   onClick={() => {
-                    onPick({
-                      id: deal.id,
-                      name: deal.name,
-                      label: [deal.projectNumber ?? deal.dealNumber, deal.name].filter(Boolean).join(" · "),
-                    });
+                    onPick(deal);
                     setOpen(false);
+                    setSearch("");
                   }}
-                  className="block w-full px-3 py-2 text-left text-[13.5px] hover:bg-slate-50"
+                  className="block w-full border-b border-slate-100 px-3 py-2.5 text-left last:border-b-0 hover:bg-slate-50"
                 >
-                  <span className="font-semibold text-slate-900">{deal.name}</span>
-                  <span className="ml-2 text-[11.5px] font-semibold text-slate-400">
-                    {deal.projectNumber ?? deal.dealNumber}
+                  <span className="block truncate text-[13.5px] font-semibold text-slate-900">
+                    {deal.name}
+                  </span>
+                  <span className="mt-0.5 block truncate text-[11.5px] text-slate-500">
+                    {deal.projectNumber ?? deal.dealNumber ?? "No project number"}
+                    {deal.clientName ? ` · ${deal.clientName}` : ""}
                   </span>
                 </button>
               ))
@@ -597,43 +736,82 @@ function DealPicker({
 }
 
 /**
- * PM / superintendent picker.
+ * PM / superintendent picker, fed by the office's FIELD TEAM ROSTER.
  *
- * Sourced from the people feed rather than `deal_team_members`, which is empty in production — a picker
- * fed from it would offer nobody at all.
+ * It used to list `public.users` filtered to four broad roles, which against the live Dallas roster
+ * could offer six of fifteen people: four are `rep` logins who are genuinely PMs and superintendents,
+ * and five hold no CRM account at all. The roster is the list a director already curates for the deal
+ * Team tab and the QC scorecards, and it holds all fifteen.
+ *
+ * Filtered to the role of the slot, because the roster's own role is what the server checks — offering a
+ * superintendent in the PM picker would produce a 400 on save for no reason the user could see.
  */
-function FieldUserSelect({
+function RosterSelect({
   value,
   onChange,
+  responders,
+  role,
+  loading,
+  error,
   ariaLabel,
+  currentName,
 }: {
   value: string;
   onChange: (value: string) => void;
+  responders: WeeklyReportAssignableResponder[];
+  role: "project_manager" | "superintendent";
+  loading: boolean;
+  /** A FAILED roster request. Distinct from an empty one — see below. */
+  error: string | null;
   ariaLabel: string;
+  currentName: string | null;
 }) {
-  const { users, loading } = useWeeklyReportAssignableUsers();
-  // Keep an assigned person visible even if they have since been deactivated or moved office — a
-  // controlled select whose value isn't in its options renders blank while still holding the id, so
-  // the form would silently look "Unassigned" and re-save as such.
-  const options = useMemo(() => {
-    if (!value || users.some((user) => user.id === value)) return users;
-    return [{ id: value, displayName: "Currently assigned (inactive)", email: "", role: "" }, ...users];
-  }, [users, value]);
+  const options = useMemo(() => responders.filter((person) => person.role === role), [responders, role]);
+
+  // Keep an assigned person selectable even once they are off the roster. A controlled select whose
+  // value is not among its options renders BLANK while still holding the id, so the form would look
+  // "Unassigned" and re-save as such — quietly removing whoever was approving this project's reports.
+  const missing = value && !options.some((person) => person.id === value);
+
+  const selected = options.find((person) => person.id === value) ?? null;
 
   return (
-    <select
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      aria-label={ariaLabel}
-      disabled={loading}
-      className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[13.5px] font-semibold text-slate-700"
-    >
-      <option value="">Unassigned</option>
-      {options.map((person) => (
-        <option key={person.id} value={person.id}>
-          {person.displayName}
-        </option>
-      ))}
-    </select>
+    <div className="space-y-1.5">
+      <SelectInput value={value} onChange={onChange} ariaLabel={ariaLabel} disabled={loading}>
+        <option value="">{loading ? "Loading roster…" : "Unassigned"}</option>
+        {missing && <option value={value}>{currentName ?? "Currently assigned"} (off the roster)</option>}
+        {options.map((person) => (
+          <option key={person.id} value={person.id}>
+            {person.name}
+            {person.hasLogin ? "" : " — no app login"}
+          </option>
+        ))}
+      </SelectInput>
+      {/* A failed request and an empty roster are NOT the same thing, and saying "nobody holds this
+          role" for a request that never landed is the worse of the two: it reads as a settled fact, and
+          somebody acts on it by saving the project with the slot unassigned. */}
+      {!loading && error && (
+        <p className="flex items-start gap-1.5 text-[11.5px] text-brand-red">
+          <AlertTriangle className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+          <span>Couldn't load the Field Team roster, so nobody can be picked. Reopen this form to retry.</span>
+        </p>
+      )}
+      {!loading && !error && options.length === 0 && (
+        <p className="text-[11.5px] text-slate-500">
+          Nobody on the Field Team roster holds this role yet.
+        </p>
+      )}
+      {selected && !selected.hasLogin && (
+        // Stated where the choice is made, not discovered on a Thursday when a report needs approving.
+        <p className="flex items-start gap-1.5 text-[11.5px] text-amber-700">
+          <Info className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+          <span>
+            {selected.name} has no CRM login, so they can't approve or send from the app. Their name still
+            prints on the report and they still get the reminder emails — a director approves on their
+            behalf.
+          </span>
+        </p>
+      )}
+    </div>
   );
 }

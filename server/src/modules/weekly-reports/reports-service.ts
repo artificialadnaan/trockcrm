@@ -53,6 +53,15 @@ export interface WeeklyReportDetail {
   weatherDelayDays: number | null;
   remainingWeeks: number | null;
   projectedDurationWeeks: number | null;
+  /**
+   * The report this week's starting values were carried from, or null.
+   *
+   * Set at draft creation and cleared the moment somebody edits the carried section. The phone reads it
+   * to label Work Completed as last week's PLAN rather than a record of what happened — a distinction
+   * that matters because the send gate only checks that the section is non-empty, and carried text
+   * satisfies that check without anybody having written it.
+   */
+  carriedFromReportId: string | null;
   snapshot: Record<string, unknown> | null;
   authoredBy: string | null;
   authoredByName: string | null;
@@ -130,6 +139,7 @@ function mapReportRow(row: Record<string, any>, photos: WeeklyReportPhoto[]): We
     weatherDelayDays: row.weather_delay_days ?? null,
     remainingWeeks: row.remaining_weeks ?? null,
     projectedDurationWeeks: row.projected_duration_weeks ?? null,
+    carriedFromReportId: row.carried_from_report_id ?? null,
     snapshot: row.snapshot ?? null,
     authoredBy: row.authored_by ?? null,
     authoredByName: row.authored_by_name ?? null,
@@ -417,6 +427,68 @@ export interface CreateWeeklyReportInput {
  */
 export const WEEKLY_REPORT_WEEK_EXISTS_CODE = "WEEKLY_REPORT_WEEK_EXISTS";
 
+/** What last week's report said, for the values a new week starts from. */
+export interface WeeklyReportCarryOver {
+  reportId: string;
+  completionPercent: string | null;
+  weatherDelayDays: number | null;
+  nextWeekLookAhead: string | null;
+}
+
+/**
+ * The report a new week should start from.
+ *
+ * Each week used to be written as if no report ever came before it: percent blank, weather days blank,
+ * and the plan the superintendent wrote last week readable only by going and opening last week's report.
+ * This is the single row all three carried values come from — ONE row on purpose, so a percentage and a
+ * weather total cannot arrive from two different weeks and quietly describe different states of the job.
+ *
+ * Three predicates, none of them decoration:
+ *
+ *   status <> 'draft'   A half-filled draft somebody abandoned is not a statement about the job.
+ *                       Only a report that was actually submitted is.
+ *   week_of < $2        The week being opened, not "the newest row". A week filed LATE must inherit
+ *                       from the week before IT, not from a later week already on the board.
+ *   is_active           A soft-deleted report is not a source of truth for the next one.
+ *
+ * `ORDER BY week_of DESC, version DESC` does the rest, and specifically does the work an
+ * `AND superseded_by_id IS NULL` predicate looks like it should: a correction is written as a NEW row
+ * with version + 1, so the surviving version always outranks the one it replaced. That predicate was
+ * here and has been REMOVED, because mutation testing showed nothing could make it fire — and because
+ * on the one case where it did change the answer it changed it to the wrong one. A correction that was
+ * itself abandoned and soft-deleted leaves the original marked superseded and yet still the only live
+ * version, which is exactly the report the client received; skipping it would carry from a week further
+ * back and quietly under-report progress. The ordering handles the ordinary case and the `is_active`
+ * predicate handles this one.
+ */
+export async function previousWeeklyReportForCarryOver(
+  client: QueryExecutor,
+  weeklyReportProjectId: string,
+  weekOf: string,
+): Promise<WeeklyReportCarryOver | null> {
+  const result = await client.query(
+    `SELECT id, completion_percent, weather_delay_days, next_week_look_ahead
+       FROM weekly_reports
+      WHERE weekly_report_project_id = $1::uuid
+        AND is_active
+        AND week_of < $2::date
+        AND status <> 'draft'
+      ORDER BY week_of DESC, version DESC
+      LIMIT 1`,
+    [weeklyReportProjectId, weekOf],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    reportId: row.id,
+    // `numeric` arrives as a string from node-postgres and is written back as one; parsing it here
+    // would lose the scale the column stores and round 45.50 to 45.5 on its way through.
+    completionPercent: row.completion_percent == null ? null : String(row.completion_percent),
+    weatherDelayDays: row.weather_delay_days ?? null,
+    nextWeekLookAhead: row.next_week_look_ahead ?? null,
+  };
+}
+
 /**
  * Create (or return) the draft for a project/week.
  *
@@ -468,15 +540,24 @@ export async function createWeeklyReportDraft(
     throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
 
+  // What last week said. Everything carried forward comes off ONE row so the three values cannot come
+  // from three different weeks — see previousWeeklyReportForCarryOver.
+  const carry = await previousWeeklyReportForCarryOver(client, input.weeklyReportProjectId, input.weekOf);
+
   // ON CONFLICT DO NOTHING rather than trusting the pre-flight SELECTs. Those two lookups do not
   // serialise anything: two retries of the same submit, or two people opening the same week, can both
   // observe no row and both reach this INSERT. Without this the loser gets a raw 23505 surfaced as a
   // 500, which is precisely the flaky-LTE case the idempotency key exists to make boring.
+  //
+  // THE CARRY-OVER RIDES ON THAT IDEMPOTENCE. Writing the prefill here, rather than in a follow-up
+  // UPDATE or on the phone, is what makes "applied exactly once, never over typed text" true: the
+  // losing side of a race writes nothing at all, and a resumed draft never re-enters this statement.
   const result = await client.query(
     `INSERT INTO weekly_reports (
        client_submission_id, weekly_report_project_id, deal_id, week_of,
-       projected_duration_weeks, authored_by, authored_at
-     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6::uuid, now())
+       projected_duration_weeks, completion_percent, weather_delay_days, work_completed,
+       carried_from_report_id, authored_by, authored_at
+     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6::numeric, $7, $8, $9::uuid, $10::uuid, now())
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [
@@ -485,6 +566,15 @@ export async function createWeeklyReportDraft(
       projectRow.deal_id,
       input.weekOf,
       projectRow.projected_duration_weeks,
+      // NULL carries as NULL, never as 0. "Nobody has said yet" and "zero percent complete" are
+      // different claims about a job and the PDF prints them differently.
+      carry?.completionPercent ?? null,
+      carry?.weatherDelayDays ?? null,
+      // Last week's PLAN becomes this week's starting point for what was done.
+      carry?.nextWeekLookAhead ?? null,
+      // Which report it came from — the phone reads this to label the section as carried rather than
+      // written, and it is what lets that label disappear the moment the text is edited.
+      carry?.reportId ?? null,
       actor.id,
     ],
   );
@@ -540,7 +630,20 @@ export async function updateWeeklyReportContent(
     assignments.push(`${column} = $${params.length}${cast}`);
   };
 
-  if (has(patch, "workCompleted")) set("work_completed", normalizeBody(patch.workCompleted));
+  if (has(patch, "workCompleted")) {
+    set("work_completed", normalizeBody(patch.workCompleted));
+    // AND DROP THE CARRY POINTER. `carried_from_report_id` means "this section is still last week's PLAN,
+    // untouched" — the phone reads it to label the text as something to edit rather than as a record of
+    // what happened. It was set at draft creation and never cleared, so that label would have survived
+    // the superintendent rewriting the section completely: the reader would be told a finished account
+    // of the week was a plan. Worse than not labelling it at all, and the interface doc claimed this
+    // clearing already happened.
+    //
+    // Cleared on ANY explicit patch of the section rather than on a text comparison. Somebody who opened
+    // it, read it and saved it unchanged has adopted those words as their own, which is exactly what the
+    // label should stop claiming.
+    set("carried_from_report_id", null, "::uuid");
+  }
   if (has(patch, "nextWeekLookAhead")) set("next_week_look_ahead", normalizeBody(patch.nextWeekLookAhead));
   if (has(patch, "issuesConcerns")) set("issues_concerns", normalizeBody(patch.issuesConcerns));
   if (has(patch, "completionPercent")) {

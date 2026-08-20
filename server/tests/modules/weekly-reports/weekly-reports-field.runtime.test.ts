@@ -10,7 +10,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -40,6 +40,13 @@ const OTHER_DEAL = U("11112");
 const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
+// Field-team roster rows (0228): what the PM/superintendent slots now name. The LOGIN each
+// resolves to is derived from the roster row's email, so these are seeded from public.users
+// below rather than carrying a hand-typed address that could drift out of step.
+const PM_RESPONDER = U("44441");
+const SUPER_RESPONDER = U("44442");
+const OTHER_SUPER_RESPONDER = U("44445");
+const OTHER_PM_RESPONDER = U("44446");
 const OTHER_SUPER = U("22225");
 const WON_STAGE = U("33331");
 
@@ -85,7 +92,7 @@ beforeAll(async () => {
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   // user_office_access carries the multi-office grants the assignee roster resolves through.
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
   await pg.exec(
     `CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`,
   );
@@ -96,6 +103,15 @@ beforeAll(async () => {
   // pressed Send" from "the client received it", and the whole basis of the undelivered list below.
   // Read from disk like the rest, so a column that exists only in a test fixture cannot make a query pass.
   await pg.exec(migrationSql("0226_weekly_report_send"));
+  // 0228 links the PM/superintendent slots to the FIELD TEAM ROSTER, so every read of a project now
+  // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
+  // missing column rather than on its subject.
+  await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -104,6 +120,14 @@ beforeAll(async () => {
       ('${SUPER}', 'Steve Sanchez', 'super@example.com', 'construction', '${OFFICE}'),
       ('${DIRECTOR}', 'Takashi', 'director@example.com', 'director', '${OFFICE}'),
       ('${OTHER_SUPER}', 'Someone Else', 'other@example.com', 'construction', '${OFFICE}');
+    INSERT INTO office_dallas.field_responders (id, name, email, role)
+SELECT '${PM_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${PM}'
+      UNION ALL
+      SELECT '${SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${SUPER}'
+      UNION ALL
+      SELECT '${OTHER_SUPER_RESPONDER}'::uuid, u.display_name, u.email, 'superintendent' FROM public.users u WHERE u.id = '${OTHER_SUPER}'
+      UNION ALL
+      SELECT '${OTHER_PM_RESPONDER}'::uuid, u.display_name, u.email, 'project_manager' FROM public.users u WHERE u.id = '${OTHER_SUPER}';
     INSERT INTO public.pipeline_stage_config (id, slug) VALUES ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}');
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
       ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432'),
@@ -131,8 +155,8 @@ function baseProjectInput(overrides: Record<string, unknown> = {}) {
     propertyDisplayName: "4123 Cedar Springs",
     clientName: "Mack Real Estate Group",
     clientTeam: { doc: { name: "Jay Stauble", email: "jay@example.com" } },
-    trockPmUserId: PM,
-    trockSuperUserId: SUPER,
+    trockPmResponderId: PM_RESPONDER,
+    trockSuperResponderId: SUPER_RESPONDER,
     projectedDurationWeeks: 19,
     cadenceWeekday: THURSDAY,
     cadenceStartDate: "2026-07-30",
@@ -200,7 +224,7 @@ describe("hub assignments", () => {
     await seedProject();
     await createWeeklyReportProject(
       db,
-      baseProjectInput({ dealId: OTHER_DEAL, propertyDisplayName: "Somebody Else's Job", trockSuperUserId: OTHER_SUPER, trockPmUserId: OTHER_SUPER }),
+      baseProjectInput({ dealId: OTHER_DEAL, propertyDisplayName: "Somebody Else's Job", trockSuperResponderId: OTHER_SUPER_RESPONDER, trockPmResponderId: OTHER_PM_RESPONDER }),
       DIRECTOR,
       OFFICE,
     );
@@ -214,7 +238,7 @@ describe("hub assignments", () => {
     await seedProject();
     await createWeeklyReportProject(
       db,
-      baseProjectInput({ dealId: OTHER_DEAL, propertyDisplayName: "Alpha Plaza", trockSuperUserId: OTHER_SUPER }),
+      baseProjectInput({ dealId: OTHER_DEAL, propertyDisplayName: "Alpha Plaza", trockSuperResponderId: OTHER_SUPER_RESPONDER }),
       DIRECTOR,
       OFFICE,
     );
@@ -755,7 +779,7 @@ describe("who may open a report by id", () => {
   it("still lets the author open what they wrote after the assignment moves on", async () => {
     const project = await seedProject();
     const id = await seedDraft(project.id, WEEK_OF);
-    await updateWeeklyReportProject(db, project.id, { trockSuperUserId: OTHER_SUPER }, OFFICE);
+    await updateWeeklyReportProject(db, project.id, { trockSuperResponderId: OTHER_SUPER_RESPONDER }, OFFICE);
     await expect(getWeeklyReportForActor(db, id, SUPER_ACTOR)).resolves.toMatchObject({ report: { id } });
   });
 
@@ -823,7 +847,7 @@ describe("an author reassigned off the project mid-draft", () => {
     const id = await seedDraft(project.id, WEEK_OF);
     await updateWeeklyReportContent(db, id, { workCompleted: "- Framing complete" }, SUPER_ACTOR);
     // Somebody else is the superintendent now; SUPER holds nothing but `authored_by`.
-    await updateWeeklyReportProject(db, project.id, { trockSuperUserId: OTHER_SUPER }, OFFICE);
+    await updateWeeklyReportProject(db, project.id, { trockSuperResponderId: OTHER_SUPER_RESPONDER }, OFFICE);
     return { project, id };
   }
 

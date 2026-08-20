@@ -6,7 +6,13 @@ import {
   weeklyReportGreetingNameFor,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   fetchWeeklyReportSendDraft,
   sendWeeklyReport,
@@ -138,11 +144,18 @@ export function WeeklyReportSendDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+      {/* `sm:!max-w-*`, not `max-w-*`. The primitive's base class list pins `sm:max-w-sm`, and
+          tailwind-merge keeps a caller's UNPREFIXED `max-w-2xl` alongside it rather than replacing it —
+          so at every desktop width the 384px base won and this dialog rendered at a third of the size it
+          asked for. That is the whole of "the modals are too small". */}
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:!max-w-2xl">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="text-[16px] font-extrabold tracking-tight text-slate-950">
             {draft?.isCorrection ? "Send correction to client" : "Send weekly report to client"}
           </DialogTitle>
+          <DialogDescription className="mt-0.5 text-[13.5px] text-slate-500">
+            Check the recipients and the note before this leaves for the client.
+          </DialogDescription>
         </DialogHeader>
 
         {loadError ? (
