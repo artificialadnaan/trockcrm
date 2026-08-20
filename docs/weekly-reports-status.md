@@ -2,8 +2,20 @@
 
 Living document. Update it when something lands; do not date-stamp it.
 
-Every claim below was verified against GitHub and the working tree on **2026-08-20**. Re-verify before
-acting — PR state and branch tips move.
+Verified against GitHub and the working tree on **2026-08-20**.
+
+**No commit SHAs for live PR state below, on purpose.** An earlier version of this file pinned #1089 to a
+tip and a check count, and both were wrong within the hour — every push during a review loop invalidates
+them, including the push that updates this file. For anything that moves, the commands are given instead.
+Run them; do not trust a remembered number.
+
+```
+gh pr view 1089 --json state,headRefOid,mergeStateStatus
+gh pr checks 1089
+gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){pullRequest(number:1089){
+  reviewThreads(last:40){nodes{isResolved path comments(first:1){nodes{author{login}body}}}}}}}' \
+  --jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)]'
+```
 
 ---
 
@@ -11,8 +23,8 @@ acting — PR state and branch tips move.
 
 | | Where it is |
 |---|---|
-| `origin/main` | `20ab7cb5b` — the merge of **#1088**. Everything through the 19 Aug batch is on main. |
-| **PR #1089** `feat/weekly-report-setup-roster` | **OPEN.** Tip `1c096b508`. All 6 checks pass. **3 unresolved review threads.** |
+| `origin/main` | `20ab7cb5b` — the merge of **#1088**. Everything through the 19 Aug batch is on main. *(A merged SHA is safe to name; it does not move.)* |
+| **PR #1089** `feat/weekly-report-setup-roster` | **OPEN**, and the whole of this batch sits behind it. Check its tip, checks and threads with the commands above. |
 | **PR #1090** | MERGED — but into **#1089's branch**, not main. It ships when #1089 does. |
 | `feat/weekly-report-open-tracking` | 3 commits, **never pushed**, no upstream, based on `8fb22cfb5` (pre-#1090-merge). |
 | Migrations on main | `0222`–`0227`. |
@@ -26,28 +38,15 @@ acting — PR state and branch tips move.
 
 ### Blocking the merge
 
-- [ ] **1. Greptile P1 — "Accepted correction hides failure."**
-  `client/src/pages/projects/weekly-report-project-audit-dialog.tsx`. When v1 bounced and its correction
-  v2 was accepted by the provider but has no delivery verdict yet, the `!supersededById` filter suppresses
-  the failure and the week reads as fully resolved. Positive evidence of one failure, no positive evidence
-  of success.
-  **A real trade, not a typo.** Flagging every accepted-but-unverified send lights up every report for its
-  first few minutes — which is why the current rule exists. The narrow fix keeps the week flagged only
-  when a *known failure* preceded the unverified correction.
-  Whichever way it goes, **the summary count, the per-report chip and the card border must all agree.**
-  Those three have disagreed twice already and each time only one got fixed.
-
-- [ ] **2. CodeRabbit — unlabelled fenced block** in `2026-08-20-weekly-reports-handoff-prompt.md:7`.
-  One word (` ```text `). Trivial.
-
-- [ ] **3. CodeRabbit (Critical) — the credential language in both spec docs.**
-  The docs say rotation "needs a decision, even if the decision is to accept the risk." CodeRabbit's
-  position is that exposed production credentials should be treated as compromised, not risk-accepted.
-  It is right about the wording. The underlying decision is item 15 and is Adnaan's.
+- [ ] **1. The review loop must land clean on the CURRENT tip.**
+  Three rounds of findings have been fixed (see *Recently completed*), and every one of the last three
+  tips produced a real defect — so "the last round was clean" is not evidence about this round.
+  The bar: `gh pr checks 1089` all green with **`build-gate` SUCCESS, not CANCELLED**, and zero
+  unresolved threads, both **on the tip that will actually be merged**.
 
 ### Then, in order
 
-- [ ] **4. Merge #1089 → deploy → verify.** **Adnaan merges this one** — the merge authorisation given this
+- [ ] **2. Merge #1089 → deploy → verify.** **Adnaan merges this one** — the merge authorisation given this
   session was for #1090 specifically.
   **Merge before 11:00 CT.** The reminder cron runs 07:00 with catch-up at 09:00 and 11:00; a later deploy
   costs that day's t−2/t−1 nudges and the digest.
@@ -59,47 +58,47 @@ acting — PR state and branch tips move.
   - worker logs show the **17:00 CT** escalation cron registered
   - **be present for that cron's first firing.** It is new and it emails a sales rep.
 
-- [ ] **5. Ship open-tracking.** Branch is built and tested but **not pushed** and its base predates the
+- [ ] **3. Ship open-tracking.** Branch is built and tested but **not pushed** and its base predates the
   #1090 merge — **rebase onto main after #1089 lands**, do not merge the old base forward.
   Built: migration `0231` (`public.weekly_report_views`), the classifier in `shared/lib/weeklyReportViews`,
   logging on all three public routes, the audit-dialog panel.
   Decisions already taken, **do not relitigate**: log raw and classify at read time · full IP + user agent ·
   24-month retention · **no client-facing disclosure** (Adnaan decided this explicitly).
 
-- [ ] **6. The 24-month retention purge.** The one piece of open-tracking that is not built. Worker job,
+- [ ] **4. The 24-month retention purge.** The one piece of open-tracking that is not built. Worker job,
   beside the dead-letter sweep, with the same table-exists probe the other jobs use.
 
-- [ ] **7. Playwright E2E against the deployed app.** Cannot start until #1089 deploys.
+- [ ] **5. Playwright E2E against the deployed app.** Cannot start until #1089 deploys.
 
-- [ ] **8. Clean up the merged weekly-report worktrees and stale branches.** ~18 branches, most merged.
+- [ ] **6. Clean up the merged weekly-report worktrees and stale branches.** ~18 branches, most merged.
   Judge by PR state; never remove a dirty tree.
 
 ### Older follow-ups, still open
 
-- [ ] **9.** The duplicate-risk warning gates on **age alone**; it should gate on **outcome**.
-- [ ] **10.** Decide whether the dictation endpoint needs **rate limiting**.
-- [ ] **11.** A field PM **cannot re-mint a share link** they just sent.
+- [ ] **7.** The duplicate-risk warning gates on **age alone**; it should gate on **outcome**.
+- [ ] **8.** Decide whether the dictation endpoint needs **rate limiting**.
+- [ ] **9.** A field PM **cannot re-mint a share link** they just sent.
 
 ---
 
 ## Decisions waiting on Adnaan — not code tasks
 
-- [ ] **12. PDF layout pass.** He wants to review on his phone and list his changes **first** — he asked for
+- [ ] **10. PDF layout pass.** He wants to review on his phone and list his changes **first** — he asked for
   exactly that order. One defect already confirmed: the Issues/Concerns box is 84pt inside a 130pt row and
   the reference document's own text overflows onto page 2.
 
-- [ ] **13. Fifteen dialogs app-wide still render at 384px** regardless of the width they request.
+- [ ] **11. Fifteen dialogs app-wide still render at 384px** regardless of the width they request.
   `DialogContent` pins `sm:max-w-sm`, and tailwind-merge keeps an unprefixed `max-w-*` alongside it rather
   than replacing it. The four weekly-report dialogs are fixed with `sm:!max-w-*`. The real fix is one line
   in the primitive — but it resizes 15 surfaces at once, several presumably laid out against the 384px they
   actually got. Own PR, own visual pass.
 
-- [ ] **14. Five roster people have no CRM login** — Corey McShane, Eric Burnett, Kevin Posey, Nick Cheatam,
+- [ ] **12. Five roster people have no CRM login** — Corey McShane, Eric Burnett, Kevin Posey, Nick Cheatam,
   Triston Mitchell. They can hold PM/super slots, print on reports and receive reminders, but cannot
   approve or send; a director approves on their behalf and the form says so. Giving them logins is admin
   provisioning, not a code change.
 
-- [ ] **15. Credential rotation — the one item here that is not a preference.** `JWT_SECRET`,
+- [ ] **13. Credential rotation — the one item here that is not a preference.** `JWT_SECRET`,
   `ENCRYPTION_KEY`, `RESEND_API_KEY` and the Procore client secret were printed into a session transcript.
   Printed is disclosed; all four are compromised and all four have to be rotated. **Raised four times, and
   what is unanswered is the scheduling, not the whether.** Costs, because they want scheduling rather than
@@ -150,6 +149,24 @@ acting — PR state and branch tips move.
 - Project picker restricted to **Won** deals
 - Per-project drill-in with the full audit trail — submitted, approved, sent, reminded, dismissed, paused
 - Weekly-report modals resized and re-laid-out for hierarchy
+
+### The #1089 review loop — three rounds, three real defects
+
+Each landed on a tip whose predecessor had been called clean, which is why the bar in item 1 is the
+*current* tip and not the last verdict.
+
+1. **Greptile P1 — an accepted correction hid a failure.** `v1 bounced → v2 accepted-but-unverified` read
+   as a settled week; the provider taking a correction is not the client receiving it.
+2. **Greptile P1 — a delivered correction left a stale failure.** The fix for (1), asking "did anything
+   fail" when the question is "is anything still *unanswered*". `v1 bounced → v2 delivered → v3 accepted`
+   was flagged off a bounce the client's copy of v2 had already answered. Now compares the newest failure
+   against the newest confirmed receipt.
+3. **CodeRabbit — the credential language, and this file's own staleness.** Both fixed; the second is why
+   there are no live SHAs at the top any more.
+
+Two structural changes came out of it, and they matter more than the bugs: `outstanding` is now **decided
+on the server** so the count, chip and border cannot disagree again, and **two guards that could not fail**
+were found by mutation testing and given cases that reach them.
 
 ### Built, tested, **unpushed** — `feat/weekly-report-open-tracking`
 

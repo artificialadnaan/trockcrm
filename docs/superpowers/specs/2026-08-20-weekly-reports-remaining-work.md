@@ -10,9 +10,13 @@ and the working tree at the time of writing — re-verify before acting, because
 
 ## Where things actually are
 
+> **This file is a point-in-time spec, not a live status board.** For current PR state — tip, checks,
+> unresolved threads — read `docs/weekly-reports-status.md`, which carries the commands to query it
+> rather than a remembered SHA. The tips and check counts once written here went stale within the hour.
+
 | | State |
 |---|---|
-| **PR #1089** `feat/weekly-report-setup-roster` → `main` | OPEN. Tip `723cecf0a`. All four checks green. **1 open Greptile thread** (task 1). Contains #1090 merged into it. |
+| **PR #1089** `feat/weekly-report-setup-roster` → `main` | OPEN, and everything stacks on it. Contains #1090 merged into it. |
 | **PR #1090** | MERGED into #1089's branch. Verified by content. |
 | `feat/weekly-report-open-tracking` | 3 commits, **never pushed**, based on `8fb22cfb5` (pre-#1090-merge). |
 | Migrations not yet on `main` | `0228`, `0229`, `0230` (+ `0231` on the unpushed branch) |
@@ -22,22 +26,32 @@ and the working tree at the time of writing — re-verify before acting, because
 
 ---
 
-## 1. Close the last Greptile finding on #1089  — BLOCKING THE MERGE
+## 1. ~~Close the last Greptile finding on #1089~~ — DONE, and it cost two more rounds
 
-`client/src/pages/projects/weekly-report-project-audit-dialog.tsx`, "Accepted correction hides failure".
+Kept here because the shape of it is the useful part.
 
-The `undelivered && !supersededById` rule — added earlier in the session to stop a *resolved* week showing
-a permanent red failure — is too broad in one direction. When v1 **bounced** and its correction v2 was
-accepted by the provider but has no delivery verdict yet, the week reads as fully resolved. There is
-positive evidence of one failure and no positive evidence of success.
+The original finding: `undelivered && !supersededById` was too broad in one direction. When v1 **bounced**
+and its correction v2 was accepted by the provider but had no delivery verdict, the week read as fully
+resolved — positive evidence of one failure, none of success.
 
-**Judgement required, and it is a real trade.** Flagging every accepted-but-unverified send would light up
-every report for its first minutes, which is why the current rule treats "accepted, no webhook verdict"
-as fine. The narrower fix is to keep the week flagged only when a **known failure** preceded the
-unverified correction.
+The first fix required a known prior failure before flagging an unverified send, which kept the ordinary
+pre-verdict case quiet. **Greptile then found that fix wrong too**: asking "did any previous version fail"
+is not "is anything still unanswered", so `v1 bounced → v2 delivered → v3 accepted` was flagged off a
+bounce the client's copy of v2 had already answered. It now compares the newest failure against the newest
+confirmed receipt.
 
-Whatever is chosen, **the three surfaces must agree**: the summary count, the per-report chip and the card
-border. They have disagreed twice already this session and each time only one of the three was fixed.
+Two things came out of it worth keeping:
+
+- **The verdict moved to the server.** The summary count, the per-report chip and the card border had each
+  owned their own predicate and disagreed twice, each time with only one of the three fixed. They read one
+  `outstanding` boolean now, so a third disagreement is not something an edit can express.
+- **Two guards could not fail.** `status = 'sent'` survived deletion because no fixture reached a live
+  draft; the client's border survived being keyed on the old rule because the two predicates diverge only
+  on inputs the server cannot emit. Both have cases that reach them now.
+
+**What remains blocking is the loop itself**, not this finding: all checks green with `build-gate`
+**SUCCESS, not CANCELLED**, and zero unresolved threads, on the tip that will actually be merged. Three
+tips in a row have produced a real defect, so a clean previous round is not evidence about the current one.
 
 ## 2. Merge #1089, deploy, verify
 
