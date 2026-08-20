@@ -1992,9 +1992,15 @@ export async function sendRepEscalation(
   // The rep is the recipient; the PM is copied so the person who has to act knows the chase is coming.
   // With no rep — unassigned, or assigned to somebody deactivated — this falls to leadership rather than
   // going nowhere: a missed client report must not be unescalated because a field was blank.
-  const unassigned = project.repEmail == null;
-  const to = unassigned ? [...leadershipRecipients] : [project.repEmail!];
-  const cc = project.pmEmail && project.pmEmail !== project.repEmail ? [project.pmEmail] : [];
+  // DELIVERABILITY, not merely presence. Keying on `repEmail == null` alone left a hole with exactly the
+  // shape this fallback exists to close: a rep whose stored address is malformed passed the null check,
+  // so `unassigned` stayed false and leadership was never added — and then `isBasicValidEmail` below
+  // dropped the bad address too. Recipients: none. The escalation reached NOBODY, silently, on the one
+  // path built to guarantee somebody is told.
+  const repEmail = project.repEmail && isBasicValidEmail(project.repEmail) ? project.repEmail : null;
+  const unassigned = repEmail == null;
+  const to = unassigned ? [...leadershipRecipients] : [repEmail];
+  const cc = project.pmEmail && project.pmEmail !== repEmail ? [project.pmEmail] : [];
   const recipients = dedupeEmails([...to, ...cc].filter((email) => isBasicValidEmail(email)));
 
   if (recipients.length === 0) {
@@ -2038,13 +2044,23 @@ export async function sendRepEscalation(
     // Released so a later tick can retry, exactly as the other kinds do. The key is fixed by
     // (project, week), so a re-send after an unknown outcome presents the SAME key with the SAME payload
     // and the provider replays rather than delivering twice.
-    await releaseReminderClaim(
-      query,
-      tenantSchema,
-      project.id,
-      project.dueDate,
-      WEEKLY_REPORT_REP_ESCALATION_KIND,
-    );
+    // Guarded, as sendProjectReminder's is. An unguarded rollback that throws REPLACES the send error
+    // with its own, so `guarded` logs the rollback and two facts are lost: what the send actually failed
+    // with, and that the slot stays claimed so no later tick will retry it.
+    try {
+      await releaseReminderClaim(
+        query,
+        tenantSchema,
+        project.id,
+        project.dueDate,
+        WEEKLY_REPORT_REP_ESCALATION_KIND,
+      );
+    } catch (rollbackError) {
+      logger.error(
+        "[WeeklyReportReminders] Escalation send failed AND the claim rollback FAILED - the slot stays claimed, so no later tick will retry it",
+        { tenantSchema, weeklyReportProjectId: project.id, rollbackError },
+      );
+    }
     throw err;
   }
 }

@@ -12,7 +12,7 @@
 //   1. The DO loop is proved by a second office schema, which the tenant block does not mention.
 //   2. The TENANT block is proved by replaying it alone, with the loop never executed.
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
 
@@ -57,6 +57,12 @@ async function insertKind(schema: string, kind: string): Promise<"ok" | "rejecte
 
 beforeEach(async () => {
   pg = new PGlite();
+});
+
+afterEach(async () => {
+  // One in-memory Postgres per test, and nothing closed them — so every instance stayed live for the
+  // whole file run. The sibling suites close theirs; this one did not.
+  await pg.close();
 });
 
 describe("migration 0229 — rep_escalation reminder kind", () => {

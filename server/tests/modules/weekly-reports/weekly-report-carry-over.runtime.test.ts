@@ -62,7 +62,18 @@ beforeAll(async () => {
       ('${SUPER_RESPONDER}', 'Steve Sanchez', 'super@example.com', 'superintendent');
     SET search_path TO office_dallas, public;
   `);
-  db = { query: (text: any, params?: any) => pg.query(text, params) } as any;
+  // rowCount NORMALISED, as the sibling harnesses do it. PGlite reports writes as `affectedRows`, so
+  // `rows.length` is 0 for every UPDATE/DELETE without RETURNING. Nothing here reads it today; the hazard
+  // is the next assertion that does, which would silently read every write as having affected nothing.
+  db = {
+    query: async (text: any, params?: any) => {
+      const result = await pg.query(text, params);
+      return {
+        rows: result.rows,
+        rowCount: (result as { affectedRows?: number }).affectedRows ?? result.rows.length,
+      };
+    },
+  } as any;
 });
 
 afterAll(async () => {

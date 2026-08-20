@@ -251,6 +251,24 @@ describe("the 17:00 sales-rep escalation", () => {
     expect(sent[0]!.to).not.toContain("gonerep@example.com");
   });
 
+  it("falls back to leadership when the rep's stored address is MALFORMED", async () => {
+    // The hole a null-check alone left open, and it is the exact failure this fallback exists to close.
+    // A rep row with a broken address passed `repEmail == null`, so `unassigned` stayed false and
+    // leadership was never added — and then the deliverability filter dropped the bad address too.
+    // Recipients: none. The escalation reached NOBODY, silently.
+    await pg.query(`UPDATE public.users SET email = 'not-an-email' WHERE id = $1::uuid`, [REP]);
+    try {
+      const { sent } = await runEscalation();
+
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.to).toContain("director@example.com");
+      expect(sent[0]!.to.join(",")).not.toContain("not-an-email");
+      expect(sent[0]!.subject).toContain("No rep assigned");
+    } finally {
+      await pg.query(`UPDATE public.users SET email = 'rep@example.com' WHERE id = $1::uuid`, [REP]);
+    }
+  });
+
   it("fires ONCE — a second tick the same evening sends nothing", async () => {
     const first = await runEscalation();
     expect(first.sent).toHaveLength(1);
@@ -270,7 +288,11 @@ describe("the 17:00 sales-rep escalation", () => {
 
     const { sent } = await runEscalation();
 
-    expect(sent.every((email) => !email.subject.includes("Weekly report status"))).toBe(true);
+    // The REAL digest subject — "Weekly reports due {day} — N filed, M outstanding". The first version
+    // of this assertion looked for "Weekly report status", a string no code path emits, so it passed
+    // whether or not a digest went out. In the guard for the regression this whole design exists to
+    // prevent, that is the worst place to have put an assertion that cannot fail.
+    expect(sent.every((email) => !email.subject.includes("Weekly reports due"))).toBe(true);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.subject).toContain("NOT submitted");
   });

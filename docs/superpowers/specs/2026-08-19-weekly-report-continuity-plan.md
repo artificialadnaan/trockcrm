@@ -110,14 +110,22 @@ duration, because the PDF renders that as an empty box.
 
 ## Step 8 — photo speed on the public link
 
-`public-routes.ts` + `public-viewer.ts`.
+**CORRECTED AFTER MEASURING.** This step originally specified a separate variant URL, a click-through to
+the raw original, and a long cache lifetime. None of that is what the problem turned out to be, and none
+of it shipped.
 
-- The grid `<img>` points at a **variant** URL; the original stays reachable behind a click.
-- The variant route resizes via `generateEvidenceJpeg` (already imported for HEIC) and sets a long
-  `Cache-Control` — the token is the access control and the bytes are immutable.
-- `loading="lazy"`, `decoding="async"`, explicit `width`/`height`.
-- **Measured**: total bytes and request count for a real multi-photo report, before and after, recorded
-  in the PR.
+The viewer ALREADY resizes (maxEdge 1400, q78) and ALREADY lazy-loads. Measured output is ~180 kB per
+photo — the bytes were never the issue. What was slow is that every request re-fetched the multi-megabyte
+original from R2 and re-decoded a twelve-megapixel image to produce them, and `max-age=300` meant a client
+reading a report re-triggered that per photo every five minutes.
+
+What shipped instead: the derived JPEG is cached in R2 behind the SAME endpoint, content-addressed on the
+source key plus the render settings. `Cache-Control` is unchanged at `private, max-age=300` — that bound
+is how long a REVOKED link keeps working, which belongs to the token rather than to the bytes, and
+lengthening it to speed up a page would trade an access-control guarantee for a cache hit.
+
+The lookup and the detached write each carry their own timeout, so a stalled cache can neither consume
+the request's deadline nor leave a pending socket behind.
 
 ---
 

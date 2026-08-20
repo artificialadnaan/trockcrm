@@ -69,6 +69,14 @@ const VIEWER_PHOTO_MAX_EDGE = 1400;
 const VIEWER_DERIVED_LOOKUP_TIMEOUT_MS = 2_000;
 
 /**
+ * How long the detached cache WRITE may run before it is abandoned.
+ *
+ * Longer than the lookup, because a write moves bytes and nobody is waiting on it; bounded all the same,
+ * because an unbounded detached promise is a pending socket the process never reclaims.
+ */
+const VIEWER_DERIVED_WRITE_TIMEOUT_MS = 30_000;
+
+/**
  * Ceiling on ONE photo request, covering the HEIC permit wait, the R2 read and the re-encode together.
  *
  * A page of twenty HEIC photos fires twenty parallel requests at this route, and every HEIC decode in the
@@ -519,7 +527,13 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
     //
     // (Written as `void` rather than `await` for readability only. Both behave identically here BECAUSE
     // of the ordering above — worth saying, because the difference looks load-bearing and is not.)
-    void putObject(derivedKey, jpeg, "image/jpeg").catch((error) => {
+    // BOUNDED. A detached promise with no deadline is one R2 can leave pending forever if it accepts the
+    // request and then stalls — and every cache miss adds another, so a bad afternoon accumulates pending
+    // uploads and their sockets long after the responses that spawned them completed. Its OWN signal, not
+    // the request's: the response has already gone, so the request deadline may well be spent.
+    void putObject(derivedKey, jpeg, "image/jpeg", {
+      signal: AbortSignal.timeout(VIEWER_DERIVED_WRITE_TIMEOUT_MS),
+    }).catch((error) => {
       console.warn("[weekly-report-viewer] could not cache a derived photo", { derivedKey, error });
     });
   } catch (error) {

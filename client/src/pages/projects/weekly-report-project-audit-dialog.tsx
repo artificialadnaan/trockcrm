@@ -273,8 +273,14 @@ function ReportCard({ report }: { report: WeeklyReportAuditReport }) {
   const superseded = Boolean(report.supersededById);
   return (
     <article
+      // `&& !superseded`, matching the chip below and the summary count above. Keying the border on
+      // `undelivered` alone left a resolved week — one whose correction was delivered — wearing the red
+      // of an outstanding failure while the chip beside it and the count above it both called it
+      // settled. Three renderings of one fact, and this was the last one still disagreeing.
       className={`rounded-lg border px-4 py-3 ${
-        report.undelivered ? "border-brand-red/30 bg-brand-red/[0.03]" : "border-slate-200 bg-white"
+        report.undelivered && !superseded
+          ? "border-brand-red/30 bg-brand-red/[0.03]"
+          : "border-slate-200 bg-white"
       }`}
     >
       <header className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">

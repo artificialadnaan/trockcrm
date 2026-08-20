@@ -46,7 +46,11 @@ export type WeeklyReportReminderKind = (typeof WEEKLY_REPORT_REMINDER_KINDS)[num
  * Two axes, two lists. The full union above is what the database constrains; this narrower one is what
  * the day scheduler may choose from.
  */
-export const WEEKLY_REPORT_LEAD_DAY_REMINDER_KINDS = ["t_minus_2", "t_minus_1", "due_digest"] as const;
+export const WEEKLY_REPORT_LEAD_DAY_REMINDER_KINDS = [
+  "t_minus_2",
+  "t_minus_1",
+  "due_digest",
+] as const satisfies readonly WeeklyReportReminderKind[];
 export type WeeklyReportLeadDayReminderKind = (typeof WEEKLY_REPORT_LEAD_DAY_REMINDER_KINDS)[number];
 
 /**
