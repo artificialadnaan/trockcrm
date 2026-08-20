@@ -421,9 +421,16 @@ export async function getWeeklyReportProjectAudit(
     // put millions of rows behind one report. Unbounded, opening the audit then pulled every one of them
     // into the API process and grouped them there, long after the traffic itself had stopped.
     //
-    // The EARLIEST accesses are kept rather than the most recent, because the question this log answers
-    // is "did it reach them after we sent it", and that is settled in the hours after the send. A flood
-    // arriving months later cannot displace the evidence that matters.
+    // ENGAGEMENT FIRST, then the earliest of the rest — and the order is the whole correctness of the
+    // cap. Keeping simply "the earliest 500" was wrong in the exact case a cap exists for: a report
+    // buried under scanner traffic, whose one real reader fetched a photo on day nine, has that fetch
+    // fall outside the window. `openedByAPerson` then reads false and the page says "only automated
+    // scanners" about a report somebody demonstrably read — the cap quietly discarding the strongest
+    // evidence in the log. Caught by Greptile, on my own fix for Codex's finding.
+    //
+    // A `pdf` or `photo` fetch is what separates a person from a scanner, so those rows are taken first
+    // and in full; the budget that remains goes to the earliest page requests, which is where "did it
+    // reach them after we sent it" is settled.
     //
     // `count(*) OVER` rides the same index scan, so the true total comes back without a second pass —
     // and it comes back precisely so the page can SAY it was truncated. A cap nobody is told about reads
@@ -431,7 +438,10 @@ export async function getWeeklyReportProjectAudit(
     const views = await client.query(
       `WITH ranked AS (
          SELECT v.weekly_report_id, v.event_type, v.occurred_at, host(v.ip) AS ip, v.user_agent,
-                row_number() OVER (PARTITION BY v.weekly_report_id ORDER BY v.occurred_at ASC) AS rn,
+                row_number() OVER (
+                  PARTITION BY v.weekly_report_id
+                      ORDER BY (v.event_type IN ('pdf', 'photo')) DESC, v.occurred_at ASC
+                ) AS rn,
                 count(*)     OVER (PARTITION BY v.weekly_report_id)                            AS total
            FROM public.weekly_report_views v
            JOIN weekly_reports wr ON wr.id = v.weekly_report_id

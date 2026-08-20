@@ -482,22 +482,22 @@ function ViewLog({
         <span className="font-normal text-slate-500">({open ? "hide" : "show"} detail)</span>
       </button>
 
+      {/* OUTSIDE the expander. A qualification that only appears once somebody thinks to open the detail
+          is not a qualification — the headline above is what gets read, and quoted, and it is the line
+          that would otherwise be taken as a complete count. */}
+      {report.viewSessionsTruncated && (
+        <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
+          This link was fetched more times than the page shows. Every fetch that opened a photo or the
+          PDF is included; the rest are the earliest after the send.
+        </p>
+      )}
+
       {open && (
-        <>
-          {report.viewSessionsTruncated && (
-            // Said out loud, because a truncated log that keeps quiet about it reads as a complete one —
-            // and somebody counting sittings off this page in a dispute would be counting a prefix.
-            <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
-              This link was fetched more times than the page shows. These are the earliest after the
-              send, which is what establishes receipt.
-            </p>
-          )}
-          <ol className="mt-1.5 space-y-1.5 border-l-2 border-slate-200 pl-3">
-            {sessions.map((session, index) => (
-              <ViewSessionRow key={`${session.startedAt}-${index}`} session={session} />
-            ))}
-          </ol>
-        </>
+        <ol className="mt-1.5 space-y-1.5 border-l-2 border-slate-200 pl-3">
+          {sessions.map((session, index) => (
+            <ViewSessionRow key={`${session.startedAt}-${index}`} session={session} />
+          ))}
+        </ol>
       )}
     </div>
   );

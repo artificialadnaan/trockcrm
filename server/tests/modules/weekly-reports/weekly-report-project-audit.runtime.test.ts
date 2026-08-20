@@ -723,6 +723,34 @@ describe("who actually opened the client's copy", () => {
     expect(audit.reports[0]!.openedByAPerson).toBe(true);
   });
 
+  it("keeps the one real reader buried under a flood of scanner traffic", async () => {
+    // THE CASE THE CAP ITSELF BROKE, and the reason its ordering is not arbitrary.
+    //
+    // 600 page requests from a scanner, and then — later, past any earliest-N window — one person who
+    // downloads the PDF. Taking simply "the earliest 500" drops that download, `openedByAPerson` goes
+    // false, and the page says "only automated scanners have fetched this" about a report somebody
+    // demonstrably read. The cap would have thrown away the single most valuable row in the log.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'page', '2026-08-13T17:00:30Z'::timestamptz + (n || ' milliseconds')::interval,
+              '10.7.7.7'::inet, 'Barracuda Link Protect'
+         FROM generate_series(1, 600) AS n`,
+      [REPORT],
+    );
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-22T14:00:00Z'::timestamptz, '73.162.44.219'::inet,
+               'Mozilla/5.0 (Macintosh) Chrome/141.0')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
+  });
+
   it("does not claim truncation on an ordinary report", async () => {
     // The control. A flag that is always true is as useless as one that is never set, and "we only show
     // some of this" on a report with four accesses would undermine the page it appears on.
