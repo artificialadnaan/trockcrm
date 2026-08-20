@@ -297,40 +297,70 @@ describe("the per-project audit trail", () => {
   });
 
   /**
-   * A week carried by two versions: v1 sent and then replaced, v2 sent as its correction.
+   * One week carried by N versions, oldest first, chained the way production chains them.
    *
-   * Mirrors what `sendWeeklyReport` actually does — it stamps `superseded_by_id` at SEND, on rows that
-   * are themselves `sent` — so these fixtures are reachable states rather than shapes only a test can
-   * build.
+   * `sendWeeklyReport` stamps `superseded_by_id` AT SEND and only onto rows that are themselves `sent`
+   * and not already superseded — so v1 points at v2 and keeps pointing at v2 once v3 goes out. These
+   * fixtures reproduce that chain rather than pointing every old row at the newest, because the
+   * difference is exactly what the version comparison in `markOutstanding` reads.
+   *
+   * Returns the ids in the order given.
    */
+  async function seedWeek(versions: Array<{ deliveryStatus?: string | null; status?: string }>) {
+    const ids = versions.map((_, index) => (index === 0 ? REPORT : U(`6666${index + 1}`)));
+
+    await seedFullySentReport({
+      send_delivery_status: versions[0]!.deliveryStatus ?? null,
+      ...(versions[0]!.status ? { status: versions[0]!.status } : {}),
+    });
+
+    for (let index = 1; index < versions.length; index += 1) {
+      const spec = versions[index]!;
+      const status = spec.status ?? "sent";
+      const sent = status === "sent";
+      await pg.query(
+        `INSERT INTO office_dallas.weekly_reports
+           (id, client_submission_id, weekly_report_project_id, deal_id, week_of, version, status,
+            created_at, sent_by, sent_at, send_delivered_at, send_delivery_status, send_request)
+         VALUES ($1::uuid, $4::uuid, $2::uuid, $3::uuid, '2026-08-13'::date, $5, $6,
+                 $7::timestamptz, $8::uuid, $9::timestamptz, $10::timestamptz, $11, $12::jsonb)`,
+        [
+          ids[index],
+          PROJECT,
+          DEAL,
+          U(`7777${index + 1}`),
+          index + 1,
+          status,
+          `2026-08-${14 + index}T09:00:00Z`,
+          sent ? PM : null,
+          sent ? `2026-08-${14 + index}T10:00:00Z` : null,
+          sent ? `2026-08-${14 + index}T10:00:30Z` : null,
+          spec.deliveryStatus ?? null,
+          sent ? JSON.stringify({ to: ["jay@mackre.com"] }) : null,
+        ],
+      );
+
+      // The supersede lands on the immediately preceding SENT row, and only if nothing claimed it
+      // first — the four predicates in send-service, reproduced.
+      if (sent && (versions[index - 1]!.status ?? "sent") === "sent") {
+        await pg.query(
+          `UPDATE office_dallas.weekly_reports SET superseded_by_id = $1::uuid
+            WHERE id = $2::uuid AND superseded_by_id IS NULL AND status = 'sent'`,
+          [ids[index], ids[index - 1]],
+        );
+      }
+    }
+
+    return ids;
+  }
+
+  /** The common two-version shape: one send, one correction. */
   async function seedCorrectedWeek(
     v1: { deliveryStatus: string | null },
-    v2: { deliveryStatus: string | null; deliveredAt?: string | null },
+    v2: { deliveryStatus: string | null },
   ) {
-    const V2 = U("66662");
-    await seedFullySentReport({ send_delivery_status: v1.deliveryStatus });
-    await pg.query(
-      `INSERT INTO office_dallas.weekly_reports
-         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, version, status,
-          created_at, sent_by, sent_at, send_delivered_at, send_delivery_status, send_request)
-       VALUES ($1::uuid, $4::uuid, $2::uuid, $3::uuid, '2026-08-13'::date, 2, 'sent',
-               '2026-08-14T09:00:00Z'::timestamptz, '${PM}'::uuid, '2026-08-14T10:00:00Z'::timestamptz,
-               $5::timestamptz, $6, $7::jsonb)`,
-      [
-        V2,
-        PROJECT,
-        DEAL,
-        U("77772"),
-        v2.deliveredAt === undefined ? "2026-08-14T10:00:30Z" : v2.deliveredAt,
-        v2.deliveryStatus,
-        JSON.stringify({ to: ["jay@mackre.com"] }),
-      ],
-    );
-    await pg.query(`UPDATE office_dallas.weekly_reports SET superseded_by_id = $1::uuid WHERE id = $2::uuid`, [
-      V2,
-      REPORT,
-    ]);
-    return V2;
+    const ids = await seedWeek([{ deliveryStatus: v1.deliveryStatus }, { deliveryStatus: v2.deliveryStatus }]);
+    return ids[1]!;
   }
 
   /**
@@ -376,6 +406,39 @@ describe("the per-project audit trail", () => {
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
     expect(audit.reports.filter((r) => r.outstanding)).toEqual([]);
+  });
+
+  /**
+   * GREPTILE'S SECOND FINDING, and the reason this compares versions instead of asking "did anything
+   * fail". `v1 bounced → v2 delivered → v3 accepted` was flagged off v1 — a bounce the client's copy of
+   * v2 had already made irrelevant — so a week they demonstrably received read as unresolved forever.
+   *
+   * A failure is spent once something later arrives. v3 is an ordinary correction in flight with
+   * nothing behind it, which is precisely the case the narrow clause exists to leave alone.
+   */
+  it("does not resurrect a bounce that a later delivery already answered", async () => {
+    await seedWeek([
+      { deliveryStatus: "bounced" },
+      { deliveryStatus: "delivered" },
+      { deliveryStatus: null },
+    ]);
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.map((r) => r.version)).toEqual([3, 2, 1]);
+    expect(audit.reports.filter((r) => r.outstanding)).toEqual([]);
+  });
+
+  /** The other side of it: a failure AFTER the last confirmed receipt is still unanswered. */
+  it("flags a bounce that came after the last delivery the client is known to hold", async () => {
+    const ids = await seedWeek([
+      { deliveryStatus: "bounced" },
+      { deliveryStatus: "delivered" },
+      { deliveryStatus: "bounced" },
+      { deliveryStatus: null },
+    ]);
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.filter((r) => r.outstanding).map((r) => r.id)).toEqual([ids[3]]);
   });
 
   it("counts a week once when both versions bounced, against the live one", async () => {

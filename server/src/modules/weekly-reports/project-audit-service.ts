@@ -223,16 +223,37 @@ function receiptConfirmed(status: unknown): boolean {
  * `undelivered` does not flag that state either. Without it every report would go red for its first
  * minutes.
  *
+ * A FAILURE IS SPENT ONCE SOMETHING LATER ARRIVES, which is why this compares versions rather than
+ * asking "did anything fail". Greptile's second finding: `v1 bounced → v2 delivered → v3 accepted` was
+ * being flagged off v1, a bounce the client's copy of v2 had already made irrelevant, so a week they
+ * demonstrably received read as unresolved forever. Versions order the same way sends do — a
+ * correction always takes a higher number, and `sendWeeklyReport` stamps the supersede at send — so
+ * "later than the last confirmed receipt" is exactly "not yet answered by something that arrived".
+ *
  * The unit is the WEEK because the client's position is a property of the week, not of a row: several
- * versions can carry one week, and either one of them reached them or none did.
+ * versions can carry one week, and what matters is where that week got to, not any single attempt.
  */
 function markOutstanding(
   reports: Array<Omit<WeeklyReportAuditReport, "outstanding">>,
 ): WeeklyReportAuditReport[] {
-  const failedAndReplaced = new Set<string>();
+  // Per week: the newest version the client is CONFIRMED to hold, and the newest replaced version that
+  // demonstrably failed. Version 0 stands for "never" — real versions start at 1.
+  const lastConfirmed = new Map<string, number>();
+  const lastFailed = new Map<string, number>();
+  const bump = (into: Map<string, number>, weekOf: string, version: number) => {
+    into.set(weekOf, Math.max(into.get(weekOf) ?? 0, version));
+  };
+
   for (const report of reports) {
+    if (receiptConfirmed(report.deliveryStatus)) bump(lastConfirmed, report.weekOf, report.version);
+    // `supersededById != null` CANNOT change the answer for any state the product can reach, and it is
+    // kept anyway — deliberately, not by oversight. A live row that failed is already `undelivered` and
+    // outstanding on its own account, and nothing soft-deletes an individual report (only the project),
+    // so a failed row that is neither live-and-flagged nor superseded does not occur. What it defends
+    // is the hand-written UPDATE: prod fixes are applied by hand on this project, and without it a
+    // failure orphaned that way would flag its week twice, on the orphan and on the live send both.
     if (report.supersededById != null && weeklyReportDeliveryFailed(report.deliveryStatus)) {
-      failedAndReplaced.add(report.weekOf);
+      bump(lastFailed, report.weekOf, report.version);
     }
   }
 
@@ -243,7 +264,7 @@ function markOutstanding(
       (report.undelivered ||
         (report.status === "sent" &&
           !receiptConfirmed(report.deliveryStatus) &&
-          failedAndReplaced.has(report.weekOf))),
+          (lastFailed.get(report.weekOf) ?? 0) > (lastConfirmed.get(report.weekOf) ?? 0))),
   }));
 }
 
