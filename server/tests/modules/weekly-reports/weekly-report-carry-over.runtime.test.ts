@@ -18,6 +18,7 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import {
   createWeeklyReportDraft,
   previousWeeklyReportForCarryOver,
+  updateWeeklyReportContent,
 } from "../../../src/modules/weekly-reports/reports-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -320,5 +321,58 @@ describe("previousWeeklyReportForCarryOver", () => {
     await seedPastReport({ weekOf: "2026-08-20", percent: "60.00" });
 
     expect(await previousWeeklyReportForCarryOver(db as any, PROJECT, "2026-08-20")).toBeNull();
+  });
+});
+
+describe("the carry pointer stops claiming the text is a plan", () => {
+  it("is dropped the moment the section is edited", async () => {
+    // `carried_from_report_id` means "this is still last week's PLAN, untouched", and the phone labels
+    // the section on it. Set at creation and never cleared, that label survived the superintendent
+    // rewriting the section completely — telling the reader a finished account of the week was a plan.
+    await seedPastReport({ weekOf: "2026-08-13", lookAhead: "- Complete sample balcony coat" });
+    const draft = await openWeek("2026-08-20");
+    expect(draft.carriedFromReportId).not.toBeNull();
+
+    const edited = await updateWeeklyReportContent(
+      db as any,
+      draft.id,
+      { workCompleted: "Balcony coat finished, scaffolding struck" },
+      SUPER_ACTOR,
+    );
+
+    expect(edited.carriedFromReportId).toBeNull();
+    expect(edited.workCompleted).toBe("Balcony coat finished, scaffolding struck");
+  });
+
+  it("is dropped even when the text is saved back unchanged", async () => {
+    // Somebody who opened the section, read it and saved it as-is has ADOPTED those words. The label
+    // exists to say "nobody has looked at this yet", and after that they have.
+    await seedPastReport({ weekOf: "2026-08-13", lookAhead: "- Complete sample balcony coat" });
+    const draft = await openWeek("2026-08-20");
+
+    const saved = await updateWeeklyReportContent(
+      db as any,
+      draft.id,
+      { workCompleted: draft.workCompleted },
+      SUPER_ACTOR,
+    );
+
+    expect(saved.carriedFromReportId).toBeNull();
+  });
+
+  it("survives an edit to a DIFFERENT section", async () => {
+    // Editing the weather days says nothing about whether the work-completed text has been read, and
+    // clearing the pointer there would drop the label while it is still telling the truth.
+    await seedPastReport({ weekOf: "2026-08-13", lookAhead: "- Complete sample balcony coat" });
+    const draft = await openWeek("2026-08-20");
+
+    const saved = await updateWeeklyReportContent(
+      db as any,
+      draft.id,
+      { weatherDelayDays: 3 },
+      SUPER_ACTOR,
+    );
+
+    expect(saved.carriedFromReportId).toBe(draft.carriedFromReportId);
   });
 });

@@ -630,7 +630,20 @@ export async function updateWeeklyReportContent(
     assignments.push(`${column} = $${params.length}${cast}`);
   };
 
-  if (has(patch, "workCompleted")) set("work_completed", normalizeBody(patch.workCompleted));
+  if (has(patch, "workCompleted")) {
+    set("work_completed", normalizeBody(patch.workCompleted));
+    // AND DROP THE CARRY POINTER. `carried_from_report_id` means "this section is still last week's PLAN,
+    // untouched" — the phone reads it to label the text as something to edit rather than as a record of
+    // what happened. It was set at draft creation and never cleared, so that label would have survived
+    // the superintendent rewriting the section completely: the reader would be told a finished account
+    // of the week was a plan. Worse than not labelling it at all, and the interface doc claimed this
+    // clearing already happened.
+    //
+    // Cleared on ANY explicit patch of the section rather than on a text comparison. Somebody who opened
+    // it, read it and saved it unchanged has adopted those words as their own, which is exactly what the
+    // label should stop claiming.
+    set("carried_from_report_id", null, "::uuid");
+  }
   if (has(patch, "nextWeekLookAhead")) set("next_week_look_ahead", normalizeBody(patch.nextWeekLookAhead));
   if (has(patch, "issuesConcerns")) set("issues_concerns", normalizeBody(patch.issuesConcerns));
   if (has(patch, "completionPercent")) {
