@@ -247,6 +247,72 @@ describe("the open log", () => {
     expect(document.body.textContent).toContain("Only automated scanners have fetched this");
   });
 
+  it("does not call an unclear visit a scanner", () => {
+    // GREPTILE'S FINDING. The classifier has THREE verdicts and this line had two, so `unclear` — a real
+    // browser that arrived late and did nothing else — was reported as "only automated scanners".
+    //
+    // The reader of this line may be about to repeat it to the client, which is the entire reason the
+    // log exists. "We cannot tell" is honest and still useful. "Robots only", said about a report a
+    // person may well have read, is how you lose the argument the log was built to win.
+    render({
+      reports: [
+        report({
+          status: "sent",
+          openedByAPerson: false,
+          viewSessions: [
+            session({
+              kind: "unclear",
+              photoViews: 0,
+              pdfDownloads: 0,
+              reason: "An ordinary browser, but it opened nothing beyond the page",
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("cannot tell whether it was a person");
+    expect(text).not.toContain("Only automated scanners");
+  });
+
+  it("still says scanners-only when every session really is one", () => {
+    // The control for the case above: widening the wording must not blur the verdict that IS supported.
+    // A mixed set is unclear; an all-scanner set is not, and reporting it as unclear would be its own
+    // understatement.
+    render({
+      reports: [
+        report({
+          status: "sent",
+          openedByAPerson: false,
+          viewSessions: [
+            session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "Known security scanner" }),
+            session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "Known security scanner" }),
+          ],
+        }),
+      ],
+    });
+
+    expect(document.body.textContent).toContain("Only automated scanners have fetched this");
+  });
+
+  it("treats a scanner mixed with an unclear visit as unclear, not as scanners-only", () => {
+    render({
+      reports: [
+        report({
+          status: "sent",
+          openedByAPerson: false,
+          viewSessions: [
+            session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "Known security scanner" }),
+            session({ kind: "unclear", photoViews: 0, pdfDownloads: 0, reason: "Ordinary browser, nothing else" }),
+          ],
+        }),
+      ],
+    });
+
+    expect(document.body.textContent).toContain("cannot tell whether it was a person");
+  });
+
   it("says who opened it when a person did", () => {
     render({ reports: [report({ status: "sent", openedByAPerson: true, viewSessions: [session()] })] });
     expect(document.body.textContent).toContain("Opened by someone at the client");

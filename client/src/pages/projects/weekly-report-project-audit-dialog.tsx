@@ -433,9 +433,19 @@ function ViewLog({ report }: { report: WeeklyReportAuditReport }) {
         ) : (
           <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-600" />
         )}
+        {/* THREE STATES, because the classifier has three and collapsing them overstates the evidence.
+            `unclear` is a real browser that arrived late and did nothing else — no photos, no PDF — and
+            calling that "only automated scanners" is a stronger claim than anything recorded supports.
+            It matters more here than the wording usually would: the reader of this line may be about to
+            repeat it to the client, and this whole feature exists to make what we say provable. Saying
+            "we cannot tell" is the honest answer and still useful; saying "robots only" when a person
+            may well have read it is how you lose the argument you built the log to win. Caught by
+            Greptile. `every` is safe — the zero-session case returned above. */}
         {report.openedByAPerson
           ? `Opened by ${people.length === 1 ? "someone" : `${people.length} people`} at the client`
-          : "Only automated scanners have fetched this"}
+          : sessions.every((session) => session.kind === "scanner")
+            ? "Only automated scanners have fetched this"
+            : "A browser opened the link — we cannot tell whether it was a person"}
         <span className="font-normal text-slate-500">({open ? "hide" : "show"} detail)</span>
       </button>
 
