@@ -145,20 +145,11 @@ function ProjectSubtitle({ audit }: { audit: WeeklyReportProjectAudit }) {
 }
 
 function AuditBody({ audit }: { audit: WeeklyReportProjectAudit }) {
-  // Both counts exclude SUPERSEDED versions, and for the same reason.
-  //
-  // A week whose v1 bounced and whose v2 was then delivered is a resolved week: the client has their
-  // report. Counting v1 as still-undelivered puts a permanent red "1 not delivered" on a project where
-  // nothing is outstanding — and it contradicted the two things beside it, because the report card
-  // already suppresses its own chip on a superseded row and the sent count already skipped them. The
-  // aggregate was the one surface still claiming a failure the other two called resolved.
-  //
-  // Caught by Greptile on this PR; the `sent` half had the guard from the start, which is precisely how
-  // the disagreement hid.
-  const undelivered = useMemo(
-    () => audit.reports.filter((r) => r.undelivered && !r.supersededById).length,
-    [audit.reports],
-  );
+  // `outstanding` is the SERVER's verdict, not a rule re-derived here — see project-audit-service.
+  // This count, the chip on the card and the card's border are three renderings of one fact, and while
+  // each owned its own predicate they disagreed twice on this PR. Reading one boolean is what stops a
+  // third disagreement being expressible.
+  const outstanding = useMemo(() => audit.reports.filter((r) => r.outstanding).length, [audit.reports]);
   const sent = useMemo(
     () => audit.reports.filter((r) => r.status === "sent" && !r.supersededById).length,
     [audit.reports],
@@ -170,8 +161,8 @@ function AuditBody({ audit }: { audit: WeeklyReportProjectAudit }) {
         <Stat label="Reports sent" value={String(sent)} />
         <Stat
           label="Not delivered"
-          value={String(undelivered)}
-          tone={undelivered > 0 ? "alert" : undefined}
+          value={String(outstanding)}
+          tone={outstanding > 0 ? "alert" : undefined}
         />
         <Stat label="Weeks on record" value={String(new Set(audit.reports.map((r) => r.weekOf)).size)} />
       </div>
@@ -271,16 +262,27 @@ function ReminderLedger({ audit }: { audit: WeeklyReportProjectAudit }) {
 
 function ReportCard({ report }: { report: WeeklyReportAuditReport }) {
   const superseded = Boolean(report.supersededById);
+  // Two shades of outstanding, and the difference is what the CRM actually knows.
+  //
+  //   RED — something demonstrably went wrong: it bounced, it stalled, it was never accepted.
+  //   AMBER — nothing has gone wrong with THIS version, but the one it replaced failed and no
+  //           confirmation has come back yet, so the week is unresolved rather than broken.
+  //
+  // Amber is already this page's "watch it" tone (`delayed`, `alerted`), so the correction in flight
+  // after a bounce reads as what it is, instead of borrowing the red of the bounce it is fixing.
+  const failing = report.outstanding && report.undelivered;
+  const unconfirmed = report.outstanding && !report.undelivered;
   return (
     <article
-      // `&& !superseded`, matching the chip below and the summary count above. Keying the border on
-      // `undelivered` alone left a resolved week — one whose correction was delivered — wearing the red
-      // of an outstanding failure while the chip beside it and the count above it both called it
-      // settled. Three renderings of one fact, and this was the last one still disagreeing.
+      // Keyed on the SERVER's `outstanding`, same as the chip below and the count above — see the note
+      // in AuditBody. Keying this on `undelivered` alone left a resolved week wearing the red of an
+      // outstanding failure while the other two surfaces called it settled.
       className={`rounded-lg border px-4 py-3 ${
-        report.undelivered && !superseded
+        failing
           ? "border-brand-red/30 bg-brand-red/[0.03]"
-          : "border-slate-200 bg-white"
+          : unconfirmed
+            ? "border-amber-300/60 bg-amber-50/40"
+            : "border-slate-200 bg-white"
       }`}
     >
       <header className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
@@ -293,9 +295,16 @@ function ReportCard({ report }: { report: WeeklyReportAuditReport }) {
             Superseded
           </span>
         )}
-        {report.undelivered && !superseded && (
+        {failing && (
           <span className="rounded border border-brand-red/30 bg-brand-red/5 px-1.5 py-px text-[11px] font-semibold text-brand-red">
             {report.deliveryStatus ?? "Not delivered"}
+          </span>
+        )}
+        {unconfirmed && (
+          // Deliberately not "Not delivered": the provider took this one and has said nothing since.
+          // Claiming a failure the CRM cannot evidence is the mirror of the bug above it.
+          <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-px text-[11px] font-semibold text-amber-700">
+            Not confirmed
           </span>
         )}
       </header>

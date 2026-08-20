@@ -296,6 +296,128 @@ describe("the per-project audit trail", () => {
     expect(original.events.find((e) => e.type === "superseded")!.at).toBe("2026-08-14T09:00:00.000Z");
   });
 
+  /**
+   * A week carried by two versions: v1 sent and then replaced, v2 sent as its correction.
+   *
+   * Mirrors what `sendWeeklyReport` actually does — it stamps `superseded_by_id` at SEND, on rows that
+   * are themselves `sent` — so these fixtures are reachable states rather than shapes only a test can
+   * build.
+   */
+  async function seedCorrectedWeek(
+    v1: { deliveryStatus: string | null },
+    v2: { deliveryStatus: string | null; deliveredAt?: string | null },
+  ) {
+    const V2 = U("66662");
+    await seedFullySentReport({ send_delivery_status: v1.deliveryStatus });
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_reports
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, version, status,
+          created_at, sent_by, sent_at, send_delivered_at, send_delivery_status, send_request)
+       VALUES ($1::uuid, $4::uuid, $2::uuid, $3::uuid, '2026-08-13'::date, 2, 'sent',
+               '2026-08-14T09:00:00Z'::timestamptz, '${PM}'::uuid, '2026-08-14T10:00:00Z'::timestamptz,
+               $5::timestamptz, $6, $7::jsonb)`,
+      [
+        V2,
+        PROJECT,
+        DEAL,
+        U("77772"),
+        v2.deliveredAt === undefined ? "2026-08-14T10:00:30Z" : v2.deliveredAt,
+        v2.deliveryStatus,
+        JSON.stringify({ to: ["jay@mackre.com"] }),
+      ],
+    );
+    await pg.query(`UPDATE office_dallas.weekly_reports SET superseded_by_id = $1::uuid WHERE id = $2::uuid`, [
+      V2,
+      REPORT,
+    ]);
+    return V2;
+  }
+
+  /**
+   * THE FINDING GREPTILE CAUGHT ON THIS PR, and the reason `outstanding` exists as its own field.
+   *
+   * Suppressing every superseded row was right for `bounced -> delivered` and wrong here: the provider
+   * ACCEPTING a correction is not the client receiving it. A week whose only hard evidence was a bounce
+   * read as fully settled, on the one page whose entire job is answering "did they get it".
+   */
+  it("does not let a merely-accepted correction settle a week that bounced", async () => {
+    const V2 = await seedCorrectedWeek({ deliveryStatus: "bounced" }, { deliveryStatus: null });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const outstanding = audit.reports.filter((r) => r.outstanding);
+    expect(outstanding.map((r) => r.id)).toEqual([V2]);
+    // The correction itself has no failure of its own — the flag is about the WEEK, and the page has to
+    // be able to say "unconfirmed" rather than borrowing the red of the bounce it is fixing.
+    expect(outstanding[0]!.undelivered).toBe(false);
+  });
+
+  it("settles the week once the correction is actually delivered", async () => {
+    await seedCorrectedWeek({ deliveryStatus: "bounced" }, { deliveryStatus: "delivered" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.filter((r) => r.outstanding)).toEqual([]);
+  });
+
+  /**
+   * The control that keeps the fix narrow. Without the requirement that a PREVIOUS version FAILED, this
+   * is the case that turns every report on the platform red for the minutes between the provider taking
+   * it and the webhook coming back — which is precisely why `undelivered` does not flag it either.
+   */
+  it("leaves an ordinary send still waiting on the provider's verdict alone", async () => {
+    await seedFullySentReport({ send_delivery_status: null });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.filter((r) => r.outstanding)).toEqual([]);
+  });
+
+  /** A correction can replace a version that arrived perfectly well — a wrong figure, a wrong photo. */
+  it("leaves a correction alone when the version it replaced was delivered", async () => {
+    await seedCorrectedWeek({ deliveryStatus: "delivered" }, { deliveryStatus: null });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.filter((r) => r.outstanding)).toEqual([]);
+  });
+
+  it("counts a week once when both versions bounced, against the live one", async () => {
+    const V2 = await seedCorrectedWeek({ deliveryStatus: "bounced" }, { deliveryStatus: "bounced" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const outstanding = audit.reports.filter((r) => r.outstanding);
+    expect(outstanding.map((r) => r.id)).toEqual([V2]);
+    expect(outstanding[0]!.undelivered).toBe(true);
+  });
+
+  /**
+   * A DRAFT is not a delivery problem, and a week can hold one alongside the live send: v1 bounces, v2
+   * goes out as the correction, and the PM immediately starts a v3. All three rows are on this page and
+   * only the sent one is anybody's problem.
+   *
+   * This exists because the `status === "sent"` half of the rule survived every other test in this file —
+   * the fixtures all happened to send both versions, so nothing here could ever reach a live draft.
+   * Deleting the predicate left the suite fully green while the page double-counted the week.
+   */
+  it("does not blame an in-progress draft for the failure it is being written to fix", async () => {
+    const V2 = await seedCorrectedWeek({ deliveryStatus: "bounced" }, { deliveryStatus: null });
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_reports
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, version, status, created_at)
+       VALUES ($1::uuid, $4::uuid, $2::uuid, $3::uuid, '2026-08-13'::date, 3, 'draft',
+               '2026-08-15T09:00:00Z'::timestamptz)`,
+      [U("66663"), PROJECT, DEAL, U("77773")],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.map((r) => r.version)).toEqual([3, 2, 1]);
+    expect(audit.reports.filter((r) => r.outstanding).map((r) => r.id)).toEqual([V2]);
+  });
+
+  it("still flags a bounce that nothing has replaced", async () => {
+    await seedFullySentReport({ send_delivery_status: "bounced" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.filter((r) => r.outstanding).map((r) => r.version)).toEqual([1]);
+  });
+
   it("carries the reminder, dismissal and pause ledgers", async () => {
     await pg.query(
       `INSERT INTO office_dallas.weekly_report_reminders_sent (weekly_report_project_id, week_of, kind, sent_at)

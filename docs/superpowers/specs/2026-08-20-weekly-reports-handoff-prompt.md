@@ -4,7 +4,7 @@ Paste the block below into a fresh session. It is written to be pasted verbatim.
 
 ---
 
-```
+```text
 Continue the T-Rock CRM Weekly Reports work. Full state and rationale:
 docs/superpowers/specs/2026-08-20-weekly-reports-remaining-work.md — read it first.
 
@@ -47,8 +47,18 @@ Work in this order. Stop and report after each numbered item rather than chainin
    - the 15 dialogs still rendering at 384px app-wide (one line in the primitive, resizes
      15 surfaces, wants its own visual pass)
    - whether the 5 roster people with no CRM login should get logins (admin task, not code)
-   - CREDENTIAL ROTATION. Production secrets were printed into a transcript. Raised three
-     times, never answered. Needs a decision even if the decision is to accept the risk.
+   - CREDENTIAL ROTATION, which is the one item on this list that is not a preference.
+     JWT_SECRET, ENCRYPTION_KEY, RESEND_API_KEY and the Procore client secret were printed
+     into a session transcript. Printed is disclosed: treat all four as compromised and
+     rotate them. What Adnaan is choosing is the WHEN and the sequencing, not the whether.
+     Each has a cost that has to be scheduled rather than discovered:
+       JWT_SECRET     — every session dies on rotation. Do it off-hours.
+       ENCRYPTION_KEY — decrypts the stored Procore and Microsoft Graph OAuth tokens.
+                        Rotating it without re-encrypting them breaks both integrations
+                        until each is re-authorised. Re-encrypt in the same window.
+       RESEND_API_KEY — swap first, it is the cheapest and it carries client email.
+       Procore secret — rotate in Procore, then update the CRM side.
+     Then scrub the transcript. Do not close this by recording that the risk was accepted.
 
 HOW TO WORK ON THIS FEATURE. Seven real defects got past a green suite in the last session,
 in three repeating shapes. Assume you will produce them too:

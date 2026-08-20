@@ -99,8 +99,14 @@ acting — PR state and branch tips move.
   approve or send; a director approves on their behalf and the form says so. Giving them logins is admin
   provisioning, not a code change.
 
-- [ ] **15. Credential rotation.** `JWT_SECRET`, `ENCRYPTION_KEY`, `RESEND_API_KEY` and the Procore secret
-  were printed into a session transcript. **Raised four times now, never answered.** See item 3.
+- [ ] **15. Credential rotation — the one item here that is not a preference.** `JWT_SECRET`,
+  `ENCRYPTION_KEY`, `RESEND_API_KEY` and the Procore client secret were printed into a session transcript.
+  Printed is disclosed; all four are compromised and all four have to be rotated. **Raised four times, and
+  what is unanswered is the scheduling, not the whether.** Costs, because they want scheduling rather than
+  discovering: `JWT_SECRET` kills every session at once (off-hours) · `ENCRYPTION_KEY` decrypts the stored
+  Procore and Microsoft Graph OAuth tokens, so rotating without re-encrypting those rows breaks both
+  integrations until each is re-authorised · `RESEND_API_KEY` is cheapest and carries client email, so do
+  it first · the Procore secret rotates in Procore, then the CRM side. Then scrub the transcript.
 
 ---
 

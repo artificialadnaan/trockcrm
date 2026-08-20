@@ -419,6 +419,13 @@ export interface WeeklyReportAuditReport {
   deliveryStatus: string | null;
   /** The CRM has no evidence the client received this one. A bounce counts — see the server's note. */
   undelivered: boolean;
+  /**
+   * A delivery problem somebody still has to act on. Decided by the server, and the audit dialog's
+   * count, chip and border all read THIS rather than each deriving their own — see the server's note
+   * on why. Broader than `undelivered`: it also covers a correction that replaced a failure and has
+   * not been confirmed.
+   */
+  outstanding: boolean;
   events: WeeklyReportAuditEvent[];
 }
 

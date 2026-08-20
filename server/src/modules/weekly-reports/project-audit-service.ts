@@ -51,6 +51,15 @@ export interface WeeklyReportAuditReport {
   deliveryStatus: string | null;
   /** True when the CRM has no evidence the client received this. Drives the one summary chip. */
   undelivered: boolean;
+  /**
+   * True when this row is a delivery problem somebody still has to act on.
+   *
+   * DERIVED HERE ON PURPOSE. The summary count, the card's chip and the card's border are three
+   * renderings of this one fact, and when each derived it for itself they disagreed twice on this PR —
+   * once with the count calling a resolved week a failure, once with the border doing the same. They
+   * now read a single boolean, so disagreeing is no longer something a future edit can express.
+   */
+  outstanding: boolean;
   events: WeeklyReportAuditEvent[];
 }
 
@@ -192,6 +201,52 @@ function buildEvents(row: Record<string, any>): WeeklyReportAuditEvent[] {
   return events.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 }
 
+/** The provider's word that it arrived. `complained` counts — they got it and then disliked it. */
+function receiptConfirmed(status: unknown): boolean {
+  return status === "delivered" || status === "complained";
+}
+
+/**
+ * Which rows are a delivery problem somebody still has to act on.
+ *
+ * A row qualifies when nothing has replaced it AND either:
+ *
+ *   • it is itself undelivered — bounced, still in transit, or never accepted at all; or
+ *   • it was sent, has no confirmation of receipt, and A PREVIOUS VERSION OF THAT WEEK FAILED.
+ *
+ * The second clause is Greptile's finding on this PR, and it is the narrow half of a real trade.
+ * Excluding superseded rows outright was right for `v1 bounced → v2 delivered`, which is a resolved
+ * week, and wrong for `v1 bounced → v2 accepted, no verdict yet`: the provider accepting a correction
+ * is not the client receiving it, so a week whose only hard evidence was a bounce read as fully
+ * settled. Requiring a KNOWN prior failure is what keeps this off the ordinary case — a first send
+ * sitting at accepted-with-no-verdict has nothing behind it and stays quiet, which is the whole reason
+ * `undelivered` does not flag that state either. Without it every report would go red for its first
+ * minutes.
+ *
+ * The unit is the WEEK because the client's position is a property of the week, not of a row: several
+ * versions can carry one week, and either one of them reached them or none did.
+ */
+function markOutstanding(
+  reports: Array<Omit<WeeklyReportAuditReport, "outstanding">>,
+): WeeklyReportAuditReport[] {
+  const failedAndReplaced = new Set<string>();
+  for (const report of reports) {
+    if (report.supersededById != null && weeklyReportDeliveryFailed(report.deliveryStatus)) {
+      failedAndReplaced.add(report.weekOf);
+    }
+  }
+
+  return reports.map((report) => ({
+    ...report,
+    outstanding:
+      report.supersededById == null &&
+      (report.undelivered ||
+        (report.status === "sent" &&
+          !receiptConfirmed(report.deliveryStatus) &&
+          failedAndReplaced.has(report.weekOf))),
+  }));
+}
+
 /**
  * @throws 404 when the project does not exist or has been soft-deleted.
  *
@@ -257,30 +312,32 @@ export async function getWeeklyReportProjectAudit(
 
   return {
     project,
-    reports: reports.rows.map((row) => ({
-      id: row.id,
-      weekOf: toIsoDate(row.week_of)!,
-      version: Number(row.version),
-      status: row.status,
-      supersededById: row.superseded_by_id ?? null,
-      recipients: recipientsOf(row.send_request),
-      deliveryStatus: row.send_delivery_status ?? null,
-      // "Sent, and no evidence it arrived." A bounce counts: the provider accepted the message, so
-      // send_delivered_at IS set, and any predicate keyed on that alone reads a bounce as a success.
-      // "The CRM has no evidence the client received this."
-      //   • never accepted by the provider          -> no evidence
-      //   • bounced / failed                        -> evidence AGAINST
-      //   • delayed                                 -> still trying; the client does not have it yet
-      //   • accepted, webhook silent (status null)  -> the ordinary pre-verdict case, NOT flagged, or
-      //                                                every report would go red for its first minutes
-      //   • delivered / complained                  -> they have it
-      undelivered:
-        row.status === "sent" &&
-        (row.send_delivered_at == null ||
-          weeklyReportDeliveryFailed(row.send_delivery_status) ||
-          row.send_delivery_status === "delayed"),
-      events: buildEvents(row),
-    })),
+    reports: markOutstanding(
+      reports.rows.map((row) => ({
+        id: row.id,
+        weekOf: toIsoDate(row.week_of)!,
+        version: Number(row.version),
+        status: row.status,
+        supersededById: row.superseded_by_id ?? null,
+        recipients: recipientsOf(row.send_request),
+        deliveryStatus: row.send_delivery_status ?? null,
+        // "Sent, and no evidence it arrived." A bounce counts: the provider accepted the message, so
+        // send_delivered_at IS set, and any predicate keyed on that alone reads a bounce as a success.
+        // "The CRM has no evidence the client received this."
+        //   • never accepted by the provider          -> no evidence
+        //   • bounced / failed                        -> evidence AGAINST
+        //   • delayed                                 -> still trying; the client does not have it yet
+        //   • accepted, webhook silent (status null)  -> the ordinary pre-verdict case, NOT flagged, or
+        //                                                every report would go red for its first minutes
+        //   • delivered / complained                  -> they have it
+        undelivered:
+          row.status === "sent" &&
+          (row.send_delivered_at == null ||
+            weeklyReportDeliveryFailed(row.send_delivery_status) ||
+            row.send_delivery_status === "delayed"),
+        events: buildEvents(row),
+      })),
+    ),
     reminders: reminders.rows.map((row) => ({
       weekOf: toIsoDate(row.week_of)!,
       kind: row.kind,

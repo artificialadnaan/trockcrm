@@ -98,9 +98,21 @@ provisioning, not a code change.
 
 ## 6. Unanswered, and it is not a code task
 
-**Credential rotation.** Production secrets were printed into a session transcript earlier —
-`JWT_SECRET`, `ENCRYPTION_KEY`, `RESEND_API_KEY` and the Procore secret. Raised three times, never
-answered. It needs a decision, even if the decision is "accept the risk".
+**Credential rotation.** `JWT_SECRET`, `ENCRYPTION_KEY`, `RESEND_API_KEY` and the Procore client secret
+were printed into a session transcript. Printed is disclosed, so all four are compromised and all four
+have to be rotated. Raised four times and still unanswered — but what is unanswered is the *scheduling*,
+not whether. Recording this as "risk accepted" is not a way to close it.
+
+Each rotation has a cost worth scheduling rather than discovering:
+
+| Secret | What rotating it costs |
+|---|---|
+| `JWT_SECRET` | Every session dies at once. Off-hours. |
+| `ENCRYPTION_KEY` | It decrypts the stored **Procore** and **Microsoft Graph** OAuth tokens. Rotate without re-encrypting those rows and both integrations break until each is re-authorised. Same window. |
+| `RESEND_API_KEY` | Cheapest, and it carries client email. Do it first. |
+| Procore client secret | Rotate in Procore, then update the CRM side. |
+
+Then scrub the transcript. **Status: not started.**
 
 ---
 
