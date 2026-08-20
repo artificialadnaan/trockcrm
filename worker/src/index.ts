@@ -17,6 +17,7 @@ import {
   runWeeklyReportReminders,
 } from "./jobs/weekly-report-reminders.js";
 import { runWeeklyReportSendSweep } from "./jobs/weekly-report-send-sweep.js";
+import { runWeeklyReportViewPurge } from "./jobs/weekly-report-view-purge.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
@@ -286,6 +287,25 @@ async function main() {
     }
   });
   console.log("[Worker] Cron scheduled: weekly report send sweep every 15 minutes");
+
+  // Weekly Reports view-log retention: 03:20 CT daily.
+  //
+  // Off-hours and off the hour, because it is the only weekly-report job that deletes anything and there
+  // is no reason for it to contend with the 07:00 reminder pass or a nightly rollup landing on :00. The
+  // work is bounded — it walks an index built for this one query and stops at a batch ceiling — so a
+  // daily pass keeps each run small rather than letting two years of rows arrive at once.
+  //
+  // Daily rather than hourly on purpose: the boundary this enforces is twenty-four MONTHS. A row living
+  // an extra few hours past its second birthday is not a retention failure, and twenty-four wake-ups a
+  // day to establish that nothing has aged out is noise in the log for no gain.
+  cron.schedule("20 3 * * *", async () => {
+    try {
+      await runWeeklyReportViewPurge();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report view purge failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: weekly report view-log purge at 3:20 AM CT daily");
 
   // Weekly digest: Monday at 7:00 AM CT
   cron.schedule("0 7 * * 1", async () => {
