@@ -50,6 +50,7 @@ beforeAll(async () => {
   // than on its subject.
   await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
   await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
+  await pg.exec(migrationSql("0231_weekly_report_views"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -76,6 +77,7 @@ beforeEach(async () => {
     DELETE FROM office_dallas.weekly_report_pauses;
     DELETE FROM office_dallas.weekly_reports;
     DELETE FROM office_dallas.weekly_report_projects;
+    DELETE FROM public.weekly_report_views;
   `);
   await pg.query(
     `INSERT INTO office_dallas.weekly_report_projects
@@ -548,5 +550,117 @@ describe("the per-project audit trail", () => {
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
     expect(audit.reports[0]!.recipients).toBeNull();
     expect(typesOf(audit.reports[0]!.events)).toContain("sent");
+  });
+});
+
+describe("who actually opened the client's copy", () => {
+  /** Record a fetch of the share link, as the public routes do. */
+  async function seedView(opts: {
+    at: string;
+    eventType?: "page" | "pdf" | "photo";
+    ip?: string;
+    userAgent?: string;
+  }) {
+    await pg.query(
+      `INSERT INTO public.weekly_report_views
+         (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, $2, $3::timestamptz, $4::inet, $5)`,
+      [
+        REPORT,
+        opts.eventType ?? "page",
+        opts.at,
+        opts.ip ?? "73.162.44.219",
+        opts.userAgent ?? "Mozilla/5.0 (Macintosh) Chrome/141.0 Safari/537.36",
+      ],
+    );
+  }
+
+  it("does not count the client's mail scanner as the client opening it", async () => {
+    // THE WHOLE REASON THIS IS CLASSIFIED. Proofpoint and its peers fetch every link within seconds of
+    // delivery, so a raw open count says "opened!" on a report nobody read. Asserting that to a client
+    // and being shown it was a datacentre discredits the rest of this page.
+    await seedFullySentReport(); // sent 2026-08-13T17:00:00Z
+    await seedView({
+      at: "2026-08-13T17:00:04.000Z",
+      ip: "67.231.156.9",
+      userAgent: "Mozilla/5.0 (compatible; ProofpointURLDefense/1.0)",
+    });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const report = audit.reports[0]!;
+
+    expect(report.viewSessions).toHaveLength(1);
+    expect(report.viewSessions[0]!.kind).toBe("scanner");
+    expect(report.openedByAPerson).toBe(false);
+  });
+
+  it("records a real reader, with the address and browser to show for it", async () => {
+    await seedFullySentReport();
+    await seedView({ at: "2026-08-13T22:41:02.000Z" });
+    await seedView({ at: "2026-08-13T22:41:05.000Z", eventType: "photo" });
+    await seedView({ at: "2026-08-13T22:49:20.000Z", eventType: "pdf" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const report = audit.reports[0]!;
+
+    expect(report.openedByAPerson).toBe(true);
+    expect(report.viewSessions).toHaveLength(1);
+    expect(report.viewSessions[0]!).toMatchObject({
+      kind: "person",
+      pageViews: 1,
+      photoViews: 1,
+      pdfDownloads: 1,
+      // Bare, not CIDR: `inet` renders 73.162.44.219/32 and that reads as a subnet to anybody who
+      // knows what one is.
+      ip: "73.162.44.219",
+    });
+  });
+
+  it("classifies against THIS report's send time, not another's", async () => {
+    // The "arrived seconds after the email" signal is meaningless measured against a different report's
+    // send. A shared timestamp would label a genuine reader of one week a scanner because their visit
+    // happened to land near another week's send.
+    await seedFullySentReport();
+    // 5h41m after THIS report's 17:00 send — plainly a person's hour, not a scanner's.
+    await seedView({ at: "2026-08-13T22:41:02.000Z" });
+    await seedView({ at: "2026-08-13T22:41:06.000Z", eventType: "photo" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.viewSessions[0]!.kind).toBe("person");
+  });
+
+  it("reports an unopened report as unopened rather than as unknown", async () => {
+    // The answer to "we never got it" when nothing ever fetched the link. An empty list and a missing
+    // one must not look the same to whoever is reading this in a dispute.
+    await seedFullySentReport();
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
+    expect(audit.reports[0]!.openedByAPerson).toBe(false);
+  });
+
+  it("keeps one report's accesses off another's", async () => {
+    const OTHER = U("66669");
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_reports
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, status)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-08-06'::date, 'sent')`,
+      [OTHER, U("77779"), PROJECT, DEAL],
+    );
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-07T10:00:00Z'::timestamptz, '10.1.1.1'::inet, 'Chrome')`,
+      [OTHER],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const week13 = audit.reports.find((r) => r.weekOf === "2026-08-13")!;
+    const week06 = audit.reports.find((r) => r.weekOf === "2026-08-06")!;
+
+    expect(week13.viewSessions).toEqual([]);
+    expect(week06.openedByAPerson).toBe(true);
   });
 });

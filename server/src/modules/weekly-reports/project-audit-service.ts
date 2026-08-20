@@ -1,4 +1,9 @@
 import { weeklyReportDeliveryFailed } from "@trock-crm/shared/lib/weeklyReportDelivery";
+import {
+  summariseWeeklyReportViews,
+  weeklyReportWasOpenedByAPerson,
+  type WeeklyReportViewSession,
+} from "@trock-crm/shared/lib/weeklyReportViews";
 import { AppError } from "../../middleware/error-handler.js";
 import { getWeeklyReportProject, type QueryExecutor, type WeeklyReportProject } from "./projects-service.js";
 
@@ -49,6 +54,15 @@ export interface WeeklyReportAuditReport {
   recipients: string[] | null;
   /** The provider's last word: `delivered | bounced | complained | failed | delayed`, or null. */
   deliveryStatus: string | null;
+  /**
+   * Every access to this report's share link, grouped into sittings and judged.
+   *
+   * The judgement matters more than the count: a client's mail security fetches the link within seconds
+   * of delivery, so a raw open count is mostly robots. See shared/lib/weeklyReportViews.
+   */
+  viewSessions: WeeklyReportViewSession[];
+  /** Did anybody demonstrably READ it — loaded the photos, or pulled the PDF. */
+  openedByAPerson: boolean;
   /** True when the CRM has no evidence the client received this. Drives the one summary chip. */
   undelivered: boolean;
   /**
@@ -303,6 +317,43 @@ export async function getWeeklyReportProjectAudit(
     [projectId],
   );
 
+  /**
+   * Accesses live in `public.weekly_report_views`, not in the tenant schema — a share link is resolved
+   * before any office is known, so the log has to be reachable without one. Read through the CALLER'S
+   * client all the same: the reference is schema-qualified, and a qualified name does not depend on the
+   * search_path. Reaching for the pool coupled this read to a live connection for no gain and took the
+   * whole audit page out of the PGlite suites.
+   *
+   * One query for every report on the project, grouped in memory. A per-report query would be N+1 on a
+   * page whose whole job is to be opened and read.
+   */
+  const reportIds = reports.rows.map((row) => row.id as string);
+  const viewsByReport = new Map<string, Array<{ eventType: any; occurredAt: string; ip: string | null; userAgent: string | null }>>();
+  if (reportIds.length > 0) {
+    const views = await client.query(
+      `SELECT weekly_report_id, event_type, occurred_at, host(ip) AS ip, user_agent
+         FROM public.weekly_report_views
+        WHERE weekly_report_id = ANY($1::uuid[])
+        ORDER BY occurred_at ASC`,
+      [reportIds],
+    );
+    for (const row of views.rows) {
+      const bucket = viewsByReport.get(row.weekly_report_id) ?? [];
+      // Stored back, always. `get(...) ?? []` hands back a NEW array on a miss, so pushing to it without
+      // setting it discards every first event for every report — silently: the page then renders "never
+      // opened" for a report that was, which is the exact wrong answer in a dispute.
+      viewsByReport.set(row.weekly_report_id, bucket);
+      bucket.push({
+        eventType: row.event_type,
+        occurredAt: toIso(row.occurred_at)!,
+        // `host()` strips the /32 that `inet` renders, so the audit page shows 73.162.44.219 rather
+        // than 73.162.44.219/32 — which reads as a subnet to anybody who knows what one is.
+        ip: row.ip ?? null,
+        userAgent: row.user_agent ?? null,
+      });
+    }
+  }
+
   const reminders = await client.query(
     `SELECT week_of, kind, sent_at FROM weekly_report_reminders_sent
       WHERE weekly_report_project_id = $1::uuid
@@ -357,6 +408,15 @@ export async function getWeeklyReportProjectAudit(
             weeklyReportDeliveryFailed(row.send_delivery_status) ||
             row.send_delivery_status === "delayed"),
         events: buildEvents(row),
+        ...(() => {
+          // Classified against THIS report's own send time — the "arrived seconds after the email"
+          // signal is meaningless measured against any other report's.
+          const sessions = summariseWeeklyReportViews(
+            viewsByReport.get(row.id) ?? [],
+            toIso(row.sent_at),
+          );
+          return { viewSessions: sessions, openedByAPerson: weeklyReportWasOpenedByAPerson(sessions) };
+        })(),
       })),
     ),
     reminders: reminders.rows.map((row) => ({
