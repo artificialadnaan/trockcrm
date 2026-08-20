@@ -168,6 +168,7 @@ export default function WeeklyReportsPage() {
           olderOutstandingCounts={dashboard.data?.olderOutstandingCounts ?? {}}
           lookbackWeeks={dashboard.data?.lookbackWeeks ?? 0}
           onDismissed={refreshAll}
+          onOpen={setAuditProjectId}
           onSend={setSendingReportId}
           onRetried={refreshAll}
         />
@@ -283,6 +284,7 @@ function ThisWeekTable({
   olderOutstandingCounts,
   lookbackWeeks,
   onDismissed,
+  onOpen,
   onSend,
   onRetried,
 }: {
@@ -292,6 +294,7 @@ function ThisWeekTable({
   olderOutstandingCounts: Record<string, number>;
   lookbackWeeks: number;
   onDismissed: () => void;
+  onOpen: (projectId: string) => void;
   onSend: (reportId: string) => void;
   onRetried: () => void;
 }) {
@@ -365,7 +368,16 @@ function ThisWeekTable({
             {sortedRows.map((row) => (
               <tr
                 key={`${row.weeklyReportProjectId}-${row.weekOf}`}
-                className={`border-b border-slate-100 ${row.daysLate > 0 ? "bg-red-50/30" : ""}`}
+                // THE WAY IN, from the tab people actually land on.
+                //
+                // The record drill-in shipped on the Projects tab only, and this is the default view —
+                // so from where anyone stands when they open Weekly Reports, it did not exist. A row
+                // here is a project's week, and "what happened to this one" is the question the row
+                // provokes; making it answer that is the whole point of the audit trail.
+                onClick={() => onOpen(row.weeklyReportProjectId)}
+                className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${
+                  row.daysLate > 0 ? "bg-red-50/30" : ""
+                }`}
               >
                 <td className="px-3.5 py-3">
                   <div className="font-semibold text-slate-950">{row.projectName}</div>
@@ -467,7 +479,13 @@ function ThisWeekTable({
                     The two do different jobs and a PM may want either: Retry replays the send that
                     failed, for a transport problem; Send delivers the correction, for a content one.
                   */}
-                  <div className="flex items-center justify-end gap-2">
+                  {/* The row opens the record; these do their own thing. Without this, Send / Retry /
+                      Dismiss would each ALSO open the audit dialog on top of what they just did — and
+                      Dismiss opens a prompt of its own, so the two would fight over the screen. */}
+                  <div
+                    className="flex items-center justify-end gap-2"
+                    onClick={(event) => event.stopPropagation()}
+                  >
                     {(row.sendFailed || row.sendStalled) && row.sendRetryReportId && (
                       // `sendRetryReportId`, not `reportId`: once a PM has drafted a correction over a
                       // failed send the live row is the unsent clone, and retrying THAT would replay a

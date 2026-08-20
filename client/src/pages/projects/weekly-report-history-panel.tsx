@@ -43,6 +43,26 @@ function fmtWeek(iso: string): string {
     : d.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
 }
 
+/**
+ * An instant, in the reader's own zone — unlike `fmtWeek`, which pins to UTC.
+ *
+ * The difference is deliberate and it is not a style choice. `week_of` is a plain calendar date with no
+ * time in it, so reading it locally would slide it to the previous day for anyone west of Greenwich.
+ * These are true timestamps of things people did, and "who approved this, and when" is answered in the
+ * zone the person asking is standing in.
+ */
+function fmtStamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 export function WeeklyReportHistoryPanel({
   projects,
   refreshSignal,
@@ -67,6 +87,7 @@ export function WeeklyReportHistoryPanel({
   const { reports, loading, error, refetch } = useWeeklyReportHistory(projectId || null);
   const [detail, setDetail] = useState<WeeklyReportDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   // Re-run the history request when the page refreshes, but NOT on mount — the hook already loads on
   // mount and on every project change, so an unguarded effect would fire a second, identical request
@@ -94,8 +115,14 @@ export function WeeklyReportHistoryPanel({
 
   const openDetail = async (reportId: string) => {
     setDetailLoading(true);
+    setDetailError(null);
     try {
       setDetail(await fetchWeeklyReportDetail(reportId));
+    } catch (error) {
+      // Previously there was no catch at all, so a failed load left `detail` null and `detailLoading`
+      // false — which is the sheet's own closed state. The panel opened, flashed, and shut with no
+      // message, and from the outside that is indistinguishable from View not being wired up.
+      setDetailError(error instanceof Error ? error.message : "Something went wrong.");
     } finally {
       setDetailLoading(false);
     }
@@ -254,17 +281,45 @@ export function WeeklyReportHistoryPanel({
         </div>
       )}
 
-      <Sheet open={Boolean(detail) || detailLoading} onOpenChange={(open) => !open && setDetail(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+      <Sheet
+        open={Boolean(detail) || detailLoading || Boolean(detailError)}
+        onOpenChange={(open) => {
+          if (open) return;
+          setDetail(null);
+          setDetailError(null);
+        }}
+      >
+        {/* `sm:!max-w-3xl`, and the `!` is doing real work. `SheetContent` pins
+            `data-[side=right]:sm:max-w-sm` in the primitive, and tailwind-merge does NOT treat that as
+            the same key as a plain `sm:max-w-*` — the variant prefixes differ, so BOTH classes survive
+            and the primitive's extra attribute selector wins on specificity. This panel asked for
+            `sm:max-w-xl` and rendered at 384px: a week's work, its look-ahead, its issues and its photo
+            captions crushed into a third of the width, which reads as content that failed to load.
+            Four of the five sheets in this app are clamped the same way, and the estimator evidence
+            sheet already carries a hand-rolled escape for it. Fixing the primitive moves four surfaces
+            at once and wants its own visual pass; this is the same `!` escape the weekly-report dialogs
+            use, applied where the bug was reported. */}
+        <SheetContent className="w-full overflow-y-auto sm:!max-w-3xl">
           <SheetHeader>
             <SheetTitle>{detail ? `Week of ${fmtWeek(detail.weekOf)}` : "Loading…"}</SheetTitle>
           </SheetHeader>
-          {detailLoading && !detail ? (
+          {detailError ? (
+            // A failed load used to leave `detail` null and `detailLoading` false, which closed the
+            // sheet again and said nothing at all. Clicking View and having the panel flash shut is
+            // indistinguishable from the app ignoring the click.
+            <div className="m-4 flex items-start gap-2 rounded-lg border border-brand-red/30 bg-brand-red/[0.03] p-3 text-[13.5px] text-brand-red">
+              <AlertTriangle className="mt-px h-4 w-4 shrink-0" />
+              <span>
+                <span className="font-semibold">This report could not be loaded.</span> {detailError}
+              </span>
+            </div>
+          ) : detailLoading && !detail ? (
             <div className="flex items-center gap-2 p-4 text-[13.5px] text-slate-500">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading report…
             </div>
           ) : detail ? (
             <div className="space-y-4 p-4">
+              <ReportProvenance detail={detail} />
               <Section title="Work Completed / In-Progress" body={detail.workCompleted} />
               <Section title="Next Week Look Ahead" body={detail.nextWeekLookAhead} />
               <Section title="Issues / Concerns" body={detail.issuesConcerns} />
@@ -293,6 +348,64 @@ export function WeeklyReportHistoryPanel({
           ) : null}
         </SheetContent>
       </Sheet>
+    </div>
+  );
+}
+
+/**
+ * WHO HANDLED THIS WEEK, above the week's contents.
+ *
+ * The panel could describe what was written and not one person who touched it, which is backwards for
+ * the question people actually open a past week to settle — "who sent this", "who signed off". Those
+ * names existed, on the per-project audit endpoint, two clicks away on a different tab.
+ *
+ * Steps with no timestamp are RENDERED AND GREYED rather than dropped, because the gap is the
+ * information: a week that was never approved should look different from one that was, not simply
+ * shorter. `—` for a missing name against a real timestamp is honest too — some rows predate the
+ * columns that record the actor.
+ */
+function ReportProvenance({ detail }: { detail: WeeklyReportDetail }) {
+  const steps: Array<{ label: string; who: string | null; at: string | null }> = [
+    { label: "Drafted", who: detail.authoredByName, at: detail.authoredAt },
+    { label: "Submitted", who: detail.submittedByName, at: detail.submittedAt },
+    { label: "Approved", who: detail.reviewedByName, at: detail.reviewedAt },
+    { label: "Sent", who: detail.sentByName, at: detail.sentAt },
+  ];
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <Badge variant="outline" className={STATUS_BADGE[detail.status] ?? ""}>
+          {detail.status.replace(/_/g, " ")}
+        </Badge>
+        {detail.version > 1 && (
+          <span className="text-[11.5px] font-semibold text-slate-500">Version {detail.version}</span>
+        )}
+        {detail.supersededById && (
+          <span className="rounded border border-slate-200 bg-white px-1.5 py-px text-[11px] font-semibold text-slate-500">
+            Superseded by a correction
+          </span>
+        )}
+      </div>
+      <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-2">
+        {steps.map((step) => (
+          <div key={step.label} className="flex items-baseline gap-2">
+            <dt className="w-[4.75rem] shrink-0 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              {step.label}
+            </dt>
+            <dd className={`text-[13.5px] ${step.at ? "text-slate-800" : "text-slate-400"}`}>
+              {step.at ? (
+                <>
+                  <span className="font-semibold">{step.who ?? "—"}</span>
+                  <span className="text-slate-500"> · {fmtStamp(step.at)}</span>
+                </>
+              ) : (
+                "Not yet"
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

@@ -151,8 +151,12 @@ export interface WeeklyReportDetail {
   projectedDurationWeeks: number | null;
   authoredByName: string | null;
   authoredAt: string | null;
+  /** Who handled it, not just when — the questions somebody actually opens a past week to answer. */
+  submittedByName: string | null;
   submittedAt: string | null;
+  reviewedByName: string | null;
   reviewedAt: string | null;
+  sentByName: string | null;
   sentAt: string | null;
   sendError: string | null;
   sendAttempts: number;

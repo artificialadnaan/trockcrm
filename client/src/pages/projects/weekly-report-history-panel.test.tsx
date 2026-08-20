@@ -385,3 +385,74 @@ describe("a report the provider reported as undeliverable", () => {
     expect(container.textContent).not.toMatch(/Delivered|Bounced|Marked as spam/);
   });
 });
+
+/**
+ * WHAT "VIEW" IS FOR.
+ *
+ * The panel could render a week's contents and not one person who handled it — the names lived only on
+ * the per-project audit endpoint, on a different tab. Somebody opening a past week is usually settling
+ * "who sent this" or "who approved it", and the sheet answered neither.
+ */
+describe("the detail sheet", () => {
+  /** Click View and let the detail promise settle, so assertions see the resolved sheet. */
+  async function openFirstReport() {
+    render();
+    const view = button("View");
+    expect(view).toBeTruthy();
+    await act(async () => {
+      view!.click();
+    });
+  }
+
+  it("names who submitted, approved and sent the week, not only who drafted it", async () => {
+    mocks.reports = [report()];
+    mocks.fetchWeeklyReportDetail.mockResolvedValue(
+      report({
+        workCompleted: "Roof deck complete",
+        authoredByName: "Steve Sanchez",
+        authoredAt: "2026-08-13T14:00:00.000Z",
+        submittedByName: "Steve Sanchez",
+        submittedAt: "2026-08-13T15:00:00.000Z",
+        reviewedByName: "Adam Sherwood",
+        reviewedAt: "2026-08-13T16:00:00.000Z",
+        sentByName: "Adam Sherwood",
+        sentAt: "2026-08-13T17:00:00.000Z",
+      }),
+    );
+
+    await openFirstReport();
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Submitted");
+    expect(text).toContain("Approved");
+    expect(text).toContain("Adam Sherwood");
+  });
+
+  it("shows a step nobody has reached rather than hiding it", async () => {
+    // The gap IS the information. A week that was never approved has to look different from one that
+    // was — dropping the empty rows makes the two render identically, just at different heights.
+    mocks.reports = [report()];
+    mocks.fetchWeeklyReportDetail.mockResolvedValue(
+      report({ status: "pending_review", reviewedByName: null, reviewedAt: null, sentByName: null, sentAt: null }),
+    );
+
+    await openFirstReport();
+
+    expect(document.body.textContent).toContain("Approved");
+    expect(document.body.textContent).toContain("Not yet");
+  });
+
+  it("says so when the report cannot be loaded, instead of closing again in silence", async () => {
+    // THE BUG: `openDetail` had no catch, so a rejection left `detail` null and `detailLoading` false —
+    // which is the sheet's own closed state. The panel opened, flashed and shut with no message, which
+    // from the outside is indistinguishable from the button not being wired up at all.
+    mocks.reports = [report()];
+    mocks.fetchWeeklyReportDetail.mockRejectedValue(new Error("Weekly report not found"));
+
+    await openFirstReport();
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("could not be loaded");
+    expect(text).toContain("Weekly report not found");
+  });
+});
