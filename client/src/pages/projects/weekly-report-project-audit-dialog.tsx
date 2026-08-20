@@ -13,12 +13,16 @@ import {
   RefreshCw,
   Send,
   Siren,
+  Eye,
+  EyeOff,
+  ShieldAlert,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   useWeeklyReportProjectAudit,
   type WeeklyReportAuditEvent,
   type WeeklyReportAuditReport,
+  type WeeklyReportViewSession,
   type WeeklyReportProjectAudit,
 } from "@/hooks/use-weekly-reports";
 
@@ -309,6 +313,8 @@ function ReportCard({ report }: { report: WeeklyReportAuditReport }) {
         )}
       </header>
 
+      <ViewLog report={report} />
+
       {report.events.length === 0 ? (
         <p className="mt-2 text-[11.5px] text-slate-500">Nothing has happened to this one yet.</p>
       ) : (
@@ -385,5 +391,100 @@ function LedgerRow({ primary, secondary }: { primary: string; secondary?: string
       <p className="text-[13.5px] text-slate-800">{primary}</p>
       {secondary && <p className="text-[11.5px] text-slate-500">{secondary}</p>}
     </div>
+  );
+}
+
+/**
+ * WHO OPENED IT — the half of the record a client dispute actually turns on.
+ *
+ * Shown with the judgement AND the raw detail, never the judgement alone. A client's mail security
+ * fetches the link within seconds of delivery, so "opened 5 times" is mostly robots; but the reader of
+ * this page may be about to repeat what it says to that client, and they need to be able to see the
+ * address, the browser and the timing for themselves rather than take our word for it.
+ */
+function ViewLog({ report }: { report: WeeklyReportAuditReport }) {
+  const [open, setOpen] = useState(false);
+  const sessions = report.viewSessions ?? [];
+
+  // A report that was never SENT has nothing to have been opened, and saying "not opened" about it
+  // would read as a failure rather than as a stage it has not reached.
+  if (report.status !== "sent") return null;
+
+  if (sessions.length === 0) {
+    return (
+      <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-slate-500">
+        <EyeOff className="h-3.5 w-3.5 shrink-0" />
+        Nobody has opened the link yet.
+      </p>
+    );
+  }
+
+  const people = sessions.filter((session) => session.kind === "person");
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-700 hover:text-brand-red"
+      >
+        {report.openedByAPerson ? (
+          <Eye className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+        ) : (
+          <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+        )}
+        {report.openedByAPerson
+          ? `Opened by ${people.length === 1 ? "someone" : `${people.length} people`} at the client`
+          : "Only automated scanners have fetched this"}
+        <span className="font-normal text-slate-500">({open ? "hide" : "show"} detail)</span>
+      </button>
+
+      {open && (
+        <ol className="mt-1.5 space-y-1.5 border-l-2 border-slate-200 pl-3">
+          {sessions.map((session, index) => (
+            <ViewSessionRow key={`${session.startedAt}-${index}`} session={session} />
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+const VIEW_KIND_LABEL: Record<WeeklyReportViewSession["kind"], string> = {
+  person: "A person",
+  scanner: "Email scanner",
+  unclear: "Unclear",
+};
+
+function ViewSessionRow({ session }: { session: WeeklyReportViewSession }) {
+  const fetched = [
+    session.pdfDownloads > 0 ? "downloaded the PDF" : null,
+    session.photoViews > 0 ? `viewed ${session.photoViews} photo${session.photoViews === 1 ? "" : "s"}` : null,
+  ].filter(Boolean);
+
+  return (
+    <li className="text-[11.5px]">
+      <p className="text-slate-800">
+        <span
+          className={
+            session.kind === "person"
+              ? "font-semibold text-emerald-700"
+              : session.kind === "scanner"
+                ? "font-semibold text-slate-500"
+                : "font-semibold text-amber-700"
+          }
+        >
+          {VIEW_KIND_LABEL[session.kind]}
+        </span>
+        <span className="text-slate-500"> · {fmtStamp(session.startedAt)}</span>
+        {fetched.length > 0 && <span className="text-slate-600"> · {fetched.join(", ")}</span>}
+      </p>
+      {/* The raw facts, so a reader can judge the label rather than only trust it. */}
+      <p className="text-slate-500">
+        {session.ip ?? "address not recorded"}
+        {session.userAgent ? ` · ${session.userAgent.slice(0, 90)}` : ""}
+      </p>
+      <p className="text-slate-400">{session.reason}</p>
+    </li>
   );
 }

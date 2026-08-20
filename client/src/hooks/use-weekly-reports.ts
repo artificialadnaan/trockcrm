@@ -413,6 +413,21 @@ export interface WeeklyReportAuditEvent {
   detail: string | null;
 }
 
+/** One sitting at the client's end, as the server grouped and judged it. */
+export interface WeeklyReportViewSession {
+  ip: string | null;
+  userAgent: string | null;
+  startedAt: string;
+  endedAt: string;
+  pageViews: number;
+  photoViews: number;
+  pdfDownloads: number;
+  /** `person` | `scanner` | `unclear` — see the server's classifier for why this is not a raw count. */
+  kind: "person" | "scanner" | "unclear";
+  /** Why it was judged that way, in words that can be repeated to a client. */
+  reason: string;
+}
+
 export interface WeeklyReportAuditReport {
   id: string;
   weekOf: string;
@@ -430,6 +445,10 @@ export interface WeeklyReportAuditReport {
    * not been confirmed.
    */
   outstanding: boolean;
+  /** Every access to the share link, grouped into sittings, newest first. */
+  viewSessions: WeeklyReportViewSession[];
+  /** Did anybody demonstrably READ it — loaded the photos, or pulled the PDF. */
+  openedByAPerson: boolean;
   events: WeeklyReportAuditEvent[];
 }
 

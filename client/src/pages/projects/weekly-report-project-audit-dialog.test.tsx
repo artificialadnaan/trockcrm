@@ -49,6 +49,8 @@ function report(overrides: Record<string, unknown> = {}) {
     deliveryStatus: null,
     undelivered: false,
     outstanding: false,
+    viewSessions: [],
+    openedByAPerson: false,
     events: [],
     ...overrides,
   };
@@ -214,5 +216,55 @@ describe("the summary counts", () => {
     expect(statValue("Not delivered")).toBe("2");
     expect(cardTone(0)).toBe("red");
     expect(cardTone(1)).toBe("amber");
+  });
+});
+
+describe("the open log", () => {
+  function session(over: Record<string, unknown> = {}) {
+    return {
+      ip: "73.162.44.219",
+      userAgent: "Mozilla/5.0 (Macintosh) Chrome/141.0",
+      startedAt: "2026-08-13T22:41:02.000Z",
+      endedAt: "2026-08-13T22:49:20.000Z",
+      pageViews: 1,
+      photoViews: 3,
+      pdfDownloads: 1,
+      kind: "person" as const,
+      reason: "Downloaded the PDF, which link scanners do not do",
+      ...over,
+    };
+  }
+
+  it("says plainly when only scanners have fetched it", () => {
+    // The distinction the whole feature exists for. "Opened" on a report only a robot touched is the
+    // claim that would collapse in front of a client's IT department.
+    render({
+      reports: [
+        report({ status: "sent", openedByAPerson: false, viewSessions: [session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "The browser it reported is an email security scanner" })] }),
+      ],
+    });
+
+    expect(document.body.textContent).toContain("Only automated scanners have fetched this");
+  });
+
+  it("says who opened it when a person did", () => {
+    render({ reports: [report({ status: "sent", openedByAPerson: true, viewSessions: [session()] })] });
+    expect(document.body.textContent).toContain("Opened by someone at the client");
+  });
+
+  it("distinguishes never-opened from never-sent", () => {
+    // A report still with the PM has nothing to have been opened; saying "nobody has opened it" about
+    // one would read as a failure rather than as a stage it has not reached.
+    render({ reports: [report({ status: "sent", viewSessions: [] })] });
+    expect(document.body.textContent).toContain("Nobody has opened the link yet");
+
+    act(() => root.unmount());
+    container.remove();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    render({ reports: [report({ status: "pending_review", viewSessions: [] })] });
+    expect(document.body.textContent).not.toContain("Nobody has opened the link yet");
   });
 });
