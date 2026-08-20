@@ -579,9 +579,11 @@ describe("who actually opened the client's copy", () => {
     // THE WHOLE REASON THIS IS CLASSIFIED. Proofpoint and its peers fetch every link within seconds of
     // delivery, so a raw open count says "opened!" on a report nobody read. Asserting that to a client
     // and being shown it was a datacentre discredits the rest of this page.
-    await seedFullySentReport(); // sent 2026-08-13T17:00:00Z
+    // Committed 17:00:00, ACCEPTED by the provider 17:00:30 — client evidence starts at acceptance, and
+    // a scanner fetches within seconds of THAT, not of the commit.
+    await seedFullySentReport();
     await seedView({
-      at: "2026-08-13T17:00:04.000Z",
+      at: "2026-08-13T17:00:34.000Z",
       ip: "67.231.156.9",
       userAgent: "Mozilla/5.0 (compatible; ProofpointURLDefense/1.0)",
     });
@@ -671,6 +673,42 @@ describe("who actually opened the client's copy", () => {
     expect(audit.reports[0]!.openedByAPerson).toBe(false);
   });
 
+  it("does not admit a staff check made between the commit and the provider accepting it", async () => {
+    // `sent_at` is stamped when the PM commits and the job is QUEUED; the worker stamps
+    // `send_delivered_at` only once the provider accepts. In that gap the client has nothing, so a
+    // staffer opening the already-minted share URL is not client evidence — the pre-send hole, reopened
+    // by any worker backlog. Caught by Codex, then caught AGAIN by Greptile when my first fix silently
+    // failed to apply and only the classifier moved to the new clock while the filter kept the old one.
+    //
+    // That is why this asserts through the payload rather than reading the SQL: an edit that does not
+    // land looks exactly like an edit that does.
+    await seedFullySentReport({ send_delivered_at: "2026-08-13T17:30:00Z" });
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-13T17:10:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    // 17:10 is after the 17:00 commit and before the 17:30 acceptance. A PDF download is the strongest
+    // person signal there is, which is precisely why admitting it here would be so convincing.
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
+    expect(audit.reports[0]!.openedByAPerson).toBe(false);
+  });
+
+  it("admits an access once the provider has accepted it", async () => {
+    await seedFullySentReport({ send_delivered_at: "2026-08-13T17:30:00Z" });
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-13T17:31:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+  });
+
   it("still counts an access after the send — the control", async () => {
     await seedFullySentReport();
     await pg.query(
@@ -685,13 +723,13 @@ describe("who actually opened the client's copy", () => {
 
   it("keeps an access that lands on the send instant exactly", async () => {
     // The boundary value, and it is not hypothetical: a mail-security scanner fetches the link the
-    // moment the message is accepted, and `sent_at` is stamped in the same transaction. `>` instead of
-    // `>=` drops that access silently — the one fetch most likely to share the send's timestamp — and
-    // every other fixture sits comfortably to one side of the line, so nothing else can see it.
+    // moment the provider accepts the message, which is the instant `send_delivered_at` records. `>`
+    // instead of `>=` drops that access silently — the one fetch most likely to share the boundary's
+    // timestamp — and every other fixture sits comfortably to one side of the line.
     await seedFullySentReport();
     await pg.query(
       `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
-       VALUES ($1::uuid, 'page', '2026-08-13T17:00:00Z'::timestamptz, '10.4.4.4'::inet, 'Chrome')`,
+       VALUES ($1::uuid, 'page', '2026-08-13T17:00:30Z'::timestamptz, '10.4.4.4'::inet, 'Chrome')`,
       [REPORT],
     );
 

@@ -468,7 +468,13 @@ function ViewLog({
         ) : (
           <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-600" />
         )}
-        {/* THREE STATES, because the classifier has three and collapsing them overstates the evidence.
+        {/* NOT "at the client", which the log cannot support. The share URL stays available to staff in
+            the send dialog after dispatch, so a PM opening their own link produces a session with
+            nothing in it that distinguishes an employee from the recipient — the token is anonymous by
+            design. "A person" is what the evidence carries; who that person was is a question the
+            addresses and agents below let a reader answer for themselves. Caught by Codex.
+
+            THREE STATES, because the classifier has three and collapsing them overstates the evidence.
             `unclear` is a real browser that arrived late and did nothing else — no photos, no PDF — and
             calling that "only automated scanners" is a stronger claim than anything recorded supports.
             It matters more here than the wording usually would: the reader of this line may be about to
@@ -477,7 +483,7 @@ function ViewLog({
             may well have read it is how you lose the argument you built the log to win. Caught by
             Greptile. `every` is safe — the zero-session case returned above. */}
         {report.openedByAPerson
-          ? `Opened at the client — ${people.length === 1 ? "one sitting" : `${people.length} separate sittings`}`
+          ? `Opened by a person — ${people.length === 1 ? "one sitting" : `${people.length} separate sittings`}`
           : sessions.every((session) => session.kind === "scanner")
             ? "Only automated scanners have fetched this"
             : "A browser opened the link — we cannot tell whether it was a person"}

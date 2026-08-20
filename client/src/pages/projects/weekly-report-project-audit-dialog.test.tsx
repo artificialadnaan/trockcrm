@@ -360,13 +360,19 @@ describe("the open log", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("2 separate sittings");
     expect(text).not.toContain("2 people");
+    expect(text).not.toContain("at the client");
   });
 
   it("says so when a person opened it", () => {
-    // Wording deliberately narrowed from "Opened by someone at the client": the log identifies sittings,
-    // not people, so a single session is "one sitting" rather than a claim about a human being.
+    // Narrowed TWICE, and each time because the wording claimed more than the log holds. It said
+    // "Opened by someone at the client" — but the token is anonymous and the send dialog keeps the URL
+    // available to staff after dispatch, so a PM opening their own link is indistinguishable from the
+    // recipient. And sittings are not people: the classifier groups by address, agent and a 30-minute
+    // gap, so one person returning after lunch is two sessions.
     render({ reports: [report({ status: "sent", openedByAPerson: true, viewSessions: [session()] })] });
-    expect(document.body.textContent).toContain("Opened at the client — one sitting");
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Opened by a person — one sitting");
+    expect(text).not.toContain("at the client");
   });
 
   it("distinguishes never-opened from never-sent", () => {

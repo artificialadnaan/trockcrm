@@ -73,13 +73,37 @@ describe("telling a person from their mail server", () => {
     expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(true);
   });
 
-  it("calls a PDF download a person even when the agent looks automated", () => {
-    // Some corporate proxies rewrite the user agent of ordinary browser traffic. Engagement outranks the
-    // agent string, or those clients would read as robots forever.
+  it("keeps a self-identified scanner a scanner even when it pulls the PDF", () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, on the theory that some corporate proxies rewrite the user
+    // agent of ordinary browser traffic. The theory is true and the ordering was still wrong: the PDF is
+    // an ordinary link on the page, and following every link is exactly what these products are FOR. So
+    // a fetch by something calling itself Proofpoint made the audit claim a person read the report while
+    // the log underneath said "ProofpointURLDefense" — and somebody would have read that to a client.
+    //
+    // Understating is the direction this page must fail in. The raw session renders beside the verdict,
+    // so a reader can see a rewritten agent and judge; a confident wrong claim leaves nothing to check.
     const sessions = summariseWeeklyReportViews(
       [
-        event({ occurredAt: "2026-08-13T19:41:02.000Z", userAgent: PROOFPOINT }),
-        event({ occurredAt: "2026-08-13T19:44:00.000Z", userAgent: PROOFPOINT, eventType: "pdf" }),
+        event({ occurredAt: "2026-08-13T19:41:02.000Z", userAgent: "ProofpointURLDefense/1.0" }),
+        event({
+          occurredAt: "2026-08-13T19:41:09.000Z",
+          eventType: "pdf",
+          userAgent: "ProofpointURLDefense/1.0",
+        }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions[0]!.kind).toBe("scanner");
+    expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(false);
+  });
+
+  it("calls a PDF download from an ordinary browser a person", () => {
+    // The control. Making the agent authoritative must not cost the verdict the feature exists to give.
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z" }),
+        event({ occurredAt: "2026-08-13T19:41:09.000Z", eventType: "pdf" }),
       ],
       SENT_AT,
     );

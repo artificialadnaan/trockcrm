@@ -452,7 +452,7 @@ export async function getWeeklyReportProjectAudit(
                         'engagement' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
-                    AND v.occurred_at >= wr.sent_at
+                    AND v.occurred_at >= COALESCE(wr.send_delivered_at, wr.sent_at)
                     AND v.event_type IN ('pdf', 'photo')
                   ORDER BY v.occurred_at
                   LIMIT $2)
@@ -461,7 +461,7 @@ export async function getWeeklyReportProjectAudit(
                         'page' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
-                    AND v.occurred_at >= wr.sent_at
+                    AND v.occurred_at >= COALESCE(wr.send_delivered_at, wr.sent_at)
                     AND v.event_type NOT IN ('pdf', 'photo')
                   ORDER BY v.occurred_at
                   LIMIT $2)

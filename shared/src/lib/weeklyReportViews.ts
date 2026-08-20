@@ -175,9 +175,29 @@ function judge(
   session: WeeklyReportViewSession,
   sentAt: string | null,
 ): Pick<WeeklyReportViewSession, "kind" | "reason"> {
-  // ENGAGEMENT BEATS EVERYTHING, including a scanner-looking agent. Some corporate proxies rewrite the
-  // user agent of ordinary browser traffic, so a session that pulled the photographs or the PDF is a
-  // person whatever it called itself — a scanner fetches the URL and leaves.
+  // A SELF-IDENTIFIED SCANNER IS A SCANNER, whatever it went on to fetch — and this used to run the
+  // other way round, on the theory that some corporate proxies rewrite the user agent of ordinary
+  // browser traffic.
+  //
+  // The theory is true and the ordering was still wrong. The viewer's PDF is an ordinary link on the
+  // page, and following every link is exactly what Proofpoint and its peers are FOR, so a fetch of it by
+  // something calling itself Proofpoint made the audit claim a person read the report while the log
+  // sitting underneath said "ProofpointURLDefense". Somebody would have read that aloud to a client.
+  // Caught by Codex.
+  //
+  // This understates rather than overstates, which is the direction this page has to fail in: the raw
+  // session is rendered beside the verdict, so a reader can see a rewritten agent for themselves and
+  // judge. A confident wrong claim leaves them nothing to check.
+  if (looksLikeScannerAgent(session.userAgent)) {
+    return {
+      kind: "scanner",
+      reason: session.userAgent
+        ? "The browser it reported is an email security scanner"
+        : "No browser was reported, which means an automated fetch",
+    };
+  }
+
+  // ENGAGEMENT, from something that did not announce itself as a robot.
   if (session.pdfDownloads > 0) {
     return { kind: "person", reason: "Downloaded the PDF, which link scanners do not do" };
   }
@@ -208,15 +228,6 @@ function judge(
       reason:
         `Loaded ${session.photoViews} photo${session.photoViews === 1 ? "" : "s"} all at once — a ` +
         `browser preloading images looks the same as a reader`,
-    };
-  }
-
-  if (looksLikeScannerAgent(session.userAgent)) {
-    return {
-      kind: "scanner",
-      reason: session.userAgent
-        ? "The browser it reported is an email security scanner"
-        : "No browser was reported, which means an automated fetch",
     };
   }
 
