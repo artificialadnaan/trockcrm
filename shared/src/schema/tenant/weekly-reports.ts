@@ -164,6 +164,19 @@ export const weeklyReports = pgTable(
     /** Computed at submit from projected duration and weeks elapsed, then STORED — so a report sent in
      *  August still reports August's arithmetic after the projected duration is revised in September. */
     remainingWeeks: integer("remaining_weeks"),
+    /**
+     * The report this week's starting values were carried from (migration 0230).
+     *
+     * ON `weekly_reports`, self-referential — NOT on `weekly_report_projects`, where a scripted edit
+     * first put it because `projected_duration_weeks` exists on both tables and the replace took the
+     * first match. The result was a Drizzle definition giving fixtures a column production never has
+     * while omitting the one the draft-creation INSERT writes, and no runtime suite could catch it
+     * because they all replay the real migration rather than this file.
+     *
+     * A BARE uuid: the FK is declared in 0230 with ON DELETE SET NULL, so Drizzle does not emit it a
+     * second time for every fixture.
+     */
+    carriedFromReportId: uuid("carried_from_report_id"),
     projectedDurationWeeks: integer("projected_duration_weeks"),
     /** The whole header block (client, client team, T-Rock team, schedule dates and notes) frozen at send.
      *  The live project row drives the NEXT report; a sent report reads its own snapshot. Without this,

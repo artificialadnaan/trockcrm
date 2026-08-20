@@ -18,6 +18,7 @@ import {
   type WeeklyReportPauseInterval,
   weeklyReportWeekOf,
   weeklyReportWeekStateLabel,
+  type WeeklyReportLeadDayReminderKind,
   type WeeklyReportReminderKind,
   type WeeklyReportWeekState,
 } from "@trock-crm/shared/types";
@@ -181,9 +182,9 @@ function toIsoDate(value: unknown): string | null {
  * Read out of the shared offset table rather than re-listing 2/1/0, so the kinds, the CHECK constraint on
  * `weekly_report_reminders_sent.kind` and this scheduler cannot drift apart.
  */
-export function reminderKindForLeadDays(leadDays: number): WeeklyReportReminderKind | null {
+export function reminderKindForLeadDays(leadDays: number): WeeklyReportLeadDayReminderKind | null {
   for (const [kind, offset] of Object.entries(WEEKLY_REPORT_REMINDER_OFFSET_DAYS)) {
-    if (offset === leadDays) return kind as WeeklyReportReminderKind;
+    if (offset === leadDays) return kind as WeeklyReportLeadDayReminderKind;
   }
   return null;
 }
@@ -390,7 +391,7 @@ export function renderDetailRows(rows: ReadonlyArray<readonly [string, string]>)
 }
 
 export interface WeeklyReportReminderEmailInput {
-  kind: Exclude<WeeklyReportReminderKind, "due_digest">;
+  kind: Exclude<WeeklyReportLeadDayReminderKind, "due_digest">;
   projectName: string;
   projectNumber: string | null;
   clientName: string | null;
@@ -857,7 +858,18 @@ type SendEmail = (
   options: { text: string; idempotencyKey: string },
 ) => Promise<SendSystemEmailResult>;
 
+/**
+ * Which tier this tick computes.
+ *
+ * `reminders` is the 07:00/09:00/11:00 pass — t−2, t−1 and the leadership digest.
+ * `escalation` is the 17:00 pass and computes ONLY its own kind. It must not re-evaluate the others:
+ * they were claimed hours ago, and a pass that re-ran the digest logic every evening would re-send it
+ * the moment a project's cadence started covering today after the morning run.
+ */
+export type WeeklyReportReminderMode = "reminders" | "escalation";
+
 export interface WeeklyReportReminderRunDeps {
+  mode?: WeeklyReportReminderMode;
   query?: PgQuery;
   sendEmail?: SendEmail;
   env?: NodeJS.ProcessEnv;
@@ -878,6 +890,8 @@ export interface WeeklyReportReminderRunSummary {
   /** t−1 reminders deliberately withheld because the week was already filed, or was dismissed. */
   tMinus1Suppressed: number;
   digestsSent: number;
+  /** 17:00 escalations sent to the sales rep (or, with no rep, to leadership). */
+  escalationsSent: number;
   /** Reminders that were due but could not be addressed (no active super/PM email, empty digest roster). */
   skipped: number;
   failed: number;
@@ -898,6 +912,9 @@ interface ProjectRow {
   superEmail: string | null;
   pmName: string | null;
   pmEmail: string | null;
+  /** The deal's assigned SALES REP — the 17:00 escalation's recipient. Null when the deal has none. */
+  repName: string | null;
+  repEmail: string | null;
   /** This week's cadence due date, or null when the project has no expected week around today. */
   dueDate: string | null;
 }
@@ -908,6 +925,7 @@ export async function runWeeklyReportReminders(
   const logger = deps.logger ?? console;
   const query = deps.query ?? (pool.query.bind(pool) as PgQuery);
   const env = deps.env ?? process.env;
+  const mode: WeeklyReportReminderMode = deps.mode ?? "reminders";
   const today = businessCalendarDay(deps.now ?? new Date());
   const frontendUrl = resolveFrontendUrl(env);
   const appDeepLinksEnabled = weeklyReportAppDeepLinksEnabled(env);
@@ -917,6 +935,7 @@ export async function runWeeklyReportReminders(
     tMinus1Sent: 0,
     tMinus1Suppressed: 0,
     digestsSent: 0,
+    escalationsSent: 0,
     skipped: 0,
     failed: 0,
   };
@@ -1012,6 +1031,7 @@ export async function runWeeklyReportReminders(
       summary.offices += 1;
       try {
         await processOffice({
+          mode,
           query,
           sendEmail: deps.sendEmail ?? sendSystemEmailWithMetadata,
           logger,
@@ -1038,6 +1058,7 @@ export async function runWeeklyReportReminders(
 }
 
 interface OfficeRunArgs {
+  mode: WeeklyReportReminderMode;
   query: PgQuery;
   sendEmail: SendEmail;
   logger: Pick<Console, "log" | "warn" | "error">;
@@ -1050,7 +1071,7 @@ interface OfficeRunArgs {
 }
 
 async function processOffice(args: OfficeRunArgs): Promise<void> {
-  const { query, summary, tenantSchema, officeId, today, frontendUrl } = args;
+  const { query, logger, summary, tenantSchema, officeId, today, frontendUrl } = args;
 
   // The SAME project predicate the CRM dashboard uses (`is_active AND status = 'active'`, joined to the
   // deal). A reminder for a project the board does not list, or silence for one it does, is drift.
@@ -1066,10 +1087,14 @@ async function processOffice(args: OfficeRunArgs): Promise<void> {
             COALESCE(sup_fr.is_active, sup_u.is_active) AS super_is_active,
             COALESCE(pm_fr.name, pm_u.display_name)     AS pm_name,
             COALESCE(pm_fr.email, pm_u.email)           AS pm_email,
-            COALESCE(pm_fr.is_active, pm_u.is_active)   AS pm_is_active
+            COALESCE(pm_fr.is_active, pm_u.is_active)   AS pm_is_active,
+            -- The deal's assigned SALES REP, for the 17:00 escalation. Joined here rather than in a
+            -- second pass because the escalation runs over exactly this row set.
+            rep.display_name AS rep_name, rep.email AS rep_email, rep.is_active AS rep_is_active
        FROM ${tenantSchema}.weekly_report_projects wrp
        JOIN ${tenantSchema}.deals d ON d.id = wrp.deal_id
 ${trockTeamJoins("wrp", tenantSchema)}
+       LEFT JOIN public.users rep ON rep.id = d.assigned_rep_id
       WHERE wrp.is_active AND wrp.status = 'active'`,
   );
   if (projectsResult.rows.length === 0) return;
@@ -1114,6 +1139,11 @@ ${trockTeamJoins("wrp", tenantSchema)}
       projectName: normalizeText(row.property_display_name) ?? normalizeText(row.deal_name) ?? "Project",
       projectNumber: normalizeText(row.project_number),
       clientName: normalizeText(row.client_name),
+      // Deactivated logins are dropped here rather than at send time, so "no rep" and "a rep who has
+      // left the company" take the SAME leadership fallback instead of the second silently emailing
+      // an address nobody reads.
+      repName: row.rep_is_active === false ? null : normalizeText(row.rep_name),
+      repEmail: row.rep_is_active === false ? null : normalizeText(row.rep_email),
       cadenceWeekday,
       cadenceStartDate,
       cadenceEndDate,
@@ -1182,6 +1212,32 @@ ${trockTeamJoins("wrp", tenantSchema)}
     for (const row of dismissalsResult.rows) {
       dismissedWeeks.add(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`);
     }
+  }
+
+  // THE 17:00 TICK STOPS HERE. It computes only `rep_escalation` and returns: t−2, t−1 and the digest
+  // were claimed hours ago, and re-running their logic every evening would re-send the digest the moment
+  // a project's cadence started covering today after the morning pass.
+  if (args.mode === "escalation") {
+    if (!(await officeAdmitsRepEscalation(query, tenantSchema))) {
+      // Migrations do not run on the worker — see officeAdmitsRepEscalation. Skip at INFO and start
+      // working by itself once the API applies 0229.
+      logger.log("[WeeklyReportReminders] Escalation kind not migrated yet - skipping office", {
+        tenantSchema,
+      });
+      return;
+    }
+
+    const leadership = await leadershipRecipientsFor(query, tenantSchema);
+    for (const project of dueToday) {
+      const weekKey = `${project.id}|${project.dueDate}`;
+      // Submitted is done, as far as the superintendent is concerned — a report sitting with the PM is
+      // not the rep's problem to chase. A DISMISSED week is not owed at all.
+      if (filedWeeks.has(weekKey) || dismissedWeeks.has(weekKey)) continue;
+      await guarded(args, `rep_escalation ${project.id}`, () =>
+        sendRepEscalation({ ...args, today }, project, leadership),
+      );
+    }
+    return;
   }
 
   // Each send is isolated. An error reaching ONE project — a rejected claim, an unreachable row — must
@@ -1254,7 +1310,7 @@ async function guarded(args: OfficeRunArgs, label: string, task: () => Promise<v
 async function sendProjectReminder(
   args: OfficeRunArgs,
   project: ProjectRow & { dueDate: string },
-  kind: Exclude<WeeklyReportReminderKind, "due_digest">,
+  kind: Exclude<WeeklyReportLeadDayReminderKind, "due_digest">,
 ): Promise<void> {
   const { query, sendEmail, logger, summary, tenantSchema, officeId, frontendUrl, appDeepLinksEnabled } = args;
 
@@ -1800,4 +1856,229 @@ export async function acquireReminderAdvisoryLock(
   poolLike: AdvisoryLockPool = pool,
 ): Promise<null | (() => Promise<void>)> {
   return acquirePgAdvisoryLock(WEEKLY_REPORT_REMINDER_LOCK_KEY, poolLike);
+}
+
+// ---------------------------------------------------------------------------
+// The 17:00 escalation to the sales rep
+// ---------------------------------------------------------------------------
+
+/**
+ * THE FOURTH TIER, AND THE FIRST ONE THAT LEAVES THE PROJECT TEAM.
+ *
+ * `t_minus_2` and `t_minus_1` nudge the superintendent and the PM; `due_digest` tells leadership what is
+ * outstanding. All three have been and gone by 11:00 on the due day, and after that nothing else happens
+ * — so a report that is simply never written goes unmentioned, and the person who owns the CLIENT
+ * relationship finds out when the client asks.
+ *
+ * At 17:00 CT on the due date, if the report has still not reached `pending_review`, the deal's assigned
+ * sales rep is emailed and the PM is copied. The rep's job is not to write the report; it is to know that
+ * their client is not getting one, and to go and find out why.
+ *
+ * WHY IT IS NOT IN THE LEAD-DAY TABLE. `due_digest` already occupies offset 0, and
+ * `reminderKindForLeadDays` returns the FIRST kind whose offset matches. A second kind at offset 0 makes
+ * the two the same slot and one of them silently stops firing forever. This tier is selected by the
+ * CLOCK, on a separate cron entry, and computes only its own kind — see WEEKLY_REPORT_LEAD_DAY_REMINDER_KINDS.
+ */
+export const WEEKLY_REPORT_REP_ESCALATION_KIND = "rep_escalation" as const;
+
+export interface WeeklyReportRepEscalationEmailInput {
+  projectName: string;
+  projectNumber: string | null;
+  clientName: string | null;
+  weekOf: string;
+  pmName: string | null;
+  /** True when no rep could be resolved and this went to leadership instead. Changes the subject. */
+  unassigned: boolean;
+  dashboardUrl: string;
+}
+
+export function buildWeeklyReportRepEscalationEmail(input: WeeklyReportRepEscalationEmailInput): {
+  subject: string;
+  html: string;
+  text: string;
+} {
+  const dueDay = formatDueDay(input.weekOf);
+  const label = input.projectNumber ? `${input.projectNumber} — ${input.projectName}` : input.projectName;
+  // The unassigned subject says so, because its recipients are leadership rather than the rep and the
+  // first question they will have is "why am I getting this".
+  const subject = input.unassigned
+    ? `No rep assigned — weekly report NOT submitted (${dueDay}): ${label}`
+    : `Weekly report NOT submitted (${dueDay}): ${label}`;
+
+  const who = input.pmName ? `the PM (${input.pmName})` : "the PM";
+  const preheader = `This week's report was due ${dueDay} and has not been submitted.`;
+  const ask = input.unassigned
+    ? `This job has no assigned sales rep, so there is nobody to chase it. Please reach out to ${who}.`
+    : `Please reach out to ${who} — the client is expecting this report.`;
+
+  const rows = renderDetailRows([
+    ["Project", label],
+    ...(input.clientName ? ([["Client", input.clientName]] as const) : []),
+    ["Week of", dueDay],
+    ["Status", "Not submitted"],
+  ] as ReadonlyArray<readonly [string, string]>);
+
+  const html = renderBrandedEmail({
+    title: "A weekly report has not been submitted",
+    preheader,
+    bodyHtml: `<p>${escapeHtml(ask)}</p>${rows}`,
+    primaryLabel: "Open the weekly reports board",
+    primaryUrl: input.dashboardUrl,
+  });
+
+  const text = [
+    `A weekly report has not been submitted.`,
+    ``,
+    ask,
+    ``,
+    `Project: ${label}`,
+    ...(input.clientName ? [`Client: ${input.clientName}`] : []),
+    `Week of: ${dueDay}`,
+    ``,
+    input.dashboardUrl,
+  ].join("\n");
+
+  return { subject, html, text };
+}
+
+/**
+ * Does this office's ledger admit the escalation kind yet?
+ *
+ * MIGRATIONS DO NOT RUN ON THE WORKER. The API applies them before it boots; the worker does not, and the
+ * two are separate Railway deployments. So there is a real window on every deploy where this tick is live
+ * against a `weekly_report_reminders_sent_kind_check` that still lists three kinds — and the claim INSERT
+ * fails a CHECK, which `guarded` swallows. The escalation would simply never arrive and the only trace
+ * would be a log line.
+ *
+ * Read off the constraint itself rather than a migration version table, because the constraint IS the
+ * thing that decides whether the write succeeds.
+ */
+export async function officeAdmitsRepEscalation(
+  query: PgQuery,
+  tenantSchema: string,
+): Promise<boolean> {
+  const result = await query(
+    `SELECT pg_get_constraintdef(c.oid) AS def
+       FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1
+        AND t.relname = 'weekly_report_reminders_sent'
+        AND c.conname = 'weekly_report_reminders_sent_kind_check'
+      LIMIT 1`,
+    [tenantSchema],
+  );
+  const def = result.rows[0]?.def;
+  // No constraint at all means nothing rejects the kind — admit it rather than skipping the office for a
+  // constraint that is not there to fail.
+  if (typeof def !== "string") return true;
+  return def.includes(WEEKLY_REPORT_REP_ESCALATION_KIND);
+}
+
+/**
+ * One project's 17:00 escalation.
+ *
+ * Ordering is the same as every other kind and for the same reason: BUILD everything that can throw,
+ * then claim, then send. The claim before the send is what stops a restart mid-window double-emailing;
+ * building first means a throw cannot burn the slot in between.
+ */
+export async function sendRepEscalation(
+  args: OfficeRunArgs & { today: string },
+  project: ProjectRow & { dueDate: string },
+  leadershipRecipients: readonly string[],
+): Promise<void> {
+  const { query, sendEmail, logger, summary, tenantSchema, officeId, frontendUrl } = args;
+
+  // The rep is the recipient; the PM is copied so the person who has to act knows the chase is coming.
+  // With no rep — unassigned, or assigned to somebody deactivated — this falls to leadership rather than
+  // going nowhere: a missed client report must not be unescalated because a field was blank.
+  const unassigned = project.repEmail == null;
+  const to = unassigned ? [...leadershipRecipients] : [project.repEmail!];
+  const cc = project.pmEmail && project.pmEmail !== project.repEmail ? [project.pmEmail] : [];
+  const recipients = dedupeEmails([...to, ...cc].filter((email) => isBasicValidEmail(email)));
+
+  if (recipients.length === 0) {
+    // Claim nothing. Assigning a rep later still gets this escalation on a subsequent tick, rather than
+    // the slot being permanently burned by a run that emailed nobody.
+    logger.warn("[WeeklyReportReminders] No escalation recipient - skipping", {
+      tenantSchema,
+      weeklyReportProjectId: project.id,
+    });
+    summary.skipped += 1;
+    return;
+  }
+
+  const email = buildWeeklyReportRepEscalationEmail({
+    projectName: project.projectName,
+    projectNumber: project.projectNumber,
+    clientName: project.clientName,
+    weekOf: project.dueDate,
+    pmName: project.pmName,
+    unassigned,
+    dashboardUrl: weeklyReportDashboardUrl(frontendUrl, officeId),
+  });
+
+  const claimed = await claimReminder(
+    query,
+    tenantSchema,
+    project.id,
+    project.dueDate,
+    WEEKLY_REPORT_REP_ESCALATION_KIND,
+  );
+  if (!claimed) return;
+
+  try {
+    const result = await sendEmail(recipients, email.subject, email.html, {
+      text: email.text,
+      idempotencyKey: `weekly-report-escalation-${tenantSchema}-${project.id}-${project.dueDate}`,
+    });
+    if (!result.success) throw new Error("Email provider returned unsuccessful result");
+    summary.escalationsSent += 1;
+  } catch (err) {
+    // Released so a later tick can retry, exactly as the other kinds do. The key is fixed by
+    // (project, week), so a re-send after an unknown outcome presents the SAME key with the SAME payload
+    // and the provider replays rather than delivering twice.
+    await releaseReminderClaim(
+      query,
+      tenantSchema,
+      project.id,
+      project.dueDate,
+      WEEKLY_REPORT_REP_ESCALATION_KIND,
+    );
+    throw err;
+  }
+}
+
+/**
+ * The office's leadership roster, as a plain list.
+ *
+ * The digest reads the same setting but couples it to its own logging and `summary.skipped` accounting,
+ * which the escalation must not inherit: an empty roster means something different there (the whole
+ * leadership half is doing nothing) from here (a fallback that only matters when a job has no rep).
+ */
+async function leadershipRecipientsFor(query: PgQuery, tenantSchema: string): Promise<string[]> {
+  const settings = await query(
+    `SELECT leadership_recipient_emails FROM ${tenantSchema}.weekly_report_settings LIMIT 1`,
+  );
+  return dedupeEmails(
+    (Array.isArray(settings.rows[0]?.leadership_recipient_emails)
+      ? (settings.rows[0].leadership_recipient_emails as unknown[])
+      : []
+    )
+      .map((value) => normalizeText(value))
+      .filter((email): email is string => email != null && isBasicValidEmail(email)),
+  );
+}
+
+/**
+ * THE 17:00 TICK.
+ *
+ * A thin wrapper rather than a second job: office discovery, the advisory lock, the table and column
+ * probes, the pause ledger and the cadence arithmetic are all identical, and a parallel implementation
+ * of any of them is a way for the evening pass to disagree with the morning one about which weeks exist.
+ */
+export async function runWeeklyReportRepEscalations(
+  deps: WeeklyReportReminderRunDeps = {},
+): Promise<WeeklyReportReminderRunSummary> {
+  return runWeeklyReportReminders({ ...deps, mode: "escalation" });
 }

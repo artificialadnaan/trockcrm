@@ -1,3 +1,4 @@
+import { weeklyReportRemainingWeeks } from "@trock-crm/shared/types";
 import {
   formatWeeklyReportDate,
   weeklyReportScheduleValue,
@@ -199,6 +200,31 @@ export function buildWeeklyReportView(input: WeeklyReportViewInput): WeeklyRepor
       ? integerOrNull(snapshot?.schedule?.projectedDurationWeeks)
       : integerOrNull(project.projected_duration_weeks));
 
+  /**
+   * Remaining follows PROJECTED, and did not used to.
+   *
+   * `remaining_weeks` is computed and stored on `draft -> pending_review`, so a report that has not been
+   * submitted has none — while `projectedWeeks` above already falls back to the project's live value.
+   * The result was a preview that printed a Projected bar and an empty Remaining one beside it, which
+   * reads as "this job has no time left" rather than "this has not been submitted yet".
+   *
+   * Recomputed here ONLY when the report has not stamped its own and is not frozen. A snapshot is the
+   * client's copy and neither number in it may move; a submitted report keeps the arithmetic it was
+   * written with, which is the whole reason the column exists.
+   */
+  const remainingWeeks =
+    integerOrNull(report.remaining_weeks) ??
+    (fromSnapshot
+      ? // Frozen. The snapshot carries no duration block, so a sent report's remaining weeks are
+        // whatever `remaining_weeks` was stamped with at submit — and if that was null, null is the
+        // honest answer rather than a number computed today against a schedule that has since moved.
+        null
+      : weeklyReportRemainingWeeks({
+          projectedDurationWeeks: projectedWeeks,
+          projectStartDate: isoDate(project.project_start_date),
+          weekOf,
+        }));
+
   // Resolved ONCE, so what is printed and what the caller is told about where it came from cannot drift.
   const namedProperty = fromSnapshot ? text(snapshot?.propertyDisplayName) : text(project.property_display_name);
   const dealName = text(input.dealName);
@@ -224,7 +250,7 @@ export function buildWeeklyReportView(input: WeeklyReportViewInput): WeeklyRepor
       },
       duration: {
         projectedWeeks,
-        remainingWeeks: integerOrNull(report.remaining_weeks),
+        remainingWeeks,
       },
       photos: input.photos,
       version: integerOrNull(report.version) ?? 1,
