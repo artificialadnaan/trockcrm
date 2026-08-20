@@ -35,8 +35,13 @@ describe("telling a person from their mail server", () => {
     expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(false);
   });
 
-  it("calls a visitor who loaded the photographs a person", () => {
-    // Scanners fetch the URL and leave. Scrolling a page of photographs is the strongest signal there is.
+  it("does not call a burst of photo loads a person", () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and it was asserting a bug as correct.
+    //
+    // The viewer emits `<img loading="lazy">`. A browser fetches everything inside its preload margin
+    // with no scroll, no click and nobody in the room, and a headless scanner that renders the HTML does
+    // the same. Three fetches inside two seconds is what a preload looks like — treating it as proof
+    // meant merely RENDERING the page could become evidence the client read the report. Caught by Codex.
     const sessions = summariseWeeklyReportViews(
       [
         event({ occurredAt: "2026-08-13T19:41:02.000Z" }),
@@ -46,8 +51,25 @@ describe("telling a person from their mail server", () => {
       SENT_AT,
     );
 
-    expect(sessions[0]!.kind).toBe("person");
+    expect(sessions[0]!.kind).toBe("unclear");
     expect(sessions[0]!.photoViews).toBe(2);
+    expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(false);
+  });
+
+  it("calls photos loaded across a sitting a person", () => {
+    // What a preload cannot fake is TIME. Images inside the margin arrive together; somebody scrolling a
+    // report pulls them over minutes. That span is the signal, and it is the only one photos can honestly
+    // carry on their own.
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z" }),
+        event({ occurredAt: "2026-08-13T19:42:30.000Z", eventType: "photo" }),
+        event({ occurredAt: "2026-08-13T19:46:10.000Z", eventType: "photo" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions[0]!.kind).toBe("person");
     expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(true);
   });
 
@@ -68,11 +90,16 @@ describe("telling a person from their mail server", () => {
 
   it("does NOT call a real reader a scanner just for arriving quickly", () => {
     // Somebody watching for the email opens it in under 90 seconds and reads it. The send-window rule
-    // must not fire when the session went on to do something.
+    // must not fire when the session went on to do something a scanner does not do.
+    //
+    // The PDF carries this now rather than the photos. A fast arrival that loads images in a burst is
+    // genuinely ambiguous — that is exactly what a scanner rendering the page produces — so the download
+    // is what separates them, and it is the one action nothing automated takes by accident.
     const sessions = summariseWeeklyReportViews(
       [
         event({ occurredAt: "2026-08-13T14:00:30.000Z" }),
         event({ occurredAt: "2026-08-13T14:00:33.000Z", eventType: "photo" }),
+        event({ occurredAt: "2026-08-13T14:00:41.000Z", eventType: "pdf" }),
       ],
       SENT_AT,
     );

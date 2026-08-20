@@ -96,10 +96,19 @@ export const WEEKLY_REPORT_VIEW_RETENTION_MONTHS = 24;
  * How long after a send a bare page fetch is treated as automated.
  *
  * A scanner runs on delivery — seconds. A person reads the email first, and even an unusually attentive
- * one takes longer than this. Not a lone verdict: a fetch inside the window that goes on to load photos
- * is still a person, because scanners do not scroll.
+ * one takes longer than this. Not a lone verdict: a fetch inside the window that goes on to download the
+ * PDF is still a person. NOT photos, though it used to say so — a scanner rendering the page pulls those
+ * too, which is the whole of Codex's finding.
  */
 export const WEEKLY_REPORT_SCANNER_WINDOW_SECONDS = 90;
+
+/**
+ * How long a sitting must span before loaded photos count as somebody reading rather than a preload.
+ *
+ * A browser's lazy-load margin fires within a second or two of the page; a person scrolls a report over
+ * minutes. Two minutes is comfortably past any preload burst and comfortably inside a real read.
+ */
+export const WEEKLY_REPORT_READING_SPAN_SECONDS = 120;
 
 /** Gap after which two fetches from one visitor are counted as separate sittings. */
 export const WEEKLY_REPORT_VIEW_SESSION_GAP_MINUTES = 30;
@@ -172,10 +181,33 @@ function judge(
   if (session.pdfDownloads > 0) {
     return { kind: "person", reason: "Downloaded the PDF, which link scanners do not do" };
   }
+  // PHOTOS ARE NOT PROOF ON THEIR OWN, however much it looks like scrolling.
+  //
+  // The viewer emits `<img loading="lazy">`, and a browser fetches anything inside its preload margin
+  // with no scroll, no click and nobody present; a headless scanner that renders the HTML pulls the
+  // images for the same reason. Treating a photo request as definitive meant merely RENDERING the page
+  // could become evidence that the client read the report — on the screen whose only job is to be
+  // trusted in a dispute. Caught by Codex.
+  //
+  // What a preload cannot fake is TIME. Images inside the margin arrive in a burst at page load; a
+  // person scrolling pulls them across a sitting. So photos spread over a session are somebody reading,
+  // and photos in a burst are ambiguous — which is what they always were.
   if (session.photoViews > 0) {
+    const spanSeconds = (Date.parse(session.endedAt) - Date.parse(session.startedAt)) / 1000;
+    if (Number.isFinite(spanSeconds) && spanSeconds >= WEEKLY_REPORT_READING_SPAN_SECONDS) {
+      return {
+        kind: "person",
+        reason:
+          `Loaded ${session.photoViews} photo${session.photoViews === 1 ? "" : "s"} over ` +
+          `${Math.round(spanSeconds / 60)} minute${Math.round(spanSeconds / 60) === 1 ? "" : "s"}, ` +
+          `which is somebody scrolling rather than a page preloading`,
+      };
+    }
     return {
-      kind: "person",
-      reason: `Loaded ${session.photoViews} photo${session.photoViews === 1 ? "" : "s"} from the page`,
+      kind: "unclear",
+      reason:
+        `Loaded ${session.photoViews} photo${session.photoViews === 1 ? "" : "s"} all at once — a ` +
+        `browser preloading images looks the same as a reader`,
     };
   }
 

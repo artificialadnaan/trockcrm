@@ -623,7 +623,9 @@ describe("who actually opened the client's copy", () => {
     await seedFullySentReport();
     // 5h41m after THIS report's 17:00 send — plainly a person's hour, not a scanner's.
     await seedView({ at: "2026-08-13T22:41:02.000Z" });
-    await seedView({ at: "2026-08-13T22:41:06.000Z", eventType: "photo" });
+    // A PDF download rather than a photo burst: images inside the browser's lazy-load margin arrive
+    // without anybody scrolling, so photos alone no longer carry "person" — the download does.
+    await seedView({ at: "2026-08-13T22:41:06.000Z", eventType: "pdf" });
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
 
@@ -709,7 +711,7 @@ describe("who actually opened the client's copy", () => {
     await seedFullySentReport();
     await pg.query(
       `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
-       SELECT $1::uuid, 'photo', '2026-08-13T17:05:00Z'::timestamptz + (n || ' milliseconds')::interval,
+       SELECT $1::uuid, 'photo', '2026-08-13T17:05:00Z'::timestamptz + (n || ' seconds')::interval,
               '10.5.5.5'::inet, 'Chrome'
          FROM generate_series(1, 520) AS n`,
       [REPORT],
@@ -782,7 +784,7 @@ describe("who actually opened the client's copy", () => {
     );
     await pg.query(
       `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
-       SELECT $1::uuid, 'photo', '2026-08-25T14:00:00Z'::timestamptz + (n || ' seconds')::interval,
+       SELECT $1::uuid, 'photo', '2026-08-25T14:00:00Z'::timestamptz + (n || ' minutes')::interval,
               '73.162.44.219'::inet, 'Mozilla/5.0 (Macintosh) Chrome/141.0'
          FROM generate_series(1, 4) AS n`,
       [REPORT],

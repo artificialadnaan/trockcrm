@@ -28,8 +28,24 @@ export { WEEKLY_REPORT_VIEW_RETENTION_MONTHS };
  */
 const PURGE_BATCH_SIZE = 5_000;
 
-/** Batches per pass. A ceiling, so one run cannot spin for hours if the backlog is enormous. */
-const MAX_BATCHES_PER_RUN = 40;
+/**
+ * Batches per pass. A backstop against a runaway loop, NOT the working limit — see the time budget.
+ *
+ * It used to be the working limit at 40, and the arithmetic did not survive contact with the route that
+ * feeds this table. One link holder may create 300 rows a minute, which is 432,000 a day; 40 batches of
+ * 5,000 removes 200,000. The sweep loses ground every day it runs, and the oldest addresses outlive the
+ * 24-month promise by more than a year. Caught by Codex.
+ */
+const MAX_BATCHES_PER_RUN = 2_000;
+
+/**
+ * Wall-clock budget for one pass. The real limit, and a better one than a batch count: what matters is
+ * that the sweep yields the connection and the schedule on time, not how many statements it took.
+ *
+ * Ten minutes at 5,000 rows a batch clears far more than a day can admit, so the backlog shrinks under
+ * any sustained flood rather than growing.
+ */
+const PURGE_TIME_BUDGET_MS = 10 * 60_000;
 
 /**
  * Per-statement deadline. Generous — a 5,000-row delete on an indexed column is fast, and the point is
@@ -70,6 +86,9 @@ export async function runWeeklyReportViewPurge(
      * backlog behind for good.
      */
     batchSize?: number;
+    /** Injected so a test can drive the time budget without waiting ten minutes for it. */
+    timeBudgetMs?: number;
+    now?: () => number;
   } = {},
 ): Promise<WeeklyReportViewPurgeResult> {
   // BOUNDED, because the worker pool sets no statement timeout. A DELETE that Postgres accepts and then
@@ -100,8 +119,13 @@ export async function runWeeklyReportViewPurge(
 
   let deleted = 0;
   let moreRemaining = false;
+  const startedAt = deps.now?.() ?? Date.now();
 
   for (let batch = 0; batch < MAX_BATCHES_PER_RUN; batch += 1) {
+    if ((deps.now?.() ?? Date.now()) - startedAt >= (deps.timeBudgetMs ?? PURGE_TIME_BUDGET_MS)) {
+      moreRemaining = true;
+      break;
+    }
     // The cutoff is recomputed per batch off `now()` IN THE DATABASE rather than a timestamp built here.
     // One clock, and it is the same one that stamped `occurred_at` — a worker whose clock has drifted
     // must not get to decide what counts as two years old.

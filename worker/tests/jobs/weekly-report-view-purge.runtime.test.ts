@@ -163,21 +163,33 @@ describe("a backlog larger than one batch", () => {
     expect(await remaining()).toBe(0);
   });
 
-  it("reports that more remain when the batch ceiling stops it mid-backlog", async () => {
-    // The ceiling exists so one pass cannot run for hours. It must SAY so when it bites — a run that
-    // silently stops short and reports success is how a backlog outlives every sweep that ever looked
-    // at it. 41 old rows at one per batch exceeds MAX_BATCHES_PER_RUN.
+  it("stops on its time budget and says the backlog outlived the pass", async () => {
+    // THE CEILING IS TIME, NOT A BATCH COUNT, and the arithmetic is why. One link holder may create 300
+    // rows a minute — 432,000 a day — through a route with no login. The old limit of 40 batches removed
+    // 200,000, so the sweep lost ground every day it ran and the oldest addresses outlived the 24-month
+    // promise by more than a year. Caught by Codex.
+    //
+    // A fake clock rather than a real ten-minute wait: it advances a minute per call, so the budget is
+    // spent after a handful of batches and the run has to yield with rows still eligible.
     for (let index = 0; index < 41; index += 1) await seedView(6);
 
+    let clock = 0;
     const result = await runWeeklyReportViewPurge({
       query,
       logger: silent,
       retentionMonths: 3,
       batchSize: 1,
+      timeBudgetMs: 5 * 60_000,
+      now: () => {
+        clock += 60_000;
+        return clock;
+      },
     });
 
+    // Yielded rather than ground on, and SAID so — a pass that stops early and reports success is how a
+    // backlog outlives every sweep that ever looked at it.
     expect(result.moreRemaining).toBe(true);
-    expect(result.deleted).toBe(40);
-    expect(await remaining()).toBe(1);
+    expect(result.deleted).toBeLessThan(41);
+    expect(await remaining()).toBeGreaterThan(0);
   });
 });

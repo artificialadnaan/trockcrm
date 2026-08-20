@@ -428,6 +428,13 @@ export async function getWeeklyReportProjectAudit(
     // stayed proportional to the flood even though only 500 rows came back. Two LATERAL reads with
     // LIMITs do bound it — each walks an index in `occurred_at` order and stops.
     //
+    // DISPATCH, NOT ENQUEUE. `sent_at` is stamped when the PM commits and the job is queued; the worker
+    // does not stamp `send_delivered_at` until the provider accepts the message. Between those two the
+    // client has nothing, so a staffer testing the returned share URL in that gap was still admitted as
+    // post-send client evidence — the pre-send hole, reopened by a worker backlog. `COALESCE` falls back
+    // to `sent_at` only where acceptance never came, which is a send that failed and has no client
+    // evidence to misattribute anyway. Caught by Codex.
+    //
     // ENGAGEMENT FIRST AND SEPARATELY. A `pdf` or `photo` fetch is what distinguishes a person from a
     // scanner, so those get their own budget off `weekly_report_views_engagement_idx` rather than
     // competing with page requests for one. A real reader buried under scanner traffic keeps their
@@ -565,7 +572,9 @@ export async function getWeeklyReportProjectAudit(
           // signal is meaningless measured against any other report's.
           const sessions = summariseWeeklyReportViews(
             viewsByReport.get(row.id) ?? [],
-            toIso(row.sent_at),
+            // The same instant the filter uses. Measuring the 90-second scanner window from the enqueue
+            // while filtering from acceptance would put the two rules on different clocks.
+            toIso(row.send_delivered_at ?? row.sent_at),
           );
           return {
             viewSessions: sessions,
