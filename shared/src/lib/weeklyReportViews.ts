@@ -82,13 +82,6 @@ const SCANNER_AGENT_MARKERS = [
 ];
 
 /**
- * How long after a send a bare page fetch is treated as automated.
- *
- * A scanner runs on delivery — seconds. A person reads the email first, and even an unusually attentive
- * one takes longer than this. Not a lone verdict: a fetch inside the window that goes on to load photos
- * is still a person, because scanners do not scroll.
- */
-/**
  * How long an access is kept before the worker's retention sweep removes it. Adnaan's call.
  *
  * HERE, in shared, rather than beside the sweep that enforces it, because two surfaces have to agree on
@@ -99,6 +92,13 @@ const SCANNER_AGENT_MARKERS = [
  */
 export const WEEKLY_REPORT_VIEW_RETENTION_MONTHS = 24;
 
+/**
+ * How long after a send a bare page fetch is treated as automated.
+ *
+ * A scanner runs on delivery — seconds. A person reads the email first, and even an unusually attentive
+ * one takes longer than this. Not a lone verdict: a fetch inside the window that goes on to load photos
+ * is still a person, because scanners do not scroll.
+ */
 export const WEEKLY_REPORT_SCANNER_WINDOW_SECONDS = 90;
 
 /** Gap after which two fetches from one visitor are counted as separate sittings. */

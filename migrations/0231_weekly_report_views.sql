@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS public.weekly_report_views (
 CREATE INDEX IF NOT EXISTS weekly_report_views_report_idx
   ON public.weekly_report_views (weekly_report_id, occurred_at DESC);
 
+-- ENGAGEMENT ONLY, and it is what makes the audit page's read bounded rather than merely capped.
+--
+-- A `pdf` or `photo` fetch is the evidence that separates a person from a scanner, so the page takes
+-- those rows first and in full. Without this partial index, "the engagement rows for this report" means
+-- scanning every access the report ever had — and these rows arrive from an unauthenticated route, so
+-- "every access" is a number somebody else chooses. With it, the read walks straight to the engagement
+-- events in time order and stops at its limit.
+CREATE INDEX IF NOT EXISTS weekly_report_views_engagement_idx
+  ON public.weekly_report_views (weekly_report_id, occurred_at)
+  WHERE event_type IN ('pdf', 'photo');
+
 -- The retention sweep's read, and nothing else. Kept separate from the index above so the purge does not
 -- have to walk a report-ordered index to find the oldest rows.
 CREATE INDEX IF NOT EXISTS weekly_report_views_occurred_idx

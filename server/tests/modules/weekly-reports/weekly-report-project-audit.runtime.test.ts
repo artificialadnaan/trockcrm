@@ -751,6 +751,49 @@ describe("who actually opened the client's copy", () => {
     expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
   });
 
+  it("does not warn about truncation at exactly the cap", async () => {
+    // The off-by-one. Truncation is `count > CAP`, so 500 rows must report false — a warning on a
+    // complete log is the same class of lie as a missing one on an incomplete log, pointed the other
+    // way, and the 520-row case above cannot see the boundary. Flagged by CodeRabbit.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'page', '2026-08-13T17:05:00Z'::timestamptz + (n || ' milliseconds')::interval,
+              '10.5.5.5'::inet, 'Chrome'
+         FROM generate_series(1, 500) AS n`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(false);
+  });
+
+  it("keeps engagement and page budgets separate, so a flood cannot crowd out the reader", async () => {
+    // Engagement and page requests are read through SEPARATE bounded queries rather than competing for
+    // one budget. 600 scanner page hits plus a handful of real photo fetches: the page bucket is
+    // truncated, the photo fetches all survive, and the reader is still visible.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'page', '2026-08-13T17:00:30Z'::timestamptz + (n || ' milliseconds')::interval,
+              '10.7.7.7'::inet, 'Barracuda Link Protect'
+         FROM generate_series(1, 600) AS n`,
+      [REPORT],
+    );
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'photo', '2026-08-25T14:00:00Z'::timestamptz + (n || ' seconds')::interval,
+              '73.162.44.219'::inet, 'Mozilla/5.0 (Macintosh) Chrome/141.0'
+         FROM generate_series(1, 4) AS n`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
+  });
+
   it("does not claim truncation on an ordinary report", async () => {
     // The control. A flag that is always true is as useless as one that is never set, and "we only show
     // some of this" on a report with four accesses would undermine the page it appears on.

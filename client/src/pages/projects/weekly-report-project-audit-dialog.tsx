@@ -428,11 +428,13 @@ function ViewLog({
   // the retention sweep to have removed theirs. Rendering that as "Nobody has opened the link yet" is
   // the CRM asserting a fact about the client's behaviour out of a gap in its own records — on the one
   // screen built to be quoted back to that client. Caught by Codex.
+  // PARSED, not string-compared. Both values are ISO today, but the API returns whatever the driver
+  // hands back and PostgreSQL's own text form is `2026-06-01 00:00:00+00` — a space where the `T` goes,
+  // which sorts BEFORE every ISO string and would silently mark every week as untracked.
+  const sentMs = report.sentAt ? Date.parse(report.sentAt) : Number.NaN;
+  const sinceMs = trackingSince ? Date.parse(trackingSince) : Number.NaN;
   const outsideTracking =
-    sessions.length === 0 &&
-    Boolean(trackingSince) &&
-    Boolean(report.sentAt) &&
-    report.sentAt! < trackingSince!;
+    sessions.length === 0 && Number.isFinite(sentMs) && Number.isFinite(sinceMs) && sentMs < sinceMs;
 
   if (outsideTracking) {
     return (
@@ -487,8 +489,8 @@ function ViewLog({
           that would otherwise be taken as a complete count. */}
       {report.viewSessionsTruncated && (
         <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
-          This link was fetched more times than the page shows. Every fetch that opened a photo or the
-          PDF is included; the rest are the earliest after the send.
+          This link was fetched more times than the page shows. Photo and PDF fetches are kept ahead of
+          plain page requests, and the earliest of each are shown.
         </p>
       )}
 

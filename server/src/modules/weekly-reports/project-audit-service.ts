@@ -3,6 +3,7 @@ import {
   WEEKLY_REPORT_VIEW_RETENTION_MONTHS,
   summariseWeeklyReportViews,
   weeklyReportWasOpenedByAPerson,
+  type WeeklyReportViewEvent,
   type WeeklyReportViewSession,
 } from "@trock-crm/shared/lib/weeklyReportViews";
 import { AppError } from "../../middleware/error-handler.js";
@@ -397,7 +398,10 @@ export async function getWeeklyReportProjectAudit(
 
   const reportIds = reports.rows.map((row) => row.id as string);
   const truncatedReports = new Set<string>();
-  const viewsByReport = new Map<string, Array<{ eventType: any; occurredAt: string; ip: string | null; userAgent: string | null }>>();
+  // `WeeklyReportViewEvent` rather than a local shape with `eventType: any`: the column's CHECK and the
+  // classifier's judgement have to stay in step, and `any` let an unrecognised event_type reach `judge`
+  // and be counted as a PDF download. Flagged by CodeRabbit.
+  const viewsByReport = new Map<string, WeeklyReportViewEvent[]>();
   if (reportIds.length > 0) {
     // ONLY WHAT HAPPENED AFTER THE CLIENT WAS SENT IT.
     //
@@ -415,57 +419,83 @@ export async function getWeeklyReportProjectAudit(
     // `sent_at` and therefore contributes nothing here, which is right — there is no client access to
     // speak of yet.
     //
-    // BOUNDED PER REPORT, and the bound is not decoration. The rows come from a route with no login:
-    // the viewer permits 300 requests a minute per address and a token stays good for 180 days, so a
-    // crawler stuck in a redirect loop — or somebody who simply wants this page to stop working — can
-    // put millions of rows behind one report. Unbounded, opening the audit then pulled every one of them
-    // into the API process and grouped them there, long after the traffic itself had stopped.
+    // BOUNDED IN THE DATABASE, not merely capped in the process — and the distinction is the whole
+    // point. These rows arrive from a route with no login: 300 requests a minute per address, tokens
+    // good for 180 days. How many exist behind one report is a number somebody else chooses.
     //
-    // ENGAGEMENT FIRST, then the earliest of the rest — and the order is the whole correctness of the
-    // cap. Keeping simply "the earliest 500" was wrong in the exact case a cap exists for: a report
-    // buried under scanner traffic, whose one real reader fetched a photo on day nine, has that fetch
-    // fall outside the window. `openedByAPerson` then reads false and the page says "only automated
-    // scanners" about a report somebody demonstrably read — the cap quietly discarding the strongest
-    // evidence in the log. Caught by Greptile, on my own fix for Codex's finding.
+    // A window function ranked over the partition does NOT bound that work: `row_number()` has to
+    // consume and sort every matching row before the outer filter can discard any of them, so the read
+    // stayed proportional to the flood even though only 500 rows came back. Two LATERAL reads with
+    // LIMITs do bound it — each walks an index in `occurred_at` order and stops.
     //
-    // A `pdf` or `photo` fetch is what separates a person from a scanner, so those rows are taken first
-    // and in full; the budget that remains goes to the earliest page requests, which is where "did it
-    // reach them after we sent it" is settled.
+    // ENGAGEMENT FIRST AND SEPARATELY. A `pdf` or `photo` fetch is what distinguishes a person from a
+    // scanner, so those get their own budget off `weekly_report_views_engagement_idx` rather than
+    // competing with page requests for one. A real reader buried under scanner traffic keeps their
+    // evidence; the page budget answers "did it reach them after we sent it", which is settled early.
     //
-    // `count(*) OVER` rides the same index scan, so the true total comes back without a second pass —
-    // and it comes back precisely so the page can SAY it was truncated. A cap nobody is told about reads
-    // as a complete record, which on this screen is the failure the whole feature exists to avoid.
+    // LIMIT is CAP + 1 rather than CAP, so "is there more than we are showing" is answered by whether
+    // the extra row came back. A `count(*)` would have been the obvious way and is exactly the
+    // unbounded scan this restructure exists to remove.
     const views = await client.query(
-      `WITH ranked AS (
-         SELECT v.weekly_report_id, v.event_type, v.occurred_at, host(v.ip) AS ip, v.user_agent,
-                row_number() OVER (
-                  PARTITION BY v.weekly_report_id
-                      ORDER BY (v.event_type IN ('pdf', 'photo')) DESC, v.occurred_at ASC
-                ) AS rn,
-                count(*)     OVER (PARTITION BY v.weekly_report_id)                            AS total
-           FROM public.weekly_report_views v
-           JOIN weekly_reports wr ON wr.id = v.weekly_report_id
-          WHERE v.weekly_report_id = ANY($1::uuid[])
-            AND wr.sent_at IS NOT NULL
-            AND v.occurred_at >= wr.sent_at
-       )
-       SELECT weekly_report_id, event_type, occurred_at, ip, user_agent, total
-         FROM ranked
-        WHERE rn <= $2
-        ORDER BY occurred_at ASC`,
-      [reportIds, WEEKLY_REPORT_VIEW_READ_CAP],
+      `SELECT e.weekly_report_id, e.event_type, e.occurred_at, host(e.ip) AS ip, e.user_agent, e.bucket
+         FROM unnest($1::uuid[]) AS r(id)
+         JOIN weekly_reports wr ON wr.id = r.id AND wr.sent_at IS NOT NULL
+        CROSS JOIN LATERAL (
+                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent,
+                        'engagement' AS bucket
+                   FROM public.weekly_report_views v
+                  WHERE v.weekly_report_id = r.id
+                    AND v.occurred_at >= wr.sent_at
+                    AND v.event_type IN ('pdf', 'photo')
+                  ORDER BY v.occurred_at
+                  LIMIT $2)
+                UNION ALL
+                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent,
+                        'page' AS bucket
+                   FROM public.weekly_report_views v
+                  WHERE v.weekly_report_id = r.id
+                    AND v.occurred_at >= wr.sent_at
+                    AND v.event_type NOT IN ('pdf', 'photo')
+                  ORDER BY v.occurred_at
+                  LIMIT $2)
+        ) AS e
+        ORDER BY e.occurred_at ASC`,
+      [reportIds, WEEKLY_REPORT_VIEW_READ_CAP + 1],
     );
+
+    // The CAP + 1th row of either bucket is the signal, and it is dropped rather than shown: it exists
+    // only to answer "is there more".
+    const bucketCounts = new Map<string, { engagement: number; page: number }>();
     for (const row of views.rows) {
-      if (Number(row.total) > WEEKLY_REPORT_VIEW_READ_CAP) truncatedReports.add(row.weekly_report_id);
+      const counts = bucketCounts.get(row.weekly_report_id) ?? { engagement: 0, page: 0 };
+      if (row.bucket === "engagement") counts.engagement += 1;
+      else counts.page += 1;
+      bucketCounts.set(row.weekly_report_id, counts);
     }
+    for (const [reportId, counts] of bucketCounts) {
+      if (counts.engagement > WEEKLY_REPORT_VIEW_READ_CAP || counts.page > WEEKLY_REPORT_VIEW_READ_CAP) {
+        truncatedReports.add(reportId);
+      }
+    }
+    const kept = new Map<string, { engagement: number; page: number }>();
     for (const row of views.rows) {
+      // The CAP + 1th row of a bucket did its job by arriving. Keeping it would show one more sitting
+      // than the cap promises and make the boundary tests depend on an off-by-one.
+      const seen = kept.get(row.weekly_report_id) ?? { engagement: 0, page: 0 };
+      const isEngagement = row.bucket === "engagement";
+      if (isEngagement) seen.engagement += 1;
+      else seen.page += 1;
+      kept.set(row.weekly_report_id, seen);
+      const rank = isEngagement ? seen.engagement : seen.page;
+      if (rank > WEEKLY_REPORT_VIEW_READ_CAP) continue;
+
       const bucket = viewsByReport.get(row.weekly_report_id) ?? [];
       // Stored back, always. `get(...) ?? []` hands back a NEW array on a miss, so pushing to it without
       // setting it discards every first event for every report — silently: the page then renders "never
       // opened" for a report that was, which is the exact wrong answer in a dispute.
       viewsByReport.set(row.weekly_report_id, bucket);
       bucket.push({
-        eventType: row.event_type,
+        eventType: row.event_type as WeeklyReportViewEvent["eventType"],
         occurredAt: toIso(row.occurred_at)!,
         // `host()` strips the /32 that `inet` renders, so the audit page shows 73.162.44.219 rather
         // than 73.162.44.219/32 — which reads as a subnet to anybody who knows what one is.

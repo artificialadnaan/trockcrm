@@ -144,6 +144,25 @@ describe("a backlog larger than one batch", () => {
     expect(await remaining()).toBe(3);
   });
 
+  it("does not warn about a backlog it just finished clearing", async () => {
+    // EXACTLY the ceiling: 40 rows at one per batch. The last batch comes back full, which is what the
+    // ceiling watches for — but the backlog is gone. Inferring "more remain" from a full final batch
+    // raises a warning that nothing can clear and that no next pass will contradict, because the next
+    // pass finds nothing to delete and says nothing at all. Flagged by CodeRabbit.
+    for (let index = 0; index < 40; index += 1) await seedView(6);
+
+    const result = await runWeeklyReportViewPurge({
+      query,
+      logger: silent,
+      retentionMonths: 3,
+      batchSize: 1,
+    });
+
+    expect(result.deleted).toBe(40);
+    expect(result.moreRemaining).toBe(false);
+    expect(await remaining()).toBe(0);
+  });
+
   it("reports that more remain when the batch ceiling stops it mid-backlog", async () => {
     // The ceiling exists so one pass cannot run for hours. It must SAY so when it bites — a run that
     // silently stops short and reports success is how a backlog outlives every sweep that ever looked

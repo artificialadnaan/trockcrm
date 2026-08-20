@@ -123,7 +123,19 @@ export async function runWeeklyReportViewPurge(
     const removed = result.rowCount ?? 0;
     deleted += removed;
     if (removed < batchSize) break;
-    if (batch === MAX_BATCHES_PER_RUN - 1) moreRemaining = true;
+    if (batch === MAX_BATCHES_PER_RUN - 1) {
+      // ASKED, not assumed. A final batch that came back full means the ceiling stopped us, not that
+      // anything is necessarily left: a backlog of exactly MAX_BATCHES * batchSize is fully cleared by
+      // the last pass, and reporting "more remain" about an empty backlog is a warning that never
+      // clears and that nobody can act on. Bounded by LIMIT 1 — it stops at the first row.
+      const leftover = await query(
+        `SELECT 1 FROM public.weekly_report_views
+          WHERE occurred_at < now() - ($1 || ' months')::interval
+          LIMIT 1`,
+        [String(retentionMonths)],
+      );
+      moreRemaining = leftover.rows.length > 0;
+    }
   }
 
   if (deleted > 0) {

@@ -70,11 +70,27 @@ export interface RecordWeeklyReportViewInput {
   eventType: WeeklyReportViewEventType;
 }
 
+/**
+ * A HEAD request asked for the metadata, not the report.
+ *
+ * Express dispatches HEAD through the matching GET handler when no HEAD route exists, and the pipeline
+ * runs to completion without a body — so a `HEAD /wr/:token/pdf` reached the same logging call as a real
+ * download. That matters more here than it usually would: a PDF or photo fetch is the classifier's
+ * DEFINITIVE evidence of a person, so a monitoring probe, a cache warmer or a link checker could make
+ * the audit assert that somebody at the client read a report nobody opened. Caught by Codex.
+ *
+ * The request is still served exactly as before. Only the claim is withheld.
+ */
+function isMetadataOnlyRequest(req: Request): boolean {
+  return req.method === "HEAD";
+}
+
 export async function recordWeeklyReportView(
   req: Request,
   input: RecordWeeklyReportViewInput,
 ): Promise<void> {
   try {
+    if (isMetadataOnlyRequest(req)) return;
     const ip = clientIpForLog(req);
     await pool.query(
       `INSERT INTO public.weekly_report_views
