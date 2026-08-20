@@ -798,6 +798,43 @@ describe("the PM gate", () => {
   });
 });
 
+/**
+ * WHO HANDLED IT, on the report's own payload.
+ *
+ * `REPORT_SELECT` joined `authored_by` and nothing else, so a report could say what was written and not
+ * one person who moved it — the History tab showed a week's contents with no name attached, and the
+ * only surface that could answer "who approved this" was the per-project audit endpoint on another tab.
+ */
+describe("the detail payload carries the people, not just the timestamps", () => {
+  it("names the submitter, the approver and the sender", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+    await transitionWeeklyReport(db, id, "sent", PM_ACTOR);
+
+    const detail = await getWeeklyReportDetail(db, id);
+
+    // The super writes and submits; the PM approves and sends. Asserting the NAMES rather than merely
+    // that the fields are non-null is the point — three LEFT JOINs onto the same table are easy to wire
+    // to the wrong column, and every one of them would still be non-null.
+    expect(detail!.submittedByName).toBe("Steve Sanchez");
+    expect(detail!.reviewedByName).toBe("Adam Sherwood");
+    expect(detail!.sentByName).toBe("Adam Sherwood");
+  });
+
+  it("leaves the names null for steps that have not happened", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+
+    const detail = await getWeeklyReportDetail(db, id);
+
+    expect(detail!.submittedByName).toBeNull();
+    expect(detail!.reviewedByName).toBeNull();
+    expect(detail!.sentByName).toBeNull();
+  });
+});
+
 describe("a sent report is immutable", () => {
   async function sendReport(projectId: string) {
     const id = await seedDraft(projectId);

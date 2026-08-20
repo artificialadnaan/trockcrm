@@ -66,8 +66,17 @@ export interface WeeklyReportDetail {
   authoredBy: string | null;
   authoredByName: string | null;
   authoredAt: string | null;
+  /**
+   * WHO, not just when. These three are the questions somebody opens a past week to answer — "who sent
+   * this", "who signed off on it" — and until now the only surface that could answer them was the
+   * per-project audit endpoint. A report's own detail could describe what was written and not one
+   * person who handled it.
+   */
+  submittedByName: string | null;
   submittedAt: string | null;
+  reviewedByName: string | null;
   reviewedAt: string | null;
+  sentByName: string | null;
   sentAt: string | null;
   sendError: string | null;
   sendAttempts: number;
@@ -144,8 +153,11 @@ function mapReportRow(row: Record<string, any>, photos: WeeklyReportPhoto[]): We
     authoredBy: row.authored_by ?? null,
     authoredByName: row.authored_by_name ?? null,
     authoredAt: toIsoTimestamp(row.authored_at),
+    submittedByName: row.submitted_by_name ?? null,
     submittedAt: toIsoTimestamp(row.submitted_at),
+    reviewedByName: row.reviewed_by_name ?? null,
     reviewedAt: toIsoTimestamp(row.reviewed_at),
+    sentByName: row.sent_by_name ?? null,
     sentAt: toIsoTimestamp(row.sent_at),
     sendError: row.send_error ?? null,
     sendAttempts: Number(row.send_attempts ?? 0),
@@ -159,10 +171,25 @@ function mapReportRow(row: Record<string, any>, photos: WeeklyReportPhoto[]): We
   };
 }
 
+/**
+ * The three extra joins are the WHO of a report, and they were missing.
+ *
+ * `authored_by` alone answers "who typed it", which is the least contested fact about a weekly report.
+ * The questions people actually arrive with — who submitted it, who approved it, who pressed send —
+ * were readable only through the per-project audit endpoint, so the History tab could show a week's
+ * contents and not one name attached to them.
+ */
 const REPORT_SELECT = `
-  SELECT wr.*, u.display_name AS authored_by_name
+  SELECT wr.*,
+         author.display_name    AS authored_by_name,
+         submitter.display_name AS submitted_by_name,
+         reviewer.display_name  AS reviewed_by_name,
+         sender.display_name    AS sent_by_name
     FROM weekly_reports wr
-    LEFT JOIN public.users u ON u.id = wr.authored_by
+    LEFT JOIN public.users author    ON author.id    = wr.authored_by
+    LEFT JOIN public.users submitter ON submitter.id = wr.submitted_by
+    LEFT JOIN public.users reviewer  ON reviewer.id  = wr.reviewed_by
+    LEFT JOIN public.users sender    ON sender.id    = wr.sent_by
 `;
 
 export async function getWeeklyReportDetail(

@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   historyRefetch: vi.fn(),
   retryWeeklyReportSend: vi.fn(),
   sendDialogReportId: null as string | null,
+  auditDialogProjectId: null as string | null,
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
@@ -43,6 +44,14 @@ vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 // dialog fetches a draft on mount, and the id it is handed is the whole point: on a row carrying both a
 // correction and a failed send, a Send pointed at the failed report renders identically to one pointed at
 // the correction.
+// Stand-in for the record drill-in, so a row click can be asserted by WHICH project it opens. The real
+// dialog fetches the audit on mount; the id it is handed is the whole assertion here.
+vi.mock("./weekly-report-project-audit-dialog", () => ({
+  WeeklyReportProjectAuditDialog: ({ projectId }: { projectId: string }) => {
+    mocks.auditDialogProjectId = projectId;
+    return null;
+  },
+}));
 vi.mock("./weekly-report-send-dialog", () => ({
   WeeklyReportSendDialog: ({ reportId }: { reportId: string }) => {
     mocks.sendDialogReportId = reportId;
@@ -126,6 +135,7 @@ beforeEach(() => {
   // Plain state, not a vi.fn, so mockReset does not clear it — a stale id would let a test that opens no
   // dialog at all inherit the previous one's and pass.
   mocks.sendDialogReportId = null;
+  mocks.auditDialogProjectId = null;
   mocks.useWeeklyReportProjects.mockReturnValue({
     projects: [],
     loading: false,
@@ -555,5 +565,72 @@ describe("failure states", () => {
       refetch: vi.fn(),
     });
     expect(renderPage()).toContain("Couldn't load the weekly report board");
+  });
+});
+
+/**
+ * THE WAY IN, from the tab people land on.
+ *
+ * The record drill-in shipped on the Projects tab only. This is the default view, so from where anyone
+ * stands when they open Weekly Reports it did not exist — which is exactly how it was reported: "the
+ * cards for the projects aren't clickable".
+ */
+describe("opening a project's record from This Week", () => {
+  function firstRow(): HTMLTableRowElement {
+    const row = container.querySelector("tbody tr");
+    expect(row).toBeTruthy();
+    return row as HTMLTableRowElement;
+  }
+
+  it("opens the record for the project on the row that was clicked", () => {
+    mockDashboard([
+      dashboardRow({ weeklyReportProjectId: "p-first" }),
+      dashboardRow({ weeklyReportProjectId: "p-second", weekOf: "2026-08-06" }),
+    ]);
+    renderPage();
+
+    act(() => {
+      firstRow().click();
+    });
+
+    expect(mocks.auditDialogProjectId).toBe("p-first");
+  });
+
+  it("offers the record through a real button, not a row click a keyboard cannot reach", () => {
+    // A bare `<tr onClick>` is a mouse affordance and nothing else: no focus, no Enter, no announcement.
+    // Wiring the row without this left keyboard users with NO way into the record at all, which is worse
+    // than the Projects-tab-only drill-in it was fixing. Asserting the element is a BUTTON is the point —
+    // a div with the same handler passes any test that only clicks it.
+    mockDashboard([dashboardRow({ weeklyReportProjectId: "p-keyboard", projectName: "4123 Cedar Springs" })]);
+    renderPage();
+
+    const named = Array.from(container.querySelectorAll("tbody button")).find(
+      (element) => element.textContent?.trim() === "4123 Cedar Springs",
+    );
+    expect(named).toBeTruthy();
+
+    act(() => {
+      (named as HTMLButtonElement).click();
+    });
+
+    expect(mocks.auditDialogProjectId).toBe("p-keyboard");
+  });
+
+  it("does not open it when the row's own Send button was the target", () => {
+    // Send opens the send dialog. Without stopPropagation the click also bubbles to the row, so a PM
+    // pressing Send would get the record dialog stacked over the thing they actually asked for.
+    mockDashboard([dashboardRow({ state: "approved", reportId: "r-approved" })]);
+    renderPage();
+
+    const send = Array.from(container.querySelectorAll("button")).find(
+      (element) => element.textContent?.trim() === "Send",
+    );
+    expect(send).toBeTruthy();
+    act(() => {
+      send!.click();
+    });
+
+    expect(mocks.sendDialogReportId).toBe("r-approved");
+    expect(mocks.auditDialogProjectId).toBeNull();
   });
 });
