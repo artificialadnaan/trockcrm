@@ -1,4 +1,6 @@
+import { WEEKLY_REPORT_VIEW_RETENTION_MONTHS } from "@trock-crm/shared/lib/weeklyReportViews";
 import { pool } from "../db.js";
+import { timedPoolClientQuery, type TimedPoolLike } from "../lib/timed-pool-query.js";
 
 /**
  * FORGETTING, ON A SCHEDULE.
@@ -9,12 +11,14 @@ import { pool } from "../db.js";
  * is an accumulating liability, and the people in it are the client's staff rather than ours.
  *
  * TWENTY-FOUR MONTHS, Adnaan's call. Long enough to outlive any dispute about a project that closed last
- * year; short enough that the table is not a decade of somebody's browsing.
+ * year; short enough that the table is not a decade of somebody's browsing. The number lives in shared
+ * because the audit page needs it too — anything older than this boundary is missing BY DESIGN, and a
+ * page that did not know that would report it as "nobody opened it".
  *
  * IN THE WORKER, NOT A MIGRATION. Retention is a recurring act, not a one-off schema change, and putting
  * it in a migration would delete once on deploy and never again.
  */
-export const WEEKLY_REPORT_VIEW_RETENTION_MONTHS = 24;
+export { WEEKLY_REPORT_VIEW_RETENTION_MONTHS };
 
 /**
  * Rows per statement. The delete is batched because the alternative is one statement holding a lock over
@@ -26,6 +30,12 @@ const PURGE_BATCH_SIZE = 5_000;
 
 /** Batches per pass. A ceiling, so one run cannot spin for hours if the backlog is enormous. */
 const MAX_BATCHES_PER_RUN = 40;
+
+/**
+ * Per-statement deadline. Generous — a 5,000-row delete on an indexed column is fast, and the point is
+ * not to police a slow query but to make sure a HUNG one lets go of its connection.
+ */
+const PURGE_QUERY_TIMEOUT_MS = 60_000;
 
 export interface WeeklyReportViewPurgeResult {
   /** False when the table is not there yet — see the probe below. */
@@ -62,7 +72,23 @@ export async function runWeeklyReportViewPurge(
     batchSize?: number;
   } = {},
 ): Promise<WeeklyReportViewPurgeResult> {
-  const query = deps.query ?? ((text: string, params?: unknown[]) => pool.query(text, params));
+  // BOUNDED, because the worker pool sets no statement timeout. A DELETE that Postgres accepts and then
+  // stops answering would hold its slot for as long as the process lives, and a DAILY cron means each
+  // stuck run strands another connection until jobs with nothing to do with weekly reports cannot get
+  // one. The queue layer already reaches for this helper for the same reason; a scheduled bulk delete
+  // is exactly the shape of statement that earns it. Caught by Codex.
+  const query =
+    deps.query ??
+    ((text: string, params?: unknown[]) =>
+      timedPoolClientQuery<{ rows: Record<string, any>[]; rowCount?: number | null }>(
+        pool as unknown as TimedPoolLike,
+        text,
+        params as any[] | undefined,
+        {
+          timeoutMs: PURGE_QUERY_TIMEOUT_MS,
+          timeoutError: () => new Error("weekly-report view purge query timed out"),
+        },
+      ));
   const logger = deps.logger ?? console;
   const retentionMonths = deps.retentionMonths ?? WEEKLY_REPORT_VIEW_RETENTION_MONTHS;
   const batchSize = deps.batchSize ?? PURGE_BATCH_SIZE;

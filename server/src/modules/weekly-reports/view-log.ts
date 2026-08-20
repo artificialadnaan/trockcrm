@@ -1,4 +1,5 @@
 import type { Request } from "express";
+import { isIP } from "node:net";
 import { pool } from "../../db.js";
 
 /**
@@ -37,6 +38,22 @@ export function clientIpFrom(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
 
+/**
+ * The address to store, or null when there is not a real one.
+ *
+ * VALIDATED HERE rather than left to the `::inet` cast, because of what the cast's failure costs. The
+ * insert is wrapped in a catch — a view that cannot be recorded must not break the page the client is
+ * reading — so a 22P02 does not merely lose the address, it loses THE ENTIRE EVENT. And the input is
+ * `X-Forwarded-For`, which the visitor controls: `:::`, `1.2.3.4:8080` and `....` are all made of legal
+ * characters, all rejected by `inet`, and each one is a way for a link holder to leave no trace at all.
+ *
+ * `net.isIP` accepts exactly what `inet` accepts, so an address that survives this survives the cast.
+ */
+export function clientIpForLog(req: Request): string | null {
+  const candidate = clientIpFrom(req);
+  return candidate && isIP(candidate) ? candidate : null;
+}
+
 /** Bounded before it reaches the column — a user agent is attacker-controlled and unbounded. */
 function bounded(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
@@ -58,7 +75,7 @@ export async function recordWeeklyReportView(
   input: RecordWeeklyReportViewInput,
 ): Promise<void> {
   try {
-    const ip = clientIpFrom(req);
+    const ip = clientIpForLog(req);
     await pool.query(
       `INSERT INTO public.weekly_report_views
          (weekly_report_id, token_id, tenant_id, office_slug, event_type, ip, user_agent, referrer)
@@ -69,10 +86,9 @@ export async function recordWeeklyReportView(
         input.tenantId,
         input.officeSlug,
         input.eventType,
-        // A malformed forwarded header would raise 22P02 on `::inet`. The row is worth more without the
-        // address than not at all, so an unparseable value is stored as null rather than losing the fact
-        // that the fetch happened.
-        ip && /^[0-9a-fA-F:.]+$/.test(ip) ? ip : null,
+        // Already validated — see clientIpForLog. Null here means "no usable address", never "the cast
+        // will sort it out", because the cast failing takes the whole event with it.
+        ip,
         bounded(req.headers["user-agent"], 1_000),
         bounded(req.headers.referer, 1_000),
       ],

@@ -445,6 +445,8 @@ export interface WeeklyReportAuditReport {
    * not been confirmed.
    */
   outstanding: boolean;
+  /** When this version was committed to the client — compared against the log's retention boundary. */
+  sentAt: string | null;
   /** Every access to the share link, grouped into sittings, newest first. */
   viewSessions: WeeklyReportViewSession[];
   /** Did anybody demonstrably READ it — loaded the photos, or pulled the PDF. */
@@ -454,6 +456,12 @@ export interface WeeklyReportAuditReport {
 
 export interface WeeklyReportProjectAudit {
   project: WeeklyReportProject;
+  /**
+   * The oldest moment the access log can speak about. A report sent before this has no sessions because
+   * nothing was RECORDED — the table did not exist, or retention has since removed it — which is a
+   * different statement from "nobody opened it" and must not be rendered as one.
+   */
+  viewTrackingSince: string | null;
   reports: WeeklyReportAuditReport[];
   reminders: { weekOf: string; kind: string; at: string }[];
   dismissals: { weekOf: string; reason: string | null; actorName: string | null; at: string }[];

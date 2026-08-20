@@ -88,6 +88,17 @@ const SCANNER_AGENT_MARKERS = [
  * one takes longer than this. Not a lone verdict: a fetch inside the window that goes on to load photos
  * is still a person, because scanners do not scroll.
  */
+/**
+ * How long an access is kept before the worker's retention sweep removes it. Adnaan's call.
+ *
+ * HERE, in shared, rather than beside the sweep that enforces it, because two surfaces have to agree on
+ * it and they are in different packages: the worker deletes on this boundary and the audit page has to
+ * know that anything older than it is missing BY DESIGN rather than absent because nobody opened the
+ * report. Two copies of a number that means "how far back our evidence goes" is how a page ends up
+ * confidently reporting the wrong thing about the oldest week it can still see.
+ */
+export const WEEKLY_REPORT_VIEW_RETENTION_MONTHS = 24;
+
 export const WEEKLY_REPORT_SCANNER_WINDOW_SECONDS = 90;
 
 /** Gap after which two fetches from one visitor are counted as separate sittings. */

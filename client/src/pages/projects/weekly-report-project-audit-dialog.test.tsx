@@ -49,6 +49,7 @@ function report(overrides: Record<string, unknown> = {}) {
     deliveryStatus: null,
     undelivered: false,
     outstanding: false,
+    sentAt: "2026-08-13T17:00:00.000Z",
     viewSessions: [],
     openedByAPerson: false,
     events: [],
@@ -67,6 +68,7 @@ function render(audit: Record<string, unknown>) {
         trockPmName: "Adam Sherwood",
         trockSuperName: "Steve Sanchez",
       },
+      viewTrackingSince: "2026-01-01T00:00:00.000Z",
       reports: [],
       reminders: [],
       dismissals: [],
@@ -313,9 +315,57 @@ describe("the open log", () => {
     expect(document.body.textContent).toContain("cannot tell whether it was a person");
   });
 
-  it("says who opened it when a person did", () => {
+  it("does not claim nobody opened a week the log never covered", () => {
+    // CODEX'S FINDING, and the same family as the scanner wording. An empty list has two meanings the
+    // page cannot tell apart on its own: nobody opened it, or nothing about that week was ever recorded.
+    // Every report sent before 0231 is the second, and so is anything the retention sweep has reached.
+    // Saying "Nobody has opened the link yet" turns a hole in our own records into a statement about the
+    // client — on the screen built to be quoted back to them.
+    render({
+      viewTrackingSince: "2026-06-01T00:00:00.000Z",
+      reports: [report({ status: "sent", sentAt: "2026-02-02T17:00:00.000Z", viewSessions: [] })],
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("No open tracking was kept for this week");
+    expect(text).not.toContain("Nobody has opened the link yet");
+  });
+
+  it("still says nobody opened a week the log DOES cover — the control", () => {
+    // Without this the fix reads as "never assert the negative", which would discard the answer the
+    // feature exists to give.
+    render({
+      viewTrackingSince: "2026-01-01T00:00:00.000Z",
+      reports: [report({ status: "sent", sentAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+    });
+
+    expect(document.body.textContent).toContain("Nobody has opened the link yet");
+  });
+
+  it("counts sittings, not identified people", () => {
+    // The classifier groups by IP, user agent and a 30-minute gap. It does not know who anybody is, so
+    // one person returning after lunch is two sessions — and "2 people opened this" is a claim about
+    // human beings that nothing in the log supports.
+    render({
+      reports: [
+        report({
+          status: "sent",
+          openedByAPerson: true,
+          viewSessions: [session(), session({ startedAt: "2026-08-14T09:00:00.000Z" })],
+        }),
+      ],
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("2 separate sittings");
+    expect(text).not.toContain("2 people");
+  });
+
+  it("says so when a person opened it", () => {
+    // Wording deliberately narrowed from "Opened by someone at the client": the log identifies sittings,
+    // not people, so a single session is "one sitting" rather than a claim about a human being.
     render({ reports: [report({ status: "sent", openedByAPerson: true, viewSessions: [session()] })] });
-    expect(document.body.textContent).toContain("Opened by someone at the client");
+    expect(document.body.textContent).toContain("Opened at the client — one sitting");
   });
 
   it("distinguishes never-opened from never-sent", () => {

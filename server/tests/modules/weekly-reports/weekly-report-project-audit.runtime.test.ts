@@ -641,13 +641,82 @@ describe("who actually opened the client's copy", () => {
     expect(audit.reports[0]!.openedByAPerson).toBe(false);
   });
 
+  /**
+   * THE ONE THAT MANUFACTURES EVIDENCE.
+   *
+   * A link can be minted on an `approved` report — `isWeeklyReportShareableStatus` allows exactly that —
+   * so checking a report before it goes out means opening the client's own URL. Those fetches are
+   * logged, and a PM who scrolled the photos while checking is, to the classifier, indistinguishable
+   * from a reader at the client: engagement is the signal, and the PM engaged.
+   *
+   * Counted, this page reports "opened at the client" about a report the client had not been sent. That
+   * is the CRM inventing the evidence it exists to provide, and it would be said to a client's face.
+   */
+  it("does not count a staff check of the link before the send as a client open", async () => {
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T16:30:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome'),
+              ($1::uuid, 'pdf',  '2026-08-13T16:31:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    // The send is stamped 17:00; both accesses above are half an hour EARLIER. Downloading the PDF is
+    // the strongest person signal there is, which is exactly why leaving them in would be so convincing.
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
+    expect(audit.reports[0]!.openedByAPerson).toBe(false);
+  });
+
+  it("still counts an access after the send — the control", async () => {
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-13T18:00:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+  });
+
+  it("keeps an access that lands on the send instant exactly", async () => {
+    // The boundary value, and it is not hypothetical: a mail-security scanner fetches the link the
+    // moment the message is accepted, and `sent_at` is stamped in the same transaction. `>` instead of
+    // `>=` drops that access silently — the one fetch most likely to share the send's timestamp — and
+    // every other fixture sits comfortably to one side of the line, so nothing else can see it.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T17:00:00Z'::timestamptz, '10.4.4.4'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions).toHaveLength(1);
+  });
+
+  it("reports how far back the log can speak, so absence can be read correctly", async () => {
+    await seedFullySentReport();
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    // Without a boundary an empty session list is ambiguous: nobody opened it, or nothing was recorded.
+    // The page cannot tell those apart on its own and must not guess.
+    expect(audit.viewTrackingSince).toBeTruthy();
+  });
+
   it("keeps one report's accesses off another's", async () => {
     const OTHER = U("66669");
     await seedFullySentReport();
     await pg.query(
+      // `sent_at` stamped, because a `sent` row without one is a state `transitionWeeklyReport` cannot
+      // produce — and client-open evidence is now bounded to accesses AT OR AFTER the send, so a fixture
+      // missing it would silently contribute no sessions and quietly stop testing what it names.
       `INSERT INTO office_dallas.weekly_reports
-         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, status)
-       VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-08-06'::date, 'sent')`,
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, status, sent_at)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-08-06'::date, 'sent',
+               '2026-08-06T17:00:00Z'::timestamptz)`,
       [OTHER, U("77779"), PROJECT, DEAL],
     );
     await pg.query(

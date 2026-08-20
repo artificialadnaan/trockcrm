@@ -1,5 +1,6 @@
 import { weeklyReportDeliveryFailed } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import {
+  WEEKLY_REPORT_VIEW_RETENTION_MONTHS,
   summariseWeeklyReportViews,
   weeklyReportWasOpenedByAPerson,
   type WeeklyReportViewSession,
@@ -55,6 +56,12 @@ export interface WeeklyReportAuditReport {
   /** The provider's last word: `delivered | bounced | complained | failed | delayed`, or null. */
   deliveryStatus: string | null;
   /**
+   * When this version was committed to the client. Carried explicitly rather than dug out of `events`,
+   * because the page compares it against the log's retention boundary to tell "nobody opened it" from
+   * "nothing was recorded" — a judgement that should not depend on parsing a timeline for one entry.
+   */
+  sentAt: string | null;
+  /**
    * Every access to this report's share link, grouped into sittings and judged.
    *
    * The judgement matters more than the count: a client's mail security fetches the link within seconds
@@ -106,6 +113,12 @@ export interface WeeklyReportProjectAudit {
   reminders: WeeklyReportAuditReminder[];
   dismissals: WeeklyReportAuditDismissal[];
   pauses: WeeklyReportAuditPause[];
+  /**
+   * The oldest moment the access log can speak about — the later of "the table existed" and "retention
+   * still covers it". A report sent before this has an empty session list because nothing was RECORDED,
+   * not because nobody opened it, and the page must say so rather than assert the negative.
+   */
+  viewTrackingSince: string | null;
 }
 
 function toIso(value: unknown): string | null {
@@ -327,14 +340,73 @@ export async function getWeeklyReportProjectAudit(
    * One query for every report on the project, grouped in memory. A per-report query would be N+1 on a
    * page whose whole job is to be opened and read.
    */
+  /**
+   * HOW FAR BACK THE ACCESS LOG ACTUALLY REACHES — and the reason it has to be sent to the browser.
+   *
+   * An empty session list has two completely different meanings and the page cannot tell them apart on
+   * its own: nobody opened the report, or nothing about that week was ever recorded. Every report sent
+   * before 0231 is in the second category, and so is every report that outlived the retention sweep.
+   * Rendering either as "Nobody has opened the link yet" turns a gap in our records into a definitive
+   * statement about the client's behaviour — in the one screen built to be quoted back to that client.
+   *
+   * Two boundaries, and the later one wins because both must hold for the absence to mean anything:
+   *
+   *   • WHEN LOGGING BEGAN. Read from `_migrations` rather than hardcoded, because the honest answer is
+   *     literally the moment the table appeared, it differs per environment, and a constant would go
+   *     stale the first time someone rebuilt an office.
+   *   • WHAT RETENTION STILL COVERS. The sweep deletes past 24 months, so beyond that an empty list is
+   *     expected rather than informative.
+   */
+  //
+  // Two queries rather than one because Postgres resolves relation names at PARSE time: a `CASE` guard
+  // around a `SELECT ... FROM public._migrations` still fails outright where that table is absent, which
+  // it is in the PGlite suites and in any environment whose schema was built from the SQL files rather
+  // than through the runner. A missing ledger must degrade to the retention floor, not 500 the page.
+  const retentionFloor = await client.query(
+    `SELECT now() - ($1 || ' months')::interval AS floor`,
+    [String(WEEKLY_REPORT_VIEW_RETENTION_MONTHS)],
+  );
+  let viewTrackingSince = toIso(retentionFloor.rows[0]?.floor ?? null);
+
+  const ledger = await client.query(`SELECT to_regclass('public._migrations') AS reg`);
+  if (ledger.rows[0]?.reg != null) {
+    const applied = await client.query(
+      `SELECT executed_at FROM public._migrations WHERE name = '0231_weekly_report_views.sql'`,
+    );
+    const loggingBegan = toIso(applied.rows[0]?.executed_at ?? null);
+    // The LATER of the two: both have to hold before an empty list means anything. Logging starting last
+    // month makes an older week unknowable however generous retention is, and vice versa.
+    if (loggingBegan && (!viewTrackingSince || Date.parse(loggingBegan) > Date.parse(viewTrackingSince))) {
+      viewTrackingSince = loggingBegan;
+    }
+  }
+
   const reportIds = reports.rows.map((row) => row.id as string);
   const viewsByReport = new Map<string, Array<{ eventType: any; occurredAt: string; ip: string | null; userAgent: string | null }>>();
   if (reportIds.length > 0) {
+    // ONLY WHAT HAPPENED AFTER THE CLIENT WAS SENT IT.
+    //
+    // A link can be minted on an `approved` report — `isWeeklyReportShareableStatus` allows it — so the
+    // ordinary way to check a report before it goes out is to open the client's own URL. Those fetches
+    // are logged like any other, and a PM who scrolled the photos while checking looks, to the
+    // classifier, exactly like a reader at the client: engagement is what distinguishes a person from a
+    // scanner, and the PM engaged.
+    //
+    // Left in, this page would report "opened by someone at the client" about a report the client had
+    // not yet been sent. That is not a cosmetic overstatement — it is the CRM manufacturing the evidence
+    // it exists to provide, and it would be repeated to a client in a dispute.
+    //
+    // The rows stay in the table; only the client-open evidence is bounded. An unsent report has no
+    // `sent_at` and therefore contributes nothing here, which is right — there is no client access to
+    // speak of yet.
     const views = await client.query(
-      `SELECT weekly_report_id, event_type, occurred_at, host(ip) AS ip, user_agent
-         FROM public.weekly_report_views
-        WHERE weekly_report_id = ANY($1::uuid[])
-        ORDER BY occurred_at ASC`,
+      `SELECT v.weekly_report_id, v.event_type, v.occurred_at, host(v.ip) AS ip, v.user_agent
+         FROM public.weekly_report_views v
+         JOIN weekly_reports wr ON wr.id = v.weekly_report_id
+        WHERE v.weekly_report_id = ANY($1::uuid[])
+          AND wr.sent_at IS NOT NULL
+          AND v.occurred_at >= wr.sent_at
+        ORDER BY v.occurred_at ASC`,
       [reportIds],
     );
     for (const row of views.rows) {
@@ -393,6 +465,7 @@ export async function getWeeklyReportProjectAudit(
         supersededById: row.superseded_by_id ?? null,
         recipients: recipientsOf(row.send_request),
         deliveryStatus: row.send_delivery_status ?? null,
+        sentAt: toIso(row.sent_at),
         // "Sent, and no evidence it arrived." A bounce counts: the provider accepted the message, so
         // send_delivered_at IS set, and any predicate keyed on that alone reads a bounce as a success.
         // "The CRM has no evidence the client received this."
@@ -430,6 +503,7 @@ export async function getWeeklyReportProjectAudit(
       actorName: row.actor_name ?? null,
       at: toIso(row.dismissed_at)!,
     })),
+    viewTrackingSince,
     pauses: pauses.rows.map((row) => ({
       pausedFrom: toIsoDate(row.paused_from)!,
       resumedOn: toIsoDate(row.resumed_on),

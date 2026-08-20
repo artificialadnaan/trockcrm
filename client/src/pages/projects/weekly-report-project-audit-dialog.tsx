@@ -180,7 +180,7 @@ function AuditBody({ audit }: { audit: WeeklyReportProjectAudit }) {
           <h3 className="text-[13.5px] font-bold tracking-tight text-slate-900">Reports</h3>
           <div className="space-y-2.5">
             {audit.reports.map((report) => (
-              <ReportCard key={report.id} report={report} />
+              <ReportCard key={report.id} report={report} trackingSince={audit.viewTrackingSince} />
             ))}
           </div>
         </section>
@@ -264,7 +264,14 @@ function ReminderLedger({ audit }: { audit: WeeklyReportProjectAudit }) {
   );
 }
 
-function ReportCard({ report }: { report: WeeklyReportAuditReport }) {
+function ReportCard({
+  report,
+  trackingSince,
+}: {
+  report: WeeklyReportAuditReport;
+  /** The log's own horizon, passed through so ViewLog can tell silence from an absent record. */
+  trackingSince: string | null;
+}) {
   const superseded = Boolean(report.supersededById);
   // Two shades of outstanding, and the difference is what the CRM actually knows.
   //
@@ -313,7 +320,7 @@ function ReportCard({ report }: { report: WeeklyReportAuditReport }) {
         )}
       </header>
 
-      <ViewLog report={report} />
+      <ViewLog report={report} trackingSince={trackingSince} />
 
       {report.events.length === 0 ? (
         <p className="mt-2 text-[11.5px] text-slate-500">Nothing has happened to this one yet.</p>
@@ -402,13 +409,39 @@ function LedgerRow({ primary, secondary }: { primary: string; secondary?: string
  * this page may be about to repeat what it says to that client, and they need to be able to see the
  * address, the browser and the timing for themselves rather than take our word for it.
  */
-function ViewLog({ report }: { report: WeeklyReportAuditReport }) {
+function ViewLog({
+  report,
+  trackingSince,
+}: {
+  report: WeeklyReportAuditReport;
+  trackingSince: string | null;
+}) {
   const [open, setOpen] = useState(false);
   const sessions = report.viewSessions ?? [];
 
   // A report that was never SENT has nothing to have been opened, and saying "not opened" about it
   // would read as a failure rather than as a stage it has not reached.
   if (report.status !== "sent") return null;
+
+  // NOTHING RECORDED IS NOT THE SAME CLAIM AS NOBODY OPENED IT, and an empty list looks identical
+  // either way. Reports sent before the log existed have no rows, and neither do reports old enough for
+  // the retention sweep to have removed theirs. Rendering that as "Nobody has opened the link yet" is
+  // the CRM asserting a fact about the client's behaviour out of a gap in its own records — on the one
+  // screen built to be quoted back to that client. Caught by Codex.
+  const outsideTracking =
+    sessions.length === 0 &&
+    Boolean(trackingSince) &&
+    Boolean(report.sentAt) &&
+    report.sentAt! < trackingSince!;
+
+  if (outsideTracking) {
+    return (
+      <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-slate-500">
+        <EyeOff className="h-3.5 w-3.5 shrink-0" />
+        No open tracking was kept for this week — sent before the log began, or past its retention.
+      </p>
+    );
+  }
 
   if (sessions.length === 0) {
     return (
@@ -442,7 +475,7 @@ function ViewLog({ report }: { report: WeeklyReportAuditReport }) {
             may well have read it is how you lose the argument you built the log to win. Caught by
             Greptile. `every` is safe — the zero-session case returned above. */}
         {report.openedByAPerson
-          ? `Opened by ${people.length === 1 ? "someone" : `${people.length} people`} at the client`
+          ? `Opened at the client — ${people.length === 1 ? "one sitting" : `${people.length} separate sittings`}`
           : sessions.every((session) => session.kind === "scanner")
             ? "Only automated scanners have fetched this"
             : "A browser opened the link — we cannot tell whether it was a person"}
