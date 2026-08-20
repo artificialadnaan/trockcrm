@@ -1,0 +1,179 @@
+// The classifier that decides whether an access log is evidence or noise.
+//
+// The fixtures below are the real shape of the problem: a commercial client's mail security fetches the
+// link within seconds of delivery, and the person reads it hours later. Getting that backwards in either
+// direction is a specific harm — reporting a scanner as the client is how the whole trail loses
+// credibility in a dispute, and reporting a person as a scanner is how somebody concludes "they never
+// looked" when they did.
+
+import { describe, expect, it } from "vitest";
+import {
+  looksLikeScannerAgent,
+  summariseWeeklyReportViews,
+  weeklyReportWasOpenedByAPerson,
+  WEEKLY_REPORT_SCANNER_WINDOW_SECONDS,
+  type WeeklyReportViewEvent,
+} from "./weeklyReportViews.js";
+
+const SENT_AT = "2026-08-13T14:00:00.000Z";
+const CHROME = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/141.0 Safari/537.36";
+const PROOFPOINT = "Mozilla/5.0 (compatible; ProofpointURLDefense/1.0)";
+
+function event(over: Partial<WeeklyReportViewEvent> & { occurredAt: string }): WeeklyReportViewEvent {
+  return { eventType: "page", ip: "73.162.44.219", userAgent: CHROME, ...over };
+}
+
+describe("telling a person from their mail server", () => {
+  it("calls the scan that lands seconds after the send a scanner", () => {
+    const sessions = summariseWeeklyReportViews(
+      [event({ occurredAt: "2026-08-13T14:00:04.000Z", ip: "67.231.156.9", userAgent: PROOFPOINT })],
+      SENT_AT,
+    );
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.kind).toBe("scanner");
+    expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(false);
+  });
+
+  it("calls a visitor who loaded the photographs a person", () => {
+    // Scanners fetch the URL and leave. Scrolling a page of photographs is the strongest signal there is.
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z" }),
+        event({ occurredAt: "2026-08-13T19:41:03.000Z", eventType: "photo" }),
+        event({ occurredAt: "2026-08-13T19:41:04.000Z", eventType: "photo" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions[0]!.kind).toBe("person");
+    expect(sessions[0]!.photoViews).toBe(2);
+    expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(true);
+  });
+
+  it("calls a PDF download a person even when the agent looks automated", () => {
+    // Some corporate proxies rewrite the user agent of ordinary browser traffic. Engagement outranks the
+    // agent string, or those clients would read as robots forever.
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z", userAgent: PROOFPOINT }),
+        event({ occurredAt: "2026-08-13T19:44:00.000Z", userAgent: PROOFPOINT, eventType: "pdf" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions[0]!.kind).toBe("person");
+    expect(sessions[0]!.reason).toContain("PDF");
+  });
+
+  it("does NOT call a real reader a scanner just for arriving quickly", () => {
+    // Somebody watching for the email opens it in under 90 seconds and reads it. The send-window rule
+    // must not fire when the session went on to do something.
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T14:00:30.000Z" }),
+        event({ occurredAt: "2026-08-13T14:00:33.000Z", eventType: "photo" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions[0]!.kind).toBe("person");
+  });
+
+  it("admits when it does not know", () => {
+    // A real browser, hours later, that opened the page and read no further. Somebody who glanced and
+    // closed it is indistinguishable from a scanner this file does not recognise, and saying so is more
+    // useful than guessing.
+    const sessions = summariseWeeklyReportViews(
+      [event({ occurredAt: "2026-08-13T19:41:02.000Z" })],
+      SENT_AT,
+    );
+
+    expect(sessions[0]!.kind).toBe("unclear");
+    expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(false);
+  });
+
+  it("treats a missing user agent as automated", () => {
+    expect(looksLikeScannerAgent(null)).toBe(true);
+    expect(looksLikeScannerAgent("")).toBe(true);
+    expect(looksLikeScannerAgent(CHROME)).toBe(false);
+  });
+
+  it("pins the send window to an interval, not to whatever the constant happens to be", () => {
+    // Both fixtures are absolute. A test computing its timestamps FROM the constant cannot fail when the
+    // constant moves — the exact defect this codebase has shipped more than once.
+    expect(WEEKLY_REPORT_SCANNER_WINDOW_SECONDS).toBe(90);
+
+    const inside = summariseWeeklyReportViews(
+      [event({ occurredAt: "2026-08-13T14:01:29.000Z" })], // 89s
+      SENT_AT,
+    );
+    const outside = summariseWeeklyReportViews(
+      [event({ occurredAt: "2026-08-13T14:01:31.000Z" })], // 91s
+      SENT_AT,
+    );
+
+    expect(inside[0]!.kind).toBe("scanner");
+    expect(outside[0]!.kind).toBe("unclear");
+  });
+});
+
+describe("grouping fetches into sittings", () => {
+  it("keeps one visitor's page, photos and PDF together", () => {
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z" }),
+        event({ occurredAt: "2026-08-13T19:41:05.000Z", eventType: "photo" }),
+        event({ occurredAt: "2026-08-13T19:49:20.000Z", eventType: "pdf" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!).toMatchObject({ pageViews: 1, photoViews: 1, pdfDownloads: 1 });
+  });
+
+  it("separates two people behind one office IP", () => {
+    // A shared NAT address is many people. Collapsing on IP alone would report one long sitting where
+    // there were two short ones — and in a dispute, "two people looked" is a different fact from "one".
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z", userAgent: CHROME }),
+        event({ occurredAt: "2026-08-13T19:42:02.000Z", userAgent: "Mozilla/5.0 (iPhone) Safari/605.1" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions).toHaveLength(2);
+  });
+
+  it("separates the same person coming back the next day", () => {
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z" }),
+        event({ occurredAt: "2026-08-14T09:15:00.000Z" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions).toHaveLength(2);
+    // Newest first — the audit page is read to answer "did they ever look", and the latest access
+    // answers it.
+    expect(sessions[0]!.startedAt).toBe("2026-08-14T09:15:00.000Z");
+  });
+
+  it("survives a report that was never sent, so there is no send to measure against", () => {
+    const sessions = summariseWeeklyReportViews(
+      [event({ occurredAt: "2026-08-13T19:41:02.000Z" })],
+      null,
+    );
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.kind).toBe("unclear");
+  });
+
+  it("reports nothing at all for a report nobody fetched", () => {
+    expect(summariseWeeklyReportViews([], SENT_AT)).toEqual([]);
+    expect(weeklyReportWasOpenedByAPerson([])).toBe(false);
+  });
+});

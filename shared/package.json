@@ -85,6 +85,10 @@
       "types": "./dist/lib/weeklyReportDelivery.d.ts",
       "default": "./dist/lib/weeklyReportDelivery.js"
     },
+    "./lib/weeklyReportViews": {
+      "types": "./dist/lib/weeklyReportViews.d.ts",
+      "default": "./dist/lib/weeklyReportViews.js"
+    },
     "./lib/weeklyReportTeam": {
       "types": "./dist/lib/weeklyReportTeam.d.ts",
       "default": "./dist/lib/weeklyReportTeam.js"
