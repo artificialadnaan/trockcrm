@@ -697,6 +697,46 @@ describe("who actually opened the client's copy", () => {
     expect(audit.reports[0]!.viewSessions).toHaveLength(1);
   });
 
+  it("bounds one report's accesses and says so, rather than loading all of them", async () => {
+    // The rows come from a route with NO LOGIN: 300 requests a minute per address, tokens good for 180
+    // days. A crawler in a redirect loop — or somebody who simply wants this page to stop working — can
+    // put millions of rows behind one report, and an unbounded read pulled every one into the API
+    // process and grouped them there long after the traffic stopped.
+    //
+    // 520 rows against a cap of 500. All from one address and agent inside one sitting, so the SESSION
+    // count stays 1 and what is actually being asserted is the truncation flag rather than a shape that
+    // would change anyway.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'photo', '2026-08-13T17:05:00Z'::timestamptz + (n || ' milliseconds')::interval,
+              '10.5.5.5'::inet, 'Chrome'
+         FROM generate_series(1, 520) AS n`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    // Announced, not swallowed. A cap nobody is told about reads as a complete record, and somebody
+    // counting opens off this page in a dispute would be counting a prefix without knowing it.
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
+    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+  });
+
+  it("does not claim truncation on an ordinary report", async () => {
+    // The control. A flag that is always true is as useless as one that is never set, and "we only show
+    // some of this" on a report with four accesses would undermine the page it appears on.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T17:05:00Z'::timestamptz, '10.5.5.5'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(false);
+  });
+
   it("reports how far back the log can speak, so absence can be read correctly", async () => {
     await seedFullySentReport();
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);

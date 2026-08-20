@@ -70,6 +70,12 @@ export interface WeeklyReportAuditReport {
   viewSessions: WeeklyReportViewSession[];
   /** Did anybody demonstrably READ it — loaded the photos, or pulled the PDF. */
   openedByAPerson: boolean;
+  /**
+   * True when this report had more accesses than the page loads, so the sessions shown are the earliest
+   * rather than all of them. Surfaced rather than swallowed: a truncated log that does not say so reads
+   * as a complete one.
+   */
+  viewSessionsTruncated: boolean;
   /** True when the CRM has no evidence the client received this. Drives the one summary chip. */
   undelivered: boolean;
   /**
@@ -120,6 +126,14 @@ export interface WeeklyReportProjectAudit {
    */
   viewTrackingSince: string | null;
 }
+
+/**
+ * How many accesses one report contributes to the audit page.
+ *
+ * Far above anything a real report produces — a client's mail security fetches a handful and their staff
+ * a few more — and far below what an unauthenticated route can be made to generate.
+ */
+const WEEKLY_REPORT_VIEW_READ_CAP = 500;
 
 function toIso(value: unknown): string | null {
   if (value == null) return null;
@@ -382,6 +396,7 @@ export async function getWeeklyReportProjectAudit(
   }
 
   const reportIds = reports.rows.map((row) => row.id as string);
+  const truncatedReports = new Set<string>();
   const viewsByReport = new Map<string, Array<{ eventType: any; occurredAt: string; ip: string | null; userAgent: string | null }>>();
   if (reportIds.length > 0) {
     // ONLY WHAT HAPPENED AFTER THE CLIENT WAS SENT IT.
@@ -399,16 +414,40 @@ export async function getWeeklyReportProjectAudit(
     // The rows stay in the table; only the client-open evidence is bounded. An unsent report has no
     // `sent_at` and therefore contributes nothing here, which is right — there is no client access to
     // speak of yet.
+    //
+    // BOUNDED PER REPORT, and the bound is not decoration. The rows come from a route with no login:
+    // the viewer permits 300 requests a minute per address and a token stays good for 180 days, so a
+    // crawler stuck in a redirect loop — or somebody who simply wants this page to stop working — can
+    // put millions of rows behind one report. Unbounded, opening the audit then pulled every one of them
+    // into the API process and grouped them there, long after the traffic itself had stopped.
+    //
+    // The EARLIEST accesses are kept rather than the most recent, because the question this log answers
+    // is "did it reach them after we sent it", and that is settled in the hours after the send. A flood
+    // arriving months later cannot displace the evidence that matters.
+    //
+    // `count(*) OVER` rides the same index scan, so the true total comes back without a second pass —
+    // and it comes back precisely so the page can SAY it was truncated. A cap nobody is told about reads
+    // as a complete record, which on this screen is the failure the whole feature exists to avoid.
     const views = await client.query(
-      `SELECT v.weekly_report_id, v.event_type, v.occurred_at, host(v.ip) AS ip, v.user_agent
-         FROM public.weekly_report_views v
-         JOIN weekly_reports wr ON wr.id = v.weekly_report_id
-        WHERE v.weekly_report_id = ANY($1::uuid[])
-          AND wr.sent_at IS NOT NULL
-          AND v.occurred_at >= wr.sent_at
-        ORDER BY v.occurred_at ASC`,
-      [reportIds],
+      `WITH ranked AS (
+         SELECT v.weekly_report_id, v.event_type, v.occurred_at, host(v.ip) AS ip, v.user_agent,
+                row_number() OVER (PARTITION BY v.weekly_report_id ORDER BY v.occurred_at ASC) AS rn,
+                count(*)     OVER (PARTITION BY v.weekly_report_id)                            AS total
+           FROM public.weekly_report_views v
+           JOIN weekly_reports wr ON wr.id = v.weekly_report_id
+          WHERE v.weekly_report_id = ANY($1::uuid[])
+            AND wr.sent_at IS NOT NULL
+            AND v.occurred_at >= wr.sent_at
+       )
+       SELECT weekly_report_id, event_type, occurred_at, ip, user_agent, total
+         FROM ranked
+        WHERE rn <= $2
+        ORDER BY occurred_at ASC`,
+      [reportIds, WEEKLY_REPORT_VIEW_READ_CAP],
     );
+    for (const row of views.rows) {
+      if (Number(row.total) > WEEKLY_REPORT_VIEW_READ_CAP) truncatedReports.add(row.weekly_report_id);
+    }
     for (const row of views.rows) {
       const bucket = viewsByReport.get(row.weekly_report_id) ?? [];
       // Stored back, always. `get(...) ?? []` hands back a NEW array on a miss, so pushing to it without
@@ -488,7 +527,11 @@ export async function getWeeklyReportProjectAudit(
             viewsByReport.get(row.id) ?? [],
             toIso(row.sent_at),
           );
-          return { viewSessions: sessions, openedByAPerson: weeklyReportWasOpenedByAPerson(sessions) };
+          return {
+            viewSessions: sessions,
+            openedByAPerson: weeklyReportWasOpenedByAPerson(sessions),
+            viewSessionsTruncated: truncatedReports.has(row.id),
+          };
         })(),
       })),
     ),

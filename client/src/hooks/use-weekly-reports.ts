@@ -451,6 +451,8 @@ export interface WeeklyReportAuditReport {
   viewSessions: WeeklyReportViewSession[];
   /** Did anybody demonstrably READ it — loaded the photos, or pulled the PDF. */
   openedByAPerson: boolean;
+  /** More accesses exist than the page loads; the sessions shown are the earliest after the send. */
+  viewSessionsTruncated: boolean;
   events: WeeklyReportAuditEvent[];
 }
 

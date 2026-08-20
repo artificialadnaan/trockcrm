@@ -483,11 +483,21 @@ function ViewLog({
       </button>
 
       {open && (
-        <ol className="mt-1.5 space-y-1.5 border-l-2 border-slate-200 pl-3">
-          {sessions.map((session, index) => (
-            <ViewSessionRow key={`${session.startedAt}-${index}`} session={session} />
-          ))}
-        </ol>
+        <>
+          {report.viewSessionsTruncated && (
+            // Said out loud, because a truncated log that keeps quiet about it reads as a complete one —
+            // and somebody counting sittings off this page in a dispute would be counting a prefix.
+            <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
+              This link was fetched more times than the page shows. These are the earliest after the
+              send, which is what establishes receipt.
+            </p>
+          )}
+          <ol className="mt-1.5 space-y-1.5 border-l-2 border-slate-200 pl-3">
+            {sessions.map((session, index) => (
+              <ViewSessionRow key={`${session.startedAt}-${index}`} session={session} />
+            ))}
+          </ol>
+        </>
       )}
     </div>
   );

@@ -52,6 +52,7 @@ function report(overrides: Record<string, unknown> = {}) {
     sentAt: "2026-08-13T17:00:00.000Z",
     viewSessions: [],
     openedByAPerson: false,
+    viewSessionsTruncated: false,
     events: [],
     ...overrides,
   };
