@@ -345,7 +345,23 @@ describe("the open log", () => {
     });
 
     const text = document.body.textContent ?? "";
-    expect(text).toContain("No open tracking was kept for this week");
+    expect(text).toContain("No open tracking on record");
+    expect(text).not.toContain("Nobody has opened the link yet");
+  });
+
+  it("does not assert nobody opened it when the horizon cannot be established", () => {
+    // CODEX. The server returns null when it cannot place the start of logging — no migration ledger and
+    // no rows to infer one from. My first fallback substituted the retention floor, which asserts that
+    // logging has been running a full 24 months when the table might be a week old, and every week in
+    // between would render as "nobody opened the link" out of a gap in our own records. That is the
+    // finding this horizon exists to prevent, reintroduced by its own fallback.
+    render({
+      viewTrackingSince: null,
+      reports: [report({ status: "sent", sendDeliveredAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("No open tracking on record");
     expect(text).not.toContain("Nobody has opened the link yet");
   });
 
@@ -366,7 +382,7 @@ describe("the open log", () => {
     });
 
     const text = document.body.textContent ?? "";
-    expect(text).toContain("No open tracking was kept for this week");
+    expect(text).toContain("No open tracking on record");
     expect(text).not.toContain("Nobody has opened the link yet");
   });
 

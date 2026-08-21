@@ -855,13 +855,28 @@ describe("the record of who fetched the client's copy", () => {
     expect(audit.reports[0]!.viewSessionsTruncated).toBe(false);
   });
 
-  it("reports how far back the log can speak, so absence can be read correctly", async () => {
+  it("says the log's horizon is UNKNOWN rather than inventing one", async () => {
+    // This suite builds its schema from the SQL files, so there is no `_migrations` ledger to read the
+    // start of logging from — and with no view rows either, there is nothing to infer it from.
+    //
+    // The first version substituted the retention floor here, which asserts logging has been running a
+    // full 24 months when the table might be a week old. Every week in between would then render as
+    // "nobody opened the link" out of a gap in our own records — the exact finding this horizon exists
+    // to prevent, reintroduced by its own fallback. Null is the honest answer and the page renders it
+    // as "not on record". Caught by Codex.
     await seedFullySentReport();
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.viewTrackingSince).toBeNull();
+  });
 
-    // Without a boundary an empty session list is ambiguous: nobody opened it, or nothing was recorded.
-    // The page cannot tell those apart on its own and must not guess.
-    expect(audit.viewTrackingSince).toBeTruthy();
+  it("takes the oldest recorded access as the horizon once there is one", async () => {
+    // A row is proof logging existed by then — a sound floor, and conservative in the safe direction:
+    // it can only place the start LATER than the truth, which marks more weeks unknown, never fewer.
+    await seedFullySentReport();
+    await seedView({ at: "2026-08-13T22:41:02.000Z" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.viewTrackingSince).toBe("2026-08-13T22:41:02.000Z");
   });
 
   it("keeps one report's accesses off another's", async () => {

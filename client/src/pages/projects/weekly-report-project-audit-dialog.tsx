@@ -435,14 +435,19 @@ function ViewLog({
   // would have called it untracked and printed "no tracking kept" over a log that has rows in it.
   const sentMs = report.sendDeliveredAt ? Date.parse(report.sendDeliveredAt) : Number.NaN;
   const sinceMs = trackingSince ? Date.parse(trackingSince) : Number.NaN;
+  // "Nobody opened it" requires KNOWING the log covered that week. An unknown horizon is not a licence
+  // to assert the negative — it is the reason not to. So silence reads as "not recorded" whenever the
+  // horizon is missing, and as "nobody opened it" only when we can place the week inside the log.
   const outsideTracking =
-    sessions.length === 0 && Number.isFinite(sentMs) && Number.isFinite(sinceMs) && sentMs < sinceMs;
+    sessions.length === 0 &&
+    (!Number.isFinite(sinceMs) || (Number.isFinite(sentMs) && sentMs < sinceMs));
 
   if (outsideTracking) {
     return (
       <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-slate-500">
         <EyeOff className="h-3.5 w-3.5 shrink-0" />
-        No open tracking was kept for this week — sent before the log began, or past its retention.
+        No open tracking on record for this week — sent before the log began, past its retention, or
+        from a period the log cannot account for.
       </p>
     );
   }

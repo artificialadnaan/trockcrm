@@ -126,9 +126,12 @@ export interface WeeklyReportProjectAudit {
   dismissals: WeeklyReportAuditDismissal[];
   pauses: WeeklyReportAuditPause[];
   /**
-   * The oldest moment the access log can speak about — the later of "the table existed" and "retention
-   * still covers it". A report sent before this has an empty session list because nothing was RECORDED,
-   * not because nobody opened it, and the page must say so rather than assert the negative.
+   * The oldest moment the access log can speak about — the later of "logging existed" and "retention
+   * still covers it".
+   *
+   * NULL MEANS UNKNOWN, not "forever". A report sent before this, or any report at all when this is
+   * null, has an empty session list because nothing was RECORDED rather than because nobody opened it,
+   * and the page must say so rather than assert the negative.
    */
   viewTrackingSince: string | null;
 }
@@ -392,20 +395,43 @@ export async function getWeeklyReportProjectAudit(
     `SELECT now() - ($1 || ' months')::interval AS floor`,
     [String(WEEKLY_REPORT_VIEW_RETENTION_MONTHS)],
   );
-  let viewTrackingSince = toIso(retentionFloor.rows[0]?.floor ?? null);
+  const retentionSince = toIso(retentionFloor.rows[0]?.floor ?? null);
 
+  // WHEN LOGGING BEGAN, or null if that cannot be established — and null is a real answer here.
+  //
+  // Two queries rather than one because Postgres resolves relation names at PARSE time: a `CASE` guard
+  // around a `SELECT ... FROM public._migrations` still fails outright where that table is absent, which
+  // it is in the PGlite suites and in any environment built from the SQL files rather than the runner.
+  //
+  // WITHOUT THE LEDGER, THE RETENTION FLOOR IS NOT A SUBSTITUTE. Falling back to it asserts that logging
+  // has been running for a full 24 months, when the table may have been created last week — so every
+  // week in between would render as "nobody opened the link" out of a gap in our own records. That is
+  // the finding this horizon exists to prevent, reintroduced by its own fallback. The oldest row we hold
+  // is a sound floor when there is one: logging demonstrably existed by then. When there is neither a
+  // ledger nor a row, we genuinely do not know, and the page says so. Caught by Codex.
+  let loggingBegan: string | null = null;
   const ledger = await client.query(`SELECT to_regclass('public._migrations') AS reg`);
   if (ledger.rows[0]?.reg != null) {
     const applied = await client.query(
       `SELECT executed_at FROM public._migrations WHERE name = '0231_weekly_report_views.sql'`,
     );
-    const loggingBegan = toIso(applied.rows[0]?.executed_at ?? null);
-    // The LATER of the two: both have to hold before an empty list means anything. Logging starting last
-    // month makes an older week unknowable however generous retention is, and vice versa.
-    if (loggingBegan && (!viewTrackingSince || Date.parse(loggingBegan) > Date.parse(viewTrackingSince))) {
-      viewTrackingSince = loggingBegan;
-    }
+    loggingBegan = toIso(applied.rows[0]?.executed_at ?? null);
   }
+  if (loggingBegan == null) {
+    const oldest = await client.query(
+      `SELECT min(occurred_at) AS first_seen FROM public.weekly_report_views`,
+    );
+    loggingBegan = toIso(oldest.rows[0]?.first_seen ?? null);
+  }
+
+  // The LATER of the two, and null the moment we cannot place one of them: both have to hold before an
+  // empty session list means anything at all.
+  const viewTrackingSince =
+    loggingBegan == null
+      ? null
+      : retentionSince && Date.parse(retentionSince) > Date.parse(loggingBegan)
+        ? retentionSince
+        : loggingBegan;
 
   const reportIds = reports.rows.map((row) => row.id as string);
   const truncatedReports = new Set<string>();
