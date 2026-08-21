@@ -438,9 +438,13 @@ function ViewLog({
   // "Nobody opened it" requires KNOWING the log covered that week. An unknown horizon is not a licence
   // to assert the negative — it is the reason not to. So silence reads as "not recorded" whenever the
   // horizon is missing, and as "nobody opened it" only when we can place the week inside the log.
-  const outsideTracking =
-    sessions.length === 0 &&
-    (!Number.isFinite(sinceMs) || (Number.isFinite(sentMs) && sentMs < sinceMs));
+  // The week predates what the log can account for. NOT conditional on the list being empty: a report
+  // accepted before the horizon whose link is fetched again afterwards has rows, and showing that count
+  // unqualified presents a partial record as a complete one — the accesses between the send and the
+  // start of logging were never captured at all. Flagged by Codex.
+  const predatesTracking =
+    !Number.isFinite(sinceMs) || (Number.isFinite(sentMs) && sentMs < sinceMs);
+  const outsideTracking = sessions.length === 0 && predatesTracking;
 
   if (outsideTracking) {
     return (
@@ -502,6 +506,12 @@ function ViewLog({
       {/* OUTSIDE the expander. A qualification that only appears once somebody thinks to open the detail
           is not a qualification — the headline above is what gets read, and quoted, and it is the line
           that would otherwise be taken as a complete count. */}
+      {predatesTracking && (
+        <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
+          This week predates the open log, so anything fetched before it began is not counted here.
+        </p>
+      )}
+
       {report.viewSessionsTruncated && (
         <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
           This link was fetched more times than the page shows. Photo and PDF fetches are kept ahead of
@@ -548,6 +558,12 @@ function ViewSessionRow({ session }: { session: WeeklyReportViewSession }) {
         {session.ip ?? "address not recorded"}
         {session.userAgent ? ` · ${session.userAgent.slice(0, 90)}` : " · no browser reported"}
       </p>
+      {/* WHERE THEY CAME FROM. Stored as an origin precisely to answer this — "reached it from Gmail"
+          against "from a Teams message" is occasionally the whole answer about who held the link — and
+          a column kept for a purpose it never serves is a column that should not have been kept. */}
+      {session.referrerOrigin && (
+        <p className="text-slate-500">followed a link from {session.referrerOrigin}</p>
+      )}
     </li>
   );
 }

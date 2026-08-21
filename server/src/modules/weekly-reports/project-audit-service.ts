@@ -485,11 +485,12 @@ export async function getWeeklyReportProjectAudit(
     // the extra row came back. A `count(*)` would have been the obvious way and is exactly the
     // unbounded scan this restructure exists to remove.
     const views = await client.query(
-      `SELECT e.weekly_report_id, e.event_type, e.occurred_at, host(e.ip) AS ip, e.user_agent, e.bucket
+      `SELECT e.weekly_report_id, e.event_type, e.occurred_at, host(e.ip) AS ip, e.user_agent,
+                e.referrer, e.bucket
          FROM unnest($1::uuid[]) AS r(id)
          JOIN weekly_reports wr ON wr.id = r.id AND wr.send_delivered_at IS NOT NULL
         CROSS JOIN LATERAL (
-                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent,
+                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent, v.referrer,
                         'engagement' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
@@ -498,7 +499,7 @@ export async function getWeeklyReportProjectAudit(
                   ORDER BY v.occurred_at
                   LIMIT $2)
                 UNION ALL
-                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent,
+                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent, v.referrer,
                         'page' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
@@ -549,6 +550,11 @@ export async function getWeeklyReportProjectAudit(
         // than 73.162.44.219/32 — which reads as a subnet to anybody who knows what one is.
         ip: row.ip ?? null,
         userAgent: row.user_agent ?? null,
+        // Stored as an ORIGIN at write time — the path and query never reach the column, because the
+        // page a client is on is the share URL and the referrer would otherwise carry a live token.
+        // Carried through because it is why the column exists: data kept for a purpose it never serves
+        // is data that should not have been kept. Flagged by Codex.
+        referrerOrigin: row.referrer ?? null,
       });
     }
   }

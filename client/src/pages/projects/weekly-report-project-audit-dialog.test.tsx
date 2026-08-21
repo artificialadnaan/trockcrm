@@ -232,6 +232,7 @@ describe("the open log", () => {
       pageViews: 1,
       photoViews: 3,
       pdfDownloads: 1,
+      referrerOrigin: null,
       ...over,
     };
   }
@@ -316,6 +317,45 @@ describe("the open log", () => {
       ) as HTMLButtonElement).click();
     });
     expect(document.body.textContent).toContain("3 PDF downloads");
+  });
+
+  it("shows where the visitor came from, which is why the referrer is kept at all", () => {
+    // The origin is stored specifically to distinguish "reached it from Gmail" from "reached it from a
+    // Teams message" — and it was being stored and never shown. A column retained for a purpose it
+    // never serves is a column that should not have been retained, which matters doubly on a table full
+    // of other people's addresses. Flagged by Codex.
+    render({
+      reports: [
+        report({ status: "sent", viewSessions: [session({ referrerOrigin: "https://mail.google.com" })] }),
+      ],
+    });
+    act(() => {
+      (Array.from(document.querySelectorAll("button")).find((element) =>
+        element.textContent?.includes("fetches of this link"),
+      ) as HTMLButtonElement).click();
+    });
+
+    expect(document.body.textContent).toContain("followed a link from https://mail.google.com");
+  });
+
+  it("qualifies a report whose week predates the log even when it has fetches", () => {
+    // A report accepted before the horizon whose link is fetched again afterwards HAS rows, so the
+    // empty-list branch never fires — and the count then reads as a complete record when everything
+    // between the send and the start of logging was never captured.
+    render({
+      viewTrackingSince: "2026-06-01T00:00:00.000Z",
+      reports: [
+        report({
+          status: "sent",
+          sendDeliveredAt: "2026-02-02T17:00:00.000Z",
+          viewSessions: [session()],
+        }),
+      ],
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("predates the open log");
+    expect(text).toContain("fetches of this link");
   });
 
   it("says when the address was never recorded rather than leaving a blank", () => {

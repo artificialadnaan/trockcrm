@@ -19,7 +19,7 @@ const CHROME = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.
 const PROOFPOINT = "Mozilla/5.0 (compatible; ProofpointURLDefense/1.0)";
 
 function event(over: Partial<WeeklyReportViewEvent> & { occurredAt: string }): WeeklyReportViewEvent {
-  return { eventType: "page", ip: "73.162.44.219", userAgent: CHROME, ...over };
+  return { eventType: "page", ip: "73.162.44.219", userAgent: CHROME, referrerOrigin: null, ...over };
 }
 
 describe("grouping one visitor's fetches", () => {
@@ -83,16 +83,33 @@ describe("telling visitors apart", () => {
     expect(sessions).toHaveLength(2);
   });
 
-  it("groups an anonymous visitor rather than dropping them", () => {
-    // No address and no agent still happened, and a log that silently omits what it cannot attribute is
-    // not a record. They group with each other, which is the most the data supports.
+  it("keeps unidentified fetches apart rather than merging them into one visitor", () => {
+    // THIS TEST USED TO ASSERT THE MERGE, and the merge was wrong. Two requests with no usable address
+    // and no user agent are not evidence of one visitor — they are two things we could not identify,
+    // and `null === null` fused them into a single sitting the page then presented as one person's
+    // activity. On the screen built to be quoted to a client, inventing a visitor is the same class of
+    // error as inventing an open. Caught by Codex.
+    //
+    // They are still RECORDED. A log that silently omits what it cannot attribute is not a record; it
+    // just does not pretend the two are related.
     const sessions = summariseWeeklyReportViews([
       event({ occurredAt: "2026-08-13T14:00:04.000Z", ip: null, userAgent: null }),
       event({ occurredAt: "2026-08-13T14:00:06.000Z", ip: null, userAgent: null, eventType: "pdf" }),
     ]);
 
+    expect(sessions).toHaveLength(2);
+    expect(sessions.map((session) => session.pdfDownloads).reduce((a, b) => a + b, 0)).toBe(1);
+  });
+
+  it("still groups a visitor identified by agent alone", () => {
+    // The control: one identifier is enough to group on. Without it, "never merge" would pass the case
+    // above while quietly scattering every visitor behind a proxy that strips addresses.
+    const sessions = summariseWeeklyReportViews([
+      event({ occurredAt: "2026-08-13T14:00:04.000Z", ip: null }),
+      event({ occurredAt: "2026-08-13T14:00:06.000Z", ip: null, eventType: "pdf" }),
+    ]);
+
     expect(sessions).toHaveLength(1);
-    expect(sessions[0]!.pdfDownloads).toBe(1);
   });
 });
 

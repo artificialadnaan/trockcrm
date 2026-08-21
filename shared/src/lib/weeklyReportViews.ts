@@ -43,6 +43,8 @@ export interface WeeklyReportViewEvent {
   occurredAt: string;
   ip: string | null;
   userAgent: string | null;
+  /** The referring page's ORIGIN only — the path and query are discarded at write time. */
+  referrerOrigin: string | null;
 }
 
 /**
@@ -58,6 +60,12 @@ export interface WeeklyReportViewSession {
   pageViews: number;
   photoViews: number;
   pdfDownloads: number;
+  /**
+   * Where the sitting came from, first one seen. Stored precisely to distinguish "reached this from
+   * Gmail" from "reached it from a Teams message", so it has to reach the page — data kept for a
+   * purpose it never serves is data that should not have been kept.
+   */
+  referrerOrigin: string | null;
 }
 
 /**
@@ -92,12 +100,20 @@ export function summariseWeeklyReportViews(
     // Same visitor AND still within the gap. Keyed on IP + agent rather than on IP alone: an office
     // behind one NAT address is many people, and collapsing them would report one long sitting where
     // there were several short ones.
-    const open = sessions.find(
-      (session) =>
-        session.ip === event.ip &&
-        session.userAgent === event.userAgent &&
-        Date.parse(event.occurredAt) - Date.parse(session.endedAt) <= gapMs,
-    );
+    //
+    // AN UNIDENTIFIED FETCH JOINS NOTHING. Two requests with no usable address and no user agent are not
+    // evidence of one visitor — they are two things we could not identify, and `null === null` merged
+    // them into a single sitting that the page then presented as one person's activity. A test here
+    // asserted that merge as correct. Caught by Codex.
+    const identified = event.ip != null || event.userAgent != null;
+    const open = identified
+      ? sessions.find(
+          (session) =>
+            session.ip === event.ip &&
+            session.userAgent === event.userAgent &&
+            Date.parse(event.occurredAt) - Date.parse(session.endedAt) <= gapMs,
+        )
+      : undefined;
     const target =
       open ??
       (sessions.push({
@@ -108,10 +124,12 @@ export function summariseWeeklyReportViews(
         pageViews: 0,
         photoViews: 0,
         pdfDownloads: 0,
+        referrerOrigin: event.referrerOrigin,
       }),
       sessions[sessions.length - 1]!);
 
     target.endedAt = event.occurredAt;
+    target.referrerOrigin ??= event.referrerOrigin;
     if (event.eventType === "page") target.pageViews += 1;
     else if (event.eventType === "photo") target.photoViews += 1;
     else target.pdfDownloads += 1;

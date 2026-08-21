@@ -422,10 +422,15 @@ export interface WeeklyReportViewSession {
   pageViews: number;
   photoViews: number;
   pdfDownloads: number;
-  /** `person` | `scanner` | `unclear` — see the server's classifier for why this is not a raw count. */
-  kind: "person" | "scanner" | "unclear";
-  /** Why it was judged that way, in words that can be repeated to a client. */
-  reason: string;
+  /**
+   * WHERE THEY CAME FROM — the referring page's origin, and nothing more of it.
+   *
+   * The path and query are discarded at write time because the page a client is on IS the share URL,
+   * so the referrer would otherwise carry a live token. The origin survives, and it is the useful part:
+   * "reached this from Gmail" against "reached it from a Teams message" is occasionally the whole
+   * answer about who was holding the link.
+   */
+  referrerOrigin: string | null;
 }
 
 export interface WeeklyReportAuditReport {
