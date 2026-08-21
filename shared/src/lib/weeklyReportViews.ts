@@ -117,6 +117,9 @@ export function summariseWeeklyReportViews(
     else target.pdfDownloads += 1;
   }
 
-  // Newest first: the page is read to answer "has anybody looked", and the most recent access answers it.
-  return sessions.sort((a, b) => (a.startedAt > b.startedAt ? -1 : 1));
+  // Newest first, BY LAST FETCH rather than by first. A sitting that ran 13:00–15:00 is more recent
+  // activity than one that started and finished at 14:00, and ordering on `startedAt` buried the longer
+  // one underneath — contradicting, in the one place a reader looks first, the promise this line makes.
+  // Caught by Codex.
+  return sessions.sort((a, b) => (a.endedAt > b.endedAt ? -1 : 1));
 }

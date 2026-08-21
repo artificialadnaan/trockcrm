@@ -10,7 +10,7 @@ import type { Request } from "express";
 import {
   clientIpForLog,
   recordWeeklyReportView,
-  redactShareTokenForTest,
+  referrerOriginForLog,
 } from "../../../src/modules/weekly-reports/view-log.js";
 
 function req(forwardedFor: string | undefined, remote = "10.0.0.1"): Request {
@@ -91,34 +91,42 @@ describe("a HEAD probe is not somebody reading the report", () => {
 
 describe("the referrer must not carry a working share link", () => {
   // A browser sends the page it was on as `Referer`, and the page the client is on IS the share URL — so
-  // `/wr/<token>` arrived on every photo and PDF fetch and was stored verbatim. The access log then held
-  // LIVE CREDENTIALS in plaintext for twenty-four months, readable by anyone with the audit page. A log
-  // built to be evidence in a dispute is the worst possible place to keep working keys.
-  it("strips the token from a report page referrer", () => {
-    expect(redactShareTokenForTest("https://trockcrm.com/wr/1DyNxVfizUSw0Og_u7hZRftYTB7mcrsS")).toBe(
-      "https://trockcrm.com/wr/[redacted]",
+  // `/wr/<token>` arrived on every photo and PDF fetch and the log held LIVE CREDENTIALS in plaintext for
+  // twenty-four months. A log built to be evidence in a dispute is the worst place to keep working keys.
+  //
+  // Redacting the `/wr/<token>` segment was the first fix and it was not enough: a mail gateway hands
+  // back the destination inside its own URL, percent-encoded, and a pattern hunting for a literal `/wr/`
+  // sails past it while the token stays recoverable. Chasing encodings is a losing game — there is
+  // always another wrapper. So only the ORIGIN is stored.
+  it("keeps the origin, which is the part anybody reads", () => {
+    expect(referrerOriginForLog("https://mail.google.com/mail/u/0/#inbox/xyz")).toBe(
+      "https://mail.google.com",
     );
   });
 
-  it("strips it from a nested asset referrer too", () => {
-    expect(
-      redactShareTokenForTest("https://trockcrm.com/wr/1DyNxVfizUSw0Og_u7hZRftYTB7mcrsS/photos/abc"),
-    ).toBe("https://trockcrm.com/wr/[redacted]/photos/abc");
-  });
-
-  it("strips it before a query string rather than leaving it in", () => {
-    expect(redactShareTokenForTest("https://trockcrm.com/wr/SECRETTOKEN?x=1")).toBe(
-      "https://trockcrm.com/wr/[redacted]?x=1",
+  it("drops the path, so a plain share URL cannot survive", () => {
+    expect(referrerOriginForLog("https://trockcrm.com/wr/1DyNxVfizUSw0Og_u7hZRftYTB7mcrsS")).toBe(
+      "https://trockcrm.com",
     );
   });
 
-  it("keeps a referrer that carries no token, because it still tells you something", () => {
-    // "Opened from the email" against "opened from a link pasted into a chat" is occasionally the whole
-    // answer, and that survives redaction. Dropping the field entirely would have thrown it away.
-    expect(redactShareTokenForTest("https://mail.google.com/")).toBe("https://mail.google.com/");
+  it("drops an ENCODED share URL hidden in a gateway's query string", () => {
+    // The case the redaction regex missed entirely. Percent-encoded, fully recoverable, and stored for
+    // two years — the token is right there under one decode.
+    const gateway =
+      "https://urldefense.proofpoint.com/v2/url?u=https%3A%2F%2Ftrockcrm.com%2Fwr%2FSECRETTOKEN&d=DwMFaQ";
+    const stored = referrerOriginForLog(gateway);
+    expect(stored).toBe("https://urldefense.proofpoint.com");
+    expect(stored).not.toContain("SECRETTOKEN");
+    expect(stored).not.toContain("wr");
   });
 
-  it("returns null for no referrer at all", () => {
-    expect(redactShareTokenForTest(undefined)).toBeNull();
+  it("stores nothing for a referrer it cannot parse", () => {
+    // Unparseable is not safe-by-default: anything could be hiding in it, so none of it is kept.
+    expect(referrerOriginForLog("not a url at all /wr/SECRETTOKEN")).toBeNull();
+  });
+
+  it("stores nothing when there is no referrer", () => {
+    expect(referrerOriginForLog(undefined)).toBeNull();
   });
 });

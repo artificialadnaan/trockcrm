@@ -55,28 +55,32 @@ export function clientIpForLog(req: Request): string | null {
 }
 
 /**
- * The referrer, with any share token taken out of it.
+ * The referrer reduced to its ORIGIN — scheme and host, nothing else.
  *
- * A browser sends the page it was on as `Referer` when it fetches an image or follows a link, and the
- * page the client is on IS the share URL — so `/wr/<token>` arrived on every photo and PDF request and
- * was stored verbatim. The access log then held LIVE CREDENTIALS: a working link to somebody's report,
- * in plaintext, readable by anyone with the audit page or the database, kept for twenty-four months.
- * A log built to be evidence in a dispute is exactly the wrong place to keep working keys.
+ * A browser sends the page it was on as `Referer`, and the page the client is on IS the share URL. So
+ * `/wr/<token>` arrived on every photo and PDF fetch and the log held live credentials in plaintext for
+ * twenty-four months, readable by anyone with the audit page or the database.
  *
- * Redacted rather than dropped, because the referrer still earns its place — "opened from the email"
- * against "opened from a link pasted into a chat" is occasionally the whole answer, and that
- * distinction survives without the secret. Caught by Codex.
+ * REDACTING THE PATH WAS NOT ENOUGH, which is the second half of this. A mail-security gateway hands
+ * back the destination inside its own URL — `?url=https%3A%2F%2F…%2Fwr%2F<token>` — and a pattern
+ * looking for a literal `/wr/` segment sails straight past a percent-encoded one while the token stays
+ * perfectly recoverable. Chasing encodings is a losing game: there is always another wrapper, another
+ * layer of escaping, another redirector.
+ *
+ * So the path and the query are discarded outright and only the origin is kept. That is also the only
+ * part anybody reads: "came from mail.google.com" against "came from a Teams message" is the whole of
+ * what this column contributes, and no share token can survive in it. Both halves caught by Codex.
  */
-export function redactShareToken(value: unknown): string | null {
+export function referrerOriginForLog(value: unknown): string | null {
   const referrer = bounded(value, 1_000);
   if (!referrer) return null;
-  // Every token-bearing path is `/wr/<token>` with at most `/pdf` or `/photos/<id>` after it. Replacing
-  // the segment rather than the whole value keeps the origin and the shape legible.
-  return referrer.replace(/(\/wr\/)[^/?#]+/gi, "$1[redacted]");
+  try {
+    return new URL(referrer).origin;
+  } catch {
+    // Not a URL we can parse is not a URL we can safely store: anything could be hiding in it.
+    return null;
+  }
 }
-
-/** Exported under a distinct name so the test exercises the real function, not a copy of the regex. */
-export const redactShareTokenForTest = redactShareToken;
 
 /** Bounded before it reaches the column — a user agent is attacker-controlled and unbounded. */
 function bounded(value: unknown, max: number): string | null {
@@ -130,7 +134,7 @@ export async function recordWeeklyReportView(
         // will sort it out", because the cast failing takes the whole event with it.
         ip,
         bounded(req.headers["user-agent"], 1_000),
-        redactShareToken(req.headers.referer),
+        referrerOriginForLog(req.headers.referer),
       ],
     );
   } catch (error) {

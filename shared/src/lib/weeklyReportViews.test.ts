@@ -112,6 +112,26 @@ describe("the order a reader gets them in", () => {
     ]);
   });
 
+  it("puts the sitting with the latest fetch first, not the one that began earliest", () => {
+    // A long sitting that is still going is more recent activity than a short one that started and
+    // finished inside it. Ordering on `startedAt` buried the longer one underneath — in the one place a
+    // reader looks first to answer "has anybody looked at this lately".
+    const sessions = summariseWeeklyReportViews([
+      // 13:00 → 15:00, one visitor.
+      event({ occurredAt: "2026-08-13T13:00:00.000Z" }),
+      event({ occurredAt: "2026-08-13T13:20:00.000Z" }),
+      event({ occurredAt: "2026-08-13T13:40:00.000Z" }),
+      event({ occurredAt: "2026-08-13T14:00:00.000Z" }),
+      event({ occurredAt: "2026-08-13T14:30:00.000Z" }),
+      event({ occurredAt: "2026-08-13T15:00:00.000Z" }),
+      // A different visitor, in and out at 14:00.
+      event({ occurredAt: "2026-08-13T14:00:30.000Z", ip: "10.2.2.2" }),
+    ]);
+
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]!.endedAt).toBe("2026-08-13T15:00:00.000Z");
+  });
+
   it("orders correctly even when the rows arrive out of order", () => {
     // The caller orders by occurred_at, but a grouping that depended on that would break silently the
     // day the query changed.
