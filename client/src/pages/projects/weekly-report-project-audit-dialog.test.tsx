@@ -285,10 +285,14 @@ describe("the open log", () => {
     expect(text).toContain("3 photos");
   });
 
-  it("says the fetches did not come from the client's copy when the send never arrived", () => {
-    // A bounce sitting beside "5 fetches of this link" reads as the client having opened it — the
-    // opposite of what the delivery chip a few lines up says. Whoever reached the URL got there some
-    // other way: a forward, or one of our own people checking what went wrong.
+  it("flags the delivery failure beside the count without ruling the fetches out", () => {
+    // A bounce sitting beside "5 fetches of this link" reads as the client having opened it, which the
+    // delivery chip a few lines up contradicts — so the failure is worth flagging.
+    //
+    // But it says only that. An earlier version claimed the fetches "did not come from the client's
+    // copy", which is wrong the moment a report goes to several contacts: `undelivered` keeps the WORST
+    // per-recipient outcome, so one bounce among three sets it while the other two received and read
+    // the report. Ruling their fetches out is the same overreach as claiming them.
     render({
       reports: [
         report({
@@ -301,12 +305,38 @@ describe("the open log", () => {
       ],
     });
 
-    expect(document.body.textContent).toContain("did not come from the client's copy");
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Delivery failed for at least one recipient");
+    // The overreach it replaced: never say where the fetches came from.
+    expect(text).not.toContain("did not come from the client's copy");
+  });
+
+  it("does not announce that nobody opened a report the provider never accepted", () => {
+    // THE SENTENCE THAT TOOK FOUR FINDINGS. A send the provider never took has no acceptance stamp, no
+    // sessions, and nothing whatever to say about the client — and the page announced that nobody had
+    // opened it. Recording is best-effort too: `recordWeeklyReportView` swallows its own failures so a
+    // view that cannot be logged never breaks the page a client is reading, which means an empty list
+    // never proves absence under ANY delivery state.
+    render({
+      reports: [
+        report({
+          status: "sent",
+          sentAt: "2026-08-13T17:00:00.000Z",
+          sendDeliveredAt: null,
+          undelivered: true,
+          viewSessions: [],
+        }),
+      ],
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("No fetches of this link have been recorded");
+    expect(text).not.toMatch(/Nobody has opened/);
   });
 
   it("says no such thing when the report was delivered", () => {
     render({ reports: [report({ status: "sent", viewSessions: [session()] })] });
-    expect(document.body.textContent).not.toContain("did not come from the client's copy");
+    expect(document.body.textContent).not.toContain("Delivery failed for at least one recipient");
   });
 
   it("shows how many times the PDF was pulled, not just that it was", () => {
@@ -347,7 +377,7 @@ describe("the open log", () => {
       reports: [
         report({
           status: "sent",
-          sendDeliveredAt: "2026-02-02T17:00:00.000Z",
+          sentAt: "2026-02-02T17:00:00.000Z",
           viewSessions: [session()],
         }),
       ],
@@ -381,12 +411,12 @@ describe("the open log", () => {
     // client — on the screen built to be quoted back to them.
     render({
       viewTrackingSince: "2026-06-01T00:00:00.000Z",
-      reports: [report({ status: "sent", sendDeliveredAt: "2026-02-02T17:00:00.000Z", viewSessions: [] })],
+      reports: [report({ status: "sent", sentAt: "2026-02-02T17:00:00.000Z", viewSessions: [] })],
     });
 
     const text = document.body.textContent ?? "";
     expect(text).toContain("No open tracking on record");
-    expect(text).not.toContain("Nobody has opened the link yet");
+    expect(text).not.toContain("No fetches of this link have been recorded");
   });
 
   it("does not assert nobody opened it when the horizon cannot be established", () => {
@@ -397,12 +427,12 @@ describe("the open log", () => {
     // finding this horizon exists to prevent, reintroduced by its own fallback.
     render({
       viewTrackingSince: null,
-      reports: [report({ status: "sent", sendDeliveredAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+      reports: [report({ status: "sent", sentAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
     });
 
     const text = document.body.textContent ?? "";
     expect(text).toContain("No open tracking on record");
-    expect(text).not.toContain("Nobody has opened the link yet");
+    expect(text).not.toContain("No fetches of this link have been recorded");
   });
 
   it("reads a PostgreSQL-formatted horizon, not just an ISO one", () => {
@@ -418,12 +448,12 @@ describe("the open log", () => {
     // reads as tracked; parsed, it sorts an hour BEFORE and the week is outside the log.
     render({
       viewTrackingSince: "2026-08-13 18:00:00+00",
-      reports: [report({ status: "sent", sendDeliveredAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+      reports: [report({ status: "sent", sentAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
     });
 
     const text = document.body.textContent ?? "";
     expect(text).toContain("No open tracking on record");
-    expect(text).not.toContain("Nobody has opened the link yet");
+    expect(text).not.toContain("No fetches of this link have been recorded");
   });
 
   it("still says nobody opened a week the log DOES cover — the control", () => {
@@ -431,17 +461,17 @@ describe("the open log", () => {
     // feature exists to give.
     render({
       viewTrackingSince: "2026-01-01T00:00:00.000Z",
-      reports: [report({ status: "sent", sendDeliveredAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+      reports: [report({ status: "sent", sentAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
     });
 
-    expect(document.body.textContent).toContain("Nobody has opened the link yet");
+    expect(document.body.textContent).toContain("No fetches of this link have been recorded");
   });
 
   it("distinguishes never-opened from never-sent", () => {
     // A report still with the PM has nothing to have been opened; saying "nobody has opened it" about
     // one would read as a failure rather than as a stage it has not reached.
     render({ reports: [report({ status: "sent", viewSessions: [] })] });
-    expect(document.body.textContent).toContain("Nobody has opened the link yet");
+    expect(document.body.textContent).toContain("No fetches of this link have been recorded");
 
     act(() => root.unmount());
     container.remove();

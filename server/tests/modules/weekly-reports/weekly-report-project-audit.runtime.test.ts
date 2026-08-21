@@ -678,15 +678,20 @@ describe("the record of who fetched the client's copy", () => {
     expect(audit.reports[0]!.viewSessions).toEqual([]);
   });
 
-  it("does not admit a staff check made between the commit and the provider accepting it", async () => {
-    // `sent_at` is stamped when the PM commits and the job is QUEUED; the worker stamps
-    // `send_delivered_at` only once the provider accepts. In that gap the client has nothing, so a
-    // staffer opening the already-minted share URL is not client evidence — the pre-send hole, reopened
-    // by any worker backlog. Caught by Codex, then caught AGAIN by Greptile when my first fix silently
-    // failed to apply and only the classifier moved to the new clock while the filter kept the old one.
+  it("keeps a fetch that lands between the commit and the acceptance stamp", async () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is a deliberate trade rather than a
+    // correction of an error.
     //
-    // That is why this asserts through the payload rather than reading the SQL: an edit that does not
-    // land looks exactly like an edit that does.
+    // Gating on `send_delivered_at` excluded staff who open the link in the gap between pressing Send
+    // and the worker recording the provider's acceptance. It also broke three ways: a genuine fetch
+    // arriving before the worker got round to stamping was excluded PERMANENTLY; a send the provider
+    // never accepted showed nothing at all, which the page rendered as nobody having opened it; and both
+    // are silent, because a missing row looks exactly like an absent visitor.
+    //
+    // The gap is worker latency — usually seconds — and this page no longer says WHO fetched anything.
+    // Losing real evidence to close a narrow window is the worse trade. `sent_at` still excludes the
+    // case that mattered: a link minted on an `approved` report and opened before it was ever sent.
+    // Caught by Codex.
     await seedFullySentReport({ send_delivered_at: "2026-08-13T17:30:00Z" });
     await pg.query(
       `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
@@ -695,11 +700,21 @@ describe("the record of who fetched the client's copy", () => {
     );
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions).toHaveLength(1);
+  });
 
-    // 17:10 is after the 17:00 commit and before the 17:30 acceptance. A PDF download is the strongest
-    // person signal there is, which is precisely why admitting it here would be so convincing.
-    expect(audit.reports[0]!.viewSessions).toEqual([]);
-    expect(audit.reports[0]!.viewSessions).toEqual([]);
+  it("still shows fetches on a send the provider never accepted", async () => {
+    // No acceptance stamp at all — a send that failed or is still in flight. Gating on acceptance made
+    // this report show nothing, and an empty log is the one thing this page must not over-read.
+    await seedFullySentReport({ send_delivered_at: null });
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T18:00:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions).toHaveLength(1);
   });
 
   it("admits an access once the provider has accepted it", async () => {

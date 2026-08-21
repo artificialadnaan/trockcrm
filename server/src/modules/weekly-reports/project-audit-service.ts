@@ -465,16 +465,19 @@ export async function getWeeklyReportProjectAudit(
     // stayed proportional to the flood even though only 500 rows came back. Two LATERAL reads with
     // LIMITs do bound it — each walks an index in `occurred_at` order and stops.
     //
-    // ACCEPTANCE, AND NOTHING WEAKER. `sent_at` is stamped when the PM commits and the job is queued;
-    // the worker stamps `send_delivered_at` only once the provider takes the message. Between those two
-    // the client has nothing, so a staffer opening the already-minted share URL in that gap is not
-    // client evidence.
+    // THE COMMIT, not the acceptance stamp — and this moved back after acceptance turned out to cost
+    // more than it bought.
     //
-    // NO FALLBACK TO `sent_at`, which is where I put it first. On a send that is still pending or that
-    // failed outright, falling back admits staff activity from enqueue time — and a failed send is
-    // exactly the report somebody is most likely to have opened themselves while working out what went
-    // wrong. A report the provider never accepted has NO client access to show, and showing none is the
-    // correct answer rather than a gap. Codex found the first half of this, Greptile the fallback.
+    // `sent_at` is written synchronously when the PM presses Send. `send_delivered_at` is written by the
+    // WORKER, later, and gating on it broke three ways: a fetch arriving between the provider actually
+    // accepting and the worker recording it was excluded permanently; a send the provider never accepted
+    // showed no fetches at all, which the page then rendered as nobody having opened it; and both
+    // failures are silent, because a missing row looks exactly like an absent visitor.
+    //
+    // What acceptance bought was excluding staff who check the link in the enqueue gap. That gap is
+    // worker latency — usually seconds — and this page no longer claims WHO fetched anything, so the
+    // cost of losing real evidence outweighs it. `sent_at` still excludes the case that mattered: a link
+    // minted on an `approved` report and opened before it was ever sent. All three caught by Codex.
     //
     // ENGAGEMENT FIRST AND SEPARATELY. A `pdf` or `photo` fetch is what distinguishes a person from a
     // scanner, so those get their own budget off `weekly_report_views_engagement_idx` rather than
@@ -488,13 +491,13 @@ export async function getWeeklyReportProjectAudit(
       `SELECT e.weekly_report_id, e.event_type, e.occurred_at, host(e.ip) AS ip, e.user_agent,
                 e.referrer, e.bucket
          FROM unnest($1::uuid[]) AS r(id)
-         JOIN weekly_reports wr ON wr.id = r.id AND wr.send_delivered_at IS NOT NULL
+         JOIN weekly_reports wr ON wr.id = r.id AND wr.sent_at IS NOT NULL
         CROSS JOIN LATERAL (
                 (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent, v.referrer,
                         'engagement' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
-                    AND v.occurred_at >= wr.send_delivered_at
+                    AND v.occurred_at >= wr.sent_at
                     AND v.event_type IN ('pdf', 'photo')
                   ORDER BY v.occurred_at
                   LIMIT $2)
@@ -503,7 +506,7 @@ export async function getWeeklyReportProjectAudit(
                         'page' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
-                    AND v.occurred_at >= wr.send_delivered_at
+                    AND v.occurred_at >= wr.sent_at
                     AND v.event_type NOT IN ('pdf', 'photo')
                   ORDER BY v.occurred_at
                   LIMIT $2)

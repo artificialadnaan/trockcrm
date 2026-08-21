@@ -430,10 +430,11 @@ function ViewLog({
   // PARSED, not string-compared. Both values are ISO today, but the API returns whatever the driver
   // hands back and PostgreSQL's own text form is `2026-06-01 00:00:00+00` — a space where the `T` goes,
   // which sorts BEFORE every ISO string and would silently mark every week as untracked.
-  // ACCEPTANCE, matching the query. Client evidence starts when the provider took the message, so a
-  // report queued before the log existed but accepted after it did IS tracked — comparing the enqueue
-  // would have called it untracked and printed "no tracking kept" over a log that has rows in it.
-  const sentMs = report.sendDeliveredAt ? Date.parse(report.sendDeliveredAt) : Number.NaN;
+  // The COMMIT, matching the query. It also removes a failure the acceptance stamp introduced here: a
+  // report the provider never accepted has no `sendDeliveredAt` at all, so this parsed to NaN, the
+  // horizon check fell through, and the page announced that nobody had opened a report it had no
+  // business making claims about.
+  const sentMs = report.sentAt ? Date.parse(report.sentAt) : Number.NaN;
   const sinceMs = trackingSince ? Date.parse(trackingSince) : Number.NaN;
   // "Nobody opened it" requires KNOWING the log covered that week. An unknown horizon is not a licence
   // to assert the negative — it is the reason not to. So silence reads as "not recorded" whenever the
@@ -457,10 +458,19 @@ function ViewLog({
   }
 
   if (sessions.length === 0) {
+    // ABOUT OUR RECORDS, NOT ABOUT THE CLIENT — and this sentence took four separate findings to get
+    // right, from three reviewers, because every version of it asserted something the log cannot carry.
+    //
+    // Recording is best-effort by design: `recordWeeklyReportView` swallows its own failures so a view
+    // that cannot be logged never breaks the page a client is reading. Pool saturation, a transient
+    // outage, a HEAD probe — each drops an event silently. An empty list therefore NEVER proves absence,
+    // whatever the delivery state, and "nobody has opened it" was a claim about somebody's behaviour
+    // drawn from a gap in our own bookkeeping. On the screen built to be quoted to a client, that is the
+    // one thing this page must never do.
     return (
       <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-slate-500">
         <EyeOff className="h-3.5 w-3.5 shrink-0" />
-        Nobody has opened the link yet.
+        No fetches of this link have been recorded.
       </p>
     );
   }
@@ -491,15 +501,17 @@ function ViewLog({
         <span className="font-normal text-slate-500">({open ? "hide" : "show"} detail)</span>
       </button>
 
-      {/* THE REPORT NEVER ARRIVED, so these fetches did not come from it.
-          A bounced or still-undelivered send sitting beside "12 fetches of this link" reads as the
-          client having opened it, which is the opposite of what the delivery chip says a few lines up.
-          Whoever fetched it reached the URL some other way — a forward, or one of our own people
-          checking what went wrong — and the count on its own cannot tell those apart. Saying so costs
-          one line and stops the two facts contradicting each other. Caught by Greptile. */}
+      {/* DELIVERY FAILED FOR SOMEBODY — and that is all this says now.
+          It used to say the fetches "did not come from the client's copy", which is wrong the moment a
+          report goes to several contacts: `undelivered` keeps the WORST per-recipient outcome, so one
+          bounce among three recipients sets it while the other two received and opened the report
+          perfectly well. Ruling their fetches out would have been the same overreach as claiming them.
+          The delivery failure is worth flagging beside the count; what it implies about the fetches is
+          not ours to say. Greptile found the first half, Codex the recipients. */}
       {report.undelivered && (
         <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
-          This report was not delivered, so these fetches did not come from the client's copy of it.
+          Delivery failed for at least one recipient of this report — read the fetches below against
+          that.
         </p>
       )}
 
