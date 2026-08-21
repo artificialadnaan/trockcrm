@@ -743,13 +743,15 @@ describe("who actually opened the client's copy", () => {
     // put millions of rows behind one report, and an unbounded read pulled every one into the API
     // process and grouped them there long after the traffic stopped.
     //
-    // 520 rows against a cap of 500. All from one address and agent inside one sitting, so the SESSION
-    // count stays 1 and what is actually being asserted is the truncation flag rather than a shape that
-    // would change anyway.
+    // 520 rows against a cap of 100, at three-second intervals — and the interval is load-bearing. The
+    // cap keeps the EARLIEST rows, so it also decides the span the classifier measures: at one-second
+    // steps the kept 100 span 99 seconds, fall under the reading threshold, and the verdict drops from
+    // person to unclear. A cap can change a verdict, which is worth knowing and worth a fixture that
+    // does not hide it.
     await seedFullySentReport();
     await pg.query(
       `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
-       SELECT $1::uuid, 'photo', '2026-08-13T17:05:00Z'::timestamptz + (n || ' seconds')::interval,
+       SELECT $1::uuid, 'photo', '2026-08-13T17:05:00Z'::timestamptz + (n * 3 || ' seconds')::interval,
               '10.5.5.5'::inet, 'Chrome'
          FROM generate_series(1, 520) AS n`,
       [REPORT],
@@ -792,15 +794,16 @@ describe("who actually opened the client's copy", () => {
   });
 
   it("does not warn about truncation at exactly the cap", async () => {
-    // The off-by-one. Truncation is `count > CAP`, so 500 rows must report false — a warning on a
+    // The off-by-one. Truncation is `count > CAP`, so exactly CAP rows must report false — a warning on a
     // complete log is the same class of lie as a missing one on an incomplete log, pointed the other
-    // way, and the 520-row case above cannot see the boundary. Flagged by CodeRabbit.
+    // way, and the 520-row case above cannot see the boundary. Flagged by CodeRabbit. Seeded from the
+    // constant's value rather than a literal 500, which is what went stale when the cap moved.
     await seedFullySentReport();
     await pg.query(
       `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
        SELECT $1::uuid, 'page', '2026-08-13T17:05:00Z'::timestamptz + (n || ' milliseconds')::interval,
               '10.5.5.5'::inet, 'Chrome'
-         FROM generate_series(1, 500) AS n`,
+         FROM generate_series(1, 100) AS n`,
       [REPORT],
     );
 
@@ -864,10 +867,13 @@ describe("who actually opened the client's copy", () => {
       // `sent_at` stamped, because a `sent` row without one is a state `transitionWeeklyReport` cannot
       // produce — and client-open evidence is now bounded to accesses AT OR AFTER the send, so a fixture
       // missing it would silently contribute no sessions and quietly stop testing what it names.
+      // `send_delivered_at` too: client evidence starts at PROVIDER ACCEPTANCE, so a row with only a
+      // commit stamp contributes no sessions at all and the test would stop testing what it names.
       `INSERT INTO office_dallas.weekly_reports
-         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, status, sent_at)
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, status, sent_at,
+          send_delivered_at)
        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-08-06'::date, 'sent',
-               '2026-08-06T17:00:00Z'::timestamptz)`,
+               '2026-08-06T17:00:00Z'::timestamptz, '2026-08-06T17:00:30Z'::timestamptz)`,
       [OTHER, U("77779"), PROJECT, DEAL],
     );
     await pg.query(

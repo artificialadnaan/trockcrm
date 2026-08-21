@@ -133,8 +133,14 @@ export interface WeeklyReportProjectAudit {
  *
  * Far above anything a real report produces — a client's mail security fetches a handful and their staff
  * a few more — and far below what an unauthenticated route can be made to generate.
+ *
+ * PER REPORT, AND THE PAGE HOLDS MANY. A weekly project accumulates a version a week, so a two-year job
+ * has ~150 of them and the page's real ceiling is this number times two buckets times that count. At the
+ * 500 it started as, one dialog could pull 150,000 rows into the process and walk them twice — bounded
+ * per report and unbounded per page, which is not bounded. 100 keeps the worst case around 30,000 while
+ * staying an order of magnitude above any genuine report. Flagged by CodeRabbit.
  */
-const WEEKLY_REPORT_VIEW_READ_CAP = 500;
+const WEEKLY_REPORT_VIEW_READ_CAP = 100;
 
 function toIso(value: unknown): string | null {
   if (value == null) return null;
@@ -428,12 +434,16 @@ export async function getWeeklyReportProjectAudit(
     // stayed proportional to the flood even though only 500 rows came back. Two LATERAL reads with
     // LIMITs do bound it — each walks an index in `occurred_at` order and stops.
     //
-    // DISPATCH, NOT ENQUEUE. `sent_at` is stamped when the PM commits and the job is queued; the worker
-    // does not stamp `send_delivered_at` until the provider accepts the message. Between those two the
-    // client has nothing, so a staffer testing the returned share URL in that gap was still admitted as
-    // post-send client evidence — the pre-send hole, reopened by a worker backlog. `COALESCE` falls back
-    // to `sent_at` only where acceptance never came, which is a send that failed and has no client
-    // evidence to misattribute anyway. Caught by Codex.
+    // ACCEPTANCE, AND NOTHING WEAKER. `sent_at` is stamped when the PM commits and the job is queued;
+    // the worker stamps `send_delivered_at` only once the provider takes the message. Between those two
+    // the client has nothing, so a staffer opening the already-minted share URL in that gap is not
+    // client evidence.
+    //
+    // NO FALLBACK TO `sent_at`, which is where I put it first. On a send that is still pending or that
+    // failed outright, falling back admits staff activity from enqueue time — and a failed send is
+    // exactly the report somebody is most likely to have opened themselves while working out what went
+    // wrong. A report the provider never accepted has NO client access to show, and showing none is the
+    // correct answer rather than a gap. Codex found the first half of this, Greptile the fallback.
     //
     // ENGAGEMENT FIRST AND SEPARATELY. A `pdf` or `photo` fetch is what distinguishes a person from a
     // scanner, so those get their own budget off `weekly_report_views_engagement_idx` rather than
@@ -446,13 +456,13 @@ export async function getWeeklyReportProjectAudit(
     const views = await client.query(
       `SELECT e.weekly_report_id, e.event_type, e.occurred_at, host(e.ip) AS ip, e.user_agent, e.bucket
          FROM unnest($1::uuid[]) AS r(id)
-         JOIN weekly_reports wr ON wr.id = r.id AND wr.sent_at IS NOT NULL
+         JOIN weekly_reports wr ON wr.id = r.id AND wr.send_delivered_at IS NOT NULL
         CROSS JOIN LATERAL (
                 (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent,
                         'engagement' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
-                    AND v.occurred_at >= COALESCE(wr.send_delivered_at, wr.sent_at)
+                    AND v.occurred_at >= wr.send_delivered_at
                     AND v.event_type IN ('pdf', 'photo')
                   ORDER BY v.occurred_at
                   LIMIT $2)
@@ -461,7 +471,7 @@ export async function getWeeklyReportProjectAudit(
                         'page' AS bucket
                    FROM public.weekly_report_views v
                   WHERE v.weekly_report_id = r.id
-                    AND v.occurred_at >= COALESCE(wr.send_delivered_at, wr.sent_at)
+                    AND v.occurred_at >= wr.send_delivered_at
                     AND v.event_type NOT IN ('pdf', 'photo')
                   ORDER BY v.occurred_at
                   LIMIT $2)

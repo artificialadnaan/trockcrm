@@ -332,6 +332,27 @@ describe("the open log", () => {
     expect(text).not.toContain("Nobody has opened the link yet");
   });
 
+  it("reads a PostgreSQL-formatted horizon, not just an ISO one", () => {
+    // The parse exists for THIS shape. `2026-06-01 00:00:00+00` is what the driver hands back when it
+    // does not coerce to a Date — a space where the `T` goes — and it sorts BEFORE every ISO string, so
+    // the old string comparison would have marked every week untracked. Both existing cases pass ISO,
+    // which the string comparison also handled, so neither could tell the two apart. Flagged by
+    // CodeRabbit.
+    // SAME DAY, one hour apart, and that is what makes this case able to fail at all. My first attempt
+    // put the two months apart, where a string comparison happens to agree with a parse — so it passed
+    // against the bug and proved nothing. Here the only difference at the deciding character is `T`
+    // (0x54) against a space (0x20): compared as text the send sorts AFTER the horizon and the week
+    // reads as tracked; parsed, it sorts an hour BEFORE and the week is outside the log.
+    render({
+      viewTrackingSince: "2026-08-13 18:00:00+00",
+      reports: [report({ status: "sent", sentAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("No open tracking was kept for this week");
+    expect(text).not.toContain("Nobody has opened the link yet");
+  });
+
   it("still says nobody opened a week the log DOES cover — the control", () => {
     // Without this the fix reads as "never assert the negative", which would discard the answer the
     // feature exists to give.

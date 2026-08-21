@@ -43,6 +43,12 @@ export interface WeeklyReportViewSession {
   pageViews: number;
   photoViews: number;
   pdfDownloads: number;
+  /**
+   * First and last PHOTO in the sitting. Separate from `startedAt`/`endedAt` because the span that
+   * distinguishes scrolling from a preload has to be measured across the photos themselves — see judge.
+   */
+  firstPhotoAt: string | null;
+  lastPhotoAt: string | null;
   kind: WeeklyReportViewerKind;
   /** Why it was classified that way, in words a non-engineer can repeat to a client. */
   reason: string;
@@ -152,6 +158,8 @@ export function summariseWeeklyReportViews(
         pageViews: 0,
         photoViews: 0,
         pdfDownloads: 0,
+        firstPhotoAt: null,
+        lastPhotoAt: null,
         kind: "unclear",
         reason: "",
       }),
@@ -159,7 +167,11 @@ export function summariseWeeklyReportViews(
 
     target.endedAt = event.occurredAt;
     if (event.eventType === "page") target.pageViews += 1;
-    else if (event.eventType === "photo") target.photoViews += 1;
+    else if (event.eventType === "photo") {
+      target.photoViews += 1;
+      target.firstPhotoAt ??= event.occurredAt;
+      target.lastPhotoAt = event.occurredAt;
+    }
     else target.pdfDownloads += 1;
   }
 
@@ -213,7 +225,15 @@ function judge(
   // person scrolling pulls them across a sitting. So photos spread over a session are somebody reading,
   // and photos in a burst are ambiguous — which is what they always were.
   if (session.photoViews > 0) {
-    const spanSeconds = (Date.parse(session.endedAt) - Date.parse(session.startedAt)) / 1000;
+    // ACROSS THE PHOTOS, not across the sitting. `endedAt` advances on ANY event, so one preloaded image
+    // plus a page refresh two minutes later — the refresh serving its own images from cache, so no
+    // second photo request at all — produced a two-minute "span" with one photo in it and read as
+    // somebody scrolling. The span only means anything measured between the first photo and the last.
+    // Caught by Codex.
+    const spanSeconds =
+      session.firstPhotoAt && session.lastPhotoAt
+        ? (Date.parse(session.lastPhotoAt) - Date.parse(session.firstPhotoAt)) / 1000
+        : 0;
     if (Number.isFinite(spanSeconds) && spanSeconds >= WEEKLY_REPORT_READING_SPAN_SECONDS) {
       return {
         kind: "person",

@@ -151,16 +151,48 @@ describe("a backlog larger than one batch", () => {
     // pass finds nothing to delete and says nothing at all. Flagged by CodeRabbit.
     for (let index = 0; index < 40; index += 1) await seedView(6);
 
+    // `maxBatches: 40` is what makes this test its own name. At the production 2,000 the loop cleared
+    // the backlog and exited through the ordinary empty-batch path, so the final-batch probe never ran
+    // — a guard that could not fire, inside the test written to stop exactly that. Flagged by
+    // CodeRabbit, and it is the same defect this file exists to catch elsewhere.
     const result = await runWeeklyReportViewPurge({
       query,
       logger: silent,
       retentionMonths: 3,
       batchSize: 1,
+      maxBatches: 40,
     });
 
     expect(result.deleted).toBe(40);
     expect(result.moreRemaining).toBe(false);
     expect(await remaining()).toBe(0);
+  });
+
+  it("does not invent a backlog when time ran out on the last of it", async () => {
+    // The time-budget branch had the same hole the ceiling branch did: it asserted `moreRemaining`
+    // rather than asking. The batch that spends the last of the budget may also have cleared the last
+    // row, and a warning about a backlog that is not there is one no later pass will contradict.
+    for (let index = 0; index < 3; index += 1) await seedView(6);
+
+    let clock = 0;
+    const result = await runWeeklyReportViewPurge({
+      query,
+      logger: silent,
+      retentionMonths: 3,
+      batchSize: 3,
+      timeBudgetMs: 60_000,
+      // Call 1 sets the start, call 2 is the first iteration's check and must be INSIDE the budget so
+      // a batch actually runs, call 3 is past it so the loop leaves through the time branch — with the
+      // backlog already gone.
+      now: () => {
+        clock += 1;
+        return clock <= 2 ? 0 : 90_000;
+      },
+    });
+
+    expect(result.deleted).toBe(3);
+    expect(await remaining()).toBe(0);
+    expect(result.moreRemaining).toBe(false);
   });
 
   it("stops on its time budget and says the backlog outlived the pass", async () => {

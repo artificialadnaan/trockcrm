@@ -74,6 +74,20 @@ async function viewsTableExists(
   return result.rows[0]?.reg != null;
 }
 
+/** Is anything still older than the boundary? Bounded by LIMIT 1 — it stops at the first row. */
+async function expiredRowsRemain(
+  query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, any>[] }>,
+  retentionMonths: number,
+): Promise<boolean> {
+  const leftover = await query(
+    `SELECT 1 FROM public.weekly_report_views
+      WHERE occurred_at < now() - ($1 || ' months')::interval
+      LIMIT 1`,
+    [String(retentionMonths)],
+  );
+  return leftover.rows.length > 0;
+}
+
 export async function runWeeklyReportViewPurge(
   deps: {
     query?: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, any>[]; rowCount?: number | null }>;
@@ -89,6 +103,13 @@ export async function runWeeklyReportViewPurge(
     /** Injected so a test can drive the time budget without waiting ten minutes for it. */
     timeBudgetMs?: number;
     now?: () => number;
+    /**
+     * Injected for the same reason as `batchSize`. At the production 2,000 the exact-ceiling test seeded
+     * 40 rows and exited through the ordinary empty-batch path, so the final-batch probe it was named
+     * for never ran — a guard that could not fire, in a test written to stop exactly that. Flagged by
+     * CodeRabbit.
+     */
+    maxBatches?: number;
   } = {},
 ): Promise<WeeklyReportViewPurgeResult> {
   // BOUNDED, because the worker pool sets no statement timeout. A DELETE that Postgres accepts and then
@@ -121,9 +142,15 @@ export async function runWeeklyReportViewPurge(
   let moreRemaining = false;
   const startedAt = deps.now?.() ?? Date.now();
 
-  for (let batch = 0; batch < MAX_BATCHES_PER_RUN; batch += 1) {
+  const maxBatches = deps.maxBatches ?? MAX_BATCHES_PER_RUN;
+  for (let batch = 0; batch < maxBatches; batch += 1) {
     if ((deps.now?.() ?? Date.now()) - startedAt >= (deps.timeBudgetMs ?? PURGE_TIME_BUDGET_MS)) {
-      moreRemaining = true;
+      // ASKED, not assumed — same as the ceiling below. Running out of time does not mean anything is
+      // left: the batch that spent the last of it may have cleared the backlog, and reporting a backlog
+      // that is not there is a warning no later pass will contradict, because a pass with nothing to
+      // delete says nothing at all. I fixed this for the ceiling and left the identical hole in the
+      // branch I added beside it. Flagged by CodeRabbit.
+      moreRemaining = await expiredRowsRemain(query, retentionMonths);
       break;
     }
     // The cutoff is recomputed per batch off `now()` IN THE DATABASE rather than a timestamp built here.
@@ -147,18 +174,12 @@ export async function runWeeklyReportViewPurge(
     const removed = result.rowCount ?? 0;
     deleted += removed;
     if (removed < batchSize) break;
-    if (batch === MAX_BATCHES_PER_RUN - 1) {
+    if (batch === maxBatches - 1) {
       // ASKED, not assumed. A final batch that came back full means the ceiling stopped us, not that
       // anything is necessarily left: a backlog of exactly MAX_BATCHES * batchSize is fully cleared by
       // the last pass, and reporting "more remain" about an empty backlog is a warning that never
       // clears and that nobody can act on. Bounded by LIMIT 1 — it stops at the first row.
-      const leftover = await query(
-        `SELECT 1 FROM public.weekly_report_views
-          WHERE occurred_at < now() - ($1 || ' months')::interval
-          LIMIT 1`,
-        [String(retentionMonths)],
-      );
-      moreRemaining = leftover.rows.length > 0;
+      moreRemaining = await expiredRowsRemain(query, retentionMonths);
     }
   }
 

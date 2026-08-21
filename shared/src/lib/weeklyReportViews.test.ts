@@ -56,6 +56,24 @@ describe("telling a person from their mail server", () => {
     expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(false);
   });
 
+  it("does not stretch a single photo into a reading span with a later page hit", () => {
+    // CODEX'S FINDING. The span used to be measured across the SITTING, and `endedAt` advances on any
+    // event — so one preloaded image plus a refresh two minutes later (its images served from cache, so
+    // no second photo request) produced a two-minute "span" containing exactly one photo, and the page
+    // called it somebody scrolling. One photo cannot be spread over anything.
+    const sessions = summariseWeeklyReportViews(
+      [
+        event({ occurredAt: "2026-08-13T19:41:02.000Z" }),
+        event({ occurredAt: "2026-08-13T19:41:03.000Z", eventType: "photo" }),
+        event({ occurredAt: "2026-08-13T19:44:30.000Z" }),
+      ],
+      SENT_AT,
+    );
+
+    expect(sessions[0]!.kind).toBe("unclear");
+    expect(weeklyReportWasOpenedByAPerson(sessions)).toBe(false);
+  });
+
   it("calls photos loaded across a sitting a person", () => {
     // What a preload cannot fake is TIME. Images inside the margin arrive together; somebody scrolling a
     // report pulls them over minutes. That span is the signal, and it is the only one photos can honestly
