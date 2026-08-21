@@ -15,7 +15,6 @@ import {
   Siren,
   Eye,
   EyeOff,
-  ShieldAlert,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -454,7 +453,10 @@ function ViewLog({
     );
   }
 
-  const people = sessions.filter((session) => session.kind === "person");
+  const fetches = sessions.reduce(
+    (total, session) => total + session.pageViews + session.photoViews + session.pdfDownloads,
+    0,
+  );
 
   return (
     <div className="mt-2">
@@ -463,30 +465,17 @@ function ViewLog({
         onClick={() => setOpen((prev) => !prev)}
         className="flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-700 hover:text-brand-red"
       >
-        {report.openedByAPerson ? (
-          <Eye className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
-        ) : (
-          <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-600" />
-        )}
-        {/* NOT "at the client", which the log cannot support. The share URL stays available to staff in
-            the send dialog after dispatch, so a PM opening their own link produces a session with
-            nothing in it that distinguishes an employee from the recipient — the token is anonymous by
-            design. "A person" is what the evidence carries; who that person was is a question the
-            addresses and agents below let a reader answer for themselves. Caught by Codex.
-
-            THREE STATES, because the classifier has three and collapsing them overstates the evidence.
-            `unclear` is a real browser that arrived late and did nothing else — no photos, no PDF — and
-            calling that "only automated scanners" is a stronger claim than anything recorded supports.
-            It matters more here than the wording usually would: the reader of this line may be about to
-            repeat it to the client, and this whole feature exists to make what we say provable. Saying
-            "we cannot tell" is the honest answer and still useful; saying "robots only" when a person
-            may well have read it is how you lose the argument you built the log to win. Caught by
-            Greptile. `every` is safe — the zero-session case returned above. */}
-        {report.openedByAPerson
-          ? `Opened by a person — ${people.length === 1 ? "one sitting" : `${people.length} separate sittings`}`
-          : sessions.every((session) => session.kind === "scanner")
-            ? "Only automated scanners have fetched this"
-            : "A browser opened the link — we cannot tell whether it was a person"}
+        <Eye className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+        {/* A COUNT, NOT A VERDICT.
+            This line used to say whether a person had read the report. It no longer does, and the
+            deletion is the point rather than a simplification: every rule that separated a reader from
+            a link scanner had a counterexample, review found them one after another, and a wrong guess
+            here is quoted to a client. See shared/lib/weeklyReportViews.
+            What is left is countable and cannot be refuted — this many fetches, in this many sittings,
+            with the address, device and timing of each one underneath. The reader decides. */}
+        {sessions.length === 1
+          ? `${fetches} ${fetches === 1 ? "fetch" : "fetches"} of this link, in one sitting`
+          : `${fetches} fetches of this link, across ${sessions.length} sittings`}
         <span className="font-normal text-slate-500">({open ? "hide" : "show"} detail)</span>
       </button>
 
@@ -511,41 +500,32 @@ function ViewLog({
   );
 }
 
-const VIEW_KIND_LABEL: Record<WeeklyReportViewSession["kind"], string> = {
-  person: "A person",
-  scanner: "Email scanner",
-  unclear: "Unclear",
-};
 
 function ViewSessionRow({ session }: { session: WeeklyReportViewSession }) {
   const fetched = [
+    session.pageViews > 0 ? `opened the page${session.pageViews > 1 ? ` ${session.pageViews}×` : ""}` : null,
+    session.photoViews > 0 ? `${session.photoViews} photo${session.photoViews === 1 ? "" : "s"}` : null,
     session.pdfDownloads > 0 ? "downloaded the PDF" : null,
-    session.photoViews > 0 ? `viewed ${session.photoViews} photo${session.photoViews === 1 ? "" : "s"}` : null,
   ].filter(Boolean);
+
+  const spanMinutes = Math.round(
+    (Date.parse(session.endedAt) - Date.parse(session.startedAt)) / 60_000,
+  );
 
   return (
     <li className="text-[11.5px]">
+      {/* FACTS ONLY, in the order somebody reads them out: when, for how long, what they took. There
+          was a label here — "A person", "Email scanner" — and it is gone on purpose; see the headline
+          above and shared/lib/weeklyReportViews. */}
       <p className="text-slate-800">
-        <span
-          className={
-            session.kind === "person"
-              ? "font-semibold text-emerald-700"
-              : session.kind === "scanner"
-                ? "font-semibold text-slate-500"
-                : "font-semibold text-amber-700"
-          }
-        >
-          {VIEW_KIND_LABEL[session.kind]}
-        </span>
-        <span className="text-slate-500"> · {fmtStamp(session.startedAt)}</span>
+        <span className="font-semibold">{fmtStamp(session.startedAt)}</span>
+        {spanMinutes >= 1 && <span className="text-slate-500"> · over {spanMinutes} min</span>}
         {fetched.length > 0 && <span className="text-slate-600"> · {fetched.join(", ")}</span>}
       </p>
-      {/* The raw facts, so a reader can judge the label rather than only trust it. */}
       <p className="text-slate-500">
         {session.ip ?? "address not recorded"}
-        {session.userAgent ? ` · ${session.userAgent.slice(0, 90)}` : ""}
+        {session.userAgent ? ` · ${session.userAgent.slice(0, 90)}` : " · no browser reported"}
       </p>
-      <p className="text-slate-400">{session.reason}</p>
     </li>
   );
 }

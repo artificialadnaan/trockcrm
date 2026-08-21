@@ -553,7 +553,7 @@ describe("the per-project audit trail", () => {
   });
 });
 
-describe("who actually opened the client's copy", () => {
+describe("the record of who fetched the client's copy", () => {
   /** Record a fetch of the share link, as the public routes do. */
   async function seedView(opts: {
     at: string;
@@ -592,8 +592,10 @@ describe("who actually opened the client's copy", () => {
     const report = audit.reports[0]!;
 
     expect(report.viewSessions).toHaveLength(1);
-    expect(report.viewSessions[0]!.kind).toBe("scanner");
-    expect(report.openedByAPerson).toBe(false);
+    // The scanner's fetch is RECORDED, with the agent that identifies it — the page no longer decides
+    // what it was, and that agent string is what lets a reader decide for themselves.
+    expect(report.viewSessions).toHaveLength(1);
+    expect(report.viewSessions[0]!.userAgent).toContain("Proofpoint");
   });
 
   it("records a real reader, with the address and browser to show for it", async () => {
@@ -605,10 +607,11 @@ describe("who actually opened the client's copy", () => {
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
     const report = audit.reports[0]!;
 
-    expect(report.openedByAPerson).toBe(true);
+    // THE FACTS, and no verdict. What a reader needs from this row is what was fetched, from where, and
+    // on what — page, photo and PDF, one address, one browser, eight minutes apart. Whether that adds up
+    // to a person is their judgement to make, and the row gives them everything it takes to make it.
     expect(report.viewSessions).toHaveLength(1);
     expect(report.viewSessions[0]!).toMatchObject({
-      kind: "person",
       pageViews: 1,
       photoViews: 1,
       pdfDownloads: 1,
@@ -616,6 +619,8 @@ describe("who actually opened the client's copy", () => {
       // knows what one is.
       ip: "73.162.44.219",
     });
+    expect(report.viewSessions[0]!.startedAt).toBe("2026-08-13T22:41:02.000Z");
+    expect(report.viewSessions[0]!.endedAt).toBe("2026-08-13T22:49:20.000Z");
   });
 
   it("classifies against THIS report's send time, not another's", async () => {
@@ -631,7 +636,7 @@ describe("who actually opened the client's copy", () => {
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
 
-    expect(audit.reports[0]!.viewSessions[0]!.kind).toBe("person");
+    expect(audit.reports[0]!.viewSessions[0]!.pdfDownloads).toBe(1);
   });
 
   it("reports an unopened report as unopened rather than as unknown", async () => {
@@ -642,7 +647,7 @@ describe("who actually opened the client's copy", () => {
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
 
     expect(audit.reports[0]!.viewSessions).toEqual([]);
-    expect(audit.reports[0]!.openedByAPerson).toBe(false);
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
   });
 
   /**
@@ -670,7 +675,7 @@ describe("who actually opened the client's copy", () => {
     // The send is stamped 17:00; both accesses above are half an hour EARLIER. Downloading the PDF is
     // the strongest person signal there is, which is exactly why leaving them in would be so convincing.
     expect(audit.reports[0]!.viewSessions).toEqual([]);
-    expect(audit.reports[0]!.openedByAPerson).toBe(false);
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
   });
 
   it("does not admit a staff check made between the commit and the provider accepting it", async () => {
@@ -694,7 +699,7 @@ describe("who actually opened the client's copy", () => {
     // 17:10 is after the 17:00 commit and before the 17:30 acceptance. A PDF download is the strongest
     // person signal there is, which is precisely why admitting it here would be so convincing.
     expect(audit.reports[0]!.viewSessions).toEqual([]);
-    expect(audit.reports[0]!.openedByAPerson).toBe(false);
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
   });
 
   it("admits an access once the provider has accepted it", async () => {
@@ -706,7 +711,7 @@ describe("who actually opened the client's copy", () => {
     );
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
-    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
   });
 
   it("still counts an access after the send — the control", async () => {
@@ -718,7 +723,7 @@ describe("who actually opened the client's copy", () => {
     );
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
-    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
   });
 
   it("keeps an access that lands on the send instant exactly", async () => {
@@ -762,16 +767,15 @@ describe("who actually opened the client's copy", () => {
     // Announced, not swallowed. A cap nobody is told about reads as a complete record, and somebody
     // counting opens off this page in a dispute would be counting a prefix without knowing it.
     expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
-    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
   });
 
   it("keeps the one real reader buried under a flood of scanner traffic", async () => {
     // THE CASE THE CAP ITSELF BROKE, and the reason its ordering is not arbitrary.
     //
     // 600 page requests from a scanner, and then — later, past any earliest-N window — one person who
-    // downloads the PDF. Taking simply "the earliest 500" drops that download, `openedByAPerson` goes
-    // false, and the page says "only automated scanners have fetched this" about a report somebody
-    // demonstrably read. The cap would have thrown away the single most valuable row in the log.
+    // downloads the PDF. Taking simply "the earliest 500" drops that download entirely, so the record
+    // loses the single most valuable row in it — the one action nothing automated performs by accident.
     await seedFullySentReport();
     await pg.query(
       `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
@@ -789,7 +793,7 @@ describe("who actually opened the client's copy", () => {
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
 
-    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
     expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
   });
 
@@ -833,7 +837,7 @@ describe("who actually opened the client's copy", () => {
 
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
 
-    expect(audit.reports[0]!.openedByAPerson).toBe(true);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
     expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
   });
 
@@ -887,6 +891,6 @@ describe("who actually opened the client's copy", () => {
     const week06 = audit.reports.find((r) => r.weekOf === "2026-08-06")!;
 
     expect(week13.viewSessions).toEqual([]);
-    expect(week06.openedByAPerson).toBe(true);
+    expect(week06.viewSessions).toHaveLength(1);
   });
 });

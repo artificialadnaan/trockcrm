@@ -2,7 +2,6 @@ import { weeklyReportDeliveryFailed } from "@trock-crm/shared/lib/weeklyReportDe
 import {
   WEEKLY_REPORT_VIEW_RETENTION_MONTHS,
   summariseWeeklyReportViews,
-  weeklyReportWasOpenedByAPerson,
   type WeeklyReportViewEvent,
   type WeeklyReportViewSession,
 } from "@trock-crm/shared/lib/weeklyReportViews";
@@ -63,14 +62,13 @@ export interface WeeklyReportAuditReport {
    */
   sentAt: string | null;
   /**
-   * Every access to this report's share link, grouped into sittings and judged.
+   * Every access to this report's share link, grouped into sittings — as OBSERVATIONS, not a verdict.
    *
-   * The judgement matters more than the count: a client's mail security fetches the link within seconds
-   * of delivery, so a raw open count is mostly robots. See shared/lib/weeklyReportViews.
+   * There used to be a `person | scanner | unclear` judgement here and it was removed: every rule that
+   * separated a reader from a link scanner had a counterexample, and a wrong guess on this page gets
+   * quoted to a client. See shared/lib/weeklyReportViews for the full account.
    */
   viewSessions: WeeklyReportViewSession[];
-  /** Did anybody demonstrably READ it — loaded the photos, or pulled the PDF. */
-  openedByAPerson: boolean;
   /**
    * True when this report had more accesses than the page loads, so the sessions shown are the earliest
    * rather than all of them. Surfaced rather than swallowed: a truncated log that does not say so reads
@@ -580,15 +578,8 @@ export async function getWeeklyReportProjectAudit(
         ...(() => {
           // Classified against THIS report's own send time — the "arrived seconds after the email"
           // signal is meaningless measured against any other report's.
-          const sessions = summariseWeeklyReportViews(
-            viewsByReport.get(row.id) ?? [],
-            // The same instant the filter uses. Measuring the 90-second scanner window from the enqueue
-            // while filtering from acceptance would put the two rules on different clocks.
-            toIso(row.send_delivered_at ?? row.sent_at),
-          );
           return {
-            viewSessions: sessions,
-            openedByAPerson: weeklyReportWasOpenedByAPerson(sessions),
+            viewSessions: summariseWeeklyReportViews(viewsByReport.get(row.id) ?? []),
             viewSessionsTruncated: truncatedReports.has(row.id),
           };
         })(),

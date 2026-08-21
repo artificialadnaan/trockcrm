@@ -51,7 +51,6 @@ function report(overrides: Record<string, unknown> = {}) {
     outstanding: false,
     sentAt: "2026-08-13T17:00:00.000Z",
     viewSessions: [],
-    openedByAPerson: false,
     viewSessionsTruncated: false,
     events: [],
     ...overrides,
@@ -232,88 +231,71 @@ describe("the open log", () => {
       pageViews: 1,
       photoViews: 3,
       pdfDownloads: 1,
-      kind: "person" as const,
-      reason: "Downloaded the PDF, which link scanners do not do",
       ...over,
     };
   }
 
-  it("says plainly when only scanners have fetched it", () => {
-    // The distinction the whole feature exists for. "Opened" on a report only a robot touched is the
-    // claim that would collapse in front of a client's IT department.
-    render({
-      reports: [
-        report({ status: "sent", openedByAPerson: false, viewSessions: [session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "The browser it reported is an email security scanner" })] }),
-      ],
-    });
+  /**
+   * WHAT THIS PAGE IS ALLOWED TO SAY.
+   *
+   * It used to say whether a person had read the report. It no longer does — every rule separating a
+   * reader from a link scanner had a counterexample, and a wrong guess here gets quoted to a client.
+   * These tests pin the retreat: a count, the raw facts, and no verdict anywhere.
+   */
+  it("counts fetches and sittings rather than judging who they were", () => {
+    render({ reports: [report({ status: "sent", viewSessions: [session()] })] });
 
-    expect(document.body.textContent).toContain("Only automated scanners have fetched this");
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("5 fetches of this link, in one sitting");
+    expect(text).not.toMatch(/A person|Email scanner|Unclear|automated scanners/);
   });
 
-  it("does not call an unclear visit a scanner", () => {
-    // GREPTILE'S FINDING. The classifier has THREE verdicts and this line had two, so `unclear` — a real
-    // browser that arrived late and did nothing else — was reported as "only automated scanners".
-    //
-    // The reader of this line may be about to repeat it to the client, which is the entire reason the
-    // log exists. "We cannot tell" is honest and still useful. "Robots only", said about a report a
-    // person may well have read, is how you lose the argument the log was built to win.
+  it("counts across sittings without calling them people", () => {
+    // Two sittings from one address and agent is one person coming back after lunch, as often as not.
     render({
       reports: [
         report({
           status: "sent",
-          openedByAPerson: false,
-          viewSessions: [
-            session({
-              kind: "unclear",
-              photoViews: 0,
-              pdfDownloads: 0,
-              reason: "An ordinary browser, but it opened nothing beyond the page",
-            }),
-          ],
+          viewSessions: [session(), session({ startedAt: "2026-08-14T09:00:00.000Z" })],
         }),
       ],
     });
 
     const text = document.body.textContent ?? "";
-    expect(text).toContain("cannot tell whether it was a person");
-    expect(text).not.toContain("Only automated scanners");
+    expect(text).toContain("across 2 sittings");
+    expect(text).not.toContain("2 people");
   });
 
-  it("still says scanners-only when every session really is one", () => {
-    // The control for the case above: widening the wording must not blur the verdict that IS supported.
-    // A mixed set is unclear; an all-scanner set is not, and reporting it as unclear would be its own
-    // understatement.
-    render({
-      reports: [
-        report({
-          status: "sent",
-          openedByAPerson: false,
-          viewSessions: [
-            session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "Known security scanner" }),
-            session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "Known security scanner" }),
-          ],
-        }),
-      ],
+  it("shows the address, the device and what was fetched", () => {
+    // The whole substance of the retreat: the reader gets everything they need to judge for themselves,
+    // which is what a dispute turns on.
+    render({ reports: [report({ status: "sent", viewSessions: [session()] })] });
+    act(() => {
+      (Array.from(document.querySelectorAll("button")).find((element) =>
+        element.textContent?.includes("fetches of this link"),
+      ) as HTMLButtonElement).click();
     });
 
-    expect(document.body.textContent).toContain("Only automated scanners have fetched this");
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("73.162.44.219");
+    expect(text).toContain("Chrome/141.0");
+    expect(text).toContain("downloaded the PDF");
+    expect(text).toContain("3 photos");
   });
 
-  it("treats a scanner mixed with an unclear visit as unclear, not as scanners-only", () => {
+  it("says when the address was never recorded rather than leaving a blank", () => {
     render({
-      reports: [
-        report({
-          status: "sent",
-          openedByAPerson: false,
-          viewSessions: [
-            session({ kind: "scanner", photoViews: 0, pdfDownloads: 0, reason: "Known security scanner" }),
-            session({ kind: "unclear", photoViews: 0, pdfDownloads: 0, reason: "Ordinary browser, nothing else" }),
-          ],
-        }),
-      ],
+      reports: [report({ status: "sent", viewSessions: [session({ ip: null, userAgent: null })] })],
+    });
+    act(() => {
+      (Array.from(document.querySelectorAll("button")).find((element) =>
+        element.textContent?.includes("fetches of this link"),
+      ) as HTMLButtonElement).click();
     });
 
-    expect(document.body.textContent).toContain("cannot tell whether it was a person");
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("address not recorded");
+    expect(text).toContain("no browser reported");
   });
 
   it("does not claim nobody opened a week the log never covered", () => {
@@ -364,38 +346,6 @@ describe("the open log", () => {
     expect(document.body.textContent).toContain("Nobody has opened the link yet");
   });
 
-  it("counts sittings, not identified people", () => {
-    // The classifier groups by IP, user agent and a 30-minute gap. It does not know who anybody is, so
-    // one person returning after lunch is two sessions — and "2 people opened this" is a claim about
-    // human beings that nothing in the log supports.
-    render({
-      reports: [
-        report({
-          status: "sent",
-          openedByAPerson: true,
-          viewSessions: [session(), session({ startedAt: "2026-08-14T09:00:00.000Z" })],
-        }),
-      ],
-    });
-
-    const text = document.body.textContent ?? "";
-    expect(text).toContain("2 separate sittings");
-    expect(text).not.toContain("2 people");
-    expect(text).not.toContain("at the client");
-  });
-
-  it("says so when a person opened it", () => {
-    // Narrowed TWICE, and each time because the wording claimed more than the log holds. It said
-    // "Opened by someone at the client" — but the token is anonymous and the send dialog keeps the URL
-    // available to staff after dispatch, so a PM opening their own link is indistinguishable from the
-    // recipient. And sittings are not people: the classifier groups by address, agent and a 30-minute
-    // gap, so one person returning after lunch is two sessions.
-    render({ reports: [report({ status: "sent", openedByAPerson: true, viewSessions: [session()] })] });
-    const text = document.body.textContent ?? "";
-    expect(text).toContain("Opened by a person — one sitting");
-    expect(text).not.toContain("at the client");
-  });
-
   it("distinguishes never-opened from never-sent", () => {
     // A report still with the PM has nothing to have been opened; saying "nobody has opened it" about
     // one would read as a failure rather than as a stage it has not reached.
@@ -411,4 +361,5 @@ describe("the open log", () => {
     render({ reports: [report({ status: "pending_review", viewSessions: [] })] });
     expect(document.body.textContent).not.toContain("Nobody has opened the link yet");
   });
+
 });

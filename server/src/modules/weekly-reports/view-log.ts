@@ -54,6 +54,30 @@ export function clientIpForLog(req: Request): string | null {
   return candidate && isIP(candidate) ? candidate : null;
 }
 
+/**
+ * The referrer, with any share token taken out of it.
+ *
+ * A browser sends the page it was on as `Referer` when it fetches an image or follows a link, and the
+ * page the client is on IS the share URL — so `/wr/<token>` arrived on every photo and PDF request and
+ * was stored verbatim. The access log then held LIVE CREDENTIALS: a working link to somebody's report,
+ * in plaintext, readable by anyone with the audit page or the database, kept for twenty-four months.
+ * A log built to be evidence in a dispute is exactly the wrong place to keep working keys.
+ *
+ * Redacted rather than dropped, because the referrer still earns its place — "opened from the email"
+ * against "opened from a link pasted into a chat" is occasionally the whole answer, and that
+ * distinction survives without the secret. Caught by Codex.
+ */
+export function redactShareToken(value: unknown): string | null {
+  const referrer = bounded(value, 1_000);
+  if (!referrer) return null;
+  // Every token-bearing path is `/wr/<token>` with at most `/pdf` or `/photos/<id>` after it. Replacing
+  // the segment rather than the whole value keeps the origin and the shape legible.
+  return referrer.replace(/(\/wr\/)[^/?#]+/gi, "$1[redacted]");
+}
+
+/** Exported under a distinct name so the test exercises the real function, not a copy of the regex. */
+export const redactShareTokenForTest = redactShareToken;
+
 /** Bounded before it reaches the column — a user agent is attacker-controlled and unbounded. */
 function bounded(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
@@ -106,7 +130,7 @@ export async function recordWeeklyReportView(
         // will sort it out", because the cast failing takes the whole event with it.
         ip,
         bounded(req.headers["user-agent"], 1_000),
-        bounded(req.headers.referer, 1_000),
+        redactShareToken(req.headers.referer),
       ],
     );
   } catch (error) {

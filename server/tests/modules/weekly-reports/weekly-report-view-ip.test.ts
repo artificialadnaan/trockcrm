@@ -7,7 +7,11 @@
 
 import { describe, expect, it } from "vitest";
 import type { Request } from "express";
-import { clientIpForLog, recordWeeklyReportView } from "../../../src/modules/weekly-reports/view-log.js";
+import {
+  clientIpForLog,
+  recordWeeklyReportView,
+  redactShareTokenForTest,
+} from "../../../src/modules/weekly-reports/view-log.js";
 
 function req(forwardedFor: string | undefined, remote = "10.0.0.1"): Request {
   return {
@@ -82,5 +86,39 @@ describe("a HEAD probe is not somebody reading the report", () => {
 
     // A swallowed failure logs a warning. Silence means the insert was never attempted.
     expect(attempted).toEqual([]);
+  });
+});
+
+describe("the referrer must not carry a working share link", () => {
+  // A browser sends the page it was on as `Referer`, and the page the client is on IS the share URL — so
+  // `/wr/<token>` arrived on every photo and PDF fetch and was stored verbatim. The access log then held
+  // LIVE CREDENTIALS in plaintext for twenty-four months, readable by anyone with the audit page. A log
+  // built to be evidence in a dispute is the worst possible place to keep working keys.
+  it("strips the token from a report page referrer", () => {
+    expect(redactShareTokenForTest("https://trockcrm.com/wr/1DyNxVfizUSw0Og_u7hZRftYTB7mcrsS")).toBe(
+      "https://trockcrm.com/wr/[redacted]",
+    );
+  });
+
+  it("strips it from a nested asset referrer too", () => {
+    expect(
+      redactShareTokenForTest("https://trockcrm.com/wr/1DyNxVfizUSw0Og_u7hZRftYTB7mcrsS/photos/abc"),
+    ).toBe("https://trockcrm.com/wr/[redacted]/photos/abc");
+  });
+
+  it("strips it before a query string rather than leaving it in", () => {
+    expect(redactShareTokenForTest("https://trockcrm.com/wr/SECRETTOKEN?x=1")).toBe(
+      "https://trockcrm.com/wr/[redacted]?x=1",
+    );
+  });
+
+  it("keeps a referrer that carries no token, because it still tells you something", () => {
+    // "Opened from the email" against "opened from a link pasted into a chat" is occasionally the whole
+    // answer, and that survives redaction. Dropping the field entirely would have thrown it away.
+    expect(redactShareTokenForTest("https://mail.google.com/")).toBe("https://mail.google.com/");
+  });
+
+  it("returns null for no referrer at all", () => {
+    expect(redactShareTokenForTest(undefined)).toBeNull();
   });
 });

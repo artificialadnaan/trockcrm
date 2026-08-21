@@ -447,10 +447,11 @@ export interface WeeklyReportAuditReport {
   outstanding: boolean;
   /** When this version was committed to the client — compared against the log's retention boundary. */
   sentAt: string | null;
-  /** Every access to the share link, grouped into sittings, newest first. */
+  /**
+   * Every access to the share link, grouped into sittings, newest first — observations, not a verdict.
+   * There was an `openedByAPerson` beside this and it was removed; see shared/lib/weeklyReportViews.
+   */
   viewSessions: WeeklyReportViewSession[];
-  /** Did anybody demonstrably READ it — loaded the photos, or pulled the PDF. */
-  openedByAPerson: boolean;
   /** More accesses exist than the page loads; the sessions shown are the earliest after the send. */
   viewSessionsTruncated: boolean;
   events: WeeklyReportAuditEvent[];
