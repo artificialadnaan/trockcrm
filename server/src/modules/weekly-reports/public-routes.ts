@@ -15,6 +15,7 @@ import {
 } from "../../lib/r2-client.js";
 import { WEEKLY_REPORT_SUPERSEDED_NOTICE } from "./pdf.js";
 import { withWeeklyReportOfficeClient } from "./office-connection.js";
+import { recordWeeklyReportView } from "./view-log.js";
 import {
   loadWeeklyReportPdfSource,
   resolveArtifactKey,
@@ -285,6 +286,17 @@ weeklyReportPublicRoutes.get("/:token", async (req, res) => {
         supersededNotice: source.view.pdf.superseded ? WEEKLY_REPORT_SUPERSEDED_NOTICE : null,
       }),
     );
+
+    // After the response, never awaited into it. See recordWeeklyReportView: this is the row that
+    // answers "did anybody at the client ever open it", and it must not be able to delay or break the
+    // page that produces it.
+    void recordWeeklyReportView(req, {
+      weeklyReportId: token.weeklyReportId,
+      tokenId: token.id,
+      tenantId: token.tenantId,
+      officeSlug: token.officeSlug,
+      eventType: "page",
+    });
   } catch (error) {
     console.error("[weekly-report-viewer] failed to render the report page", error);
     // The friendly page, not a 500 body. Whatever broke on our side, the reader is a client holding a link.
@@ -329,6 +341,17 @@ weeklyReportPublicRoutes.get("/:token/pdf", async (req, res) => {
     // pipeline rather than a hand-rolled write/drain loop: it propagates a source error and destroys both
     // ends, where an awaited "drain" that never arrives would hang the request until the socket timed out.
     await pipeline(Readable.from(object.stream), res, { signal: deadline });
+
+    // Logged only once the stream COMPLETED. A download that died halfway is not evidence anybody read
+    // the report, and this is the strongest human signal the log carries — scanners fetch the page and
+    // leave; they do not pull the attachment.
+    void recordWeeklyReportView(req, {
+      weeklyReportId: token.weeklyReportId,
+      tokenId: token.id,
+      tenantId: token.tenantId,
+      officeSlug: token.officeSlug,
+      eventType: "pdf",
+    });
   } catch (error) {
     if (res.headersSent) {
       // Bytes are already on the wire, so the status cannot change — abort rather than append an HTML page
@@ -451,6 +474,18 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
       // long a revoked link keeps working — that bound belongs to the token, not to the bytes.
       res.setHeader("Cache-Control", "private, max-age=300");
       res.end(cached.buffer);
+
+    // The CORROBORATING signal, and the reason photos are logged at all. A scanner fetches the page URL
+    // and leaves; somebody scrolling a report pulls the images. It is what upgrades an ambiguous "a
+    // browser opened the page" into a session the classifier can call a person — see
+    // shared/lib/weeklyReportViews.
+    void recordWeeklyReportView(req, {
+      weeklyReportId: token.weeklyReportId,
+      tokenId: token.id,
+      tenantId: token.tenantId,
+      officeSlug: token.officeSlug,
+      eventType: "photo",
+    });
       return;
     }
 
@@ -518,6 +553,18 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
     // must stop serving within minutes rather than days.
     res.setHeader("Cache-Control", "private, max-age=300");
     res.end(jpeg);
+
+    // The CORROBORATING signal, and the reason photos are logged at all. A scanner fetches the page URL
+    // and leaves; somebody scrolling a report pulls the images. It is what upgrades an ambiguous "a
+    // browser opened the page" into a session the classifier can call a person — see
+    // shared/lib/weeklyReportViews.
+    void recordWeeklyReportView(req, {
+      weeklyReportId: token.weeklyReportId,
+      tokenId: token.id,
+      tenantId: token.tenantId,
+      officeSlug: token.officeSlug,
+      eventType: "photo",
+    });
 
     // Stored AFTER `res.end`, which is what actually keeps the reader out of it: the response has already
     // gone, so this PUT cannot delay them however slow the bucket is. `void` and `.catch` are belt to that

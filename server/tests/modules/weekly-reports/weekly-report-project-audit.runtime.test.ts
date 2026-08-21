@@ -50,6 +50,7 @@ beforeAll(async () => {
   // than on its subject.
   await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
   await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
+  await pg.exec(migrationSql("0231_weekly_report_views"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -76,6 +77,7 @@ beforeEach(async () => {
     DELETE FROM office_dallas.weekly_report_pauses;
     DELETE FROM office_dallas.weekly_reports;
     DELETE FROM office_dallas.weekly_report_projects;
+    DELETE FROM public.weekly_report_views;
   `);
   await pg.query(
     `INSERT INTO office_dallas.weekly_report_projects
@@ -548,5 +550,377 @@ describe("the per-project audit trail", () => {
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
     expect(audit.reports[0]!.recipients).toBeNull();
     expect(typesOf(audit.reports[0]!.events)).toContain("sent");
+  });
+});
+
+describe("the record of who fetched the client's copy", () => {
+  /** Record a fetch of the share link, as the public routes do. */
+  async function seedView(opts: {
+    at: string;
+    eventType?: "page" | "pdf" | "photo";
+    ip?: string;
+    userAgent?: string;
+  }) {
+    await pg.query(
+      `INSERT INTO public.weekly_report_views
+         (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, $2, $3::timestamptz, $4::inet, $5)`,
+      [
+        REPORT,
+        opts.eventType ?? "page",
+        opts.at,
+        opts.ip ?? "73.162.44.219",
+        opts.userAgent ?? "Mozilla/5.0 (Macintosh) Chrome/141.0 Safari/537.36",
+      ],
+    );
+  }
+
+  it("does not count the client's mail scanner as the client opening it", async () => {
+    // THE WHOLE REASON THIS IS CLASSIFIED. Proofpoint and its peers fetch every link within seconds of
+    // delivery, so a raw open count says "opened!" on a report nobody read. Asserting that to a client
+    // and being shown it was a datacentre discredits the rest of this page.
+    // Committed 17:00:00, ACCEPTED by the provider 17:00:30 — client evidence starts at acceptance, and
+    // a scanner fetches within seconds of THAT, not of the commit.
+    await seedFullySentReport();
+    await seedView({
+      at: "2026-08-13T17:00:34.000Z",
+      ip: "67.231.156.9",
+      userAgent: "Mozilla/5.0 (compatible; ProofpointURLDefense/1.0)",
+    });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const report = audit.reports[0]!;
+
+    expect(report.viewSessions).toHaveLength(1);
+    // The scanner's fetch is RECORDED, with the agent that identifies it — the page no longer decides
+    // what it was, and that agent string is what lets a reader decide for themselves.
+    expect(report.viewSessions).toHaveLength(1);
+    expect(report.viewSessions[0]!.userAgent).toContain("Proofpoint");
+  });
+
+  it("records a real reader, with the address and browser to show for it", async () => {
+    await seedFullySentReport();
+    await seedView({ at: "2026-08-13T22:41:02.000Z" });
+    await seedView({ at: "2026-08-13T22:41:05.000Z", eventType: "photo" });
+    await seedView({ at: "2026-08-13T22:49:20.000Z", eventType: "pdf" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const report = audit.reports[0]!;
+
+    // THE FACTS, and no verdict. What a reader needs from this row is what was fetched, from where, and
+    // on what — page, photo and PDF, one address, one browser, eight minutes apart. Whether that adds up
+    // to a person is their judgement to make, and the row gives them everything it takes to make it.
+    expect(report.viewSessions).toHaveLength(1);
+    expect(report.viewSessions[0]!).toMatchObject({
+      pageViews: 1,
+      photoViews: 1,
+      pdfDownloads: 1,
+      // Bare, not CIDR: `inet` renders 73.162.44.219/32 and that reads as a subnet to anybody who
+      // knows what one is.
+      ip: "73.162.44.219",
+    });
+    expect(report.viewSessions[0]!.startedAt).toBe("2026-08-13T22:41:02.000Z");
+    expect(report.viewSessions[0]!.endedAt).toBe("2026-08-13T22:49:20.000Z");
+  });
+
+  it("classifies against THIS report's send time, not another's", async () => {
+    // The "arrived seconds after the email" signal is meaningless measured against a different report's
+    // send. A shared timestamp would label a genuine reader of one week a scanner because their visit
+    // happened to land near another week's send.
+    await seedFullySentReport();
+    // 5h41m after THIS report's 17:00 send — plainly a person's hour, not a scanner's.
+    await seedView({ at: "2026-08-13T22:41:02.000Z" });
+    // A PDF download rather than a photo burst: images inside the browser's lazy-load margin arrive
+    // without anybody scrolling, so photos alone no longer carry "person" — the download does.
+    await seedView({ at: "2026-08-13T22:41:06.000Z", eventType: "pdf" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.viewSessions[0]!.pdfDownloads).toBe(1);
+  });
+
+  it("reports an unopened report as unopened rather than as unknown", async () => {
+    // The answer to "we never got it" when nothing ever fetched the link. An empty list and a missing
+    // one must not look the same to whoever is reading this in a dispute.
+    await seedFullySentReport();
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
+  });
+
+  /**
+   * THE ONE THAT MANUFACTURES EVIDENCE.
+   *
+   * A link can be minted on an `approved` report — `isWeeklyReportShareableStatus` allows exactly that —
+   * so checking a report before it goes out means opening the client's own URL. Those fetches are
+   * logged, and a PM who scrolled the photos while checking is, to the classifier, indistinguishable
+   * from a reader at the client: engagement is the signal, and the PM engaged.
+   *
+   * Counted, this page reports "opened at the client" about a report the client had not been sent. That
+   * is the CRM inventing the evidence it exists to provide, and it would be said to a client's face.
+   */
+  it("does not count a staff check of the link before the send as a client open", async () => {
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T16:30:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome'),
+              ($1::uuid, 'pdf',  '2026-08-13T16:31:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    // The send is stamped 17:00; both accesses above are half an hour EARLIER. Downloading the PDF is
+    // the strongest person signal there is, which is exactly why leaving them in would be so convincing.
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
+    expect(audit.reports[0]!.viewSessions).toEqual([]);
+  });
+
+  it("keeps a fetch that lands between the commit and the acceptance stamp", async () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is a deliberate trade rather than a
+    // correction of an error.
+    //
+    // Gating on `send_delivered_at` excluded staff who open the link in the gap between pressing Send
+    // and the worker recording the provider's acceptance. It also broke three ways: a genuine fetch
+    // arriving before the worker got round to stamping was excluded PERMANENTLY; a send the provider
+    // never accepted showed nothing at all, which the page rendered as nobody having opened it; and both
+    // are silent, because a missing row looks exactly like an absent visitor.
+    //
+    // The gap is worker latency — usually seconds — and this page no longer says WHO fetched anything.
+    // Losing real evidence to close a narrow window is the worse trade. `sent_at` still excludes the
+    // case that mattered: a link minted on an `approved` report and opened before it was ever sent.
+    // Caught by Codex.
+    await seedFullySentReport({ send_delivered_at: "2026-08-13T17:30:00Z" });
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-13T17:10:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions).toHaveLength(1);
+  });
+
+  it("still shows fetches on a send the provider never accepted", async () => {
+    // No acceptance stamp at all — a send that failed or is still in flight. Gating on acceptance made
+    // this report show nothing, and an empty log is the one thing this page must not over-read.
+    await seedFullySentReport({ send_delivered_at: null });
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T18:00:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions).toHaveLength(1);
+  });
+
+  it("admits an access once the provider has accepted it", async () => {
+    await seedFullySentReport({ send_delivered_at: "2026-08-13T17:30:00Z" });
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-13T17:31:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
+  });
+
+  it("still counts an access after the send — the control", async () => {
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-13T18:00:00Z'::timestamptz, '10.9.9.9'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
+  });
+
+  it("keeps an access that lands on the send instant exactly", async () => {
+    // The boundary value, and it is not hypothetical: a mail-security scanner fetches the link the
+    // moment the provider accepts the message, which is the instant `send_delivered_at` records. `>`
+    // instead of `>=` drops that access silently — the one fetch most likely to share the boundary's
+    // timestamp — and every other fixture sits comfortably to one side of the line.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T17:00:30Z'::timestamptz, '10.4.4.4'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessions).toHaveLength(1);
+  });
+
+  it("bounds one report's accesses and says so, rather than loading all of them", async () => {
+    // The rows come from a route with NO LOGIN: 300 requests a minute per address, tokens good for 180
+    // days. A crawler in a redirect loop — or somebody who simply wants this page to stop working — can
+    // put millions of rows behind one report, and an unbounded read pulled every one into the API
+    // process and grouped them there long after the traffic stopped.
+    //
+    // 520 rows against a cap of 100, at three-second intervals — and the interval is load-bearing. The
+    // cap keeps the EARLIEST rows, so it also decides the span the classifier measures: at one-second
+    // steps the kept 100 span 99 seconds, fall under the reading threshold, and the verdict drops from
+    // person to unclear. A cap can change a verdict, which is worth knowing and worth a fixture that
+    // does not hide it.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'photo', '2026-08-13T17:05:00Z'::timestamptz + (n * 3 || ' seconds')::interval,
+              '10.5.5.5'::inet, 'Chrome'
+         FROM generate_series(1, 520) AS n`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    // Announced, not swallowed. A cap nobody is told about reads as a complete record, and somebody
+    // counting opens off this page in a dispute would be counting a prefix without knowing it.
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the one real reader buried under a flood of scanner traffic", async () => {
+    // THE CASE THE CAP ITSELF BROKE, and the reason its ordering is not arbitrary.
+    //
+    // 600 page requests from a scanner, and then — later, past any earliest-N window — one person who
+    // downloads the PDF. Taking simply "the earliest 500" drops that download entirely, so the record
+    // loses the single most valuable row in it — the one action nothing automated performs by accident.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'page', '2026-08-13T17:00:30Z'::timestamptz + (n || ' milliseconds')::interval,
+              '10.7.7.7'::inet, 'Barracuda Link Protect'
+         FROM generate_series(1, 600) AS n`,
+      [REPORT],
+    );
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-22T14:00:00Z'::timestamptz, '73.162.44.219'::inet,
+               'Mozilla/5.0 (Macintosh) Chrome/141.0')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
+  });
+
+  it("does not warn about truncation at exactly the cap", async () => {
+    // The off-by-one. Truncation is `count > CAP`, so exactly CAP rows must report false — a warning on a
+    // complete log is the same class of lie as a missing one on an incomplete log, pointed the other
+    // way, and the 520-row case above cannot see the boundary. Flagged by CodeRabbit. Seeded from the
+    // constant's value rather than a literal 500, which is what went stale when the cap moved.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'page', '2026-08-13T17:05:00Z'::timestamptz + (n || ' milliseconds')::interval,
+              '10.5.5.5'::inet, 'Chrome'
+         FROM generate_series(1, 100) AS n`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(false);
+  });
+
+  it("keeps engagement and page budgets separate, so a flood cannot crowd out the reader", async () => {
+    // Engagement and page requests are read through SEPARATE bounded queries rather than competing for
+    // one budget. 600 scanner page hits plus a handful of real photo fetches: the page bucket is
+    // truncated, the photo fetches all survive, and the reader is still visible.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'page', '2026-08-13T17:00:30Z'::timestamptz + (n || ' milliseconds')::interval,
+              '10.7.7.7'::inet, 'Barracuda Link Protect'
+         FROM generate_series(1, 600) AS n`,
+      [REPORT],
+    );
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       SELECT $1::uuid, 'photo', '2026-08-25T14:00:00Z'::timestamptz + (n || ' minutes')::interval,
+              '73.162.44.219'::inet, 'Mozilla/5.0 (Macintosh) Chrome/141.0'
+         FROM generate_series(1, 4) AS n`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+
+    expect(audit.reports[0]!.viewSessions.length).toBeGreaterThan(0);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(true);
+  });
+
+  it("does not claim truncation on an ordinary report", async () => {
+    // The control. A flag that is always true is as useless as one that is never set, and "we only show
+    // some of this" on a report with four accesses would undermine the page it appears on.
+    await seedFullySentReport();
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'page', '2026-08-13T17:05:00Z'::timestamptz, '10.5.5.5'::inet, 'Chrome')`,
+      [REPORT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.viewSessionsTruncated).toBe(false);
+  });
+
+  it("says the log's horizon is UNKNOWN rather than inventing one", async () => {
+    // This suite builds its schema from the SQL files, so there is no `_migrations` ledger to read the
+    // start of logging from — and with no view rows either, there is nothing to infer it from.
+    //
+    // The first version substituted the retention floor here, which asserts logging has been running a
+    // full 24 months when the table might be a week old. Every week in between would then render as
+    // "nobody opened the link" out of a gap in our own records — the exact finding this horizon exists
+    // to prevent, reintroduced by its own fallback. Null is the honest answer and the page renders it
+    // as "not on record". Caught by Codex.
+    await seedFullySentReport();
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.viewTrackingSince).toBeNull();
+  });
+
+  it("takes the oldest recorded access as the horizon once there is one", async () => {
+    // A row is proof logging existed by then — a sound floor, and conservative in the safe direction:
+    // it can only place the start LATER than the truth, which marks more weeks unknown, never fewer.
+    await seedFullySentReport();
+    await seedView({ at: "2026-08-13T22:41:02.000Z" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.viewTrackingSince).toBe("2026-08-13T22:41:02.000Z");
+  });
+
+  it("keeps one report's accesses off another's", async () => {
+    const OTHER = U("66669");
+    await seedFullySentReport();
+    await pg.query(
+      // `sent_at` stamped, because a `sent` row without one is a state `transitionWeeklyReport` cannot
+      // produce — and client-open evidence is now bounded to accesses AT OR AFTER the send, so a fixture
+      // missing it would silently contribute no sessions and quietly stop testing what it names.
+      // `send_delivered_at` too: client evidence starts at PROVIDER ACCEPTANCE, so a row with only a
+      // commit stamp contributes no sessions at all and the test would stop testing what it names.
+      `INSERT INTO office_dallas.weekly_reports
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, status, sent_at,
+          send_delivered_at)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-08-06'::date, 'sent',
+               '2026-08-06T17:00:00Z'::timestamptz, '2026-08-06T17:00:30Z'::timestamptz)`,
+      [OTHER, U("77779"), PROJECT, DEAL],
+    );
+    await pg.query(
+      `INSERT INTO public.weekly_report_views (weekly_report_id, event_type, occurred_at, ip, user_agent)
+       VALUES ($1::uuid, 'pdf', '2026-08-07T10:00:00Z'::timestamptz, '10.1.1.1'::inet, 'Chrome')`,
+      [OTHER],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const week13 = audit.reports.find((r) => r.weekOf === "2026-08-13")!;
+    const week06 = audit.reports.find((r) => r.weekOf === "2026-08-06")!;
+
+    expect(week13.viewSessions).toEqual([]);
+    expect(week06.viewSessions).toHaveLength(1);
   });
 });

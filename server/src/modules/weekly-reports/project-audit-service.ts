@@ -1,4 +1,10 @@
 import { weeklyReportDeliveryFailed } from "@trock-crm/shared/lib/weeklyReportDelivery";
+import {
+  WEEKLY_REPORT_VIEW_RETENTION_MONTHS,
+  summariseWeeklyReportViews,
+  type WeeklyReportViewEvent,
+  type WeeklyReportViewSession,
+} from "@trock-crm/shared/lib/weeklyReportViews";
 import { AppError } from "../../middleware/error-handler.js";
 import { getWeeklyReportProject, type QueryExecutor, type WeeklyReportProject } from "./projects-service.js";
 
@@ -49,6 +55,33 @@ export interface WeeklyReportAuditReport {
   recipients: string[] | null;
   /** The provider's last word: `delivered | bounced | complained | failed | delayed`, or null. */
   deliveryStatus: string | null;
+  /**
+   * When this version was committed to the client. Carried explicitly rather than dug out of `events`,
+   * because the page compares it against the log's retention boundary to tell "nobody opened it" from
+   * "nothing was recorded" — a judgement that should not depend on parsing a timeline for one entry.
+   */
+  sentAt: string | null;
+  /**
+   * When the provider ACCEPTED it, which is where client evidence starts — the view query gates on this,
+   * not on `sentAt`. Carried so the page compares the same instant: a report queued before the log
+   * existed but accepted after it did is tracked, and comparing the enqueue would have called it
+   * untracked. Flagged by CodeRabbit.
+   */
+  sendDeliveredAt: string | null;
+  /**
+   * Every access to this report's share link, grouped into sittings — as OBSERVATIONS, not a verdict.
+   *
+   * There used to be a `person | scanner | unclear` judgement here and it was removed: every rule that
+   * separated a reader from a link scanner had a counterexample, and a wrong guess on this page gets
+   * quoted to a client. See shared/lib/weeklyReportViews for the full account.
+   */
+  viewSessions: WeeklyReportViewSession[];
+  /**
+   * True when this report had more accesses than the page loads, so the sessions shown are the earliest
+   * rather than all of them. Surfaced rather than swallowed: a truncated log that does not say so reads
+   * as a complete one.
+   */
+  viewSessionsTruncated: boolean;
   /** True when the CRM has no evidence the client received this. Drives the one summary chip. */
   undelivered: boolean;
   /**
@@ -92,7 +125,30 @@ export interface WeeklyReportProjectAudit {
   reminders: WeeklyReportAuditReminder[];
   dismissals: WeeklyReportAuditDismissal[];
   pauses: WeeklyReportAuditPause[];
+  /**
+   * The oldest moment the access log can speak about — the later of "logging existed" and "retention
+   * still covers it".
+   *
+   * NULL MEANS UNKNOWN, not "forever". A report sent before this, or any report at all when this is
+   * null, has an empty session list because nothing was RECORDED rather than because nobody opened it,
+   * and the page must say so rather than assert the negative.
+   */
+  viewTrackingSince: string | null;
 }
+
+/**
+ * How many accesses one report contributes to the audit page.
+ *
+ * Far above anything a real report produces — a client's mail security fetches a handful and their staff
+ * a few more — and far below what an unauthenticated route can be made to generate.
+ *
+ * PER REPORT, AND THE PAGE HOLDS MANY. A weekly project accumulates a version a week, so a two-year job
+ * has ~150 of them and the page's real ceiling is this number times two buckets times that count. At the
+ * 500 it started as, one dialog could pull 150,000 rows into the process and walk them twice — bounded
+ * per report and unbounded per page, which is not bounded. 100 keeps the worst case around 30,000 while
+ * staying an order of magnitude above any genuine report. Flagged by CodeRabbit.
+ */
+const WEEKLY_REPORT_VIEW_READ_CAP = 100;
 
 function toIso(value: unknown): string | null {
   if (value == null) return null;
@@ -303,6 +359,209 @@ export async function getWeeklyReportProjectAudit(
     [projectId],
   );
 
+  /**
+   * Accesses live in `public.weekly_report_views`, not in the tenant schema — a share link is resolved
+   * before any office is known, so the log has to be reachable without one. Read through the CALLER'S
+   * client all the same: the reference is schema-qualified, and a qualified name does not depend on the
+   * search_path. Reaching for the pool coupled this read to a live connection for no gain and took the
+   * whole audit page out of the PGlite suites.
+   *
+   * One query for every report on the project, grouped in memory. A per-report query would be N+1 on a
+   * page whose whole job is to be opened and read.
+   */
+  /**
+   * HOW FAR BACK THE ACCESS LOG ACTUALLY REACHES — and the reason it has to be sent to the browser.
+   *
+   * An empty session list has two completely different meanings and the page cannot tell them apart on
+   * its own: nobody opened the report, or nothing about that week was ever recorded. Every report sent
+   * before 0231 is in the second category, and so is every report that outlived the retention sweep.
+   * Rendering either as "Nobody has opened the link yet" turns a gap in our records into a definitive
+   * statement about the client's behaviour — in the one screen built to be quoted back to that client.
+   *
+   * Two boundaries, and the later one wins because both must hold for the absence to mean anything:
+   *
+   *   • WHEN LOGGING BEGAN. Read from `_migrations` rather than hardcoded, because the honest answer is
+   *     literally the moment the table appeared, it differs per environment, and a constant would go
+   *     stale the first time someone rebuilt an office.
+   *   • WHAT RETENTION STILL COVERS. The sweep deletes past 24 months, so beyond that an empty list is
+   *     expected rather than informative.
+   */
+  //
+  // Two queries rather than one because Postgres resolves relation names at PARSE time: a `CASE` guard
+  // around a `SELECT ... FROM public._migrations` still fails outright where that table is absent, which
+  // it is in the PGlite suites and in any environment whose schema was built from the SQL files rather
+  // than through the runner. A missing ledger must degrade to the retention floor, not 500 the page.
+  const retentionFloor = await client.query(
+    `SELECT now() - ($1 || ' months')::interval AS floor`,
+    [String(WEEKLY_REPORT_VIEW_RETENTION_MONTHS)],
+  );
+  const retentionSince = toIso(retentionFloor.rows[0]?.floor ?? null);
+
+  // WHEN LOGGING BEGAN, or null if that cannot be established — and null is a real answer here.
+  //
+  // Two queries rather than one because Postgres resolves relation names at PARSE time: a `CASE` guard
+  // around a `SELECT ... FROM public._migrations` still fails outright where that table is absent, which
+  // it is in the PGlite suites and in any environment built from the SQL files rather than the runner.
+  //
+  // WITHOUT THE LEDGER, THE RETENTION FLOOR IS NOT A SUBSTITUTE. Falling back to it asserts that logging
+  // has been running for a full 24 months, when the table may have been created last week — so every
+  // week in between would render as "nobody opened the link" out of a gap in our own records. That is
+  // the finding this horizon exists to prevent, reintroduced by its own fallback. The oldest row we hold
+  // is a sound floor when there is one: logging demonstrably existed by then. When there is neither a
+  // ledger nor a row, we genuinely do not know, and the page says so. Caught by Codex.
+  let loggingBegan: string | null = null;
+  const ledger = await client.query(`SELECT to_regclass('public._migrations') AS reg`);
+  if (ledger.rows[0]?.reg != null) {
+    const applied = await client.query(
+      `SELECT executed_at FROM public._migrations WHERE name = '0231_weekly_report_views.sql'`,
+    );
+    loggingBegan = toIso(applied.rows[0]?.executed_at ?? null);
+  }
+  if (loggingBegan == null) {
+    const oldest = await client.query(
+      `SELECT min(occurred_at) AS first_seen FROM public.weekly_report_views`,
+    );
+    loggingBegan = toIso(oldest.rows[0]?.first_seen ?? null);
+  }
+
+  // The LATER of the two, and null the moment we cannot place one of them: both have to hold before an
+  // empty session list means anything at all.
+  const viewTrackingSince =
+    loggingBegan == null
+      ? null
+      : retentionSince && Date.parse(retentionSince) > Date.parse(loggingBegan)
+        ? retentionSince
+        : loggingBegan;
+
+  const reportIds = reports.rows.map((row) => row.id as string);
+  const truncatedReports = new Set<string>();
+  // `WeeklyReportViewEvent` rather than a local shape with `eventType: any`: the column's CHECK and the
+  // classifier's judgement have to stay in step, and `any` let an unrecognised event_type reach `judge`
+  // and be counted as a PDF download. Flagged by CodeRabbit.
+  const viewsByReport = new Map<string, WeeklyReportViewEvent[]>();
+  if (reportIds.length > 0) {
+    // ONLY WHAT HAPPENED AFTER THE CLIENT WAS SENT IT.
+    //
+    // A link can be minted on an `approved` report — `isWeeklyReportShareableStatus` allows it — so the
+    // ordinary way to check a report before it goes out is to open the client's own URL. Those fetches
+    // are logged like any other, and a PM who scrolled the photos while checking looks, to the
+    // classifier, exactly like a reader at the client: engagement is what distinguishes a person from a
+    // scanner, and the PM engaged.
+    //
+    // Left in, this page would report "opened by someone at the client" about a report the client had
+    // not yet been sent. That is not a cosmetic overstatement — it is the CRM manufacturing the evidence
+    // it exists to provide, and it would be repeated to a client in a dispute.
+    //
+    // The rows stay in the table; only the client-open evidence is bounded. An unsent report has no
+    // `sent_at` and therefore contributes nothing here, which is right — there is no client access to
+    // speak of yet.
+    //
+    // BOUNDED IN THE DATABASE, not merely capped in the process — and the distinction is the whole
+    // point. These rows arrive from a route with no login: 300 requests a minute per address, tokens
+    // good for 180 days. How many exist behind one report is a number somebody else chooses.
+    //
+    // A window function ranked over the partition does NOT bound that work: `row_number()` has to
+    // consume and sort every matching row before the outer filter can discard any of them, so the read
+    // stayed proportional to the flood even though only 500 rows came back. Two LATERAL reads with
+    // LIMITs do bound it — each walks an index in `occurred_at` order and stops.
+    //
+    // THE COMMIT, not the acceptance stamp — and this moved back after acceptance turned out to cost
+    // more than it bought.
+    //
+    // `sent_at` is written synchronously when the PM presses Send. `send_delivered_at` is written by the
+    // WORKER, later, and gating on it broke three ways: a fetch arriving between the provider actually
+    // accepting and the worker recording it was excluded permanently; a send the provider never accepted
+    // showed no fetches at all, which the page then rendered as nobody having opened it; and both
+    // failures are silent, because a missing row looks exactly like an absent visitor.
+    //
+    // What acceptance bought was excluding staff who check the link in the enqueue gap. That gap is
+    // worker latency — usually seconds — and this page no longer claims WHO fetched anything, so the
+    // cost of losing real evidence outweighs it. `sent_at` still excludes the case that mattered: a link
+    // minted on an `approved` report and opened before it was ever sent. All three caught by Codex.
+    //
+    // ENGAGEMENT FIRST AND SEPARATELY. A `pdf` or `photo` fetch is what distinguishes a person from a
+    // scanner, so those get their own budget off `weekly_report_views_engagement_idx` rather than
+    // competing with page requests for one. A real reader buried under scanner traffic keeps their
+    // evidence; the page budget answers "did it reach them after we sent it", which is settled early.
+    //
+    // LIMIT is CAP + 1 rather than CAP, so "is there more than we are showing" is answered by whether
+    // the extra row came back. A `count(*)` would have been the obvious way and is exactly the
+    // unbounded scan this restructure exists to remove.
+    const views = await client.query(
+      `SELECT e.weekly_report_id, e.event_type, e.occurred_at, host(e.ip) AS ip, e.user_agent,
+                e.referrer, e.bucket
+         FROM unnest($1::uuid[]) AS r(id)
+         JOIN weekly_reports wr ON wr.id = r.id AND wr.sent_at IS NOT NULL
+        CROSS JOIN LATERAL (
+                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent, v.referrer,
+                        'engagement' AS bucket
+                   FROM public.weekly_report_views v
+                  WHERE v.weekly_report_id = r.id
+                    AND v.occurred_at >= wr.sent_at
+                    AND v.event_type IN ('pdf', 'photo')
+                  ORDER BY v.occurred_at
+                  LIMIT $2)
+                UNION ALL
+                (SELECT v.weekly_report_id, v.event_type, v.occurred_at, v.ip, v.user_agent, v.referrer,
+                        'page' AS bucket
+                   FROM public.weekly_report_views v
+                  WHERE v.weekly_report_id = r.id
+                    AND v.occurred_at >= wr.sent_at
+                    AND v.event_type NOT IN ('pdf', 'photo')
+                  ORDER BY v.occurred_at
+                  LIMIT $2)
+        ) AS e
+        ORDER BY e.occurred_at ASC`,
+      [reportIds, WEEKLY_REPORT_VIEW_READ_CAP + 1],
+    );
+
+    // The CAP + 1th row of either bucket is the signal, and it is dropped rather than shown: it exists
+    // only to answer "is there more".
+    const bucketCounts = new Map<string, { engagement: number; page: number }>();
+    for (const row of views.rows) {
+      const counts = bucketCounts.get(row.weekly_report_id) ?? { engagement: 0, page: 0 };
+      if (row.bucket === "engagement") counts.engagement += 1;
+      else counts.page += 1;
+      bucketCounts.set(row.weekly_report_id, counts);
+    }
+    for (const [reportId, counts] of bucketCounts) {
+      if (counts.engagement > WEEKLY_REPORT_VIEW_READ_CAP || counts.page > WEEKLY_REPORT_VIEW_READ_CAP) {
+        truncatedReports.add(reportId);
+      }
+    }
+    const kept = new Map<string, { engagement: number; page: number }>();
+    for (const row of views.rows) {
+      // The CAP + 1th row of a bucket did its job by arriving. Keeping it would show one more sitting
+      // than the cap promises and make the boundary tests depend on an off-by-one.
+      const seen = kept.get(row.weekly_report_id) ?? { engagement: 0, page: 0 };
+      const isEngagement = row.bucket === "engagement";
+      if (isEngagement) seen.engagement += 1;
+      else seen.page += 1;
+      kept.set(row.weekly_report_id, seen);
+      const rank = isEngagement ? seen.engagement : seen.page;
+      if (rank > WEEKLY_REPORT_VIEW_READ_CAP) continue;
+
+      const bucket = viewsByReport.get(row.weekly_report_id) ?? [];
+      // Stored back, always. `get(...) ?? []` hands back a NEW array on a miss, so pushing to it without
+      // setting it discards every first event for every report — silently: the page then renders "never
+      // opened" for a report that was, which is the exact wrong answer in a dispute.
+      viewsByReport.set(row.weekly_report_id, bucket);
+      bucket.push({
+        eventType: row.event_type as WeeklyReportViewEvent["eventType"],
+        occurredAt: toIso(row.occurred_at)!,
+        // `host()` strips the /32 that `inet` renders, so the audit page shows 73.162.44.219 rather
+        // than 73.162.44.219/32 — which reads as a subnet to anybody who knows what one is.
+        ip: row.ip ?? null,
+        userAgent: row.user_agent ?? null,
+        // Stored as an ORIGIN at write time — the path and query never reach the column, because the
+        // page a client is on is the share URL and the referrer would otherwise carry a live token.
+        // Carried through because it is why the column exists: data kept for a purpose it never serves
+        // is data that should not have been kept. Flagged by Codex.
+        referrerOrigin: row.referrer ?? null,
+      });
+    }
+  }
+
   const reminders = await client.query(
     `SELECT week_of, kind, sent_at FROM weekly_report_reminders_sent
       WHERE weekly_report_project_id = $1::uuid
@@ -342,6 +601,8 @@ export async function getWeeklyReportProjectAudit(
         supersededById: row.superseded_by_id ?? null,
         recipients: recipientsOf(row.send_request),
         deliveryStatus: row.send_delivery_status ?? null,
+        sentAt: toIso(row.sent_at),
+        sendDeliveredAt: toIso(row.send_delivered_at),
         // "Sent, and no evidence it arrived." A bounce counts: the provider accepted the message, so
         // send_delivered_at IS set, and any predicate keyed on that alone reads a bounce as a success.
         // "The CRM has no evidence the client received this."
@@ -357,6 +618,14 @@ export async function getWeeklyReportProjectAudit(
             weeklyReportDeliveryFailed(row.send_delivery_status) ||
             row.send_delivery_status === "delayed"),
         events: buildEvents(row),
+        ...(() => {
+          // Classified against THIS report's own send time — the "arrived seconds after the email"
+          // signal is meaningless measured against any other report's.
+          return {
+            viewSessions: summariseWeeklyReportViews(viewsByReport.get(row.id) ?? []),
+            viewSessionsTruncated: truncatedReports.has(row.id),
+          };
+        })(),
       })),
     ),
     reminders: reminders.rows.map((row) => ({
@@ -370,6 +639,7 @@ export async function getWeeklyReportProjectAudit(
       actorName: row.actor_name ?? null,
       at: toIso(row.dismissed_at)!,
     })),
+    viewTrackingSince,
     pauses: pauses.rows.map((row) => ({
       pausedFrom: toIsoDate(row.paused_from)!,
       resumedOn: toIsoDate(row.resumed_on),

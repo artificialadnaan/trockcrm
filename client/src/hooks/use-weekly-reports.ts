@@ -413,6 +413,26 @@ export interface WeeklyReportAuditEvent {
   detail: string | null;
 }
 
+/** One sitting at the client's end, as the server grouped and judged it. */
+export interface WeeklyReportViewSession {
+  ip: string | null;
+  userAgent: string | null;
+  startedAt: string;
+  endedAt: string;
+  pageViews: number;
+  photoViews: number;
+  pdfDownloads: number;
+  /**
+   * WHERE THEY CAME FROM — the referring page's origin, and nothing more of it.
+   *
+   * The path and query are discarded at write time because the page a client is on IS the share URL,
+   * so the referrer would otherwise carry a live token. The origin survives, and it is the useful part:
+   * "reached this from Gmail" against "reached it from a Teams message" is occasionally the whole
+   * answer about who was holding the link.
+   */
+  referrerOrigin: string | null;
+}
+
 export interface WeeklyReportAuditReport {
   id: string;
   weekOf: string;
@@ -430,11 +450,28 @@ export interface WeeklyReportAuditReport {
    * not been confirmed.
    */
   outstanding: boolean;
+  /** When this version was committed to the client. */
+  sentAt: string | null;
+  /** When the provider accepted it — where client evidence starts, and what the horizon is compared to. */
+  sendDeliveredAt: string | null;
+  /**
+   * Every access to the share link, grouped into sittings, newest first — observations, not a verdict.
+   * There was an `openedByAPerson` beside this and it was removed; see shared/lib/weeklyReportViews.
+   */
+  viewSessions: WeeklyReportViewSession[];
+  /** More accesses exist than the page loads; the sessions shown are the earliest after the send. */
+  viewSessionsTruncated: boolean;
   events: WeeklyReportAuditEvent[];
 }
 
 export interface WeeklyReportProjectAudit {
   project: WeeklyReportProject;
+  /**
+   * The oldest moment the access log can speak about. A report sent before this has no sessions because
+   * nothing was RECORDED — the table did not exist, or retention has since removed it — which is a
+   * different statement from "nobody opened it" and must not be rendered as one.
+   */
+  viewTrackingSince: string | null;
   reports: WeeklyReportAuditReport[];
   reminders: { weekOf: string; kind: string; at: string }[];
   dismissals: { weekOf: string; reason: string | null; actorName: string | null; at: string }[];
