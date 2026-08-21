@@ -62,6 +62,13 @@ export interface WeeklyReportAuditReport {
    */
   sentAt: string | null;
   /**
+   * When the provider ACCEPTED it, which is where client evidence starts — the view query gates on this,
+   * not on `sentAt`. Carried so the page compares the same instant: a report queued before the log
+   * existed but accepted after it did is tracked, and comparing the enqueue would have called it
+   * untracked. Flagged by CodeRabbit.
+   */
+  sendDeliveredAt: string | null;
+  /**
    * Every access to this report's share link, grouped into sittings — as OBSERVATIONS, not a verdict.
    *
    * There used to be a `person | scanner | unclear` judgement here and it was removed: every rule that
@@ -560,6 +567,7 @@ export async function getWeeklyReportProjectAudit(
         recipients: recipientsOf(row.send_request),
         deliveryStatus: row.send_delivery_status ?? null,
         sentAt: toIso(row.sent_at),
+        sendDeliveredAt: toIso(row.send_delivered_at),
         // "Sent, and no evidence it arrived." A bounce counts: the provider accepted the message, so
         // send_delivered_at IS set, and any predicate keyed on that alone reads a bounce as a success.
         // "The CRM has no evidence the client received this."

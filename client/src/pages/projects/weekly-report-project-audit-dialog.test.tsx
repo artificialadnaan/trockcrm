@@ -50,6 +50,7 @@ function report(overrides: Record<string, unknown> = {}) {
     undelivered: false,
     outstanding: false,
     sentAt: "2026-08-13T17:00:00.000Z",
+    sendDeliveredAt: "2026-08-13T17:00:30.000Z",
     viewSessions: [],
     viewSessionsTruncated: false,
     events: [],
@@ -279,8 +280,42 @@ describe("the open log", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("73.162.44.219");
     expect(text).toContain("Chrome/141.0");
-    expect(text).toContain("downloaded the PDF");
+    expect(text).toContain("1 PDF download");
     expect(text).toContain("3 photos");
+  });
+
+  it("says the fetches did not come from the client's copy when the send never arrived", () => {
+    // A bounce sitting beside "5 fetches of this link" reads as the client having opened it — the
+    // opposite of what the delivery chip a few lines up says. Whoever reached the URL got there some
+    // other way: a forward, or one of our own people checking what went wrong.
+    render({
+      reports: [
+        report({
+          status: "sent",
+          undelivered: true,
+          deliveryStatus: "bounced",
+          outstanding: true,
+          viewSessions: [session()],
+        }),
+      ],
+    });
+
+    expect(document.body.textContent).toContain("did not come from the client's copy");
+  });
+
+  it("says no such thing when the report was delivered", () => {
+    render({ reports: [report({ status: "sent", viewSessions: [session()] })] });
+    expect(document.body.textContent).not.toContain("did not come from the client's copy");
+  });
+
+  it("shows how many times the PDF was pulled, not just that it was", () => {
+    render({ reports: [report({ status: "sent", viewSessions: [session({ pdfDownloads: 3 })] })] });
+    act(() => {
+      (Array.from(document.querySelectorAll("button")).find((element) =>
+        element.textContent?.includes("fetches of this link"),
+      ) as HTMLButtonElement).click();
+    });
+    expect(document.body.textContent).toContain("3 PDF downloads");
   });
 
   it("says when the address was never recorded rather than leaving a blank", () => {
@@ -306,7 +341,7 @@ describe("the open log", () => {
     // client — on the screen built to be quoted back to them.
     render({
       viewTrackingSince: "2026-06-01T00:00:00.000Z",
-      reports: [report({ status: "sent", sentAt: "2026-02-02T17:00:00.000Z", viewSessions: [] })],
+      reports: [report({ status: "sent", sendDeliveredAt: "2026-02-02T17:00:00.000Z", viewSessions: [] })],
     });
 
     const text = document.body.textContent ?? "";
@@ -327,7 +362,7 @@ describe("the open log", () => {
     // reads as tracked; parsed, it sorts an hour BEFORE and the week is outside the log.
     render({
       viewTrackingSince: "2026-08-13 18:00:00+00",
-      reports: [report({ status: "sent", sentAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+      reports: [report({ status: "sent", sendDeliveredAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
     });
 
     const text = document.body.textContent ?? "";
@@ -340,7 +375,7 @@ describe("the open log", () => {
     // feature exists to give.
     render({
       viewTrackingSince: "2026-01-01T00:00:00.000Z",
-      reports: [report({ status: "sent", sentAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
+      reports: [report({ status: "sent", sendDeliveredAt: "2026-08-13T17:00:00.000Z", viewSessions: [] })],
     });
 
     expect(document.body.textContent).toContain("Nobody has opened the link yet");

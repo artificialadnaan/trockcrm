@@ -445,8 +445,10 @@ export interface WeeklyReportAuditReport {
    * not been confirmed.
    */
   outstanding: boolean;
-  /** When this version was committed to the client — compared against the log's retention boundary. */
+  /** When this version was committed to the client. */
   sentAt: string | null;
+  /** When the provider accepted it — where client evidence starts, and what the horizon is compared to. */
+  sendDeliveredAt: string | null;
   /**
    * Every access to the share link, grouped into sittings, newest first — observations, not a verdict.
    * There was an `openedByAPerson` beside this and it was removed; see shared/lib/weeklyReportViews.

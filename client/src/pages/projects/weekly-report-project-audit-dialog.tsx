@@ -430,7 +430,10 @@ function ViewLog({
   // PARSED, not string-compared. Both values are ISO today, but the API returns whatever the driver
   // hands back and PostgreSQL's own text form is `2026-06-01 00:00:00+00` — a space where the `T` goes,
   // which sorts BEFORE every ISO string and would silently mark every week as untracked.
-  const sentMs = report.sentAt ? Date.parse(report.sentAt) : Number.NaN;
+  // ACCEPTANCE, matching the query. Client evidence starts when the provider took the message, so a
+  // report queued before the log existed but accepted after it did IS tracked — comparing the enqueue
+  // would have called it untracked and printed "no tracking kept" over a log that has rows in it.
+  const sentMs = report.sendDeliveredAt ? Date.parse(report.sendDeliveredAt) : Number.NaN;
   const sinceMs = trackingSince ? Date.parse(trackingSince) : Number.NaN;
   const outsideTracking =
     sessions.length === 0 && Number.isFinite(sentMs) && Number.isFinite(sinceMs) && sentMs < sinceMs;
@@ -479,6 +482,18 @@ function ViewLog({
         <span className="font-normal text-slate-500">({open ? "hide" : "show"} detail)</span>
       </button>
 
+      {/* THE REPORT NEVER ARRIVED, so these fetches did not come from it.
+          A bounced or still-undelivered send sitting beside "12 fetches of this link" reads as the
+          client having opened it, which is the opposite of what the delivery chip says a few lines up.
+          Whoever fetched it reached the URL some other way — a forward, or one of our own people
+          checking what went wrong — and the count on its own cannot tell those apart. Saying so costs
+          one line and stops the two facts contradicting each other. Caught by Greptile. */}
+      {report.undelivered && (
+        <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
+          This report was not delivered, so these fetches did not come from the client's copy of it.
+        </p>
+      )}
+
       {/* OUTSIDE the expander. A qualification that only appears once somebody thinks to open the detail
           is not a qualification — the headline above is what gets read, and quoted, and it is the line
           that would otherwise be taken as a complete count. */}
@@ -505,7 +520,9 @@ function ViewSessionRow({ session }: { session: WeeklyReportViewSession }) {
   const fetched = [
     session.pageViews > 0 ? `opened the page${session.pageViews > 1 ? ` ${session.pageViews}×` : ""}` : null,
     session.photoViews > 0 ? `${session.photoViews} photo${session.photoViews === 1 ? "" : "s"}` : null,
-    session.pdfDownloads > 0 ? "downloaded the PDF" : null,
+    session.pdfDownloads > 0
+      ? `${session.pdfDownloads} PDF download${session.pdfDownloads === 1 ? "" : "s"}`
+      : null,
   ].filter(Boolean);
 
   const spanMinutes = Math.round(

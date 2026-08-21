@@ -74,6 +74,16 @@ CREATE INDEX IF NOT EXISTS weekly_report_views_engagement_idx
   ON public.weekly_report_views (weekly_report_id, occurred_at)
   WHERE event_type IN ('pdf', 'photo');
 
+-- PAGE EVENTS ONLY, the mirror of the index above and bounded for the same reason.
+--
+-- The audit page reads its two buckets separately, so the page-request half needs its own path too:
+-- without this, a report with one early page view buried under a million photo fetches makes that half
+-- walk the whole report before it can return a single row — the flood still setting the cost, just
+-- through the other query. Caught by Codex.
+CREATE INDEX IF NOT EXISTS weekly_report_views_page_idx
+  ON public.weekly_report_views (weekly_report_id, occurred_at)
+  WHERE event_type NOT IN ('pdf', 'photo');
+
 -- The retention sweep's read, and nothing else. Kept separate from the index above so the purge does not
 -- have to walk a report-ordered index to find the oldest rows.
 CREATE INDEX IF NOT EXISTS weekly_report_views_occurred_idx
