@@ -28,19 +28,20 @@ const COVER_LOGO_Y = 334;
 const COVER_LOGO_FIT: [number, number] = [210, 210];
 
 // --- Photo grid layout (contact sheet) -----------------------------------------------------------
-// The page is a grid of identical CELLS, each one a photo tile with its caption and metadata beside it.
+// The page is a grid of identical CELLS, each one a photo tile with its caption and metadata below it.
 // PHOTO_COLUMNS x PHOTO_ROWS_PER_PAGE drives the chunking, the cell pitch and the tile size together, so
 // changing either re-flows the whole sheet consistently.
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
 /**
- * TWO photo cells per row, four rows down: eight photographs a page rather than four.
+ * TWO photo cells per row, ONE row down: two photographs a page.
  *
- * The one-up grid this replaces spent roughly half the page width on a caption column holding three short
- * lines, so a 22-photo report ran to six pages of half-empty sheets — "long" was the first thing anyone said
- * about it. Pairing the cells reclaims that gutter and halves the page count.
+ * The 8-up grid this replaces fit eight cells a page, which made every photograph small — and the app's
+ * captures are much narrower than a normal phone photo (measured 884x1920, ~0.46:1), so in a 148x156.5 tile
+ * they contain-fit HEIGHT-bound to 72x156.5: a 72pt-wide strip nobody could read. Two cells a page is what
+ * buys the width back. The cost is stated plainly: four times the pages for the same number of photographs.
  */
 const PHOTO_COLUMNS = 2;
-const PHOTO_ROWS_PER_PAGE = 4;
+const PHOTO_ROWS_PER_PAGE = 1;
 const PHOTOS_PER_PAGE = PHOTO_COLUMNS * PHOTO_ROWS_PER_PAGE;
 const COLUMN_GAP = 20;
 const COLUMN_WIDTH = (CONTENT_WIDTH - COLUMN_GAP * (PHOTO_COLUMNS - 1)) / PHOTO_COLUMNS;
@@ -58,32 +59,76 @@ const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP + PHOTO_ROW_GAP) / P
  * rendered image, drifted with them. A constant tile gives every photograph the same footprint whatever its
  * shape, and letterboxing onto grey reads as deliberate framing where the identical letterbox on white just
  * reads as a mistake.
- */
-const PHOTO_TILE_HEIGHT = PHOTO_ROW_PITCH - PHOTO_ROW_GAP;
-/**
- * A very slightly PORTRAIT tile, and deliberately not the full column width.
  *
- * At eight cells a page no photograph can be large, so the question is only whether the space each one gets
- * is spent evenly. A wide tile flatters landscapes and ruins portraits: against the 19.5:9 frames the app
- * currently captures, a full-width tile filled 82% for a landscape and 26% for a portrait — the portrait
- * pages were the ones that read as broken. A near-square tile gives both orientations the same footprint,
- * and when the capture fix lands and photographs arrive as 4:3/3:4 it fills roughly three quarters either
- * way. The leftover column width is what the metadata gets.
+ * FIXED at 560 rather than derived from PHOTO_ROW_PITCH, because the caption block sits BELOW the tile and
+ * the tile has to leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT = 682 - 560 =
+ * 122pt) is that room, of which ~98pt is usable once CAPTION_GAP and PHOTO_ROW_GAP are taken.
+ *
+ * Being a literal rather than a derivation is the trade: it no longer moves with PHOTO_ROW_PITCH, so if
+ * PHOTO_ROWS_TOP/BOTTOM/GAP are ever retuned this number must be revisited by hand or the caption band
+ * silently overruns the footer.
  */
-const PHOTO_TILE_WIDTH = 148;
+const PHOTO_TILE_HEIGHT = 560;
+/**
+ * Nearly the full column width, and a tall tile — sized for the narrow captures the app actually produces.
+ *
+ * A 0.46:1 photograph (the measured shape of the app's current captures) was HEIGHT-bound in the old
+ * 148x156.5 tile: it rendered 72x156.5, and widening the tile alone would not have helped it while the tile
+ * stayed short. At 256x560 the same photograph is WIDTH-bound and renders 256x556 — about 4pt of letterbox,
+ * and ~12.6x the visible area (11.3k -> 142.3k pt^2). A 3:4 portrait goes 117x156.5 -> 256x341, a 4:3
+ * landscape 148x111 -> 256x192; all three are larger, with more surrounding grey on the wider shapes,
+ * because one fixed tile cannot be optimal for every aspect ratio and the narrow case is the unreadable one.
+ */
+const PHOTO_TILE_WIDTH = 256;
 const PHOTO_TILE_RADIUS = 8;
 const PHOTO_TILE_FILL = "#F4F5F7";
 const PHOTO_ROW_HEIGHT = PHOTO_TILE_HEIGHT;
 // Metadata is drawn as single-line, ellipsised rows. Each is capped to ONE line so a long deal/project name
 // (the deal schema allows up to 500 chars) can never wrap and push the block past the cell below it — the
-// blank-page/overlap regression the report layout exists to avoid. Smaller than the one-up grid's 8.5pt
-// because the cell column is now ~106pt rather than ~264pt.
+// blank-page/overlap regression the report layout exists to avoid. Kept at 7.5 rather than restored toward
+// the one-up grid's 8.5pt even though the caption is about to run the tile's full 256pt: the cap that
+// matters is the number of LINES the band can hold, and a larger face buys fewer of them.
 const META_FONT_SIZE = 7.5;
 const META_LINE_PITCH = 10;
-// Caption + metadata sit to the RIGHT of the tile inside the same cell, BOTTOM-aligned to it, so the last
-// line always lands on the tile's bottom edge no matter how tall the photograph rendered.
+// Caption + metadata sit BELOW the tile inside the same cell, running the tile's full width.
+//
+// They used to sit to its RIGHT, in whatever column width the tile did not use. At a 256pt tile inside a
+// 264pt column that leftover is -2pt, so there is no "beside" left to sit in — and the move is what let the
+// tile take the width in the first place. CAPTION_GAP is now a VERTICAL gap (tile bottom -> first text
+// baseline) rather than a horizontal one.
 const CAPTION_GAP = 10;
-const CAPTION_WIDTH = COLUMN_WIDTH - PHOTO_TILE_WIDTH - CAPTION_GAP;
+const CAPTION_WIDTH = PHOTO_TILE_WIDTH;
+/**
+ * Fail LOUDLY if the cell geometry is ever retuned into an impossible caption box.
+ *
+ * pdfkit does not throw on a negative or zero text width — `doc.text` and `heightOfString` silently render
+ * nothing — so a bad constant here costs every caption and every metadata line in the report with no error
+ * anywhere. That is exactly the failure this layout briefly had between two commits, and it is invisible to
+ * a page-count test. Verified at module load because there is no later point where it would be cheaper.
+ */
+if (CAPTION_WIDTH <= 0) {
+  throw new Error(
+    `[field-photo-report] CAPTION_WIDTH must be positive, got ${CAPTION_WIDTH} — check PHOTO_TILE_WIDTH against COLUMN_WIDTH`,
+  );
+}
+/**
+ * The check the error above NAMES but does not perform.
+ *
+ * Since the caption moved below the tile, `CAPTION_WIDTH` is just `PHOTO_TILE_WIDTH` — a literal — so the
+ * guard above compares 256 against 0 and can never fire. It reads as though it covers the tile-vs-column
+ * relationship. It does not, and a reviewer would reasonably assume otherwise.
+ *
+ * A tile wider than its column is silent in every other way: the left tile runs into the right column and
+ * the right tile runs off the page edge, and both still produce a perfectly valid PDF. Widening
+ * PHOTO_TILE_WIDTH to 300 was caught by nothing at all until the side-by-side test learned to read the
+ * tiles' RENDERED right edges. Checked at module load because there is no later point where it is cheaper.
+ */
+if (PHOTO_TILE_WIDTH > COLUMN_WIDTH) {
+  throw new Error(
+    `[field-photo-report] PHOTO_TILE_WIDTH (${PHOTO_TILE_WIDTH}) exceeds COLUMN_WIDTH (${COLUMN_WIDTH}) — ` +
+      `the tile would overlap the next column and run past the page margin`,
+  );
+}
 const IMAGE_BOX_WIDTH = PHOTO_TILE_WIDTH;
 const IMAGE_BOX_HEIGHT = PHOTO_TILE_HEIGHT;
 
@@ -101,9 +146,9 @@ const SUMMARY_BODY_FONT_SIZE = 11;
 const SUMMARY_LINE_GAP = 4;
 
 // --- Findings layout (AI condition assessment) ---------------------------------------------------
-// A SECOND per-photo layout, opt-in via `photoLayout: "findings"`. The default grid above packs three
-// photos per page beside a 174pt caption column clamped to ~320 chars — built for short human captions and
-// structurally unable to carry a multi-sentence, multi-bullet AI finding without ellipsising most of it.
+// A SECOND per-photo layout, opt-in via `photoLayout: "findings"`. The default grid above packs two photos
+// per page over a caption band clamped to ~200 chars and ~98pt of height — built for short human captions
+// and structurally unable to carry a multi-sentence, multi-bullet AI finding without ellipsising most of it.
 // This layout inverts the proportions to match a written condition assessment: ONE photo per page, image
 // across the full content width, a subject caption under it, then the findings as bullets. Bullets flow
 // onto continuation pages (image not repeated) so a long finding is never truncated — the grid layout's
@@ -308,9 +353,19 @@ function formatPhotoDate(value: string | null, fallback: string): string {
  * carry historical photos or straddle a year boundary, and "Jul 31, 4:52 PM" then reads identically for a
  * 2025 and a 2026 capture, which for an evidence document is a real loss.
  *
- * It fits: measured against Geist at META_FONT_SIZE, the long form is 74.7pt (82.4pt worst case) inside a
- * ~106pt column. The width worry that prompted the short form came from the one-up grid's 8.5pt text and
- * did not survive the move to 7.5pt.
+ * It fits, with room to spare. Measured against Geist-Regular at META_FONT_SIZE over the month/day/hour/
+ * minute shapes this formatter emits, the long form spans 64.76pt to 84.78pt — narrowest
+ * "Jul 1, 2026, 1:11 PM", widest "May 20, 2026, 10:00 AM" — inside a caption box that, since the block
+ * moved BELOW the tile, is the tile's full 256pt rather than the ~106pt side column the original
+ * measurement was taken against. The width worry that prompted the short form came from the one-up grid's
+ * 8.5pt text and did not survive the move to 7.5pt.
+ *
+ * TWO earlier versions of this sentence were wrong, so the method is recorded next to the number. The
+ * long-standing "74.7pt (82.4pt worst case)" is REAL — 74.730pt and 82.395pt both reproduce exactly — but
+ * they are two sample points, not bounds, and reading them as a min/max is what made them look
+ * unreproducible. A replacement "71.8-83.7pt" was then asserted here on trust, and it is wrong in both
+ * directions. Re-measure with pdfkit's `widthOfString` before editing this line; do not adjust it from
+ * memory or from a summary.
  */
 function formatPhotoDateCompact(value: string | null, fallback: string): string {
   const date = new Date(value ?? fallback);
@@ -739,24 +794,49 @@ async function drawPhotoEntry(
   // Badge on the TILE corner, not the image corner, so it sits in the same place in every cell.
   drawIndexBadge(doc, fonts, left, top, photo.reportIndex);
 
-  // --- Caption + metadata, to the right of the tile and BOTTOM-aligned to it ------------------------
-  // Bottom-aligned rather than top-aligned, so the last line always lands on the tile's bottom edge.
+  // --- Caption + metadata, BELOW the tile ----------------------------------------------------------
+  // Top-anchored to the tile's bottom edge and flowing downward: description first, then metadata. The old
+  // layout bottom-anchored this group to the tile's bottom-right, which only made sense while it lived in a
+  // narrow side column. Below the tile there is a fixed band, so ordinary top-down reading order is both
+  // simpler and what a reader expects under a photograph.
   //
-  // The "Project:"/"Date:"/"Creator:" labels are GONE. In a ~106pt cell column they would have eaten 40% of
-  // the width to restate what the values obviously are, and the project name they introduced is already the
-  // page header, the footer and the cover title. It is printed here ONLY when a photograph actually belongs
-  // to some other project than the report's — the case where it is information rather than furniture.
-  const captionLeft = left + PHOTO_TILE_WIDTH + CAPTION_GAP;
+  // The "Project:"/"Date:"/"Creator:" labels stay GONE — the values are self-evident, and the project name
+  // is already the page header, the footer and the cover title. It is printed here ONLY when a photograph
+  // belongs to some other project than the report's, the case where it is information rather than furniture.
+  const captionLeft = left;
+  const captionTop = top + boxHeight + CAPTION_GAP;
+
   const metaLines = [formatPhotoDateCompact(photo.takenAt, photo.createdAt), photo.uploaderName];
   if (photo.projectName.trim() && photo.projectName.trim() !== coverProjectName.trim()) {
     metaLines.push(photo.projectName);
   }
-  const metaTop = top + boxHeight - metaLines.length * META_LINE_PITCH;
+
+  // The description gets whatever vertical room is left after the metadata rows are reserved, so a long
+  // caption can never push the metadata out of the cell and into the page furniture below it.
+  const metaBlockHeight = metaLines.length * META_LINE_PITCH;
+  const captionBandHeight = PHOTO_ROW_PITCH - boxHeight - CAPTION_GAP - PHOTO_ROW_GAP;
+  const descriptionAvailable = Math.max(0, captionBandHeight - metaBlockHeight - 4);
+
+  let cursor = captionTop;
+  const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
+  if (description && descriptionAvailable > 0) {
+    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(8);
+    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 });
+    const descriptionHeight = Math.min(measured, descriptionAvailable);
+    doc.text(description, captionLeft, cursor, {
+      width: CAPTION_WIDTH,
+      lineGap: 1.5,
+      height: descriptionHeight,
+      ellipsis: true,
+    });
+    cursor += descriptionHeight + 4;
+  }
+
   metaLines.forEach((value, index) => {
     doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(META_FONT_SIZE);
-    // One line each, ellipsised, so a 500-char project name truncates instead of wrapping into the cell
-    // below it.
-    doc.text(value, captionLeft, metaTop + index * META_LINE_PITCH, {
+    // One line each, ellipsised, so a 500-char project name truncates instead of wrapping into the page
+    // furniture below the cell.
+    doc.text(value, captionLeft, cursor + index * META_LINE_PITCH, {
       width: CAPTION_WIDTH,
       align: "left",
       lineBreak: false,
@@ -764,25 +844,6 @@ async function drawPhotoEntry(
       ellipsis: true,
     });
   });
-
-  // The crew's caption (or the AI's finding) sits DIRECTLY above the metadata, as one bottom-anchored
-  // group. Pinning it to the top of the tile instead left ~100pt of dead air between the caption and the
-  // data it describes — the two belong together, and the whitespace then falls above the group where it
-  // reads as breathing room rather than a gap. Only drawn when there is one: an absent caption leaves clean
-  // space rather than the words "No description".
-  const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
-  if (description) {
-    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(8);
-    const available = metaTop - top - 6;
-    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 });
-    const descriptionHeight = Math.min(measured, available);
-    doc.text(description, captionLeft, metaTop - 6 - descriptionHeight, {
-      width: CAPTION_WIDTH,
-      lineGap: 1.5,
-      height: descriptionHeight,
-      ellipsis: true,
-    });
-  }
 }
 
 export type ParsedFinding = {
@@ -1014,7 +1075,7 @@ export function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
 
 /**
  * How per-photo entries are laid out.
- * - `grid` (default): three photos per page with a compact side caption — the human photo-report look.
+ * - `grid` (default): two photos per page, caption below each tile — the human photo-report look.
  * - `findings`: one photo per page with a subject caption and bulleted findings below — the AI condition
  *   assessment look. Callers that omit this keep byte-identical output to before the option existed.
  */
@@ -1129,8 +1190,9 @@ export async function renderFieldPhotoReportPdf(input: {
     }
 
     // The findings layout gives every photo its own page, so it drives its own page/pageMeta loop rather
-    // than the 3-per-page chunking. It also skips the compact section title: that band (y=50..63) would
-    // collide with the full-width image at y=62, and the executive summary already introduces the findings.
+    // than the grid's PHOTOS_PER_PAGE chunking. It also skips the compact section title: that band
+    // (y=50..63) would collide with the full-width image at y=62, and the executive summary already
+    // introduces the findings.
     if (photoLayout === "findings") {
       for (const photo of section.photos) {
         await drawFindingsPhotoPages(

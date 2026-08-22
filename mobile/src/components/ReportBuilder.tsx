@@ -496,7 +496,7 @@ export function ReportBuilder({
                   onChangeText={(text) => setSectionTitles((prev) => ({ ...prev, [section.id]: text }))}
                   placeholder="Section title"
                 />
-                {/* The PDF prints 3 photos per page in exactly this order, so the position number is the
+                {/* The PDF prints 2 photos per page in exactly this order, so the position number is the
                     page-composition control, not decoration. */}
                 <Text style={styles.hint}>Photos print in this order — use ↑ ↓ to rearrange.</Text>
                 {section.photos.map((photo, photoIndex) => (
