@@ -108,13 +108,22 @@ function dialogCallSites(): CallSite[] {
             // one that lost.
             const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
             for (const className of variants) {
-              const width = /(?:^|\s)((?:sm:|md:|lg:|xl:|2xl:)?!?max-w-[^\s]+)/.exec(className);
-              found.push({
-                file: path.relative(CLIENT_SRC, file),
-                line: line + 1,
-                requested: width ? width[1] : "",
-                className,
-              });
+              // EVERY width in the variant, not the first match. `requested` used to be whichever the
+              // regex reached first, so the verdict depended on class ORDER: in
+              // `className="lg:max-w-3xl max-w-2xl"` the prefixed one matched first, the site counted as
+              // prefixed, and the unprefixed `max-w-2xl` — the one actually defeated between 640px and
+              // 1023px — was never examined. One entry per requested width, each judged on its own.
+              const widths = [
+                ...className.matchAll(/(?:^|\s)((?:sm:|md:|lg:|xl:|2xl:)?!?max-w-[^\s]+)/g),
+              ].map((m) => m[1]!);
+              const relative = path.relative(CLIENT_SRC, file);
+              if (widths.length === 0) {
+                found.push({ file: relative, line: line + 1, requested: "", className });
+                continue;
+              }
+              for (const requested of widths) {
+                found.push({ file: relative, line: line + 1, requested, className });
+              }
             }
           }
         }
@@ -141,7 +150,13 @@ function dialogCallSites(): CallSite[] {
  * not resolved: `cn(dialogClasses, "overflow-y-auto")` yields a literal, and an earlier version took that
  * as success and silently dropped whatever `dialogClasses` held.
  */
+const CLASS_COMBINERS = new Set(["cn", "clsx", "classNames", "twMerge", "twJoin"]);
+
 function classNameVariants(opening: ts.JsxOpeningLikeElement): string[] | null | undefined {
+  // A SPREAD CAN CARRY `className`. `<DialogContent {...contentProps}>` was read as having none, so a
+  // defeated width inside `contentProps` was invisible. It cannot be resolved here, so it is reported.
+  if (opening.attributes.properties.some((p) => ts.isJsxSpreadAttribute(p))) return null;
+
   for (const property of opening.attributes.properties) {
     if (!ts.isJsxAttribute(property) || property.name.getText() !== "className") continue;
     const init = property.initializer;
@@ -185,7 +200,33 @@ function classNameVariants(opening: ts.JsxOpeningLikeElement): string[] | null |
         return [...alternatives(node.left), ...alternatives(node.right)];
       }
 
+      if (ts.isObjectLiteralExpression(node)) {
+        // The clsx object form: `cn({ "w-full": expanded })`. Each key is a class that may or may not be
+        // present, so each contributes an alternative — with it and without it.
+        let combos = [""];
+        for (const prop of node.properties) {
+          if (!ts.isPropertyAssignment(prop)) {
+            opaque = true;
+            continue;
+          }
+          const key = ts.isStringLiteral(prop.name) || ts.isIdentifier(prop.name) ? prop.name.text : null;
+          if (key === null) {
+            opaque = true;
+            continue;
+          }
+          combos = combos.flatMap((prefix) => [prefix, `${prefix} ${key}`]);
+        }
+        return combos;
+      }
+
       if (ts.isCallExpression(node)) {
+        // ONLY a known combiner. `getDialogClasses()` is not one — its return value is classes this sweep
+        // cannot see, and treating every call as `cn(...)` meant such a caller resolved to "" and read as
+        // asking for no width.
+        if (!ts.isIdentifier(node.expression) || !CLASS_COMBINERS.has(node.expression.text)) {
+          opaque = true;
+          return [];
+        }
         // `cn(a, b, c)` — every argument contributes, so the product across them.
         let combos = [""];
         for (const argument of node.arguments) {
@@ -205,6 +246,15 @@ function classNameVariants(opening: ts.JsxOpeningLikeElement): string[] | null |
       }
 
       if (ts.isParenthesizedExpression(node)) return alternatives(node.expression);
+      // Contributes nothing and cannot: a literal `undefined`/`null`/boolean in a `cn()` argument list.
+      if (
+        node.kind === ts.SyntaxKind.NullKeyword ||
+        node.kind === ts.SyntaxKind.TrueKeyword ||
+        node.kind === ts.SyntaxKind.FalseKeyword ||
+        (ts.isIdentifier(node) && node.text === "undefined")
+      ) {
+        return [""];
+      }
       if (ts.isArrayLiteralExpression(node)) {
         let combos = [""];
         for (const element of node.elements) {
@@ -217,6 +267,11 @@ function classNameVariants(opening: ts.JsxOpeningLikeElement): string[] | null |
         }
         return combos;
       }
+      // ANYTHING ELSE IS LOUD. Returning [] here is what let three separate shapes — clsx objects,
+      // non-combiner calls, spreads — resolve to "" and read as "this dialog asks for no width". A guard
+      // cannot enumerate every expression somebody might write, so the default is to admit it does not
+      // know rather than to guess that the answer is "nothing".
+      opaque = true;
       return [];
     };
 
