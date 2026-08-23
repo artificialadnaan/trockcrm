@@ -59,7 +59,7 @@ jest.mock("../auth/AuthContext", () => ({
 }));
 
 jest.mock("../api/endpoints", () => ({
-  getWeeklyReport: jest.fn(async () => ({})),
+  getWeeklyReport: () => mockGetWeeklyReport(),
   getWeeklyReportAssignments: jest.fn(async () => mockAssignments),
 }));
 
@@ -76,6 +76,15 @@ jest.mock("../capture/upload-queue", () => ({
 jest.mock("../scorecards/ids", () => ({ newSubmissionId: () => "sub-1" }));
 
 const mockRouterPush = jest.fn();
+
+/** Resolved by the test, so a week open can be held mid-flight while the card is inspected. */
+let releaseOpen: (() => void) | null = null;
+const mockGetWeeklyReport = jest.fn(
+  () =>
+    new Promise((resolve) => {
+      releaseOpen = () => resolve({ report: {}, permissions: {} });
+    }),
+);
 
 // eslint-disable-next-line import/first
 import ReportsHubScreen from "../../app/(app)/reports/index";
@@ -131,6 +140,7 @@ function deliveryButtons(tree: ReturnType<typeof render>) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  releaseOpen = null;
   setProjects(assignment());
 });
 
@@ -183,5 +193,44 @@ describe("the card offers a way back to the delivered report", () => {
   it("withholds it when nothing has ever been delivered", () => {
     setProjects(assignment({ lastSentReportId: null, lastSentWeekOf: null }));
     expect(deliveryButtons(render(<ReportsHubScreen />))).toHaveLength(0);
+  });
+
+  it("goes inert while a week is being opened, instead of racing it", async () => {
+    // THE SECOND DEFECT ON THIS CARD, and it only exists because the button moved out of the `done`
+    // branch: a rolled-over project now shows BOTH a week action and this one, which the old layout never
+    // did. Every week button carries `disabled={busyKey !== null && busyKey !== ownKey}` precisely because
+    // two Pressables in one native event batch both read the render-time value of `opening` and both
+    // proceed. This button shipped with no guard at all.
+    //
+    // The failure is not a double-open, it is landing on the WRONG SCREEN: the delivery route pushes
+    // immediately, then the still-in-flight `openWeek` pushes the editor on top of it. The PM asked for a
+    // client link and is looking at a draft.
+    //
+    // Asserted by holding the door's read open rather than by reading the prop back, so this fails if the
+    // guard is wired to something that is not the real busy state.
+    // A week already in DRAFT, so opening it goes through the reconciling door and awaits a server read.
+    // A `not_started` week mints a local draft without touching the network, so `busyKey` is set and
+    // cleared inside one tick and there is no in-flight window to observe — the first version of this test
+    // used that state and the `releaseOpen` check below is what caught it asserting nothing.
+    setProjects(assignment({ currentState: "draft", currentReportId: "rep-this-week" }));
+
+    const tree = render(<ReportsHubScreen />);
+    const start = tree.UNSAFE_getAllByType(Button).find((n) => {
+      const t: unknown = n.props.title;
+      return typeof t === "string" && t.startsWith("Open week of");
+    })!;
+
+    await act(async () => {
+      start.props.onPress();
+    });
+
+    // If this is null the open never reached the door, which means the busy state was never entered and
+    // the assertion below would pass on a button that is disabled for some unrelated reason.
+    expect(releaseOpen).not.toBeNull();
+    expect(deliveryButtons(tree)[0]!.props.disabled).toBe(true);
+
+    await act(async () => {
+      releaseOpen!();
+    });
   });
 });

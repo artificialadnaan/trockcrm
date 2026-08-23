@@ -271,6 +271,40 @@ export async function listWeeklyReportAssignments(
     [projectIds],
   );
 
+  // THE MOST RECENT SENT VERSION PER PROJECT, asked for separately and on purpose.
+  //
+  // It cannot be read off `reportByKey`. That map is `DISTINCT ON (project, week_of) … ORDER BY version
+  // DESC` — the LIVE version of each week — and supersession is stamped at SEND, not at clone. So while a
+  // correction is being worked, v1 is still `sent` and unsuperseded but the v2 `approved` clone outranks it
+  // and wins the DISTINCT ON. The week stops reading as `sent`, and a walk over that map skips it: starting
+  // a correction removed the route to the very report the client is asking about, which is the single
+  // action most likely to coincide with needing it.
+  //
+  // The week's STATE and the delivered REPORT are different questions. The state is the correction's — that
+  // is what the DISTINCT ON is for and it is right. The delivered report is still v1, because that is the
+  // copy sitting in the client's inbox.
+  //
+  // No lookback bound. The previous derivation walked `expected` and inherited that window as a side
+  // effect; a send older than it silently had no route at all. Asking the database directly costs one
+  // indexed query and removes a second way for this to answer null.
+  const lastSentResult = await client.query(
+    `SELECT DISTINCT ON (weekly_report_project_id)
+            id, weekly_report_project_id, week_of
+       FROM weekly_reports
+      WHERE weekly_report_project_id = ANY($1::uuid[])
+        AND is_active
+        AND status = 'sent'
+      ORDER BY weekly_report_project_id, week_of DESC, version DESC`,
+    [projectIds],
+  );
+  const lastSentByProject = new Map<string, { id: string; weekOf: string }>();
+  for (const row of lastSentResult.rows) {
+    lastSentByProject.set(row.weekly_report_project_id, {
+      id: row.id,
+      weekOf: toIsoDate(row.week_of)!,
+    });
+  }
+
   const reportByKey = new Map<string, Record<string, any>>();
   for (const row of reportsResult.rows) {
     reportByKey.set(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`, row);
@@ -391,24 +425,9 @@ export async function listWeeklyReportAssignments(
     }
     const previousForCurrent = previousByWeekOf[currentWeekOf] ?? null;
 
-    // THE MOST RECENT WEEK THIS PROJECT ACTUALLY SENT, which is not the same thing as the current one and
-    // is the only durable handle the phone has on a delivered report.
-    //
-    // `currentReportId` is defined for `currentWeekOf` alone. The moment the cadence rolls over, a report
-    // the client DID receive is neither the current week nor in `undeliveredSends` (that query carries
-    // `send_delivered_at IS NULL`), so every route the app had to it disappears — and "the client lost the
-    // email" is a thing that happens weeks later, not during the week it was sent.
-    //
-    // Bounded by `expected`, i.e. the same lookback the rest of this payload uses. A send older than that
-    // window is not reachable from the phone and remains a CRM job; that is a deliberate limit rather than
-    // an oversight, and it keeps this a derivation over rows already in memory instead of a second query.
-    const lastSent = (() => {
-      for (let i = expected.length - 1; i >= 0; i -= 1) {
-        const found = reportByKey.get(`${project.id}|${expected[i]!}`);
-        if (found && String(found.status) === "sent") return { row: found, weekOf: expected[i]! };
-      }
-      return null;
-    })();
+    // The most recent week this project actually sent — see `lastSentByProject` above for why this is a
+    // query rather than a walk over the live-version map.
+    const lastSent = lastSentByProject.get(project.id) ?? null;
 
     projects.push({
       weeklyReportProjectId: project.id,
@@ -422,7 +441,7 @@ export async function listWeeklyReportAssignments(
       currentWeekOf,
       currentState,
       currentReportId: currentReport?.id ?? null,
-      lastSentReportId: (lastSent?.row.id as string | undefined) ?? null,
+      lastSentReportId: lastSent?.id ?? null,
       lastSentWeekOf: lastSent?.weekOf ?? null,
       currentReportStatus: (currentReport?.status as WeeklyReportStatus) ?? null,
       currentWeekFilable,

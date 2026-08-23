@@ -32,6 +32,7 @@ import {
   APP_REVIEW_QUEUE_LIMIT,
   listWeeklyReportAssignments,
 } from "../../../src/modules/weekly-reports/assignments-service.js";
+import { createWeeklyReportCorrection } from "../../../src/modules/weekly-reports/send-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const OFFICE = U("00001");
@@ -257,6 +258,40 @@ describe("hub assignments", () => {
     expect(card.lastSentReportId).toBe(reportId);
     // And it is NOT the current week's id — the distinction the whole fix rests on.
     expect(card.lastSentReportId).not.toBe(card.currentReportId);
+  });
+
+  it("still reaches the delivered report while a CORRECTION is open on that same week", async () => {
+    // The assignments query is `DISTINCT ON (project, week_of) … ORDER BY version DESC`, so the LIVE row
+    // for a week is its highest unsuperseded version. `createWeeklyReportCorrection` clones a sent report
+    // to `version + 1` in `approved`, and supersession is stamped at SEND, not at clone — so while a
+    // correction is being worked, v1 is still `sent` and unsuperseded but v2 outranks it and wins the
+    // DISTINCT ON. The week stops reading as `sent`, the last-sent walk skips it, and `lastSentReportId`
+    // falls back to an older week or to null.
+    //
+    // Starting a correction is an ordinary thing for a PM to do, and it is MOST likely on exactly the
+    // report a client is currently asking about. So the single action most correlated with needing the
+    // link again was the action that removed the route to it.
+    //
+    // The state and the route are different questions. The week's state is the correction's — that is
+    // what the DISTINCT ON is for and it is right. The delivered report is still v1, because that is the
+    // copy the client actually has in their inbox.
+    const project = await seedProject();
+    const sentId = await seedDraft(project.id, PRIOR_WEEK);
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET status = 'sent', sent_at = now() WHERE id = $1::uuid`,
+      [sentId],
+    );
+
+    const correction = await createWeeklyReportCorrection(db, sentId, PM_ACTOR);
+    expect(correction.id).not.toBe(sentId);
+    expect(correction.version).toBe(2);
+
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    const card = view.projects[0]!;
+    expect(card.lastSentReportId).toBe(sentId);
+    expect(card.lastSentWeekOf).toBe(PRIOR_WEEK);
+    // Explicitly NOT the correction: that version has never been delivered to anybody.
+    expect(card.lastSentReportId).not.toBe(correction.id);
   });
 
   it("has no last-sent report before anything has gone out", async () => {

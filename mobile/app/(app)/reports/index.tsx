@@ -744,6 +744,15 @@ function ProjectCard({
         <Button
           title="Delivery & client link"
           variant="ghost"
+          // INERT WHILE A WEEK IS OPENING. This button has no week of its own, so unlike the week buttons
+          // it is disabled by ANY open in flight rather than by "an open that is not mine".
+          //
+          // The hazard only exists because the button moved out of the `done` branch: a rolled-over project
+          // now shows a week action AND this one, which the old layout never did. Two Pressables in one
+          // native event batch both read the render-time `opening`, so without this the delivery route
+          // pushes first and the completing `openWeek` pushes the editor on top of it — the PM asked for a
+          // client link and lands on a draft.
+          disabled={busyKey !== null}
           onPress={() => onOpenDelivery(deliveryEntry.reportId, project.projectName)}
           accessibilityLabel={`Delivery status and client link for the week of ${
             deliveryEntry.weekOf ? formatWeekOf(deliveryEntry.weekOf) : week
