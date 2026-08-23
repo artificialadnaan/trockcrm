@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
+import ts from "typescript";
 import { twMerge } from "tailwind-merge";
 
 // A DIALOG THAT ASKS FOR A WIDTH AND SILENTLY DOES NOT GET IT.
@@ -48,47 +49,97 @@ interface CallSite {
   className: string;
 }
 
-/** Every `<DialogContent className="…">` in the app, with the width it asks for. */
+/**
+ * Every `<DialogContent className="…">` in the app, with the width it asks for.
+ *
+ * PARSED, NOT SCANNED. Two earlier versions of this read lines, and both under-reported:
+ *
+ *   * the first took a fixed three-line window, which missed `weekly-report-project-dialog.tsx` — two
+ *     comment lines sit between the tag and its className, putting the width on the fourth;
+ *   * the second read "until the first line containing `>`", which ends the opening tag on the arrow of a
+ *     prop like `onEscapeKeyDown={(event) => handle(event)}` and never reaches the className below it.
+ *
+ * Both failures are silent and both point the same way: the call site vanishes from the sweep, so a dialog
+ * whose width is defeated passes every assertion in this file while being invisible to it. A guard that
+ * quietly covers less than it claims is the exact failure this file exists to prevent, so it now asks the
+ * TypeScript parser where the element ends instead of guessing from punctuation.
+ */
 function dialogCallSites(): CallSite[] {
   const found: CallSite[] = [];
+
   const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.name.endsWith(".tsx")) {
-        const lines = fs.readFileSync(full, "utf8").split("\n");
-        lines.forEach((line, index) => {
-          if (!line.includes("<DialogContent")) return;
-          // THROUGH THE CLOSING `>`, not a fixed window. The first version read three lines, which missed
-          // `weekly-report-project-dialog.tsx` — two comment lines sit between the tag and its className,
-          // putting the width on the fourth. That call site was absent from the sweep entirely, so it
-          // could have regressed to a defeated width with all four tests still green: the coarse
-          // `sites.length > 10` check happily passes while the one caller you care about is invisible.
-          // A guard that silently covers less than it claims is the failure mode this file exists for.
-          let tag = "";
-          for (let i = index; i < Math.min(lines.length, index + 30); i += 1) {
-            tag += " " + lines[i];
-            if (lines[i]!.includes(">")) break;
-          }
-          const match = /className=\{?["`]([^"`]*)["`]/.exec(tag);
-          if (!match) return;
-          const className = match[1];
-          const width = /(?:^|\s)((?:sm:|md:|lg:|xl:)?!?max-w-[^\s]+)/.exec(className);
-          if (!width) return;
-          found.push({
-            file: path.relative(CLIENT_SRC, full),
-            line: index + 1,
-            requested: width[1],
-            className,
-          });
-        });
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules") continue;
+        walk(full);
+      } else if (entry.name.endsWith(".tsx")) {
+        collect(full);
       }
     }
   };
+
+  const collect = (file: string): void => {
+    const text = fs.readFileSync(file, "utf8");
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+    const visit = (node: ts.Node): void => {
+      if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const opening = ts.isJsxElement(node) ? node.openingElement : node;
+        if (opening.tagName.getText() === "DialogContent") {
+          const className = classNameOf(opening);
+          if (className) {
+            const width = /(?:^|\s)((?:sm:|md:|lg:|xl:)?!?max-w-[^\s]+)/.exec(className);
+            if (width) {
+              const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
+              found.push({
+                file: path.relative(CLIENT_SRC, file),
+                line: line + 1,
+                requested: width[1],
+                className,
+              });
+            }
+          }
+        }
+      }
+      node.forEachChild(visit);
+    };
+    visit(source);
+  };
+
   walk(CLIENT_SRC);
   return found;
 }
 
+/**
+ * The class string an element asks for, flattened.
+ *
+ * A caller may write a plain literal or an expression — `cn("sm:max-w-2xl", open && "…")`. Every string
+ * inside the expression is joined, because tailwind-merge sees them joined too; which branch is live at
+ * runtime does not change whether a `max-w-*` in it can be defeated by the primitive's own pin.
+ */
+function classNameOf(opening: ts.JsxOpeningLikeElement): string | null {
+  for (const property of opening.attributes.properties) {
+    if (!ts.isJsxAttribute(property) || property.name.getText() !== "className") continue;
+    const init = property.initializer;
+    if (!init) return null;
+    if (ts.isStringLiteral(init)) return init.text;
+    if (ts.isJsxExpression(init) && init.expression) {
+      const parts: string[] = [];
+      const gather = (n: ts.Node): void => {
+        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
+        if (ts.isTemplateExpression(n)) {
+          parts.push(n.head.text);
+          for (const span of n.templateSpans) parts.push(span.literal.text);
+        }
+        n.forEachChild(gather);
+      };
+      gather(init.expression);
+      return parts.join(" ");
+    }
+  }
+  return null;
+}
 
 /**
  * Tailwind widths at or below the `sm` breakpoint (640px), which this guard deliberately does not police.
