@@ -380,6 +380,16 @@ export const retryWeeklyReportSend = (f: Fetcher, id: string, acknowledgeDuplica
     body: { acknowledgeDuplicateRisk },
   });
 
+// Mint a FRESH client link for a report already sent (#17). The send screen shows the link exactly once
+// and only a SHA-256 hash is stored, so nothing can hand the original back — this is the only way to a
+// usable link afterwards. 201 with the raw URL, returned exactly once, same as the CRM route.
+//
+// A NEW link, not the old one: revoking the link just emailed must not kill the one a client is reading.
+// Both stay valid, and the view log is keyed on the report rather than the token, so the audit that
+// answers "did they open it" is not fragmented by minting a second.
+export const remintWeeklyReportShareLink = (f: Fetcher, id: string) =>
+  f<{ url: string }>(`/field/weekly-reports/reports/${id}/share-link`, { method: "POST" });
+
 // Clone a sent report to the next version so it can be corrected. 201, and it is NOT sent by this call —
 // the original keeps its link and only starts showing "a newer version was issued" when the correction
 // actually goes out. This is the only way back from `sent`, which is immutable for everyone.

@@ -111,6 +111,8 @@ function assignment(suffix: string): WeeklyReportAssignment {
     currentState: "draft",
     currentReportId: `rep-${suffix}`,
     currentReportStatus: "draft",
+    lastSentReportId: null,
+    lastSentWeekOf: null,
     currentWeekFilable: true,
     daysLate: 0,
     outstandingWeeks: [],

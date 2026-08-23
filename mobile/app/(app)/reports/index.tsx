@@ -153,6 +153,14 @@ export default function ReportsHubScreen() {
    * are freshness-sensitive (anything the server has a row for must be reconciled first, a purely local
    * draft must NOT be) and belong somewhere a test can reach them.
    */
+  // The one route into the delivery screen for a report the client ALREADY received. The hub's
+  // "Not delivered to the client" list cannot carry it — that query is `send_delivered_at IS NULL` — so
+  // without this the re-mint action was reachable only while a send was failing or still in flight, which
+  // is the opposite of when somebody asks for a replacement link.
+  function openDelivery(reportId: string, projectName: string): void {
+    router.push({ pathname: "/(app)/reports/delivery/[reportId]", params: { reportId, projectName } });
+  }
+
   async function openWeek(
     project: WeeklyReportAssignment,
     weekOf: string,
@@ -577,6 +585,7 @@ export default function ReportsHubScreen() {
                 project={project}
                 busyKey={opening}
                 onOpenWeek={openWeek}
+                onOpenDelivery={openDelivery}
               />
             ))
           )}
@@ -668,10 +677,12 @@ function ProjectCard({
   project,
   busyKey,
   onOpenWeek,
+  onOpenDelivery,
 }: {
   project: WeeklyReportAssignment;
   busyKey: string | null;
   onOpenWeek: (project: WeeklyReportAssignment, weekOf: string, mode: "author" | "review") => void;
+  onOpenDelivery: (reportId: string, projectName: string) => void;
 }) {
   const tone = weeklyReportWeekStateTone(project.currentState, project.daysLate);
   const currentKey = `${project.weeklyReportProjectId}:${project.currentWeekOf}`;
@@ -704,7 +715,31 @@ function ProjectCard({
         // A line of text beats a button that fails: the state chip already says what is happening, this
         // says whose move it is.
         <Text style={styles.cardSub}>This week is with the project manager.</Text>
-      ) : action.kind === "done" ? null : (
+      ) : action.kind === "done" ? (
+        // THE WEEK IS SENT, and this branch used to render nothing — which is how #17's actual case stayed
+        // unreachable. The delivery screen was only ever linked from "Not delivered to the client", and
+        // that list carries `send_delivered_at IS NULL`, so a report the client DID receive dropped out of
+        // every path the phone had. "The client lost the email" happens weeks later, not during a failure.
+        //
+        // `lastSentReportId`, NOT `currentReportId`. The first version of this used the current week's id,
+        // which the server defines for `currentWeekOf` alone — so the moment the cadence rolled over the
+        // delivered report went unreachable all over again. Two reviewers caught that independently.
+        //
+        // GATED ON `isPm` because the action is: minting a client link needs `canPublishWeeklyReport`, and
+        // an assigned superintendent is not that. They appear on this feed for their own projects and the
+        // week reads `done` for them too, so without this they get a button that always ends in a 403 —
+        // an app advertising something the person holding it cannot do.
+        project.isPm && project.lastSentReportId ? (
+          <Button
+            title="Delivery & client link"
+            variant="ghost"
+            onPress={() => onOpenDelivery(project.lastSentReportId!, project.projectName)}
+            accessibilityLabel={`Delivery status and client link for the week of ${
+              project.lastSentWeekOf ? formatWeekOf(project.lastSentWeekOf) : week
+            }`}
+          />
+        ) : null
+      ) : (
         <Button
           title={
             action.kind === "start"
