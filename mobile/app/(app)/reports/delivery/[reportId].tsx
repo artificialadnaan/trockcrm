@@ -132,9 +132,9 @@ export default function WeeklyReportDeliveryScreen() {
     setNotice(null);
     try {
       const outcome = await runWeeklyReportRetry(
-        // `sendError` as well as `sentAt`: a recorded provider refusal means there is no first copy to
-        // duplicate, so this retry neither warns nor claims an acknowledgement. Same rule as the CRM and
-        // the send service — a PM must not be told two different things about the same click.
+        // `sendError` as well as `sentAt`, and only for the DIALOG's wording: on a provable rejection it
+        // tells the PM that attempt sent nothing. Whether the dialog appears is age alone, the same rule
+        // as the CRM and the send service — a PM must not be told two different things about one click.
         { sentAt: report.sentAt, sendError: report.sendError },
         {
           confirm,

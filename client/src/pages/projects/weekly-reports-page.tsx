@@ -583,9 +583,10 @@ function DismissButton({ row, onDismissed }: { row: WeeklyReportDashboardRow; on
  * replay is a real second email. Past it the PM is told so and has to agree; the server refuses without
  * the acknowledgement, so this dialog is the explanation, not the enforcement.
  *
- * AND IT ONLY EXPIRES INTO A RISK WHEN THE RECORD IS SILENT. A recorded provider error on the send being
- * replayed says the message was refused, so there is no first copy and nothing to warn about — which is
- * the "Send failed" chip, the one a PM is most often looking at when they reach for this button.
+ * THE OUTCOME CHANGES THE SENTENCE, NOT THE GATE. On a provable rejection the dialog says that attempt
+ * sent nothing — the "Send failed" chip is what a PM is most often looking at when they reach for this
+ * button, and being warned with no acknowledgement of what the record shows is what sent them to Send
+ * correction instead. It still asks: `send_error` describes only the latest attempt.
  * `sendRetrySendError`, not `sendError`: the two describe different reports once a correction exists.
  */
 function RetryButton({

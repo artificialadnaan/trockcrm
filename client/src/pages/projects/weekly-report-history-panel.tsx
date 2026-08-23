@@ -519,10 +519,14 @@ function CorrectionButton({
  * provider's 24-hour idempotency window a replay is a genuinely second email, so the PM is told and the
  * acknowledgement is passed on — the server refuses without it.
  *
- * WHEN IT ASKS is not a question of age alone, which is why `sendError` is here. A recorded provider
- * error is evidence the message was refused, so no first copy exists to duplicate; a silent record is
- * not, because the stamp and the provider call are separate steps. Same predicate as the server's 409
- * and the phone's dialog, so the three cannot disagree about whether this click is dangerous.
+ * WHEN IT ASKS is age alone — the same rule as the server's 409, so the two cannot disagree about
+ * whether this click needs agreeing to.
+ *
+ * WHAT IT SAYS is what `sendError` is here for. On a provable rejection the dialog can tell the PM that
+ * attempt sent nothing, which is the sentence the original complaint was really about: without it a
+ * "Send failed" chip read as "retrying is dangerous" and PMs reached for Send correction instead. It
+ * stops there and still warns, because a `rejected:` on the latest attempt says nothing about an earlier
+ * one — see `weeklyReportRetryDuplicateRiskPrompt`.
  */
 function RetryButton({
   reportId,

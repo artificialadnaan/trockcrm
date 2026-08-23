@@ -1162,8 +1162,9 @@ describe("retrying a failed send", () => {
    * A send the provider PROVABLY refused — `send_error` carries the `rejected:` prefix.
    *
    * The prefix is not decoration. `weeklyReportSendFailureMessage` leads every stored error with the
-   * outcome `classifySendFailure` reached, and the retry gate reads it back: `rejected:` means the request
-   * was refused before an email existed, so a replay cannot duplicate anything at any age.
+   * outcome `classifySendFailure` reached: `rejected:` means the request was refused before an email
+   * existed. The GATE does not read it — a rejection describes only the latest attempt — but the retry
+   * dialog does, to tell the PM that attempt sent nothing.
    */
   async function failedSend() {
     return sentWithError(
