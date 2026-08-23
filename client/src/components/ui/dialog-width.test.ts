@@ -81,7 +81,14 @@ function dialogCallSites(): CallSite[] {
       if (entry.isDirectory()) {
         if (entry.name === "node_modules") continue;
         walk(full);
-      } else if (entry.name.endsWith(".tsx")) {
+      } else if (
+        entry.name.endsWith(".tsx") &&
+        // A fixture in a test file is not a dialog anybody sees, and it is routinely written with a
+        // deliberately wrong width to exercise a case. Sweeping it fails CI on a file whose job is to be
+        // wrong.
+        !entry.name.includes(".test.") &&
+        !entry.name.includes(".spec.")
+      ) {
         collect(full);
       }
     }
@@ -240,6 +247,10 @@ function classNameVariants(opening: ts.JsxOpeningLikeElement): string[] | null |
         return combos;
       }
 
+      // BEFORE the opaque-identifier branch. `className={undefined}` is an Identifier, and treating it as
+      // a reference this sweep cannot follow failed the suite on a dialog that plainly has no classes.
+      if (ts.isIdentifier(node) && node.text === "undefined") return [""];
+
       if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) {
         opaque = true;
         return [];
@@ -325,7 +336,10 @@ describe("a dialog gets the width it asks for", () => {
       if (!site.requested) return false;
       const merged = twMerge(base, site.className).split(/\s+/);
       const clampSurvived = merged.includes(clamp!);
-      const overrode = merged.some((c) => /^sm:!max-w-/.test(c));
+      // `!max-w-5xl` UNPREFIXED counts as an override. `!important` beats a media-query rule regardless of
+      // source order, so that caller genuinely gets its width — flagging it was the guard failing on
+      // correct code, which is precisely how this codebase acquired its escape hatches in the first place.
+      const overrode = merged.some((c) => /^(?:sm:)?!max-w-/.test(c));
       // A LATER BREAKPOINT IS NOT DEFEATED. `md:max-w-2xl` legitimately leaves `sm:max-w-sm` standing:
       // the dialog keeps the default width from 640–767px and takes the requested one at `md`, which is
       // what its author asked for. Flagging that would fail CI on correct code — and a guard that cries
