@@ -609,8 +609,10 @@ export async function retryWeeklyReportSend(
   // dies — writes nothing at all by construction.
   //
   // So this stopped trying to prove a negative the schema cannot support. What was actually wrong was the
-  // SENTENCE, and that moved to `weeklyReportRetryDuplicateRiskPrompt`, which tells a PM the last attempt
-  // sent nothing when that is known without claiming an earlier one did not.
+  // SENTENCE, and that moved to `weeklyReportRetryDuplicateRiskPrompt`, which tells a PM that a RECORDED
+  // attempt sent nothing — not which one, and nothing about the others. A rejected attempt followed by a
+  // successful one whose stamp write dies leaves `rejected:` on a row the client has, so naming it the
+  // latest would be false in exactly the state where being wrong costs a duplicate.
   if (
     !options.acknowledgeDuplicateRisk &&
     !weeklyReportRetryIsProviderDeduped(reportRow.sent_at, options.now)

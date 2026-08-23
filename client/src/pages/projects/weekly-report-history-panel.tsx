@@ -525,8 +525,9 @@ function CorrectionButton({
  * WHAT IT SAYS is what `sendError` is here for. On a provable rejection the dialog can tell the PM that
  * attempt sent nothing, which is the sentence the original complaint was really about: without it a
  * "Send failed" chip read as "retrying is dangerous" and PMs reached for Send correction instead. It
- * stops there and still warns, because a `rejected:` on the latest attempt says nothing about an earlier
- * one — see `weeklyReportRetryDuplicateRiskPrompt`.
+ * stops there and still warns, because a recorded `rejected:` says nothing about the OTHER attempts —
+ * neither earlier ones nor a later one whose delivery stamp was lost. See
+ * `weeklyReportRetryDuplicateRiskPrompt`.
  */
 function RetryButton({
   reportId,

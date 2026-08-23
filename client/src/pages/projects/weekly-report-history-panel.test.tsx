@@ -236,8 +236,8 @@ describe("a sent report the client has not received", () => {
     // dialog reads as "retrying is dangerous" — which sent them to Send correction instead, minting a v2
     // and taking the failure off the board.
     //
-    // The fix is the sentence, not the gate. It still asks, because a `rejected:` on the LATEST attempt
-    // does not prove an earlier attempt failed to reach anyone — but it now credits what is known.
+    // The fix is the sentence, not the gate. It still asks, because a recorded `rejected:` does not
+    // prove the OTHER attempts failed to reach anyone — but it now credits what is known.
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     try {
