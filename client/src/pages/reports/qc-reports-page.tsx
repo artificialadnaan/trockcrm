@@ -280,7 +280,7 @@ export default function QcReportsPage() {
 
       {/* KPI drill-down modal */}
       <Dialog open={!!drill} onOpenChange={(o) => !o && setDrill(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{drill?.title} <span className="text-slate-400">· {drill?.rows.length}</span></DialogTitle>
           </DialogHeader>

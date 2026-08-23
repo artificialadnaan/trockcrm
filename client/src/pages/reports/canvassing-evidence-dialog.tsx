@@ -178,7 +178,7 @@ export function CanvassingEvidenceDialog({
 
   return (
     <Dialog open={Boolean(target)} onOpenChange={(open) => (!open ? onClose() : undefined)}>
-      <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[80vh] sm:max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {target ? `${target.personName} — ${target.expected} ${noun}` : ""}

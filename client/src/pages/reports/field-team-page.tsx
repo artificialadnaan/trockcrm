@@ -327,7 +327,7 @@ function ResponderFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{mode === "add" ? "Add Field Responder" : "Edit Field Responder"}</DialogTitle>
         </DialogHeader>

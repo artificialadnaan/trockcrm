@@ -491,7 +491,7 @@ export function CompanyDetailPage() {
 
       {/* Add Contact Dialog */}
       <Dialog open={addContactOpen} onOpenChange={setAddContactOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add Contact to {company.name}</DialogTitle>
           </DialogHeader>

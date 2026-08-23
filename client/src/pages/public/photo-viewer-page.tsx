@@ -126,7 +126,7 @@ export function PublicPhotoViewerPage() {
 
       <Dialog open={Boolean(selectedPhoto)} onOpenChange={(open) => !open && setSelectedId(null)}>
         {selectedPhoto && (
-          <DialogContent className="max-w-5xl overflow-hidden bg-black p-0">
+          <DialogContent className="sm:max-w-5xl overflow-hidden bg-black p-0">
             <div className="relative flex max-h-[90vh] min-h-[60vh] items-center justify-center">
               <button
                 type="button"

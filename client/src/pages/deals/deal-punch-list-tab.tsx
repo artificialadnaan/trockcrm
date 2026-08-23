@@ -388,7 +388,7 @@ function AddPunchItemDialog({
   };
 
   return (
-    <DialogContent className="max-w-md">
+    <DialogContent className="sm:max-w-md">
       <DialogHeader>
         <DialogTitle>Add Punch List Item</DialogTitle>
       </DialogHeader>

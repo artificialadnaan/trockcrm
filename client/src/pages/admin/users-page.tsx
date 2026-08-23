@@ -1042,7 +1042,7 @@ export function UsersPage() {
 
       {showAddUser && (
         <Dialog open={showAddUser} onOpenChange={(open) => { if (!open) setShowAddUser(false); }}>
-          <DialogContent className="max-w-md">
+          <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>Add User</DialogTitle>
             </DialogHeader>
