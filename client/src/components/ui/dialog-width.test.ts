@@ -95,31 +95,27 @@ function dialogCallSites(): CallSite[] {
       if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
         const opening = ts.isJsxElement(node) ? node.openingElement : node;
         if (opening.tagName.getText() === "DialogContent") {
-          const className = classNameOf(opening);
-          if (className === null) {
-            // UNRESOLVABLE, not absent. `className={dialogClasses}` has no string literal anywhere in it,
-            // so flattening yields nothing and the call site would simply vanish from the sweep — a
-            // defeated width in it would never be reported. Recorded instead, and asserted empty below,
-            // so introducing one is a loud failure rather than a quiet loss of coverage.
+          const variants = classNameVariants(opening);
+          if (variants === null) {
+            // UNRESOLVABLE, not absent. Part of this className lives behind a reference, so a defeated
+            // width in it would never be reported. Recorded and asserted empty below, so introducing one
+            // is a loud failure rather than a quiet loss of coverage.
             const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
             unresolvable.push({ file: path.relative(CLIENT_SRC, file), line: line + 1 });
-          } else if (className) {
-            // `2xl:` INCLUDED. It was missing here while the `laterBreakpoint` predicate below already
-            // recognised it, so a dialog whose only width was `2xl:max-w-*` matched nothing, was recorded
-            // as having no requested width, and dropped out of both regression checks entirely — the
-            // silent-omission failure this file exists to prevent, inside the file itself.
-            const width = /(?:^|\s)((?:sm:|md:|lg:|xl:|2xl:)?!?max-w-[^\s]+)/.exec(className);
-            // COLLECTED EVEN WITHOUT A REQUESTED WIDTH. The edge-to-edge assertion looks for `w-full`,
-            // which has nothing to do with `max-w-*` — so gating collection on a width match meant
-            // `<DialogContent className="w-full">` was never inspected by it at all. `requested` is empty
-            // for those; the width assertions skip them on their own predicates.
+          } else if (variants !== undefined) {
+            // ONE ENTRY PER VARIANT. Mutually exclusive branches are separate renderings and each has to
+            // stand on its own; collapsing them into one string lets the surviving branch answer for the
+            // one that lost.
             const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
-            found.push({
-              file: path.relative(CLIENT_SRC, file),
-              line: line + 1,
-              requested: width ? width[1] : "",
-              className,
-            });
+            for (const className of variants) {
+              const width = /(?:^|\s)((?:sm:|md:|lg:|xl:|2xl:)?!?max-w-[^\s]+)/.exec(className);
+              found.push({
+                file: path.relative(CLIENT_SRC, file),
+                line: line + 1,
+                requested: width ? width[1] : "",
+                className,
+              });
+            }
           }
         }
       }
@@ -134,51 +130,100 @@ function dialogCallSites(): CallSite[] {
 }
 
 /**
- * The class string an element asks for, flattened.
+ * Every class string an element can actually render with — one per combination of conditional branches.
  *
- * A caller may write a plain literal or an expression — `cn("sm:max-w-2xl", open && "…")`. Every string
- * inside the expression is joined, because tailwind-merge sees them joined too; which branch is live at
- * runtime does not change whether a `max-w-*` in it can be defeated by the primitive's own pin.
+ * VARIANTS, NOT ONE JOINED STRING. The first version concatenated every literal it found, so
+ * `cn(isWide ? "max-w-2xl" : "max-w-sm")` produced `"max-w-2xl max-w-sm"` — a string the component can
+ * never render. tailwind-merge then collapses that to the LAST width, and whichever branch lost is checked
+ * against nothing. Mutually exclusive branches have to be evaluated as the alternatives they are.
+ *
+ * Returns `null` when any part of the expression is behind a reference this sweep cannot follow. Partial is
+ * not resolved: `cn(dialogClasses, "overflow-y-auto")` yields a literal, and an earlier version took that
+ * as success and silently dropped whatever `dialogClasses` held.
  */
-function classNameOf(opening: ts.JsxOpeningLikeElement): string | null | undefined {
+function classNameVariants(opening: ts.JsxOpeningLikeElement): string[] | null | undefined {
   for (const property of opening.attributes.properties) {
     if (!ts.isJsxAttribute(property) || property.name.getText() !== "className") continue;
     const init = property.initializer;
     if (!init) return undefined;
-    if (ts.isStringLiteral(init)) return init.text;
-    if (ts.isJsxExpression(init) && init.expression) {
-      const parts: string[] = [];
-      let sawUnresolvedIdentifier = false;
-      const gather = (n: ts.Node): void => {
-        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) {
-          parts.push(n.text);
-          return;
+    if (ts.isStringLiteral(init)) return [init.text];
+    if (!ts.isJsxExpression(init) || !init.expression) return undefined;
+
+    let opaque = false;
+    /** Each node contributes a set of alternatives; the result is their cartesian product. */
+    const alternatives = (node: ts.Node): string[] => {
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+
+      if (ts.isConditionalExpression(node)) {
+        // The branch point. Both arms are real renderings; neither may hide the other.
+        return [...alternatives(node.whenTrue), ...alternatives(node.whenFalse)];
+      }
+
+      if (ts.isTemplateExpression(node)) {
+        // INTERPOLATIONS ARE VISITED. An earlier version pushed the head and the span literals and
+        // returned, never looking at `span.expression` — so `` `${dialogClasses} p-0` `` resolved to
+        // " p-0" and read as fully resolved.
+        let combos = [node.head.text];
+        for (const span of node.templateSpans) {
+          const inner = alternatives(span.expression);
+          const next: string[] = [];
+          for (const prefix of combos) {
+            for (const piece of inner.length ? inner : [""]) {
+              next.push(`${prefix} ${piece} ${span.literal.text}`);
+            }
+          }
+          combos = next;
         }
-        if (ts.isTemplateExpression(n)) {
-          parts.push(n.head.text);
-          for (const span of n.templateSpans) parts.push(span.literal.text);
-          return;
+        return combos;
+      }
+
+      if (ts.isBinaryExpression(node)) {
+        // `open && "…"` — the falsy arm contributes nothing, which is itself a valid rendering.
+        if (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+          return ["", ...alternatives(node.right)];
         }
-        // An identifier standing in for classes — `cn(dialogClasses, "overflow-y-auto")`. The FIRST
-        // version only asked whether ANY literal was found, so a mixed expression like that one resolved
-        // to "overflow-y-auto" and the identifier's classes vanished without a word. Partial is not
-        // resolved: if any part is unreadable, the whole call site is.
-        if (ts.isIdentifier(n) && !ts.isPropertyAccessExpression(n.parent)) {
-          const isCallee = ts.isCallExpression(n.parent) && n.parent.expression === n;
-          if (!isCallee) sawUnresolvedIdentifier = true;
-          return;
+        return [...alternatives(node.left), ...alternatives(node.right)];
+      }
+
+      if (ts.isCallExpression(node)) {
+        // `cn(a, b, c)` — every argument contributes, so the product across them.
+        let combos = [""];
+        for (const argument of node.arguments) {
+          const inner = alternatives(argument);
+          const next: string[] = [];
+          for (const prefix of combos) {
+            for (const piece of inner.length ? inner : [""]) next.push(`${prefix} ${piece}`);
+          }
+          combos = next;
         }
-        n.forEachChild(gather);
-      };
-      gather(init.expression);
-      // `null` = a className exists but part of it is behind a reference this sweep cannot follow. `""`
-      // would have read as "asks for no width" and skipped it silently.
-      return sawUnresolvedIdentifier ? null : parts.join(" ");
-    }
+        return combos;
+      }
+
+      if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) {
+        opaque = true;
+        return [];
+      }
+
+      if (ts.isParenthesizedExpression(node)) return alternatives(node.expression);
+      if (ts.isArrayLiteralExpression(node)) {
+        let combos = [""];
+        for (const element of node.elements) {
+          const inner = alternatives(element);
+          const next: string[] = [];
+          for (const prefix of combos) {
+            for (const piece of inner.length ? inner : [""]) next.push(`${prefix} ${piece}`);
+          }
+          combos = next;
+        }
+        return combos;
+      }
+      return [];
+    };
+
+    const variants = alternatives(init.expression);
+    if (opaque) return null;
+    return variants.map((v) => v.replace(/\s+/g, " ").trim());
   }
-  // `undefined` = no className attribute at all, which is fine: the dialog takes the primitive's default
-  // width and there is nothing to defeat. Distinct from `null`, which means a className exists but its
-  // classes live behind a reference — the case that must not pass silently.
   return undefined;
 }
 
@@ -189,6 +234,9 @@ function classNameOf(opening: ts.JsxOpeningLikeElement): string | null | undefin
  * the 640px the prefix starts at — so `sm:max-w-md` leaves the sub-640 range capped by the primitive's
  * inset instead, and a 600px window renders 568px rather than the 448px the author asked for. The fix for
  * a wide dialog is a regression for a narrow one.
+ *
+ * `lg` (512px) and `xl` (576px) belong here too and were missing: both are below 640, so both hit the same
+ * trap, and leaving them out meant the guard demanded a prefix that would have made them worse.
  *
  * Those call sites keep their unprefixed width and stay clamped at 384px above `sm`. That is a real defect
  * and it is NOT fixed here: correcting it needs the primitive to stop pinning a default at all, which
@@ -274,8 +322,13 @@ describe("a dialog gets the width it asks for", () => {
     // A caller with a deliberate width of its own is fine and is NOT flagged:
     // `w-[min(96vw,1040px)]` carries its own 96vw inset. The defect is specifically `w-full`.
     const base = baseClassesOf("components/ui/dialog.tsx", "fixed top-1/2 left-1/2");
+    // ANY breakpoint variant, not the bare utility. `sm:w-full` survives tailwind-merge alongside the
+    // primitive's unprefixed inset and makes the dialog edge to edge from 640px up — the same defect, one
+    // prefix away, and an exact-match check reported it clean.
     const edgeToEdge = dialogCallSites().filter((site) =>
-      twMerge(base, site.className).split(/\s+/).includes("w-full"),
+      twMerge(base, site.className)
+        .split(/\s+/)
+        .some((c) => /^(?:[^:\s]+:)*!?w-full$/.test(c)),
     );
 
     expect(
