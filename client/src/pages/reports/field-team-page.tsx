@@ -327,7 +327,7 @@ function ResponderFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{mode === "add" ? "Add Field Responder" : "Edit Field Responder"}</DialogTitle>
         </DialogHeader>
@@ -455,7 +455,7 @@ function AssignmentsSheet({
 
   return (
     <Sheet open={!!responder} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-md">
+      <SheetContent className="flex w-full flex-col gap-0 p-0 max-w-md">
         {responder && (
           <>
             <SheetHeader className="shrink-0 border-b border-slate-100 px-6 py-5">

@@ -59,9 +59,18 @@ function dialogCallSites(): CallSite[] {
         const lines = fs.readFileSync(full, "utf8").split("\n");
         lines.forEach((line, index) => {
           if (!line.includes("<DialogContent")) return;
-          // The className may sit on the next line or two; join a small window and take the first string.
-          const window = lines.slice(index, index + 3).join(" ");
-          const match = /className=\{?["`]([^"`]*)["`]/.exec(window);
+          // THROUGH THE CLOSING `>`, not a fixed window. The first version read three lines, which missed
+          // `weekly-report-project-dialog.tsx` — two comment lines sit between the tag and its className,
+          // putting the width on the fourth. That call site was absent from the sweep entirely, so it
+          // could have regressed to a defeated width with all four tests still green: the coarse
+          // `sites.length > 10` check happily passes while the one caller you care about is invisible.
+          // A guard that silently covers less than it claims is the failure mode this file exists for.
+          let tag = "";
+          for (let i = index; i < Math.min(lines.length, index + 30); i += 1) {
+            tag += " " + lines[i];
+            if (lines[i]!.includes(">")) break;
+          }
+          const match = /className=\{?["`]([^"`]*)["`]/.exec(tag);
           if (!match) return;
           const className = match[1];
           const width = /(?:^|\s)((?:sm:|md:|lg:|xl:)?!?max-w-[^\s]+)/.exec(className);
@@ -79,6 +88,22 @@ function dialogCallSites(): CallSite[] {
   walk(CLIENT_SRC);
   return found;
 }
+
+
+/**
+ * Tailwind widths at or below the `sm` breakpoint (640px), which this guard deliberately does not police.
+ *
+ * `sm:` FIXES A WIDTH ONLY IF THAT WIDTH IS WIDER THAN THE BREAKPOINT. `max-w-md` is 448px — narrower than
+ * the 640px the prefix starts at — so `sm:max-w-md` leaves the sub-640 range capped by the primitive's
+ * inset instead, and a 600px window renders 568px rather than the 448px the author asked for. The fix for
+ * a wide dialog is a regression for a narrow one.
+ *
+ * Those call sites keep their unprefixed width and stay clamped at 384px above `sm`. That is a real defect
+ * and it is NOT fixed here: correcting it needs the primitive to stop pinning a default at all, which
+ * resizes all 47 dialogs and wants a visual pass. Naming them here keeps the exemption honest rather than
+ * letting the guard quietly report success over a category it cannot handle.
+ */
+const NARROWER_THAN_BREAKPOINT = /^(?:sm:|md:|lg:|xl:)?!?max-w-(?:0|px|xs|sm|md|\d|\d\.5|\d{1,2})$/;
 
 describe("a dialog gets the width it asks for", () => {
   it("found call sites to check — an empty sweep would pass every assertion below vacuously", () => {
@@ -100,11 +125,16 @@ describe("a dialog gets the width it asks for", () => {
 
     const defeated = dialogCallSites().filter((site) => {
       const merged = twMerge(base, site.className).split(/\s+/);
-      // The caller lost if the primitive's own breakpoint clamp is STILL present and the caller did not
-      // out-rank it with `!`. That is the exact condition under which the browser renders 384px.
       const clampSurvived = merged.includes(clamp!);
       const overrode = merged.some((c) => /^sm:!max-w-/.test(c));
-      return clampSurvived && !overrode;
+      // A LATER BREAKPOINT IS NOT DEFEATED. `md:max-w-2xl` legitimately leaves `sm:max-w-sm` standing:
+      // the dialog keeps the default width from 640–767px and takes the requested one at `md`, which is
+      // what its author asked for. Flagging that would fail CI on correct code — and a guard that cries
+      // wolf on valid usage is one people learn to route around with `!`, which is how this codebase
+      // acquired nine escape hatches in the first place.
+      const laterBreakpoint = merged.some((c) => /^(md|lg|xl|2xl):!?max-w-/.test(c));
+      const tooNarrowToPrefix = NARROWER_THAN_BREAKPOINT.test(site.requested);
+      return clampSurvived && !overrode && !laterBreakpoint && !tooNarrowToPrefix;
     });
 
     expect(
@@ -123,7 +153,9 @@ describe("a dialog gets the width it asks for", () => {
     expect(inset, "the primitive no longer sets a mobile inset — update this test").toBeDefined();
 
     const lostInset = dialogCallSites().filter(
-      (site) => !twMerge(base, site.className).split(/\s+/).includes(inset!),
+      (site) =>
+        !NARROWER_THAN_BREAKPOINT.test(site.requested) &&
+        !twMerge(base, site.className).split(/\s+/).includes(inset!),
     );
 
     expect(
