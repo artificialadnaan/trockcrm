@@ -211,7 +211,7 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // confirmation is a PM who clicks through it on the one day it is real.
     expect(weeklyReportRetryIsProviderDeduped(SENT_AT, NOW_INSIDE_WINDOW)).toBe(true);
     expect(
-      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT, sendError: null }, NOW_INSIDE_WINDOW),
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT }, NOW_INSIDE_WINDOW),
     ).toBe(false);
   });
 
@@ -221,20 +221,18 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // second the client already has the report.
     expect(weeklyReportRetryIsProviderDeduped(SENT_AT, NOW_OUTSIDE_WINDOW)).toBe(false);
     expect(
-      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT, sendError: null }, NOW_OUTSIDE_WINDOW),
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT }, NOW_OUTSIDE_WINDOW),
     ).toBe(true);
   });
 
-  it("STILL asks on a provable rejection — the gate is age alone", () => {
-    // A `rejected:` error says THAT attempt created nothing. It says nothing about an earlier attempt,
-    // and `send_error` holds only the latest one, so it cannot carry the gate. What it changes is the
-    // WORDING (below), which is where the real complaint was.
-    expect(
-      weeklyReportRetryNeedsAcknowledgement(
-        { sentAt: SENT_AT, sendError: REJECTED_ERROR },
-        NOW_OUTSIDE_WINDOW,
-      ),
-    ).toBe(true);
+  it("asks outside the window WHATEVER the record says — the gate ignores the outcome", () => {
+    // One test, not four. An earlier revision had a separate case per outcome, but once the gate went
+    // back to age alone every one of them made the identical call with the identical arguments: four
+    // assertions that could only ever agree, dressed as coverage of a distinction the function no longer
+    // draws. The distinction is real, and it now lives entirely in the PROMPT, below.
+    expect(weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT }, NOW_OUTSIDE_WINDOW)).toBe(true);
+    // And the signature refuses the outcome outright, so a future edit cannot quietly reintroduce it:
+    // `weeklyReportRetryNeedsAcknowledgement` takes `sentAt` and nothing else.
   });
 
   it("says the last attempt sent nothing when the provider provably refused it", () => {
@@ -244,69 +242,41 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     expect(message).toMatch(/second copy/i);
   });
 
-  it("claims no such thing on an `unknown:` or legacy record", () => {
-    // The control. A prompt that mentioned the refusal unconditionally would pass the test above.
-    for (const sendError of [UNKNOWN_ERROR, "Resend timed out", null, undefined]) {
+  it("claims no such thing on an `unknown:`, blank, or legacy record", () => {
+    // The control, and the one that carries the distinction now. `unknown:` covers a swallowed fetch, a
+    // 5xx, a 408 and an in-flight idempotency 409 — all of which may have left the message enqueued.
+    // A prompt that mentioned the refusal unconditionally would pass the test above and fail here.
+    for (const sendError of [UNKNOWN_ERROR, "Resend timed out", "", "   ", null, undefined]) {
       const { message } = weeklyReportRetryAcknowledgementPrompt(sendError);
       expect(message).not.toMatch(/sent nothing/i);
       expect(message).toMatch(/second copy/i);
     }
   });
 
-  it("treats a blank error as no evidence of refusal", () => {
-    // `send_error` is cleared to NULL on every retry, so blank is a state this really reaches.
-    expect(
-      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT, sendError: "   " }, NOW_OUTSIDE_WINDOW),
-    ).toBe(true);
-  });
-
-  it("STILL asks on an `unknown:` error, which proves nothing either way", () => {
-    // A recorded error is not automatically evidence. `unknown:` is written for a swallowed fetch, a 5xx,
-    // a 408 and an in-flight idempotency 409 — all of which may have left the message enqueued, so the
-    // client may already have this report. The phone must reach the same verdict as the CRM and the
-    // server here, or a PM is warned on one surface and waved through on another.
-    expect(
-      weeklyReportRetryNeedsAcknowledgement(
-        { sentAt: SENT_AT, sendError: UNKNOWN_ERROR },
-        NOW_OUTSIDE_WINDOW,
-      ),
-    ).toBe(true);
-  });
-
-  it("STILL asks on a legacy error written before the outcome prefix existed", () => {
-    expect(
-      weeklyReportRetryNeedsAcknowledgement(
-        { sentAt: SENT_AT, sendError: "Resend timed out" },
-        NOW_OUTSIDE_WINDOW,
-      ),
-    ).toBe(true);
-  });
-
   it("reads the prefix as a PREFIX, not as a word appearing somewhere in the sentence", () => {
     // The provider's own text is quoted into `send_error`, and it is free to contain the word. A
-    // substring match calls this ambiguous row a provable rejection and waves the retry through — and
-    // every other test in this block still passes with that bug in place, which is why this one exists.
-    expect(
-      weeklyReportRetryNeedsAcknowledgement(
-        {
-          sentAt: SENT_AT,
-          sendError:
-            "unknown: the email provider never confirmed the message, so it may or may not have gone " +
-            "out — smtp_error (502): the receiving server rejected: 4.7.0 try again later",
-        },
-        NOW_OUTSIDE_WINDOW,
-      ),
-    ).toBe(true);
+    // substring match reads this ambiguous row as a provable rejection and tells the PM their last
+    // attempt sent nothing — the opposite of what it says.
+    //
+    // Asserted through the PROMPT, which is the only thing that consults the outcome now. Pointing this
+    // at `weeklyReportRetryNeedsAcknowledgement` was wrong once the gate went back to age alone: that
+    // function ignores the outcome entirely, so the assertion held for a reason unrelated to the parser
+    // and would have passed with the substring bug fully restored.
+    const { message } = weeklyReportRetryAcknowledgementPrompt(
+      "unknown: the email provider never confirmed the message, so it may or may not have gone " +
+        "out — smtp_error (502): the receiving server rejected: 4.7.0 try again later",
+    );
+    expect(message).not.toMatch(/sent nothing/i);
   });
 
   it("asks when the send has no timestamp, or an unreadable one", () => {
     // Conservative on purpose, and matching the shared implementation: being wrong this way costs one
     // extra confirmation, being wrong the other way costs a client a duplicate email.
     expect(
-      weeklyReportRetryNeedsAcknowledgement({ sentAt: null, sendError: null }, NOW_INSIDE_WINDOW),
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: null }, NOW_INSIDE_WINDOW),
     ).toBe(true);
     expect(
-      weeklyReportRetryNeedsAcknowledgement({ sentAt: "not a date", sendError: null }, NOW_INSIDE_WINDOW),
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: "not a date" }, NOW_INSIDE_WINDOW),
     ).toBe(true);
   });
 });

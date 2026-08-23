@@ -181,22 +181,20 @@ export function weeklyReportDeliveryDetail(
 /**
  * Does a Retry right now need the duplicate-risk acknowledgement?
  *
- * TWO facts, not one. The window says whether the provider still recognises the key; `sendError` says
- * whether there is anything to duplicate in the first place. Inside the window the worst outcome of a
- * retry is a no-op and asking would train the PM to click through the one confirmation on this screen that
- * is ever real. Outside it, a retry CAN put a second copy in a client's inbox — but only if a first copy
- * exists, and a recorded provider error is evidence that it does not.
+ * AGE ALONE, and the send's recorded outcome deliberately plays no part. An earlier revision took
+ * `sendError` here on the reasoning that a recorded provider refusal means there is no first copy to
+ * duplicate; it was reverted, because `send_error` describes only the LATEST attempt. It is overwritten
+ * each time, a retry clears it while keeping `send_attempts`, and the case that matters most — the
+ * provider accepting while the delivery-stamp write dies — records nothing at all. "This send definitely
+ * reached nobody" is not a statement these columns can support, so the confirmation is always asked for
+ * once the provider's window has closed.
  *
- * NULL IS NOT THE OPPOSITE OF AN ERROR. The delivery stamp is written by a separate statement after the
- * provider call returns, so a send that recorded nothing at all may be one the client already has. Silence
- * still asks.
- *
- * Mirrors `weeklyReportRetryNeedsDuplicateRiskAck` in shared, which the CRM and the send service both use.
- * The phone cannot import it, so the two are kept identical by hand and by these tests — a surface that
- * warns where the others do not is a PM told two different things about the same click.
+ * The outcome drives `weeklyReportRetryAcknowledgementPrompt` instead: what the PM is TOLD, not whether
+ * they are asked. Mirrors `weeklyReportRetryIsProviderDeduped` in shared, which the CRM and the send
+ * service both use — the phone cannot import it, so the two are kept in step by hand and by these tests.
  */
 export function weeklyReportRetryNeedsAcknowledgement(
-  report: { sentAt: string | null | undefined; sendError?: string | null },
+  report: { sentAt: string | null | undefined },
   now: Date = new Date(),
 ): boolean {
   return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);

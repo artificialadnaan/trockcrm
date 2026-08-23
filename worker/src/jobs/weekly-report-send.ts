@@ -355,21 +355,27 @@ function assertMayEmailRealClients(recipients: string[]): void {
  * env var — behind one indistinguishable string, with no way for a director to tell which they had.
  *
  * IT LEADS WITH THE OUTCOME, and that prefix is load-bearing rather than decorative. `rejected` means the
- * provider refused the request and created nothing, so this report is PROVABLY still undelivered and a
- * replay cannot duplicate it at any age; `unknown` means we never learned, so a replay might. The API's
- * retry route currently gates its duplicate-risk warning on AGE alone (`retryWeeklyReportSend`), which warns
- * a PM replaying a provable rejection that they may put a second copy in the client's inbox — false for that
- * case, and it trains click-through on a warning that is true for `unknown`. Keying that gate on this
- * outcome is the server half of the fix and is deliberately not made here.
+ * provider refused the request and created nothing, so THIS ATTEMPT is provably undelivered; `unknown`
+ * means we never learned, so it may have gone out.
+ *
+ * WHAT THAT PREFIX IS FOR, AND WHAT IT IS NOT. An earlier revision of this docblock proposed keying the
+ * retry's duplicate-risk gate on it, and that was tried and reverted: a `rejected:` here describes only the
+ * LATEST attempt. This column is overwritten per attempt and `retryWeeklyReportSend` clears it while
+ * keeping `send_attempts`, so an earlier `unknown:` that may have delivered can sit behind a later
+ * `rejected:` — and the worst case, the provider accepting while the delivery-stamp write dies, records
+ * nothing here at all. The gate is AGE ALONE and stays that way.
+ *
+ * The prefix drives the WORDING instead (`weeklyReportRetryDuplicateRiskPrompt`): a PM is told this attempt
+ * sent nothing, without being told the client received nothing.
  */
 export function weeklyReportSendFailureMessage(result: SendSystemEmailResult): string {
   // Anything not positively `rejected` is treated as ambiguous — the same conservative default
   // classifySendFailure applies, and it also covers a stub or an older build that omits the field.
   //
-  // The two words come from `shared` rather than being spelled here, because the retry gate now PARSES
-  // this prefix back out (`weeklyReportSendErrorIsProvableRejection`) to decide whether a replay can
-  // duplicate anything. Written as literals at both ends, renaming one would silently reclassify every
-  // provable rejection as ambiguous — which fails safe, and would therefore never be noticed.
+  // The two words come from `shared` rather than being spelled here, because the retry dialog PARSES
+  // this prefix back out (`weeklyReportSendErrorIsProvableRejection`) to decide what it tells the PM.
+  // Written as literals at both ends, renaming one would silently reclassify every provable rejection as
+  // ambiguous — which fails safe, and would therefore never be noticed.
   const outcome =
     result.outcome === WEEKLY_REPORT_SEND_OUTCOME_REJECTED
       ? WEEKLY_REPORT_SEND_OUTCOME_REJECTED

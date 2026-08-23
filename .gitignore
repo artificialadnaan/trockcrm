@@ -26,3 +26,6 @@ close-date-exports/
 # (ids, project numbers, recipient emails) by construction, so they are kept locally for rollback and must
 # never be committed — git history cannot be un-published. Narrative audit notes in .audit/ stay tracked.
 .audit/backfills/
+
+# Per-machine cache written by the impeccable design hook — absolute paths and session ids.
+**/.impeccable/hook.cache.json
