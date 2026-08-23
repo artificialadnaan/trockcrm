@@ -147,16 +147,55 @@ export const weeklyReportDeliveryWebhookLimiter = rateLimit({
  * itself at 60 seconds, so a person cannot physically produce more than about one transcript a minute per
  * section; 30 is an order of magnitude above the busiest real session and still stops a loop dead.
  */
+/**
+ * Per-USER, shared by both dictation limiters so a burst bucket and a daily bucket can never disagree
+ * about whose spend they are counting.
+ *
+ * Falling back to IP rather than to a single shared bucket: a constant key would put every caller whose id
+ * could not be read into one bucket, which is a self-inflicted outage rather than a limit.
+ */
+function weeklyReportDictationKey(req: Request): string {
+  const id = (req as Request & { fieldUser?: { id?: unknown } }).fieldUser?.id;
+  return typeof id === "string" && id ? `user:${id}` : `ip:${correctiveActionIpKey(req)}`;
+}
+
+/**
+ * THE BURST LIMIT ALONE DOES NOT BOUND SPEND, which is the point of the second limiter below.
+ *
+ * A 60-second window replenishes. A loop pacing itself at one call every two seconds never trips 30/min
+ * and still runs 43,200 requests a day — up to twice that in model attempts — so the guard that was
+ * supposed to cap runaway cost would have capped only its SHAPE. A faster loop is no better off in the
+ * end: it simply spends its allowance, sleeps, and resumes when the next window opens.
+ *
+ * So the burst limit stops a hot loop from hammering the provider, and the daily cap is what actually
+ * bounds the bill. Both are keyed per user, for the same reason.
+ *
+ * SIZED AGAINST REAL USE, NOT AGAINST THE BURST NUMBER. A superintendent files one report a week per
+ * project across a handful of sections; even a PM covering several jobsites and re-recording freely is in
+ * the low tens of dictations a day. 200 is far above that and roughly two orders of magnitude below what
+ * an unbounded loop would spend.
+ *
+ * WHAT THIS DOES NOT DO, stated plainly because a limiter is exactly the thing that gets trusted for more
+ * than it does: the store is in-process memory, so the count resets on deploy or restart and is not shared
+ * across instances. That is a real hole and a deliberate trade — a durable quota needs a table and a write
+ * on every dictation, which is a larger change than this follow-up. What it buys is that the runaway and
+ * stolen-token cases this was raised for now stop within a day instead of never.
+ */
+const WEEKLY_REPORT_DICTATION_DAILY_LIMIT = 200;
+export const weeklyReportDictationDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: WEEKLY_REPORT_DICTATION_DAILY_LIMIT,
+  keyGenerator: weeklyReportDictationKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: "Daily dictation limit reached, please try again tomorrow" } },
+});
+
 const WEEKLY_REPORT_DICTATION_LIMIT = 30;
 export const weeklyReportDictationLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: WEEKLY_REPORT_DICTATION_LIMIT,
-  keyGenerator: (req: Request) => {
-    const id = (req as Request & { fieldUser?: { id?: unknown } }).fieldUser?.id;
-    // Falling back to IP rather than to a single shared bucket: a constant key would put every caller
-    // whose id could not be read into one bucket, which is a self-inflicted outage rather than a limit.
-    return typeof id === "string" && id ? `user:${id}` : `ip:${correctiveActionIpKey(req)}`;
-  },
+  keyGenerator: weeklyReportDictationKey,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: { message: "Too many dictation requests, please try again in a minute" } },
