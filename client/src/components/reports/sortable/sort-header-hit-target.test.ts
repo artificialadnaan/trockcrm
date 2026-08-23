@@ -73,8 +73,11 @@ function tokenFloorPx(token: string): number | typeof UNRESOLVABLE | null {
 function widthOf(classes: string): number | typeof UNRESOLVABLE | null {
   let narrowest: number | null = null;
   for (const token of classes.split(/\s+/)) {
+    // `size-*` sets width AND height; `max-w-*` caps width. Both make the button narrower than its label
+    // and neither was recognised — a caller passing `size-4` produced a 16px-wide target that this
+    // reported as unconstrained.
     const arbitraryProperty = /^(?:[^:\s]+:)*!?\[width:(.+)\]$/.exec(token);
-    const scale = /^(?:[^:\s]+:)*!?w-(.+)$/.exec(token);
+    const scale = /^(?:[^:\s]+:)*!?(?:w|size|max-w)-(.+)$/.exec(token);
     let px: number | typeof UNRESOLVABLE | null = null;
     if (arbitraryProperty) px = lengthToPx(arbitraryProperty[1]!);
     else if (scale) {
@@ -348,8 +351,20 @@ describe("a sort header is big enough to hit", () => {
     const sources = [...new Set(callSites().flatMap((site) => site.spreads))].sort();
     expect(sources).toEqual(["getHeaderProps", "sortHeaderProps"]);
 
-    const hook = fs.readFileSync(path.join(SORTABLE_DIR, "use-sort-state.ts"), "utf8");
-    const source = ts.createSourceFile("use-sort-state.ts", hook, ts.ScriptTarget.Latest, true);
+    // EVERY FILE in the module, not one hook. `getHeaderProps` is ALSO declared on `UseTableSortResult`
+    // in use-table-sort.ts, and reading only use-sort-state.ts meant a `className` added there passed
+    // unnoticed — the same defect as checking one of two declarations, one file over.
+    const moduleFiles = fs
+      .readdirSync(SORTABLE_DIR)
+      .filter((name) => name.endsWith(".ts") && !name.includes(".test."));
+    const sourcesByFile = moduleFiles.map((name) =>
+      ts.createSourceFile(
+        name,
+        fs.readFileSync(path.join(SORTABLE_DIR, name), "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      ),
+    );
 
     for (const name of sources) {
       // EVERY declaration, not the first one found. `getHeaderProps` is declared twice — once as a
@@ -367,7 +382,7 @@ describe("a sort header is big enough to hit", () => {
         }
         node.forEachChild(visit);
       };
-      visit(source);
+      for (const source of sourcesByFile) visit(source);
 
       expect(declaredReturns.length, `no declared return type for ${name} — re-verify it by hand`)
         .toBeGreaterThan(0);
@@ -413,9 +428,14 @@ describe("a sort header is big enough to hit", () => {
     // `min-h-6` is 24px only while `theme.spacing.6` / `theme.minHeight.6` are Tailwind's defaults. A
     // config extending `{ 6: "1rem" }` would silently make every number in this file wrong — the
     // assertions would keep passing while the buttons shrank. Cheap to pin, and otherwise an assumption.
+    // SCOPED TO THE `6` ENTRY. A config-wide `spacing:` match would fail this suite for an unrelated
+    // addition like `spacing: { 72: "18rem" }`, which changes nothing this file counts in — and a guard
+    // that fails on correct config is one people delete.
     const config = fs.readFileSync(path.resolve(CLIENT_SRC, "../tailwind.config.ts"), "utf8");
-    expect(config).not.toMatch(/minHeight\s*:/);
-    expect(config).not.toMatch(/\bspacing\s*:/);
+    expect(config, "theme.spacing.6 is redefined — every px number in this file is now wrong")
+      .not.toMatch(/spacing\s*:\s*\{[^}]*(?:"6"|'6'|\b6)\s*:/s);
+    expect(config, "theme.minHeight.6 is redefined — every px number in this file is now wrong")
+      .not.toMatch(/minHeight\s*:\s*\{[^}]*(?:"6"|'6'|\b6)\s*:/s);
   });
 
   it.each([
