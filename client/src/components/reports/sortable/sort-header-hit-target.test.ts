@@ -62,6 +62,39 @@ function tokenFloorPx(token: string): number | typeof UNRESOLVABLE | null {
   return UNRESOLVABLE;
 }
 
+/**
+ * The narrowest width a merged class string leaves, in px — or null when it constrains width at all.
+ *
+ * SC 2.5.8 IS TWO-DIMENSIONAL and this guard was one. A caller passing `w-4` keeps `min-h-6 w-4` through
+ * tailwind-merge, so the height assertion reported a comfortable 24px floor for a target that is 16×24 —
+ * failing the criterion on the axis nobody was looking at. The button is `inline-flex` and sized by its
+ * label, so an explicit `w-*` is the only way to make it narrow, and that is what this looks for.
+ */
+function widthOf(classes: string): number | typeof UNRESOLVABLE | null {
+  let narrowest: number | null = null;
+  for (const token of classes.split(/\s+/)) {
+    const arbitraryProperty = /^(?:[^:\s]+:)*!?\[width:(.+)\]$/.exec(token);
+    const scale = /^(?:[^:\s]+:)*!?w-(.+)$/.exec(token);
+    let px: number | typeof UNRESOLVABLE | null = null;
+    if (arbitraryProperty) px = lengthToPx(arbitraryProperty[1]!);
+    else if (scale) {
+      const value = scale[1]!;
+      if (value === "px") px = 1;
+      else if (/^\d+(?:\.5)?$/.test(value)) px = Number(value) * 4;
+      else {
+        const arbitrary = /^\[(.+)\]$/.exec(value);
+        // `full`, `auto`, `fit`, `min`, `max`, fractions — all depend on a container, and none of them
+        // makes the button NARROWER than its label, which is what would break the criterion.
+        px = arbitrary ? lengthToPx(arbitrary[1]!) : null;
+      }
+    }
+    if (px === null) continue;
+    if (px === UNRESOLVABLE) return UNRESOLVABLE;
+    narrowest = narrowest === null ? px : Math.min(narrowest, px);
+  }
+  return narrowest;
+}
+
 /** A CSS length in px, or UNRESOLVABLE when it depends on something static analysis cannot know. */
 function lengthToPx(raw: string): number | typeof UNRESOLVABLE {
   const px = /^([\d.]+)px$/.exec(raw);
@@ -203,7 +236,11 @@ function classesOf(
  * is a prop by definition and can never be resolved there. It is covered by sweeping its CALLERS, which is
  * where the actual strings are written.
  */
+let cachedSites: Site[] | null = null;
+
+/** Parsed once. Several assertions used to reparse every non-test TSX file under client/src each time. */
 function callSites(): Site[] {
+  if (cachedSites) return cachedSites;
   const found: Site[] = [];
 
   const walk = (dir: string): void => {
@@ -268,6 +305,7 @@ function callSites(): Site[] {
   };
 
   walk(CLIENT_SRC);
+  cachedSites = found;
   return found;
 }
 
@@ -354,6 +392,30 @@ describe("a sort header is big enough to hit", () => {
       defeated.map((d) => `${d.file}:${d.line} → ${twMerge(base, d.className)}`),
       "these callers drop the sort button below the 24px minimum target size",
     ).toEqual([]);
+  });
+
+  it("leaves no caller narrower than the minimum either — the criterion is 24 BY 24", () => {
+    // The axis this guard did not have. `w-4` survives tailwind-merge next to `min-h-6`, and the height
+    // assertion happily reports 24 for a 16×24 target.
+    const base = baseClasses();
+    const narrow = callSites().filter((site) => {
+      const width = widthOf(twMerge(base, site.className));
+      return width !== null && (width === UNRESOLVABLE || width < WCAG_MINIMUM_PX);
+    });
+
+    expect(
+      narrow.map((d) => `${d.file}:${d.line} → ${twMerge(base, d.className)}`),
+      "these callers make the sort button narrower than the 24px minimum target size",
+    ).toEqual([]);
+  });
+
+  it("is measuring real pixels — the theme does not redefine the scale this guard counts in", () => {
+    // `min-h-6` is 24px only while `theme.spacing.6` / `theme.minHeight.6` are Tailwind's defaults. A
+    // config extending `{ 6: "1rem" }` would silently make every number in this file wrong — the
+    // assertions would keep passing while the buttons shrank. Cheap to pin, and otherwise an assumption.
+    const config = fs.readFileSync(path.resolve(CLIENT_SRC, "../tailwind.config.ts"), "utf8");
+    expect(config).not.toMatch(/minHeight\s*:/);
+    expect(config).not.toMatch(/\bspacing\s*:/);
   });
 
   it.each([
