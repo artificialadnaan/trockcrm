@@ -39,7 +39,11 @@ export function SortHeaderButton({ label, active, dir, numeric, onClick, classNa
       aria-label={accessibleName}
       title={accessibleName}
       className={cn(
-        "inline-flex items-center gap-1 transition hover:text-slate-800",
+        // `min-h-6` is the WCAG 2.2 SC 2.5.8 minimum target (24px), not a style choice. Without it the
+        // button is exactly as tall as its own text — 16px on every sortable table in the app — and none
+        // of the exceptions apply: this is a standalone control in a header cell, not a link inside a
+        // sentence, and the same sort is not offered anywhere larger on the page.
+        "inline-flex min-h-6 items-center gap-1 transition hover:text-slate-800",
         numeric ? "flex-row-reverse" : "",
         className,
       )}
