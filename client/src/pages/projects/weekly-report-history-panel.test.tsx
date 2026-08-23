@@ -155,7 +155,10 @@ describe("a sent report the client has not received", () => {
     try {
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
       mocks.retryWeeklyReportSend.mockResolvedValue({});
-      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      // `sendError: null` — the SILENT record, which is the only case the warning is still right for.
+      // With an error recorded this retry no longer warns at all (see the test below), so leaving the old
+      // fixture here would have asserted the removed behaviour as correct.
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: null })];
       render();
       await act(async () => {
         button("Retry send")!.click();
@@ -174,14 +177,14 @@ describe("a sent report the client has not received", () => {
     try {
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
       mocks.retryWeeklyReportSend.mockResolvedValue({});
-      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: null })];
       render();
       await act(async () => {
         button("Retry send")!.click();
       });
       // `true` is what disables the server's 409 gate. It must only ever follow a dialog the PM saw, so
       // assert the dialog as well as the flag — checking the flag alone still passes if the confirm is
-      // deleted, because `!deduped` is true either way.
+      // deleted, because the acknowledgement is needed either way.
       expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
       expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", true);
       confirm.mockRestore();
@@ -198,12 +201,39 @@ describe("a sent report the client has not received", () => {
     try {
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
       mocks.retryWeeklyReportSend.mockResolvedValue({});
-      mocks.reports = [report({ id: "v1", sentAt: SENT_23H_AGO, sendError: "Resend timed out" })];
+      // Silent here too, so this still tests the WINDOW. With an error recorded the retry is waved
+      // through for a second, independent reason and the test would pass with the window check deleted.
+      mocks.reports = [report({ id: "v1", sentAt: SENT_23H_AGO, sendError: null })];
       render();
       await act(async () => {
         button("Retry send")!.click();
       });
       expect(confirm).not.toHaveBeenCalled();
+      expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks nothing when the provider recorded why it refused, however old the send", async () => {
+    // `send_error` is positive evidence the message was REFUSED, so there is no first copy to duplicate
+    // and nothing to acknowledge. History is exactly where a PM lands chasing a "Send failed" chip, and
+    // warning them here about a duplicate that cannot happen is what sent them to Send correction
+    // instead — which mints a v2 and takes the failure off the board.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      expect(confirm).not.toHaveBeenCalled();
+      // And it must not claim an acknowledgement nobody gave. `false` is also what keeps the server's
+      // own gate meaningful: the CRM asserting `true` here would disable a 409 it never needed.
       expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
       confirm.mockRestore();
     } finally {

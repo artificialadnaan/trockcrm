@@ -132,7 +132,10 @@ export default function WeeklyReportDeliveryScreen() {
     setNotice(null);
     try {
       const outcome = await runWeeklyReportRetry(
-        { sentAt: report.sentAt },
+        // `sendError` as well as `sentAt`: a recorded provider refusal means there is no first copy to
+        // duplicate, so this retry neither warns nor claims an acknowledgement. Same rule as the CRM and
+        // the send service — a PM must not be told two different things about the same click.
+        { sentAt: report.sentAt, sendError: report.sendError },
         {
           confirm,
           retry: async (acknowledgeDuplicateRisk) => {
@@ -263,7 +266,7 @@ export default function WeeklyReportDeliveryScreen() {
         {/* Shown BEFORE the button, not in the dialog alone. A PM who knows what the confirmation will say
             can decide whether to open it at all, and the sentence is the reason this screen refuses to
             make Retry a one-tap action past the window. */}
-        {canRetry && weeklyReportRetryNeedsAcknowledgement(report.sentAt) ? (
+        {canRetry && weeklyReportRetryNeedsAcknowledgement(report) ? (
           <Text style={styles.warning}>
             This send is more than a day old, so a retry is a genuinely new email rather than a repeat the
             mail provider will ignore. If the first one did go out, the client gets a second copy.

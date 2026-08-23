@@ -62,6 +62,14 @@ export interface WeeklyReportDashboardRow {
   sendRetryReportId: string | null;
   /** When THAT send was committed. `sentAt` is the live row's, which is null once a correction exists. */
   sendRetrySentAt: string | null;
+  /**
+   * What the provider said about THAT send. `sendError` falls back to the live row's, which describes a
+   * different report once a correction exists.
+   *
+   * A recorded error means the message was refused, so a retry cannot duplicate anything. Null does not
+   * mean the opposite — an accepted send whose delivery stamp was lost looks exactly the same.
+   */
+  sendRetrySendError: string | null;
   waitingOn: string | null;
   dismissalReason: string | null;
 }

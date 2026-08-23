@@ -85,6 +85,37 @@ export function weeklyReportRetryIsProviderDeduped(
 }
 
 /**
+ * Must the PM be warned that retrying this send can put a SECOND copy in the client's inbox?
+ *
+ * The question the retry gate actually has to answer, and it is not the same question as "is the key still
+ * deduped". Two facts decide it, and every surface that offers Retry has to weigh both the same way — the
+ * CRM's History panel, the phone's field route, and `retryWeeklyReportSend`, which is the one that refuses.
+ * They were each gating on age alone, so all three warned about a duplicate that could not exist.
+ *
+ * `sendError` is POSITIVE EVIDENCE THE PROVIDER REFUSED the message: the worker writes it, in the same
+ * statement that records the attempt, only on the path where the send itself failed. Nothing left, so
+ * nothing can arrive twice, and the confirmation is pure friction on the one retry that is unambiguously
+ * correct — friction that pushed PMs towards Send correction, which makes a v2 and takes the failure off
+ * the board.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO is read `send_delivered_at IS NULL` as "never sent". The stamp is
+ * written by a SEPARATE statement after the provider call returns, so a process that dies in between
+ * leaves a report the client HAS with no stamp and no error at all — "an ordinary outcome for this worker",
+ * as dashboard-service.ts puts it, "the reason the whole idempotency-key design exists". A SILENT record is
+ * not evidence of failure. When nothing was recorded either way this still asks, exactly as before.
+ *
+ * Blank counts as silent. `send_error` is cleared to NULL on every retry, so "no error" is a state the
+ * column genuinely reaches on a report that has already been through this path.
+ */
+export function weeklyReportRetryNeedsDuplicateRiskAck(
+  report: { sentAt: string | Date | null | undefined; sendError: string | null | undefined },
+  now: Date = new Date(),
+): boolean {
+  if (typeof report.sendError === "string" && report.sendError.trim().length > 0) return false;
+  return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);
+}
+
+/**
  * The frozen `send_request` jsonb — the ONLY description of what was sent, and the contract between the
  * API that writes it and the worker that reads it.
  *

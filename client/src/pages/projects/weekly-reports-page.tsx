@@ -11,7 +11,7 @@ import {
 } from "@trock-crm/shared/types";
 import {
   WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
-  weeklyReportRetryIsProviderDeduped,
+  weeklyReportRetryNeedsDuplicateRiskAck,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import {
   dismissWeeklyReportWeek,
@@ -511,6 +511,7 @@ function ThisWeekTable({
                       <RetryButton
                         reportId={row.sendRetryReportId}
                         sentAt={row.sendRetrySentAt}
+                        sendError={row.sendRetrySendError}
                         onRetried={onRetried}
                       />
                     )}
@@ -581,14 +582,21 @@ function DismissButton({ row, onDismissed }: { row: WeeklyReportDashboardRow; on
  * for the 26-week lookback, so a PM clicking Retry the following Monday is outside the window and the
  * replay is a real second email. Past it the PM is told so and has to agree; the server refuses without
  * the acknowledgement, so this dialog is the explanation, not the enforcement.
+ *
+ * AND IT ONLY EXPIRES INTO A RISK WHEN THE RECORD IS SILENT. A recorded provider error on the send being
+ * replayed says the message was refused, so there is no first copy and nothing to warn about — which is
+ * the "Send failed" chip, the one a PM is most often looking at when they reach for this button.
+ * `sendRetrySendError`, not `sendError`: the two describe different reports once a correction exists.
  */
 function RetryButton({
   reportId,
   sentAt,
+  sendError,
   onRetried,
 }: {
   reportId: string;
   sentAt: string | null;
+  sendError: string | null;
   onRetried: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -598,9 +606,9 @@ function RetryButton({
       size="sm"
       disabled={busy}
       onClick={async () => {
-        const deduped = weeklyReportRetryIsProviderDeduped(sentAt);
+        const needsAck = weeklyReportRetryNeedsDuplicateRiskAck({ sentAt, sendError });
         if (
-          !deduped &&
+          needsAck &&
           !window.confirm(
             `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the ` +
               "mail provider will no longer treat a retry as a duplicate. If the first email did go out, " +
@@ -611,7 +619,7 @@ function RetryButton({
         }
         setBusy(true);
         try {
-          await retryWeeklyReportSend(reportId, !deduped);
+          await retryWeeklyReportSend(reportId, needsAck);
           toast.success("Send queued again");
           onRetried();
         } catch (error) {

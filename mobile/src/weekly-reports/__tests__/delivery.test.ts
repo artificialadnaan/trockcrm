@@ -194,19 +194,48 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // Asking here would be crying wolf, and the cost is not zero: a PM taught to click through this
     // confirmation is a PM who clicks through it on the one day it is real.
     expect(weeklyReportRetryIsProviderDeduped(SENT_AT, NOW_INSIDE_WINDOW)).toBe(true);
-    expect(weeklyReportRetryNeedsAcknowledgement(SENT_AT, NOW_INSIDE_WINDOW)).toBe(false);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT, sendError: null }, NOW_INSIDE_WINDOW),
+    ).toBe(false);
   });
 
-  it("DOES ask outside it, where a replay is a genuinely second email", () => {
+  it("DOES ask outside it when the record is SILENT, where a replay is a genuinely second email", () => {
+    // Silent, not failed. No delivery stamp and no error is the state that cannot distinguish "the job
+    // never ran" from "the provider accepted it and the process died before the stamp" — and in the
+    // second the client already has the report.
     expect(weeklyReportRetryIsProviderDeduped(SENT_AT, NOW_OUTSIDE_WINDOW)).toBe(false);
-    expect(weeklyReportRetryNeedsAcknowledgement(SENT_AT, NOW_OUTSIDE_WINDOW)).toBe(true);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT, sendError: null }, NOW_OUTSIDE_WINDOW),
+    ).toBe(true);
+  });
+
+  it("does NOT ask when the provider recorded why it refused, however old the send", () => {
+    // A recorded error is positive evidence of refusal, so there is no first copy to duplicate. The CRM
+    // and the server now both take this branch; the phone must not be the surface that still warns.
+    expect(
+      weeklyReportRetryNeedsAcknowledgement(
+        { sentAt: SENT_AT, sendError: "Invalid `to` field" },
+        NOW_OUTSIDE_WINDOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a blank error as no evidence of refusal", () => {
+    // `send_error` is cleared to NULL on every retry, so blank is a state this really reaches.
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT, sendError: "   " }, NOW_OUTSIDE_WINDOW),
+    ).toBe(true);
   });
 
   it("asks when the send has no timestamp, or an unreadable one", () => {
     // Conservative on purpose, and matching the shared implementation: being wrong this way costs one
     // extra confirmation, being wrong the other way costs a client a duplicate email.
-    expect(weeklyReportRetryNeedsAcknowledgement(null, NOW_INSIDE_WINDOW)).toBe(true);
-    expect(weeklyReportRetryNeedsAcknowledgement("not a date", NOW_INSIDE_WINDOW)).toBe(true);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: null, sendError: null }, NOW_INSIDE_WINDOW),
+    ).toBe(true);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: "not a date", sendError: null }, NOW_INSIDE_WINDOW),
+    ).toBe(true);
   });
 });
 
@@ -263,6 +292,23 @@ describe("running the retry", () => {
     expect(confirms).toHaveLength(1);
     expect(confirms[0]!.message).toMatch(/second copy/i);
     expect(retries).toEqual([true]);
+  });
+
+  it("asks NOTHING outside the window when the provider recorded why it refused", async () => {
+    // The failed-send case, end to end through the port: no dialog, and — just as important — no
+    // acknowledgement posted. Sending `true` here would switch off a server gate that was never in the
+    // way, on a report where nothing was ever delivered to duplicate.
+    const { port, confirms, retries, retried } = retryPort();
+
+    const outcome = await runWeeklyReportRetry(
+      { sentAt: SENT_AT, sendError: "Invalid `to` field", now: NOW_OUTSIDE_WINDOW },
+      port,
+    );
+
+    expect(outcome).toBe("retried");
+    expect(confirms).toEqual([]);
+    expect(retries).toEqual([false]);
+    expect(retried).toHaveLength(1);
   });
 
   it("posts NOTHING when the PM declines — silence and no are the same answer", async () => {

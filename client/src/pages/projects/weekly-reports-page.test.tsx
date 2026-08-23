@@ -100,6 +100,10 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     sendBounced: false,
     sendRetryReportId: null,
     sendRetrySentAt: null,
+    // THAT report's `send_error`, and not the same field as `sendError` above, which falls back to the
+    // live row's. It is what says whether a Retry can duplicate anything: an error means the provider
+    // refused the message, so there is no first copy.
+    sendRetrySendError: null,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
     ...overrides,
@@ -373,6 +377,11 @@ describe("This Week board", () => {
     // Resend forgets an idempotency key after 24 hours while this chip lives on the board for 26 weeks,
     // so a replay past the window is a genuinely second email. The server refuses without the
     // acknowledgement; this is the UI that earns it.
+    //
+    // A STALLED send, not a failed one. Stalled is precisely the state where nothing was recorded either
+    // way — the job may never have run, or the provider accepted the message and the process died before
+    // the delivery stamp — so a replay really can be a second copy. On a FAILED send the provider said
+    // why it refused, no first copy exists, and this dialog no longer appears at all.
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     mocks.retryWeeklyReportSend.mockResolvedValue({});
     mockDashboard([
@@ -382,8 +391,9 @@ describe("This Week board", () => {
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
         sendRetrySentAt: "2026-08-01T10:00:00.000Z",
-        sendError: "SMTP timeout",
-        sendFailed: true,
+        sendError: null,
+        sendRetrySendError: null,
+        sendStalled: true,
       }),
     ]);
     renderPage();
@@ -398,6 +408,69 @@ describe("This Week board", () => {
     confirm.mockRestore();
   });
 
+  it("asks nothing when the provider recorded why it refused the send a Retry would replay", async () => {
+    // The board's half of the same rule the History tab and the server's 409 now follow. `sendFailed` is
+    // the chip a PM is most likely to be looking at, and warning them about a duplicate that cannot
+    // happen is what pushed people towards Send correction — which mints a v2 and clears the failure off
+    // this board without the client ever receiving anything.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mocks.retryWeeklyReportSend.mockResolvedValue({});
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: "SMTP timeout",
+        sendRetrySendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).not.toHaveBeenCalled();
+    // And no acknowledgement is claimed on the wire. Asserting `false` rather than only the absent
+    // dialog: sending `true` here would disable a server gate the CRM never needed to disable.
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("r1", false);
+    confirm.mockRestore();
+  });
+
+  it("STILL asks when only the LIVE row carries an error and the replayed send is silent", async () => {
+    // Why `sendRetrySendError` is a separate field rather than a reuse of `sendError`. Once a correction
+    // is drafted over a failed send the two describe different reports: `sendError` falls back to the
+    // live clone, while Retry replays the ORIGINAL. Reading the fallback would suppress the warning on
+    // the strength of an error belonging to a report this button is not going to send.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r2",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: "SMTP timeout",
+        sendRetrySendError: null,
+        sendStalled: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it("sends nothing when the PM declines that confirmation", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     mockDashboard([
@@ -407,8 +480,10 @@ describe("This Week board", () => {
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
         sendRetrySentAt: "2026-08-01T10:00:00.000Z",
-        sendError: "SMTP timeout",
-        sendFailed: true,
+        // Stalled, for the same reason as the test above: a failed send never reaches the dialog now.
+        sendError: null,
+        sendRetrySendError: null,
+        sendStalled: true,
       }),
     ]);
     renderPage();

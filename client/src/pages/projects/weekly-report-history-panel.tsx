@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
-  weeklyReportRetryIsProviderDeduped,
+  weeklyReportRetryNeedsDuplicateRiskAck,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import {
   isWeeklyReportDeliveryStatus,
@@ -243,7 +243,12 @@ export function WeeklyReportHistoryPanel({
                           The server and the worker each refuse it independently — this only stops the CRM
                           inviting it. */}
                       {report.status === "sent" && !report.sendDeliveredAt && !report.supersededById && (
-                        <RetryButton reportId={report.id} sentAt={report.sentAt} onRetried={onChanged} />
+                        <RetryButton
+                          reportId={report.id}
+                          sentAt={report.sentAt}
+                          sendError={report.sendError}
+                          onRetried={onChanged}
+                        />
                       )}
                       {/* Only on the LIVE, NEWEST version. A report already superseded by a correction has
                           nothing left to correct — the fix is on the version that replaced it — and an
@@ -513,14 +518,21 @@ function CorrectionButton({
  * the right button in front of them rather than only the one that makes a new version. Past the
  * provider's 24-hour idempotency window a replay is a genuinely second email, so the PM is told and the
  * acknowledgement is passed on — the server refuses without it.
+ *
+ * WHEN IT ASKS is not a question of age alone, which is why `sendError` is here. A recorded provider
+ * error is evidence the message was refused, so no first copy exists to duplicate; a silent record is
+ * not, because the stamp and the provider call are separate steps. Same predicate as the server's 409
+ * and the phone's dialog, so the three cannot disagree about whether this click is dangerous.
  */
 function RetryButton({
   reportId,
   sentAt,
+  sendError,
   onRetried,
 }: {
   reportId: string;
   sentAt: string | null;
+  sendError: string | null;
   onRetried: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -530,9 +542,9 @@ function RetryButton({
       size="sm"
       disabled={busy}
       onClick={async () => {
-        const deduped = weeklyReportRetryIsProviderDeduped(sentAt);
+        const needsAck = weeklyReportRetryNeedsDuplicateRiskAck({ sentAt, sendError });
         if (
-          !deduped &&
+          needsAck &&
           !window.confirm(
             `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the ` +
               "mail provider will no longer treat a retry as a duplicate. If the first email did go out, " +
@@ -543,7 +555,7 @@ function RetryButton({
         }
         setBusy(true);
         try {
-          await retryWeeklyReportSend(reportId, !deduped);
+          await retryWeeklyReportSend(reportId, needsAck);
           toast.success("Send queued again");
           onRetried();
         } catch (error) {

@@ -181,15 +181,26 @@ export function weeklyReportDeliveryDetail(
 /**
  * Does a Retry right now need the duplicate-risk acknowledgement?
  *
- * The whole question is whether the provider still recognises the key. Inside the window the worst outcome
- * of a retry is a no-op and asking would train the PM to click through the one confirmation on this screen
- * that is ever real; outside it, a retry can put a second copy in a client's inbox.
+ * TWO facts, not one. The window says whether the provider still recognises the key; `sendError` says
+ * whether there is anything to duplicate in the first place. Inside the window the worst outcome of a
+ * retry is a no-op and asking would train the PM to click through the one confirmation on this screen that
+ * is ever real. Outside it, a retry CAN put a second copy in a client's inbox — but only if a first copy
+ * exists, and a recorded provider error is evidence that it does not.
+ *
+ * NULL IS NOT THE OPPOSITE OF AN ERROR. The delivery stamp is written by a separate statement after the
+ * provider call returns, so a send that recorded nothing at all may be one the client already has. Silence
+ * still asks.
+ *
+ * Mirrors `weeklyReportRetryNeedsDuplicateRiskAck` in shared, which the CRM and the send service both use.
+ * The phone cannot import it, so the two are kept identical by hand and by these tests — a surface that
+ * warns where the others do not is a PM told two different things about the same click.
  */
 export function weeklyReportRetryNeedsAcknowledgement(
-  sentAt: string | null | undefined,
+  report: { sentAt: string | null | undefined; sendError: string | null | undefined },
   now: Date = new Date(),
 ): boolean {
-  return !weeklyReportRetryIsProviderDeduped(sentAt, now);
+  if (typeof report.sendError === "string" && report.sendError.trim().length > 0) return false;
+  return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);
 }
 
 /**
@@ -235,10 +246,13 @@ export interface WeeklyReportRetryPort {
  * and the screen must not show it as an error.
  */
 export async function runWeeklyReportRetry(
-  input: { sentAt: string | null; now?: Date },
+  input: { sentAt: string | null; sendError?: string | null; now?: Date },
   port: WeeklyReportRetryPort,
 ): Promise<"retried" | "cancelled"> {
-  const needsAcknowledgement = weeklyReportRetryNeedsAcknowledgement(input.sentAt, input.now ?? new Date());
+  const needsAcknowledgement = weeklyReportRetryNeedsAcknowledgement(
+    { sentAt: input.sentAt, sendError: input.sendError ?? null },
+    input.now ?? new Date(),
+  );
   if (needsAcknowledgement) {
     const confirmed = await port.confirm(weeklyReportRetryAcknowledgementPrompt());
     if (!confirmed) return "cancelled";

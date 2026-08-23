@@ -9,7 +9,7 @@ import {
   weeklyReportEmailSubject,
   weeklyReportGreeting,
   weeklyReportGreetingNameFor,
-  weeklyReportRetryIsProviderDeduped,
+  weeklyReportRetryNeedsDuplicateRiskAck,
   type WeeklyReportRecipientOption,
   type WeeklyReportSenderContact,
   type WeeklyReportSendRequest,
@@ -601,9 +601,19 @@ export async function retryWeeklyReportSend(
       "This report's email was already accepted by the mail provider — issue a correction to send it again",
     );
   }
+  // AGE ALONE WAS THE WRONG QUESTION. A recorded `send_error` is positive evidence the provider REFUSED
+  // this message, so there is no first copy for a retry to duplicate and no risk to acknowledge — the gate
+  // was demanding a confirmation for an outcome that cannot happen, on precisely the retry a PM staring at
+  // a "Send failed" chip should make without hesitating.
+  //
+  // It still refuses when the record is SILENT, which is the case it was really written for: no stamp and
+  // no error does not mean no email. See `weeklyReportRetryNeedsDuplicateRiskAck`.
   if (
     !options.acknowledgeDuplicateRisk &&
-    !weeklyReportRetryIsProviderDeduped(reportRow.sent_at, options.now)
+    weeklyReportRetryNeedsDuplicateRiskAck(
+      { sentAt: reportRow.sent_at, sendError: text(reportRow.send_error) },
+      options.now,
+    )
   ) {
     throw new AppError(
       409,

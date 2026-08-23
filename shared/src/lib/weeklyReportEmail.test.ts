@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
   weeklyReportRetryIsProviderDeduped,
+  weeklyReportRetryNeedsDuplicateRiskAck,
 } from "./weeklyReportEmail.js";
 
 const SENT_AT = "2026-08-01T10:00:00.000Z";
@@ -73,5 +74,82 @@ describe("weeklyReportRetryIsProviderDeduped", () => {
     // Clock skew between the API that stamps sent_at and whoever evaluates this. Elapsed is negative,
     // which is inside the window, and that is the conservative answer: the key was minted moments ago.
     expect(weeklyReportRetryIsProviderDeduped("2026-08-03T10:00:00.000Z", INSIDE)).toBe(true);
+  });
+});
+
+// The age of the send is only HALF the question, and on its own it asks the wrong PM to think twice.
+//
+// `weeklyReportRetryIsProviderDeduped` answers "would the provider still swallow a replay of this key".
+// What the retry gate actually needs to know is "can a replay put a second copy in the client's inbox",
+// and those come apart in the case a PM meets most often: the provider REFUSED the message and said why.
+// `send_error` is the record of that refusal, so nothing was delivered and there is nothing to duplicate —
+// yet the age gate warned anyway, which talks a PM out of the one retry that is unambiguously correct.
+//
+// The other direction is the trap, and it is why this predicate is not simply `send_delivered_at IS NULL`.
+// `send_delivered_at` is stamped by a SEPARATE statement after the provider call returns
+// (worker/src/jobs/weekly-report-send.ts), so a process that dies in between leaves a report the client
+// HAS with no stamp and no error — dashboard-service.ts calls that "an ordinary outcome for this worker
+// ... the reason the whole idempotency-key design exists". A silent record is therefore not evidence of
+// failure, and past the window such a retry sends a real second copy. Absence is not proof here either.
+describe("weeklyReportRetryNeedsDuplicateRiskAck", () => {
+  it("does not ask when the provider recorded why it refused, however old the send", () => {
+    // The whole point. An old send with a recorded error is the "Send failed" chip, and retrying it is
+    // exactly what the PM should do — being asked to confirm a duplicate that cannot exist is what made
+    // people reach for Send correction instead, which creates a v2 and takes the failure off the board.
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "Invalid `to` field" }, OUTSIDE),
+    ).toBe(false);
+  });
+
+  it("STILL asks when the record is silent and the window has closed", () => {
+    // The case the old predicate got right and a `send_delivered_at IS NULL` rewrite would get wrong.
+    // No error recorded does not mean no email sent: the provider may have accepted it and the process
+    // died before the stamp. Past the window a replay is a genuine second email, so it stays a deliberate
+    // act. This is the guard that must not be relaxed.
+    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, OUTSIDE)).toBe(true);
+  });
+
+  it("does not ask inside the provider's window, error or not", () => {
+    // Inside the window the key still dedupes, so a replay is a no-op whatever the record says.
+    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, INSIDE)).toBe(false);
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "bounced" }, INSIDE),
+    ).toBe(false);
+  });
+
+  it("flips exactly at the boundary when the record is silent", () => {
+    // The same boundary the deduped predicate is pinned on, re-asserted THROUGH this function so a
+    // rewrite that stops consulting the window at all cannot stay green.
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, JUST_INSIDE),
+    ).toBe(false);
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, JUST_OUTSIDE),
+    ).toBe(true);
+  });
+
+  it("treats a blank error as no evidence of refusal", () => {
+    // Fail safe, and not hypothetical: `send_error` is cleared to NULL on every retry
+    // (send-service.ts), so "empty" is a state this column really reaches. An empty string says nothing
+    // about what the provider did, so it must not buy the PM out of the confirmation.
+    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "" }, OUTSIDE)).toBe(true);
+    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "   " }, OUTSIDE)).toBe(
+      true,
+    );
+  });
+
+  it("asks when the send has no usable stamp and nothing was recorded", () => {
+    // Unknown age, unknown outcome. The conservative answer is the confirmation.
+    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: null }, OUTSIDE)).toBe(true);
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: "not a date", sendError: null }, OUTSIDE),
+    ).toBe(true);
+  });
+
+  it("does not ask when the send has no usable stamp but the provider recorded a refusal", () => {
+    // Evidence of refusal settles it without needing to know how old the send is.
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: "Invalid `to` field" }, OUTSIDE),
+    ).toBe(false);
   });
 });

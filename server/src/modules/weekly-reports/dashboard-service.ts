@@ -142,6 +142,20 @@ export interface WeeklyReportDashboardRow {
    * PM to click through the one confirmation on this page that is ever real.
    */
   sendRetrySentAt: string | null;
+  /**
+   * What the provider said about the send a Retry would replay, if it said anything.
+   *
+   * The third member of the `sendRetry*` triple, and separate from `sendError` for exactly the reason the
+   * two above are separate from `reportId` / `sentAt`: `sendError` falls back to the LIVE row's error, so
+   * on a week with a correction drafted over a failed send it can describe a different report from the one
+   * Retry actually replays. A caller deciding whether that click is dangerous has to read the error of the
+   * send being replayed, not of whatever is currently live.
+   *
+   * A recorded error is positive evidence the provider REFUSED the message, so no first copy exists and
+   * there is no duplicate risk to acknowledge. NULL is not the opposite: the delivery stamp is written by a
+   * separate statement after the provider call returns, so a silent row may be one the client already has.
+   */
+  sendRetrySendError: string | null;
   /** Who the week is waiting on, in plain words — the column a director actually reads. */
   waitingOn: string | null;
   dismissalReason: string | null;
@@ -640,6 +654,7 @@ ${trockTeamJoins("wrp")}
         sendBounced,
         sendRetryReportId: undelivered?.id ?? null,
         sendRetrySentAt: toIsoTimestamp(undelivered?.sent_at),
+        sendRetrySendError: undelivered?.send_error ?? null,
         // An undelivered send is waiting on the PM to deal with it. Left null, the column read "—" on the
         // one row on the board that needs a person. A bounce is the same situation with a worse cause:
         // the client's address is wrong and only the PM can fix it.
@@ -768,6 +783,7 @@ ${trockTeamJoins("wrp")}
       // a control whose only outcome is a 409. The way forward is a correction, from History.
       sendRetryReportId: undelivered?.id ?? null,
       sendRetrySentAt: toIsoTimestamp(undelivered?.sent_at),
+      sendRetrySendError: undelivered?.send_error ?? null,
       // Always the PM: the ONLY reason this row exists is a delivery that has to be dealt with, and the
       // superintendent owes nothing for a week the cadence has stopped asking for.
       waitingOn: project.trock_pm_name ?? "Unassigned PM",
