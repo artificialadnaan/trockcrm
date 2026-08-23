@@ -234,6 +234,39 @@ describe("hub assignments", () => {
     expect(mine.projects[0]).toMatchObject({ isSuper: true, isPm: false, currentWeekOf: WEEK_OF });
   });
 
+  it("carries the LAST SENT report, which survives a cadence rollover", async () => {
+    // #17's reachability. `currentReportId` describes `currentWeekOf` only, so the moment the cadence
+    // moves on, a report the client DID receive is neither the current week nor in `undeliveredSends` —
+    // that query carries `send_delivered_at IS NULL` — and the phone loses every route to it. Which is
+    // precisely when somebody asks for the link again.
+    //
+    // Asserted from a week EARLIER than the one being viewed, because a fixture where the sent week and
+    // the current week coincide passes just as well when the field is wired to `currentReportId`, and
+    // that is the bug.
+    const project = await seedProject();
+    const reportId = await seedDraft(project.id, PRIOR_WEEK);
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET status = 'sent', sent_at = now() WHERE id = $1::uuid`,
+      [reportId],
+    );
+
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    const card = view.projects[0]!;
+    expect(card.currentWeekOf).toBe(WEEK_OF);
+    expect(card.lastSentWeekOf).toBe(PRIOR_WEEK);
+    expect(card.lastSentReportId).toBe(reportId);
+    // And it is NOT the current week's id — the distinction the whole fix rests on.
+    expect(card.lastSentReportId).not.toBe(card.currentReportId);
+  });
+
+  it("has no last-sent report before anything has gone out", async () => {
+    // The control. A field that returned some id unconditionally would satisfy the test above.
+    await seedProject();
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    expect(view.projects[0]!.lastSentReportId).toBeNull();
+    expect(view.projects[0]!.lastSentWeekOf).toBeNull();
+  });
+
   it("shows a director every active project, matching what the services let them act on", async () => {
     await seedProject();
     await createWeeklyReportProject(

@@ -62,6 +62,9 @@ describe("weekly-report field route surface", () => {
     ["POST", `/api/field/weekly-reports/reports/${REPORT}/send`],
     ["POST", `/api/field/weekly-reports/reports/${REPORT}/send/retry`],
     ["POST", `/api/field/weekly-reports/reports/${REPORT}/correction`],
+    // And re-minting the client link (#17). The send screen shows it once and only a hash is stored, so
+    // a PM who left that screen had to ask a director for a link to their own report.
+    ["POST", `/api/field/weekly-reports/reports/${REPORT}/share-link`],
   ])("registers %s %s on the FIELD router, where T-Rock Cam can reach it", async (method, path) => {
     const agent = request(createApp()) as any;
     const response = await agent[method.toLowerCase()](path).send({});
@@ -102,6 +105,13 @@ describe("weekly-report field route surface", () => {
       "/reports/:id/send",
       "/reports/:id/send-draft",
       "/reports/:id/send/retry",
+      // NOT authoring, and admitted deliberately (#17). Every field user in the company can authenticate
+      // against this mount, so the question is what a SUPERINTENDENT gets by reaching it: nothing. The
+      // handler delegates to `remintWeeklyReportShareLink`, whose gate is `canPublishWeeklyReport` — the
+      // assigned PM or leadership — so a super is refused 403 by the same rule that stops them sending.
+      // That is the distinction between this and /dashboard or /projects/:id/dismiss, which have no
+      // per-actor gate behind them at all.
+      "/reports/:id/share-link",
       "/reports/:id/transition",
     ]);
   });

@@ -49,6 +49,7 @@ import {
 import {
   buildWeeklyReportSendDraft,
   createWeeklyReportCorrection,
+  remintWeeklyReportShareLink,
   retryWeeklyReportSend,
   sendWeeklyReport,
 } from "./send-service.js";
@@ -741,17 +742,17 @@ router.post("/reports/:id/share-link", async (req, res, next) => {
     const office = officeContextFrom(req);
     const actor = actorFrom(req);
     const id = requireUuid(req.params.id, "id");
-    const report = await loadPublishableReport(req, id);
-    if (!isWeeklyReportShareableStatus(report.status)) {
-      throw new AppError(409, "A client link can only be created once the PM has approved the report");
-    }
-
-    const { rawToken, token } = await mintWeeklyReportToken(req.tenantClient!, {
-      weeklyReportId: id,
-      tenantId: office.tenantId,
-      officeSlug: office.slug,
-      createdByUserId: actor.id,
-    });
+    // Through the SERVICE, not inline. The field router mints these too now (#17), and "who may hand out a
+    // login-free client credential for 180 days" is a rule that must have one home — two copies is how the
+    // phone and the CRM end up disagreeing about it. The service re-checks the shareable status and the
+    // publish gate; this router's own admin/director/rep gate still applies on top.
+    const { url, token } = await remintWeeklyReportShareLink(
+      req.tenantClient!,
+      id,
+      actor,
+      { tenantId: office.tenantId, slug: office.slug },
+      (rawToken) => weeklyReportShareUrl(req, rawToken),
+    );
     await req.commitTransaction!();
 
     // The link's host is config, and getting it wrong is invisible from in here: `/wr` is served by the API
@@ -765,7 +766,7 @@ router.post("/reports/:id/share-link", async (req, res, next) => {
     }
     // The raw token is returned EXACTLY ONCE, here. Only its hash is stored, so this response is the only
     // moment the usable link exists anywhere but in the email that carries it.
-    res.status(201).json({ url: weeklyReportShareUrl(req, rawToken), token });
+    res.status(201).json({ url, token });
   } catch (error) {
     next(error);
   }

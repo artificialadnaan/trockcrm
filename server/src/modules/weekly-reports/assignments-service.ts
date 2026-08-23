@@ -63,6 +63,14 @@ export interface WeeklyReportAssignment {
   currentWeekOf: string;
   currentState: WeeklyReportWeekState;
   currentReportId: string | null;
+  /**
+   * The newest week this project has SENT, and its report id — null until one has gone out.
+   *
+   * Separate from `currentReportId`, which only ever describes `currentWeekOf`. This is what survives a
+   * cadence rollover, and it is the handle the app needs to offer a delivered report's client link again.
+   */
+  lastSentReportId: string | null;
+  lastSentWeekOf: string | null;
   currentReportStatus: WeeklyReportStatus | null;
   /**
    * False once reporting has ENDED but missed weeks remain: `currentWeekOf` is then past
@@ -383,6 +391,25 @@ export async function listWeeklyReportAssignments(
     }
     const previousForCurrent = previousByWeekOf[currentWeekOf] ?? null;
 
+    // THE MOST RECENT WEEK THIS PROJECT ACTUALLY SENT, which is not the same thing as the current one and
+    // is the only durable handle the phone has on a delivered report.
+    //
+    // `currentReportId` is defined for `currentWeekOf` alone. The moment the cadence rolls over, a report
+    // the client DID receive is neither the current week nor in `undeliveredSends` (that query carries
+    // `send_delivered_at IS NULL`), so every route the app had to it disappears — and "the client lost the
+    // email" is a thing that happens weeks later, not during the week it was sent.
+    //
+    // Bounded by `expected`, i.e. the same lookback the rest of this payload uses. A send older than that
+    // window is not reachable from the phone and remains a CRM job; that is a deliberate limit rather than
+    // an oversight, and it keeps this a derivation over rows already in memory instead of a second query.
+    const lastSent = (() => {
+      for (let i = expected.length - 1; i >= 0; i -= 1) {
+        const found = reportByKey.get(`${project.id}|${expected[i]!}`);
+        if (found && String(found.status) === "sent") return { row: found, weekOf: expected[i]! };
+      }
+      return null;
+    })();
+
     projects.push({
       weeklyReportProjectId: project.id,
       dealId: project.deal_id,
@@ -395,6 +422,8 @@ export async function listWeeklyReportAssignments(
       currentWeekOf,
       currentState,
       currentReportId: currentReport?.id ?? null,
+      lastSentReportId: (lastSent?.row.id as string | undefined) ?? null,
+      lastSentWeekOf: lastSent?.weekOf ?? null,
       currentReportStatus: (currentReport?.status as WeeklyReportStatus) ?? null,
       currentWeekFilable,
       // Measured from the OLDEST week still owed, not from the current one — and not from the oldest
