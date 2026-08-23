@@ -200,10 +200,14 @@ describe("the words on the chip", () => {
       { ...UNDELIVERED, sendError: REJECTED_ERROR, sendAttempts: 2 },
       "failed",
     );
-    expect(detail).toMatch(/was refused after 2 attempts, so nothing went out/i);
+    expect(detail).toMatch(/a recorded attempt was refused, of 2 attempts so far/i);
     // And it does not say the MAIL PROVIDER refused it: `rejected:` is also written when the
     // deployment guard stops a send before the provider is ever called.
     expect(detail).not.toMatch(/mail provider refused/i);
+    // Nor that the SEND produced nothing. `send_error` holds one attempt's outcome, so claiming the
+    // client has no copy contradicts the retry warning further down this same screen.
+    expect(detail).not.toMatch(/nothing went out/i);
+    expect(detail).not.toMatch(/this send was refused/i);
   });
 
   it("does NOT claim a refusal when the provider never confirmed anything", () => {

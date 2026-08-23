@@ -673,7 +673,7 @@ export async function handleWeeklyReportSend(
     const stored =
       error instanceof WeeklyReportSendRefusedBeforeSending
         ? `${WEEKLY_REPORT_SEND_OUTCOME_REJECTED}: this deployment refused to send before the provider ` +
-          `was called, so nothing went out — ${message}`
+          `was called, so this attempt sent nothing — ${message}`
         : message;
     // Written BEFORE the rethrow, so the failure is visible on the dashboard whether the queue retries or
     // dead-letters. This is the whole difference from the fire-and-forget scorecard path.
