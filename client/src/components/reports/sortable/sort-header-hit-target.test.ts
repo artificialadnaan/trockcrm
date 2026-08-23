@@ -29,24 +29,56 @@ import { twMerge } from "tailwind-merge";
 const SORTABLE_DIR = __dirname;
 const CLIENT_SRC = path.resolve(__dirname, "../../..");
 
-/** The Tailwind min-height scale, in px, for the utilities this component might reasonably carry. */
-const MIN_HEIGHT_PX: Record<string, number> = {
-  "min-h-0": 0,
-  "min-h-px": 1,
-  "min-h-1": 4,
-  "min-h-2": 8,
-  "min-h-3": 12,
-  "min-h-4": 16,
-  "min-h-5": 20,
-  "min-h-6": 24,
-  "min-h-7": 28,
-  "min-h-8": 32,
-  "min-h-9": 36,
-  "min-h-10": 40,
-  "min-h-11": 44,
-};
-
 const WCAG_MINIMUM_PX = 24;
+
+/** Sentinel for a `min-h-*` token this evaluator cannot turn into a number. Never silently ignored. */
+const UNRESOLVABLE = Symbol("unresolvable min-height");
+
+/**
+ * The floor a single `min-h-*` token sets, in px.
+ *
+ * ARBITRARY AND PREFIXED VALUES BOTH COUNT. The first version held a hard-coded map from `min-h-0` to
+ * `min-h-11`, which meant `min-h-[1px]` and `md:min-h-0` were both invisible: the lookup missed them, the
+ * base 24 survived as the answer, and the caller was reported safe while its surviving utility set a
+ * smaller floor — or none at all above a breakpoint. A guard that cannot see the override is not a guard.
+ */
+function tokenFloorPx(token: string): number | typeof UNRESOLVABLE | null {
+  const match = /^(?:(sm|md|lg|xl|2xl):)?!?min-h-(.+)$/.exec(token);
+  if (!match) return null;
+  const value = match[2]!;
+  if (value === "px") return 1;
+  if (/^\d+$/.test(value)) return Number(value) * 4;
+  if (/^\d+\.5$/.test(value)) return Number(value) * 4;
+  const arbitrary = /^\[(.+)\]$/.exec(value);
+  if (arbitrary) {
+    const raw = arbitrary[1]!;
+    const px = /^([\d.]+)px$/.exec(raw);
+    if (px) return Number(px[1]);
+    const rem = /^([\d.]+)rem$/.exec(raw);
+    if (rem) return Number(rem[1]) * 16;
+    return UNRESOLVABLE;
+  }
+  // `full`, `screen`, `fit`, `min`, `max`, `dvh` … all depend on a container this sweep cannot see.
+  return UNRESOLVABLE;
+}
+
+/**
+ * The WORST floor a merged class string leaves, in px — or null when it sets none.
+ *
+ * The minimum across every variant, not the last one seen. `min-h-6 md:min-h-0` keeps BOTH after
+ * tailwind-merge (different groups), and the button is 0-floored from `md` upward — which is most desktop
+ * viewports. Taking the last token, or only the unprefixed one, reports that as safe.
+ */
+function minHeightOf(classes: string): number | typeof UNRESOLVABLE | null {
+  let worst: number | null = null;
+  for (const token of classes.split(/\s+/)) {
+    const floor = tokenFloorPx(token);
+    if (floor === null) continue;
+    if (floor === UNRESOLVABLE) return UNRESOLVABLE;
+    worst = worst === null ? floor : Math.min(worst, floor);
+  }
+  return worst;
+}
 
 /**
  * The class string the component applies before any caller's, read from source so it cannot drift.
@@ -87,19 +119,80 @@ function baseClasses(): string {
   return base!;
 }
 
-/** The resolved min-height of a merged class string, in px, or null when it sets no floor at all. */
-function minHeightOf(classes: string): number | null {
-  let found: number | null = null;
-  for (const token of classes.split(/\s+/)) {
-    const px = MIN_HEIGHT_PX[token.replace(/^!/, "")];
-    if (px !== undefined) found = px;
-  }
-  return found;
+interface Site {
+  file: string;
+  line: number;
+  className: string;
+  /** True when the classes live behind something this sweep could not follow. */
+  opaque: boolean;
 }
 
-/** Every `<SortHeaderButton className="…">` in the client, via the parser rather than a line scan. */
-function callSites(): { file: string; line: number; className: string }[] {
-  const found: { file: string; line: number; className: string }[] = [];
+/**
+ * Module-level `const NAME = "…"` string constants in a file, so `className={HEAD}` can be resolved.
+ *
+ * Three real call sites take this form — `HEAD`, `HEADER_CLASS`, `CC_HEADER_CLASS` — and the first version
+ * of this sweep flattened them to "". An empty string reads as "this caller adds nothing", which is the
+ * safest possible answer and happens to be wrong: those are exactly the strings that could carry a
+ * height override, and the assertion passed over them without looking.
+ */
+function stringConstants(source: ts.SourceFile): Map<string, string> {
+  const constants = new Map<string, string>();
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      (ts.isStringLiteral(node.initializer) || ts.isNoSubstitutionTemplateLiteral(node.initializer))
+    ) {
+      constants.set(node.name.text, node.initializer.text);
+    }
+    node.forEachChild(visit);
+  };
+  visit(source);
+  return constants;
+}
+
+/** Flatten a className/buttonClassName initializer to the classes it can contribute. */
+function classesOf(
+  init: ts.JsxAttributeValue | undefined,
+  constants: Map<string, string>,
+): { className: string; opaque: boolean } {
+  if (!init) return { className: "", opaque: false };
+  if (ts.isStringLiteral(init)) return { className: init.text, opaque: false };
+  if (!ts.isJsxExpression(init) || !init.expression) return { className: "", opaque: false };
+
+  const parts: string[] = [];
+  let opaque = false;
+  const gather = (n: ts.Node): void => {
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) {
+      parts.push(n.text);
+      return;
+    }
+    if (ts.isIdentifier(n)) {
+      const resolved = constants.get(n.text);
+      if (resolved !== undefined) parts.push(resolved);
+      else opaque = true;
+      return;
+    }
+    n.forEachChild(gather);
+  };
+  gather(init.expression);
+  return { className: parts.join(" "), opaque };
+}
+
+/**
+ * Every place a class string reaches `SortHeaderButton`.
+ *
+ * TWO SHAPES, because there are two. Direct `<SortHeaderButton className=…>`, and `<SortableTableHead
+ * buttonClassName=…>`, which forwards its prop straight through. Sweeping only the first leaves every
+ * table that goes through the wrapper unchecked, and the wrapper is the shape most pages use.
+ *
+ * The forwarding site inside `sortable-table-head.tsx` itself is skipped: its `className={buttonClassName}`
+ * is a prop by definition and can never be resolved there. It is covered by sweeping its CALLERS, which is
+ * where the actual strings are written.
+ */
+function callSites(): Site[] {
+  const found: Site[] = [];
 
   const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -113,31 +206,28 @@ function callSites(): { file: string; line: number; className: string }[] {
     }
   };
 
+  const FORWARDER = path.join("components", "shared", "sortable-table-head.tsx");
+
   const collect = (file: string): void => {
     const text = fs.readFileSync(file, "utf8");
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const constants = stringConstants(source);
+    const relative = path.relative(CLIENT_SRC, file);
+    const isForwarder = relative === FORWARDER;
+
     const visit = (node: ts.Node): void => {
       if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
         const opening = ts.isJsxElement(node) ? node.openingElement : node;
-        if (opening.tagName.getText() === "SortHeaderButton") {
+        const tag = opening.tagName.getText();
+        const attrName =
+          tag === "SortHeaderButton" ? "className" : tag === "SortableTableHead" ? "buttonClassName" : null;
+
+        if (attrName && !(isForwarder && tag === "SortHeaderButton")) {
           for (const property of opening.attributes.properties) {
-            if (!ts.isJsxAttribute(property) || property.name.getText() !== "className") continue;
-            const init = property.initializer;
-            const parts: string[] = [];
-            if (init && ts.isStringLiteral(init)) parts.push(init.text);
-            else if (init && ts.isJsxExpression(init) && init.expression) {
-              const gather = (n: ts.Node): void => {
-                if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
-                n.forEachChild(gather);
-              };
-              gather(init.expression);
-            }
+            if (!ts.isJsxAttribute(property) || property.name.getText() !== attrName) continue;
+            const { className, opaque } = classesOf(property.initializer, constants);
             const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
-            found.push({
-              file: path.relative(CLIENT_SRC, file),
-              line: line + 1,
-              className: parts.join(" "),
-            });
+            found.push({ file: relative, line: line + 1, className, opaque });
           }
         }
       }
@@ -154,24 +244,36 @@ describe("a sort header is big enough to hit", () => {
   it("sets a height floor of at least the WCAG minimum by default", () => {
     const floor = minHeightOf(baseClasses());
     expect(floor, "the component sets no min-height at all — its target is its text height").not.toBeNull();
+    expect(floor).not.toBe(UNRESOLVABLE);
     expect(floor).toBeGreaterThanOrEqual(WCAG_MINIMUM_PX);
   });
 
-  it("found the call sites — an empty sweep would pass the next assertion vacuously", () => {
+  it("found the call sites — an empty sweep would pass everything below vacuously", () => {
     // The standing failure mode of a source sweep, and one this codebase has shipped: a renamed component
     // empties the list and a loop over nothing is green.
     expect(callSites().length).toBeGreaterThan(5);
   });
 
+  it("reads every caller's classes, rather than treating what it cannot follow as empty", () => {
+    // THE GAP THAT MADE THE NEXT ASSERTION WEAKER THAN IT LOOKED. Three real call sites pass
+    // `className={HEAD}` / `{HEADER_CLASS}` / `{CC_HEADER_CLASS}`, and the first version flattened those to
+    // "" — which reads as "adds nothing", the safest possible answer and the wrong one. Constants are now
+    // resolved; anything still opaque is named here rather than quietly skipped.
+    const opaque = callSites().filter((site) => site.opaque);
+    expect(
+      opaque.map((o) => `${o.file}:${o.line}`),
+      "these callers' classes come from something this sweep cannot resolve",
+    ).toEqual([]);
+  });
+
   it("keeps that floor through every caller's className", () => {
-    // THE ASSERTION THAT EARNS THIS FILE. `cn` is tailwind-merge, so a caller's `min-h-*` REPLACES the
-    // component's rather than losing to it — silently, with no error and no visual cue. One caller can
-    // undo the fix for its own table while ten others stay correct, which is the hardest kind of
-    // regression to notice.
+    // `cn` is tailwind-merge, so a caller's `min-h-*` REPLACES the component's rather than losing to it —
+    // silently, with no error and no visual cue. One caller can undo the fix for its own table while ten
+    // others stay correct, which is the hardest kind of regression to notice.
     const base = baseClasses();
     const defeated = callSites().filter((site) => {
       const floor = minHeightOf(twMerge(base, site.className));
-      return floor === null || floor < WCAG_MINIMUM_PX;
+      return floor === null || floor === UNRESOLVABLE || floor < WCAG_MINIMUM_PX;
     });
 
     expect(
@@ -180,10 +282,23 @@ describe("a sort header is big enough to hit", () => {
     ).toEqual([]);
   });
 
-  it("actually detects a caller that defeats the floor, rather than always passing", () => {
-    // The mirror. Without this, `minHeightOf` returning a constant — or the merge never being reached —
-    // would make the sweep above green forever while checking nothing.
-    const base = baseClasses();
-    expect(minHeightOf(twMerge(base, "min-h-0"))).toBeLessThan(WCAG_MINIMUM_PX);
+  it.each([
+    ["min-h-0", "the blunt override"],
+    ["md:min-h-0", "a breakpoint override — survives the merge in its own group"],
+    ["min-h-[1px]", "an arbitrary value the old hard-coded map could not see"],
+    ["min-h-5", "one step under the minimum"],
+  ])("detects %s (%s), rather than always passing", (override) => {
+    // The mirror, and the reason it is a table. Every one of these was a way for the sweep above to return
+    // 24 for a button that is smaller than 24 — the prefixed and arbitrary forms because the first version
+    // looked them up in a hard-coded map and found nothing, leaving the base value standing as the answer.
+    const floor = minHeightOf(twMerge(baseClasses(), override));
+    expect(floor).not.toBe(UNRESOLVABLE);
+    expect(floor as number).toBeLessThan(WCAG_MINIMUM_PX);
+  });
+
+  it("does not mistake a LARGER override for a defeat", () => {
+    // The other direction. A caller asking for a taller target is correct, and a guard that fails on it
+    // teaches people to route around the guard.
+    expect(minHeightOf(twMerge(baseClasses(), "min-h-11"))).toBe(44);
   });
 });
