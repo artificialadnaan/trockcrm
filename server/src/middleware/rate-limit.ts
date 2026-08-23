@@ -121,3 +121,43 @@ export const weeklyReportDeliveryWebhookLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: { message: "Too many requests, please try again later" } },
 });
+
+/**
+ * The weekly-report dictation pass, which is the only authenticated route in this app that spends money
+ * per call.
+ *
+ * It reaches Anthropic with `claude-opus-5` on every request, up to MAX_ATTEMPTS times, and every field
+ * account in the company can authenticate against the surface it is mounted on. The per-CALL cost is
+ * already bounded — the transcript is capped at 4k chars and the output at the section ceiling — but
+ * nothing bounded calls per ACTOR, so a stuck retry loop in the app, or one stolen field token, could
+ * spend without limit and the first sign of it would be an invoice.
+ *
+ * KEYED BY USER, NOT IP, unlike every other limiter in this file. Those protect unauthenticated surfaces
+ * where the IP is the only identity available. Here the caller is authenticated before this runs, and IP
+ * is actively the wrong key: a crew on one jobsite shares a cellular NAT, so an IP bucket would let one
+ * superintendent's runaway exhaust the budget of everyone standing next to them. The actor who spends the
+ * money is the account.
+ *
+ * MOUNTED AFTER `requireFieldContractor` so `req.fieldUser` exists. That also means an unauthenticated
+ * flood is refused by auth without consuming anyone's bucket.
+ *
+ * SIZED WELL ABOVE HUMAN USE, because tripping it is invisible and cheap: the phone swallows any 4xx and
+ * falls back to its on-device bullet split (mobile/src/weekly-reports/dictation.ts), so a superintendent
+ * who somehow hit this still gets their words formatted into the same editable box. The recorder stops
+ * itself at 60 seconds, so a person cannot physically produce more than about one transcript a minute per
+ * section; 30 is an order of magnitude above the busiest real session and still stops a loop dead.
+ */
+const WEEKLY_REPORT_DICTATION_LIMIT = 30;
+export const weeklyReportDictationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: WEEKLY_REPORT_DICTATION_LIMIT,
+  keyGenerator: (req: Request) => {
+    const id = (req as Request & { fieldUser?: { id?: unknown } }).fieldUser?.id;
+    // Falling back to IP rather than to a single shared bucket: a constant key would put every caller
+    // whose id could not be read into one bucket, which is a self-inflicted outage rather than a limit.
+    return typeof id === "string" && id ? `user:${id}` : `ip:${correctiveActionIpKey(req)}`;
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: "Too many dictation requests, please try again in a minute" } },
+});

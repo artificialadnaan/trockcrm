@@ -15,6 +15,7 @@
 import { Router, type Request } from "express";
 import { businessToday } from "../../lib/period.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { weeklyReportDictationLimiter } from "../../middleware/rate-limit.js";
 import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { resolvePhotoDisplayUrls } from "../files/service.js";
@@ -64,7 +65,11 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
  * never given, and can never return, the existing section. `existingChars` is a count used only to size
  * the remaining room. See dictation-service.ts for why that split matters.
  */
-router.post("/dictation", requireFieldContractor, async (req, res, next) => {
+// AFTER `requireFieldContractor`, which is what makes the limiter's per-USER key readable and keeps an
+// unauthenticated flood from consuming anyone's bucket. This is the one authenticated route in the app
+// that spends money per call — see weeklyReportDictationLimiter for the sizing and why it is not keyed by
+// IP like its siblings.
+router.post("/dictation", requireFieldContractor, weeklyReportDictationLimiter, async (req, res, next) => {
   try {
     // Passed through UNCOERCED so the service's own type and length checks stay reachable: substituting
     // "" for a malformed transcript would answer 200 with an empty addition and look like a clean
