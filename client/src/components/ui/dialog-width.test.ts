@@ -109,15 +109,17 @@ function dialogCallSites(): CallSite[] {
             // as having no requested width, and dropped out of both regression checks entirely — the
             // silent-omission failure this file exists to prevent, inside the file itself.
             const width = /(?:^|\s)((?:sm:|md:|lg:|xl:|2xl:)?!?max-w-[^\s]+)/.exec(className);
-            if (width) {
-              const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
-              found.push({
-                file: path.relative(CLIENT_SRC, file),
-                line: line + 1,
-                requested: width[1],
-                className,
-              });
-            }
+            // COLLECTED EVEN WITHOUT A REQUESTED WIDTH. The edge-to-edge assertion looks for `w-full`,
+            // which has nothing to do with `max-w-*` — so gating collection on a width match meant
+            // `<DialogContent className="w-full">` was never inspected by it at all. `requested` is empty
+            // for those; the width assertions skip them on their own predicates.
+            const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
+            found.push({
+              file: path.relative(CLIENT_SRC, file),
+              line: line + 1,
+              requested: width ? width[1] : "",
+              className,
+            });
           }
         }
       }
@@ -146,23 +148,32 @@ function classNameOf(opening: ts.JsxOpeningLikeElement): string | null | undefin
     if (ts.isStringLiteral(init)) return init.text;
     if (ts.isJsxExpression(init) && init.expression) {
       const parts: string[] = [];
-      let sawIdentifierOnly = true;
+      let sawUnresolvedIdentifier = false;
       const gather = (n: ts.Node): void => {
         if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) {
           parts.push(n.text);
-          sawIdentifierOnly = false;
+          return;
         }
         if (ts.isTemplateExpression(n)) {
           parts.push(n.head.text);
           for (const span of n.templateSpans) parts.push(span.literal.text);
-          sawIdentifierOnly = false;
+          return;
+        }
+        // An identifier standing in for classes — `cn(dialogClasses, "overflow-y-auto")`. The FIRST
+        // version only asked whether ANY literal was found, so a mixed expression like that one resolved
+        // to "overflow-y-auto" and the identifier's classes vanished without a word. Partial is not
+        // resolved: if any part is unreadable, the whole call site is.
+        if (ts.isIdentifier(n) && !ts.isPropertyAccessExpression(n.parent)) {
+          const isCallee = ts.isCallExpression(n.parent) && n.parent.expression === n;
+          if (!isCallee) sawUnresolvedIdentifier = true;
+          return;
         }
         n.forEachChild(gather);
       };
       gather(init.expression);
-      // No literal ANYWHERE in the expression means the classes live behind a reference this sweep cannot
-      // follow. `null` says so; `""` would have read as "asks for no width" and skipped it silently.
-      return sawIdentifierOnly ? null : parts.join(" ");
+      // `null` = a className exists but part of it is behind a reference this sweep cannot follow. `""`
+      // would have read as "asks for no width" and skipped it silently.
+      return sawUnresolvedIdentifier ? null : parts.join(" ");
     }
   }
   // `undefined` = no className attribute at all, which is fine: the dialog takes the primitive's default
@@ -184,7 +195,8 @@ function classNameOf(opening: ts.JsxOpeningLikeElement): string | null | undefin
  * resizes all 47 dialogs and wants a visual pass. Naming them here keeps the exemption honest rather than
  * letting the guard quietly report success over a category it cannot handle.
  */
-const NARROWER_THAN_BREAKPOINT = /^(?:sm:|md:|lg:|xl:)?!?max-w-(?:0|px|xs|sm|md|\d|\d\.5|\d{1,2})$/;
+const NARROWER_THAN_BREAKPOINT =
+  /^(?:sm:|md:|lg:|xl:|2xl:)?!?max-w-(?:0|px|xs|sm|md|lg|xl|\d|\d\.5|\d{1,2})$/;
 
 describe("a dialog gets the width it asks for", () => {
   it("found call sites to check — an empty sweep would pass every assertion below vacuously", () => {
@@ -205,6 +217,9 @@ describe("a dialog gets the width it asks for", () => {
     expect(clamp, "the primitive no longer pins a sm: width — update this test").toBeDefined();
 
     const defeated = dialogCallSites().filter((site) => {
+      // A call site with a className but NO width asks for nothing and cannot be defeated. It is collected
+      // anyway, because the edge-to-edge assertion below needs to see `w-full` regardless of `max-w-*`.
+      if (!site.requested) return false;
       const merged = twMerge(base, site.className).split(/\s+/);
       const clampSurvived = merged.includes(clamp!);
       const overrode = merged.some((c) => /^sm:!max-w-/.test(c));
@@ -213,7 +228,15 @@ describe("a dialog gets the width it asks for", () => {
       // what its author asked for. Flagging that would fail CI on correct code — and a guard that cries
       // wolf on valid usage is one people learn to route around with `!`, which is how this codebase
       // acquired nine escape hatches in the first place.
-      const laterBreakpoint = merged.some((c) => /^(md|lg|xl|2xl):!?max-w-/.test(c));
+      // SCOPED TO THE REQUESTED WIDTH. `md:max-w-2xl` alone is legitimate: the author accepts the default
+      // below `md` and their width above it. But `max-w-2xl lg:max-w-3xl` is NOT rescued by its `lg:` —
+      // the UNPREFIXED width is meant to apply from 0 up, and between 640px and 1023px the primitive's
+      // `sm:max-w-sm` overrides it anyway. The first version exempted the whole call site whenever any
+      // later-breakpoint width appeared, so that dialog rendered at 384px through the entire band with
+      // this guard reporting it fine.
+      const requestedIsPrefixed = /^(sm|md|lg|xl|2xl):/.test(site.requested);
+      const laterBreakpoint =
+        requestedIsPrefixed && merged.some((c) => /^(md|lg|xl|2xl):!?max-w-/.test(c));
       const tooNarrowToPrefix = NARROWER_THAN_BREAKPOINT.test(site.requested);
       return clampSurvived && !overrode && !laterBreakpoint && !tooNarrowToPrefix;
     });
