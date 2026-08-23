@@ -166,7 +166,17 @@ export function weeklyReportDeliveryDetail(
       // Says "accepted", not "received". The platform cannot evidence the second.
       return "The mail provider accepted this email. That is not proof anybody opened it, but it did leave here.";
     case "failed":
-      return `The mail provider refused this email after ${tries}. ${facts.sendError ?? ""}`.trim();
+      // "Refused" ONLY when the record can support it. `failed` is reached on any recorded error, and
+      // `unknown:` — a swallowed fetch, a 5xx, a 408, an in-flight idempotency 409 — means the provider
+      // never told us anything. Asserting a refusal there contradicted the provider's own words in the
+      // very next sentence, since `send_error` is appended verbatim: "refused this email … never
+      // confirmed the message, so it may or may not have gone out". It also disagreed with the retry
+      // warning three lines below it on the same screen.
+      return weeklyReportSendErrorIsProvableRejection(facts.sendError)
+        ? `The mail provider refused this email after ${tries}. ${facts.sendError ?? ""}`.trim()
+        : `Delivery failed after ${tries}, and the provider never confirmed what became of it. ${
+            facts.sendError ?? ""
+          }`.trim();
     case "stuck":
       return attempts > 0
         ? `Sent, and delivery has been tried ${tries}, but the mail provider has never been recorded as accepting it and the last attempt reported no error.`

@@ -167,6 +167,31 @@ describe("the words on the chip", () => {
     expect(detail).toContain("2 attempts");
   });
 
+  it("says REFUSED only when the provider actually refused it", () => {
+    // `failed` is reached on ANY recorded error, so this sentence used to assert a refusal for an
+    // `unknown:` outcome too — and `send_error` is appended verbatim, so the paragraph contradicted
+    // itself in consecutive sentences: "refused this email … never confirmed the message, so it may or
+    // may not have gone out". It also disagreed with the retry warning further down the same screen.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: REJECTED_ERROR, sendAttempts: 2 },
+      "failed",
+    );
+    expect(detail).toMatch(/refused this email/i);
+  });
+
+  it("does NOT claim a refusal when the provider never confirmed anything", () => {
+    // The control, and the case that was wrong. `unknown:` covers a swallowed fetch, a 5xx, a 408 and an
+    // in-flight idempotency 409 — the message may well have gone out.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: UNKNOWN_ERROR, sendAttempts: 3 },
+      "failed",
+    );
+    expect(detail).not.toMatch(/refused/i);
+    expect(detail).toMatch(/never confirmed what became of it/i);
+    // And the provider's own words still come through — that is the actionable half.
+    expect(detail).toContain("fetch failed");
+  });
+
   it("does not claim a delivered report was READ, which nothing here can evidence", () => {
     // There is no bounce webhook anywhere in this platform, so a report addressed to a mistyped domain is
     // accepted, hard-bounces, and reads as delivered for ever. The copy claims acceptance and no more.
