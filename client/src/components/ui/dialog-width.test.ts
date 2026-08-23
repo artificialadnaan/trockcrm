@@ -42,6 +42,9 @@ function baseClassesOf(file: string, marker: string): string {
   return source.slice(open + 1, close);
 }
 
+/** Call sites whose className cannot be read statically — populated by `dialogCallSites()`. */
+const unresolvable: { file: string; line: number }[] = [];
+
 interface CallSite {
   file: string;
   line: number;
@@ -66,6 +69,7 @@ interface CallSite {
  */
 function dialogCallSites(): CallSite[] {
   const found: CallSite[] = [];
+  unresolvable.length = 0;
 
   const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -88,8 +92,19 @@ function dialogCallSites(): CallSite[] {
         const opening = ts.isJsxElement(node) ? node.openingElement : node;
         if (opening.tagName.getText() === "DialogContent") {
           const className = classNameOf(opening);
-          if (className) {
-            const width = /(?:^|\s)((?:sm:|md:|lg:|xl:)?!?max-w-[^\s]+)/.exec(className);
+          if (className === null) {
+            // UNRESOLVABLE, not absent. `className={dialogClasses}` has no string literal anywhere in it,
+            // so flattening yields nothing and the call site would simply vanish from the sweep — a
+            // defeated width in it would never be reported. Recorded instead, and asserted empty below,
+            // so introducing one is a loud failure rather than a quiet loss of coverage.
+            const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
+            unresolvable.push({ file: path.relative(CLIENT_SRC, file), line: line + 1 });
+          } else if (className) {
+            // `2xl:` INCLUDED. It was missing here while the `laterBreakpoint` predicate below already
+            // recognised it, so a dialog whose only width was `2xl:max-w-*` matched nothing, was recorded
+            // as having no requested width, and dropped out of both regression checks entirely — the
+            // silent-omission failure this file exists to prevent, inside the file itself.
+            const width = /(?:^|\s)((?:sm:|md:|lg:|xl:|2xl:)?!?max-w-[^\s]+)/.exec(className);
             if (width) {
               const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
               found.push({
@@ -118,27 +133,37 @@ function dialogCallSites(): CallSite[] {
  * inside the expression is joined, because tailwind-merge sees them joined too; which branch is live at
  * runtime does not change whether a `max-w-*` in it can be defeated by the primitive's own pin.
  */
-function classNameOf(opening: ts.JsxOpeningLikeElement): string | null {
+function classNameOf(opening: ts.JsxOpeningLikeElement): string | null | undefined {
   for (const property of opening.attributes.properties) {
     if (!ts.isJsxAttribute(property) || property.name.getText() !== "className") continue;
     const init = property.initializer;
-    if (!init) return null;
+    if (!init) return undefined;
     if (ts.isStringLiteral(init)) return init.text;
     if (ts.isJsxExpression(init) && init.expression) {
       const parts: string[] = [];
+      let sawIdentifierOnly = true;
       const gather = (n: ts.Node): void => {
-        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
+        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) {
+          parts.push(n.text);
+          sawIdentifierOnly = false;
+        }
         if (ts.isTemplateExpression(n)) {
           parts.push(n.head.text);
           for (const span of n.templateSpans) parts.push(span.literal.text);
+          sawIdentifierOnly = false;
         }
         n.forEachChild(gather);
       };
       gather(init.expression);
-      return parts.join(" ");
+      // No literal ANYWHERE in the expression means the classes live behind a reference this sweep cannot
+      // follow. `null` says so; `""` would have read as "asks for no width" and skipped it silently.
+      return sawIdentifierOnly ? null : parts.join(" ");
     }
   }
-  return null;
+  // `undefined` = no className attribute at all, which is fine: the dialog takes the primitive's default
+  // width and there is nothing to defeat. Distinct from `null`, which means a className exists but its
+  // classes live behind a reference — the case that must not pass silently.
+  return undefined;
 }
 
 /**
@@ -191,6 +216,18 @@ describe("a dialog gets the width it asks for", () => {
     expect(
       defeated.map((d) => `${d.file}:${d.line} asked for ${d.requested}`),
       "these dialogs request a width the primitive silently overrides at sm and above",
+    ).toEqual([]);
+  });
+
+  it("can read every call site's className, rather than silently skipping the ones it cannot", () => {
+    // A dialog whose classes come from a variable — `className={dialogClasses}` — has no literal for this
+    // sweep to read. Returning "" for it would have looked exactly like "this dialog asks for no width",
+    // and it would have been excluded from both checks above without a word. There are none today; this
+    // fails the moment one appears, which is the point at which someone has to decide how to cover it.
+    dialogCallSites();
+    expect(
+      unresolvable.map((u) => `${u.file}:${u.line}`),
+      "these dialogs take their className from a reference this sweep cannot resolve",
     ).toEqual([]);
   });
 
