@@ -13,7 +13,9 @@ import {
   weeklyReportDeliveryLabel,
   weeklyReportDeliveryState,
   weeklyReportRetryIsProviderDeduped,
+  weeklyReportRetryAcknowledgementPrompt,
   weeklyReportRetryNeedsAcknowledgement,
+  weeklyReportRetryWarning,
   weeklyReportUndeliveredSummary,
   type WeeklyReportCorrectionPort,
   type WeeklyReportRetryPort,
@@ -32,6 +34,21 @@ import type { WeeklyReportDetailView } from "../../api/types";
  * The reference send: committed 2026-08-13 at 20:00 UTC.
  */
 const SENT_AT = "2026-08-13T20:00:00.000Z";
+
+/**
+ * The two shapes the worker actually persists into `send_error`, prefix and all.
+ *
+ * Written out rather than reduced to "an error string", because the prefix is the whole distinction the
+ * DIALOG'S WORDING turns on — the gate is `sentAt` and nothing else. `rejected:` is the provider refusing
+ * before an email existed, `unknown:` is a swallowed fetch or a 5xx that may have left the message
+ * enqueued. A fixture of `"Refused"` would have exercised neither branch honestly.
+ */
+const REJECTED_ERROR =
+  "rejected: the email provider refused the message and sent nothing — " +
+  "validation_error (422): Invalid `to` field";
+const UNKNOWN_ERROR =
+  "unknown: the email provider never confirmed the message, so it may or may not have gone out — " +
+  "application_error: fetch failed";
 
 /** 11 hours after the send — comfortably inside a 24-hour provider window. */
 const NOW_INSIDE_WINDOW = new Date("2026-08-14T07:00:00.000Z");
@@ -150,6 +167,62 @@ describe("the words on the chip", () => {
     expect(detail).toContain("2 attempts");
   });
 
+  it("does not print the outcome token, or say the same thing twice", () => {
+    // `send_error` is `${outcome}: ${summary} — ${detail}`. The sentence around it now states the outcome
+    // in human words, so printing the whole value repeats it and leaks "rejected:" into prose. Only the
+    // provider's own detail carries anything new.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: REJECTED_ERROR, sendAttempts: 2 },
+      "failed",
+    );
+    expect(detail).not.toMatch(/rejected:/i);
+    expect(detail).toContain("Invalid `to` field");
+    // "refused" once, from the sentence — not twice, from the appended summary as well.
+    expect(detail.toLowerCase().split("refused").length - 1).toBe(1);
+  });
+
+  it("shows a LEGACY error whole, since it is the only diagnostic there is", () => {
+    // No recognised prefix means nothing can be stripped safely. Dropping it would leave a PM looking at
+    // a failure with no reason for it.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: "Resend timed out", sendAttempts: 1 },
+      "failed",
+    );
+    expect(detail).toContain("Resend timed out");
+  });
+
+  it("says REFUSED only when the provider actually refused it", () => {
+    // `failed` is reached on ANY recorded error, so this sentence used to assert a refusal for an
+    // `unknown:` outcome too — and `send_error` is appended verbatim, so the paragraph contradicted
+    // itself in consecutive sentences: "refused this email … never confirmed the message, so it may or
+    // may not have gone out". It also disagreed with the retry warning further down the same screen.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: REJECTED_ERROR, sendAttempts: 2 },
+      "failed",
+    );
+    expect(detail).toMatch(/a recorded attempt was refused, of 2 attempts so far/i);
+    // And it does not say the MAIL PROVIDER refused it: `rejected:` is also written when the
+    // deployment guard stops a send before the provider is ever called.
+    expect(detail).not.toMatch(/mail provider refused/i);
+    // Nor that the SEND produced nothing. `send_error` holds one attempt's outcome, so claiming the
+    // client has no copy contradicts the retry warning further down this same screen.
+    expect(detail).not.toMatch(/nothing went out/i);
+    expect(detail).not.toMatch(/this send was refused/i);
+  });
+
+  it("does NOT claim a refusal when the provider never confirmed anything", () => {
+    // The control, and the case that was wrong. `unknown:` covers a swallowed fetch, a 5xx, a 408 and an
+    // in-flight idempotency 409 — the message may well have gone out.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: UNKNOWN_ERROR, sendAttempts: 3 },
+      "failed",
+    );
+    expect(detail).not.toMatch(/refused/i);
+    expect(detail).toMatch(/never confirmed what became of it/i);
+    // And the provider's own words still come through — that is the actionable half.
+    expect(detail).toContain("fetch failed");
+  });
+
   it("does not claim a delivered report was READ, which nothing here can evidence", () => {
     // There is no bounce webhook anywhere in this platform, so a report addressed to a mistyped domain is
     // accepted, hard-bounces, and reads as delivered for ever. The copy claims acceptance and no more.
@@ -194,19 +267,107 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // Asking here would be crying wolf, and the cost is not zero: a PM taught to click through this
     // confirmation is a PM who clicks through it on the one day it is real.
     expect(weeklyReportRetryIsProviderDeduped(SENT_AT, NOW_INSIDE_WINDOW)).toBe(true);
-    expect(weeklyReportRetryNeedsAcknowledgement(SENT_AT, NOW_INSIDE_WINDOW)).toBe(false);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT }, NOW_INSIDE_WINDOW),
+    ).toBe(false);
   });
 
-  it("DOES ask outside it, where a replay is a genuinely second email", () => {
+  it("DOES ask outside it when the record is SILENT, where a replay is a genuinely second email", () => {
+    // Silent, not failed. No delivery stamp and no error is the state that cannot distinguish "the job
+    // never ran" from "the provider accepted it and the process died before the stamp" — and in the
+    // second the client already has the report.
     expect(weeklyReportRetryIsProviderDeduped(SENT_AT, NOW_OUTSIDE_WINDOW)).toBe(false);
-    expect(weeklyReportRetryNeedsAcknowledgement(SENT_AT, NOW_OUTSIDE_WINDOW)).toBe(true);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT }, NOW_OUTSIDE_WINDOW),
+    ).toBe(true);
+  });
+
+  it("asks outside the window WHATEVER the record says — the gate ignores the outcome", () => {
+    // One test, not four. An earlier revision had a separate case per outcome, but once the gate went
+    // back to age alone every one of them made the identical call with the identical arguments: four
+    // assertions that could only ever agree, dressed as coverage of a distinction the function no longer
+    // draws. The distinction is real, and it now lives entirely in the PROMPT, below.
+    expect(weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT }, NOW_OUTSIDE_WINDOW)).toBe(true);
+    // And the signature refuses the outcome outright, so a future edit cannot quietly reintroduce it:
+    // `weeklyReportRetryNeedsAcknowledgement` takes `sentAt` and nothing else.
+  });
+
+  it("says a recorded attempt sent nothing when the provider provably refused it", () => {
+    const { message } = weeklyReportRetryAcknowledgementPrompt(REJECTED_ERROR);
+    expect(message).toMatch(/that attempt sent nothing/i);
+    expect(message).toMatch(/outcome of any other attempt is unknown/i);
+    expect(message).toMatch(/second copy/i);
+  });
+
+  it("puts the SAME verdict on the screen as in the dialog, not a generic warning", () => {
+    // The screen's warning is the real decision point: a PM who reads it and walks away never opens the
+    // dialog at all. A generic sentence there defeats an outcome-aware dialog completely — which is what
+    // this screen did until now, telling a PM "if the first one did go out" about a send the provider had
+    // demonstrably refused, and steering them to Send correction exactly as before.
+    const screen = weeklyReportRetryWarning(REJECTED_ERROR);
+    expect(screen).toMatch(/was refused, so that attempt reached nobody/i);
+    expect(screen).not.toMatch(/refused by the mail provider/i);
+    expect(screen).not.toMatch(/the first one did go out/i);
+    // And it still warns, in the same breath — the gate has not moved.
+    expect(screen).toMatch(/second copy/i);
+  });
+
+  it("keeps the generic warning where nothing is known about any attempt", () => {
+    // The control. A screen warning that claimed the refusal unconditionally would pass the test above
+    // and would be the same overstatement in a new place.
+    for (const sendError of [UNKNOWN_ERROR, "Resend timed out", null, undefined]) {
+      const screen = weeklyReportRetryWarning(sendError);
+      expect(screen).toMatch(/the first one did go out/i);
+      expect(screen).not.toMatch(/reached nobody/i);
+      expect(screen).toMatch(/second copy/i);
+    }
+  });
+
+  it("does not then ask about \"the first email\", which contradicts the sentence before it", () => {
+    // Same coherence guard as shared. Every clause-level assertion passed while the two halves of this
+    // message disagreed with each other; only reading the finished string caught it.
+    const { message } = weeklyReportRetryAcknowledgementPrompt(REJECTED_ERROR);
+    expect(message).not.toMatch(/the first email/i);
+    expect(message).toMatch(/outcome of any other attempt is unknown/i);
+    expect(weeklyReportRetryAcknowledgementPrompt(UNKNOWN_ERROR).message).toMatch(/the first email/i);
+  });
+
+  it("claims no such thing on an `unknown:`, blank, or legacy record", () => {
+    // The control, and the one that carries the distinction now. `unknown:` covers a swallowed fetch, a
+    // 5xx, a 408 and an in-flight idempotency 409 — all of which may have left the message enqueued.
+    // A prompt that mentioned the refusal unconditionally would pass the test above and fail here.
+    for (const sendError of [UNKNOWN_ERROR, "Resend timed out", "", "   ", null, undefined]) {
+      const { message } = weeklyReportRetryAcknowledgementPrompt(sendError);
+      expect(message).not.toMatch(/sent nothing/i);
+      expect(message).toMatch(/second copy/i);
+    }
+  });
+
+  it("reads the prefix as a PREFIX, not as a word appearing somewhere in the sentence", () => {
+    // The provider's own text is quoted into `send_error`, and it is free to contain the word. A
+    // substring match reads this ambiguous row as a provable rejection and tells the PM their last
+    // attempt sent nothing — the opposite of what it says.
+    //
+    // Asserted through the PROMPT, which is the only thing that consults the outcome now. Pointing this
+    // at `weeklyReportRetryNeedsAcknowledgement` was wrong once the gate went back to age alone: that
+    // function ignores the outcome entirely, so the assertion held for a reason unrelated to the parser
+    // and would have passed with the substring bug fully restored.
+    const { message } = weeklyReportRetryAcknowledgementPrompt(
+      "unknown: the email provider never confirmed the message, so it may or may not have gone " +
+        "out — smtp_error (502): the receiving server rejected: 4.7.0 try again later",
+    );
+    expect(message).not.toMatch(/sent nothing/i);
   });
 
   it("asks when the send has no timestamp, or an unreadable one", () => {
     // Conservative on purpose, and matching the shared implementation: being wrong this way costs one
     // extra confirmation, being wrong the other way costs a client a duplicate email.
-    expect(weeklyReportRetryNeedsAcknowledgement(null, NOW_INSIDE_WINDOW)).toBe(true);
-    expect(weeklyReportRetryNeedsAcknowledgement("not a date", NOW_INSIDE_WINDOW)).toBe(true);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: null }, NOW_INSIDE_WINDOW),
+    ).toBe(true);
+    expect(
+      weeklyReportRetryNeedsAcknowledgement({ sentAt: "not a date" }, NOW_INSIDE_WINDOW),
+    ).toBe(true);
   });
 });
 
@@ -263,6 +424,24 @@ describe("running the retry", () => {
     expect(confirms).toHaveLength(1);
     expect(confirms[0]!.message).toMatch(/second copy/i);
     expect(retries).toEqual([true]);
+  });
+
+  it("carries the refusal into the DIALOG, end to end, and still asks", async () => {
+    // The failed-send case through the port. The confirmation is still raised — the gate is age alone —
+    // but the sentence the PM reads now credits what the record actually shows.
+    const { port, confirms, retries, retried } = retryPort();
+
+    const outcome = await runWeeklyReportRetry(
+      { sentAt: SENT_AT, sendError: REJECTED_ERROR, now: NOW_OUTSIDE_WINDOW },
+      port,
+    );
+
+    expect(outcome).toBe("retried");
+    expect(confirms).toHaveLength(1);
+    expect(confirms[0]!.message).toMatch(/that attempt sent nothing/i);
+    expect(confirms[0]!.message).toMatch(/second copy/i);
+    expect(retries).toEqual([true]);
+    expect(retried).toHaveLength(1);
   });
 
   it("posts NOTHING when the PM declines — silence and no are the same answer", async () => {

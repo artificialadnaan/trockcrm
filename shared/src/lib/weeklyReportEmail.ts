@@ -85,6 +85,92 @@ export function weeklyReportRetryIsProviderDeduped(
 }
 
 /**
+ * The two outcomes a failed send is classified into, and the prefix `send_error` is written with.
+ *
+ * A CONTRACT between the worker that writes the column and everything that reads it, named here so the two
+ * ends cannot drift apart. `weeklyReportSendFailureMessage` builds the stored string from these;
+ * `weeklyReportSendErrorIsProvableRejection` takes it apart again.
+ *
+ * `rejected` — the provider refused the request and created nothing, so the report is PROVABLY undelivered.
+ * `unknown` — we never learned. A swallowed fetch, a 5xx, a 408, or a 409 `concurrent_idempotent_requests`
+ * all reached something that may have enqueued the message. See `classifySendFailure`, whose default is
+ * `unknown` for the same reason: over-reporting `unknown` costs a retry declined, over-reporting `rejected`
+ * costs a duplicate delivery.
+ */
+export const WEEKLY_REPORT_SEND_OUTCOME_REJECTED = "rejected";
+export const WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN = "unknown";
+
+/**
+ * Does this stored `send_error` PROVE the provider created nothing?
+ *
+ * Only the `rejected:` prefix does. Everything else — `unknown:`, a legacy row written before the prefix
+ * existed, a blank, an absent value — is ambiguous and must be treated as "the client may already have it".
+ *
+ * ANCHORED AT THE START AND REQUIRING THE COLON, not a substring search: `unknown: ... the address was
+ * rejected by the receiving server` contains the word and proves the opposite of what it would be read as.
+ * Whitespace and casing are tolerated because this parses a value out of a database column rather than a
+ * literal the caller just built.
+ */
+export function weeklyReportSendErrorIsProvableRejection(sendError: unknown): boolean {
+  if (typeof sendError !== "string") return false;
+  return sendError.trimStart().toLowerCase().startsWith(`${WEEKLY_REPORT_SEND_OUTCOME_REJECTED}:`);
+}
+
+/**
+ * What the PM is asked to agree to before a retry the provider will no longer dedupe.
+ *
+ * WHEN it is asked is decided by AGE ALONE (`weeklyReportRetryIsProviderDeduped`). This function changes
+ * only what the dialog SAYS, and that division is the whole point.
+ *
+ * Three rounds of review went into trying to make the GATE outcome-aware — suppressing the confirmation on
+ * a send we could show had failed — and each round produced a new counterexample of the same shape:
+ * `send_delivered_at IS NULL` is not proof of non-delivery; a non-blank `send_error` is not proof of
+ * refusal; and a `rejected:` on the LATEST attempt is not proof that an EARLIER attempt did not deliver,
+ * because `send_error` is overwritten per attempt and a retry clears it while keeping `send_attempts`.
+ *
+ * The question is underdetermined by the columns, and the case that matters most cannot be recorded at all:
+ * when the provider accepts and the delivery stamp write dies, nothing is written by construction. So the
+ * platform stopped trying to prove a negative it cannot prove, and the confirmation stayed.
+ *
+ * WHAT WAS ACTUALLY WRONG was the sentence, not the gate. A PM in front of a "Send failed" chip was told
+ * flatly that the client might get a second copy, with nothing acknowledging that the attempt they are
+ * looking at demonstrably sent nothing — so the obvious read was "retrying is dangerous", and the button
+ * they reached for instead was Send correction, which mints a v2 and takes the failure off the board.
+ *
+ * So when the record carries a provable rejection this SAYS so, and is then careful about the rest: that
+ * attempt sent nothing, the outcome of any other attempt is unknown, and past the window a replay is a
+ * new email. It states what is known and stops there.
+ *
+ * IT DOES NOT NAME WHO REFUSED IT. `rejected:` is also written when the deployment guard stops a send
+ * before the provider is ever called, so "refused by the mail provider" would be false on exactly the
+ * rows where the platform is most certain nothing went out.
+ *
+ * AND "UNKNOWN OUTCOME", NOT "UNACCOUNTED FOR". A row with `send_attempts` of 3 has accounted for three
+ * attempts; what it has not kept is what became of two of them, since `send_error` holds only one.
+ *
+ * DELIBERATELY NOT "the last attempt". `send_error` is cleared only by the statement that also stamps the
+ * delivery, so a rejected attempt followed by a successful one whose stamp write dies leaves `rejected:`
+ * on a row the client HAS. Calling it the latest attempt would be a false claim in exactly the state that
+ * matters, and would encourage the duplicate this dialog exists to prevent. "A recorded attempt" asserts
+ * only what the column can support: that some attempt was refused, not which, and nothing about the rest.
+ */
+export function weeklyReportRetryDuplicateRiskPrompt(sendError?: string | null): string {
+  // "the first email" only makes sense when nothing is known about any attempt. After telling a PM that a
+  // recorded attempt sent nothing, it reads as a contradiction of the sentence they just finished — so the
+  // rejected branch names what is actually unaccounted for instead. Found by printing the finished string
+  // and reading it, which no assertion here was ever going to do.
+  const risk = (subject: string) =>
+    `This send is at least ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
+    `provider will no longer treat a retry as a duplicate. If ${subject} did go out, the client will ` +
+    "receive a second copy. Send it again?";
+  if (!weeklyReportSendErrorIsProvableRejection(sendError)) return risk("the first email");
+  return (
+    "A recorded attempt on this send was refused, so that attempt sent nothing. The outcome of any other " +
+    `attempt is unknown. ${risk("one of those")}`
+  );
+}
+
+/**
  * The frozen `send_request` jsonb — the ONLY description of what was sent, and the contract between the
  * API that writes it and the worker that reads it.
  *

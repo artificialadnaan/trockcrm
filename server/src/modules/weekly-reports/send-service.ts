@@ -601,6 +601,18 @@ export async function retryWeeklyReportSend(
       "This report's email was already accepted by the mail provider — issue a correction to send it again",
     );
   }
+  // AGE ALONE, DELIBERATELY. An earlier revision made this outcome-aware — a `send_error` showing the
+  // provider had refused the message skipped the acknowledgement, since a refused send has no first copy
+  // to duplicate. Review produced three counterexamples of the same shape, ending in one no column can
+  // rule out: `send_error` records only the LATEST attempt, a retry clears it while keeping
+  // `send_attempts`, and the case that matters most — the provider accepts and the delivery-stamp write
+  // dies — writes nothing at all by construction.
+  //
+  // So this stopped trying to prove a negative the schema cannot support. What was actually wrong was the
+  // SENTENCE, and that moved to `weeklyReportRetryDuplicateRiskPrompt`, which tells a PM that a RECORDED
+  // attempt sent nothing — not which one, and nothing about the others. A rejected attempt followed by a
+  // successful one whose stamp write dies leaves `rejected:` on a row the client has, so naming it the
+  // latest would be false in exactly the state where being wrong costs a duplicate.
   if (
     !options.acknowledgeDuplicateRisk &&
     !weeklyReportRetryIsProviderDeduped(reportRow.sent_at, options.now)

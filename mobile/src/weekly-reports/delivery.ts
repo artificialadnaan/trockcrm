@@ -166,7 +166,24 @@ export function weeklyReportDeliveryDetail(
       // Says "accepted", not "received". The platform cannot evidence the second.
       return "The mail provider accepted this email. That is not proof anybody opened it, but it did leave here.";
     case "failed":
-      return `The mail provider refused this email after ${tries}. ${facts.sendError ?? ""}`.trim();
+      // SCOPED TO THE ATTEMPT, never to the send. `send_error` records one attempt's outcome, so
+      // "this send was refused, nothing went out" claims more than the column can carry — a later
+      // attempt may have been accepted with its delivery-stamp write lost, and the sentence then tells a
+      // PM the client has no copy while the retry warning below says the opposite.
+      //
+      // "Refused" ONLY when the record can support it. `failed` is reached on any recorded error, and
+      // `unknown:` — a swallowed fetch, a 5xx, a 408, an in-flight idempotency 409 — means the provider
+      // never told us anything. Asserting a refusal there contradicted the provider's own words in the
+      // very next sentence, since `send_error` is appended verbatim: "refused this email … never
+      // confirmed the message, so it may or may not have gone out". It also disagreed with the retry
+      // warning three lines below it on the same screen.
+      return weeklyReportSendErrorIsProvableRejection(facts.sendError)
+        ? `A recorded attempt was refused, of ${tries} so far. ${weeklyReportSendErrorDetail(
+            facts.sendError,
+          )}`.trim()
+        : `Delivery failed after ${tries}, and the provider never confirmed what became of it. ${weeklyReportSendErrorDetail(
+            facts.sendError,
+          )}`.trim();
     case "stuck":
       return attempts > 0
         ? `Sent, and delivery has been tried ${tries}, but the mail provider has never been recorded as accepting it and the last attempt reported no error.`
@@ -179,17 +196,68 @@ export function weeklyReportDeliveryDetail(
 }
 
 /**
+ * The part of `send_error` worth showing a PM, once the sentence around it already states the outcome.
+ *
+ * The stored value is `${outcome}: ${summary} — ${detail}`. `outcome` is a machine token and `summary` is
+ * the same fact the surrounding copy now states in human words, so printing the whole string says it
+ * twice and leaks "rejected:" into prose:
+ *
+ *   The mail provider refused this email after 3 attempts. rejected: the email provider refused the
+ *   message and sent nothing — validation_error (422): Invalid `to` field
+ *
+ * Only `detail` carries anything new — the provider's own words, which are the actionable half and the
+ * reason this column stopped being a single constant.
+ *
+ * A value with no recognised prefix is a LEGACY row and is shown whole: it is the only diagnostic there
+ * is, and dropping it would leave a PM with a failure and no reason for it.
+ */
+export function weeklyReportSendErrorDetail(sendError: string | null | undefined): string {
+  if (typeof sendError !== "string") return "";
+  const trimmed = sendError.trim();
+  const lower = trimmed.toLowerCase();
+  const prefixed = lower.startsWith("rejected:") || lower.startsWith("unknown:");
+  if (!prefixed) return trimmed;
+  const split = trimmed.indexOf(" — ");
+  return split === -1 ? "" : trimmed.slice(split + 3).trim();
+}
+
+/**
  * Does a Retry right now need the duplicate-risk acknowledgement?
  *
- * The whole question is whether the provider still recognises the key. Inside the window the worst outcome
- * of a retry is a no-op and asking would train the PM to click through the one confirmation on this screen
- * that is ever real; outside it, a retry can put a second copy in a client's inbox.
+ * AGE ALONE, and the send's recorded outcome deliberately plays no part. An earlier revision took
+ * `sendError` here on the reasoning that a recorded provider refusal means there is no first copy to
+ * duplicate; it was reverted, because `send_error` describes only the LATEST attempt. It is overwritten
+ * each time, a retry clears it while keeping `send_attempts`, and the case that matters most — the
+ * provider accepting while the delivery-stamp write dies — records nothing at all. "This send definitely
+ * reached nobody" is not a statement these columns can support, so the confirmation is always asked for
+ * once the provider's window has closed.
+ *
+ * The outcome drives `weeklyReportRetryAcknowledgementPrompt` instead: what the PM is TOLD, not whether
+ * they are asked. Mirrors `weeklyReportRetryIsProviderDeduped` in shared, which the CRM and the send
+ * service both use — the phone cannot import it, so the two are kept in step by hand and by these tests.
  */
 export function weeklyReportRetryNeedsAcknowledgement(
-  sentAt: string | null | undefined,
+  report: { sentAt: string | null | undefined },
   now: Date = new Date(),
 ): boolean {
-  return !weeklyReportRetryIsProviderDeduped(sentAt, now);
+  return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);
+}
+
+/**
+ * Does this stored `send_error` PROVE the provider created nothing?
+ *
+ * Mirrors `weeklyReportSendErrorIsProvableRejection` in shared. The worker writes `send_error` with an
+ * outcome prefix — `rejected:` when the provider refused the request and created nothing, `unknown:` when
+ * we never learned. ONLY the first is evidence. `unknown:` covers a swallowed fetch, a 5xx, a 408 and an
+ * in-flight idempotency 409, all of which may have left the message enqueued, so a row can carry a real
+ * `send_error` and still be a report the client has.
+ *
+ * Anchored at the start and requiring the colon: `unknown: ... the address was rejected by the receiving
+ * server` contains the word and means the opposite.
+ */
+function weeklyReportSendErrorIsProvableRejection(sendError: string | null | undefined): boolean {
+  if (typeof sendError !== "string") return false;
+  return sendError.trimStart().toLowerCase().startsWith("rejected:");
 }
 
 /**
@@ -198,14 +266,50 @@ export function weeklyReportRetryNeedsAcknowledgement(
  * Mirrors the CRM dialog's substance (weekly-report-history-panel.tsx `RetryButton`) — the two surfaces
  * take the same action against the same service, so a PM must not be warned on one and not the other.
  */
-export function weeklyReportRetryAcknowledgementPrompt(): { title: string; message: string } {
+export function weeklyReportRetryAcknowledgementPrompt(sendError?: string | null): {
+  title: string;
+  message: string;
+} {
+  // `subject` varies for coherence, matching shared. "the first email" is right when nothing is known
+  // about any attempt, and reads as a contradiction directly after telling the PM a recorded attempt sent
+  // nothing — so the rejected branch names the unaccounted-for attempts instead.
+  const risk = (subject: string) =>
+    `This send is at least ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
+    `provider will no longer treat a retry as a duplicate. If ${subject} did go out, the client ` +
+    "will receive a second copy.";
   return {
     title: "Send this again?",
-    message:
-      `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
-      "provider will no longer treat a retry as a duplicate. If the first email did go out, the client " +
-      "will receive a second copy.",
+    message: weeklyReportSendErrorIsProvableRejection(sendError)
+      ? "A recorded attempt on this send was refused, so that attempt sent nothing. The outcome of any " +
+        `other attempt is unknown. ${risk("one of those")}`
+      : risk("the first email"),
   };
+}
+
+/**
+ * The sentence shown ON THE SCREEN, above the Retry button — not in the dialog.
+ *
+ * It exists because a PM who knows what the confirmation will say can decide whether to open it at all,
+ * which makes it the REAL decision point: the dialog only ever gets read by someone who has already
+ * chosen to tap. So a generic warning here defeats an outcome-aware dialog entirely — the PM sees "if the
+ * first one did go out, the client gets a second copy" on a send the provider demonstrably refused, and
+ * reaches for Send correction exactly as before.
+ *
+ * Same rule and the same evidence as `weeklyReportRetryAcknowledgementPrompt`, kept as a shorter
+ * paraphrase because this is body copy on a phone rather than an alert. The two must never disagree:
+ * being told one thing on the screen and another in the dialog is worse than either alone.
+ */
+export function weeklyReportRetryWarning(sendError?: string | null): string {
+  const closing =
+    "a retry is a genuinely new email rather than a repeat the mail provider will ignore";
+  if (!weeklyReportSendErrorIsProvableRejection(sendError)) {
+    return `This send is a day or more old, so ${closing}. If the first one did go out, the client gets a second copy.`;
+  }
+  return (
+    "A recorded attempt on this send was refused, so that attempt reached nobody. The outcome of any " +
+    `other attempt is unknown. This send is a day or more old, so ${closing}, and if one of those did ` +
+    "go out the client gets a second copy."
+  );
 }
 
 export interface WeeklyReportRetryPort {
@@ -235,12 +339,15 @@ export interface WeeklyReportRetryPort {
  * and the screen must not show it as an error.
  */
 export async function runWeeklyReportRetry(
-  input: { sentAt: string | null; now?: Date },
+  input: { sentAt: string | null; sendError?: string | null; now?: Date },
   port: WeeklyReportRetryPort,
 ): Promise<"retried" | "cancelled"> {
-  const needsAcknowledgement = weeklyReportRetryNeedsAcknowledgement(input.sentAt, input.now ?? new Date());
+  const needsAcknowledgement = weeklyReportRetryNeedsAcknowledgement(
+    { sentAt: input.sentAt },
+    input.now ?? new Date(),
+  );
   if (needsAcknowledgement) {
-    const confirmed = await port.confirm(weeklyReportRetryAcknowledgementPrompt());
+    const confirmed = await port.confirm(weeklyReportRetryAcknowledgementPrompt(input.sendError));
     if (!confirmed) return "cancelled";
   }
   const report = await port.retry(needsAcknowledgement);

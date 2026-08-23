@@ -62,6 +62,15 @@ export interface WeeklyReportDashboardRow {
   sendRetryReportId: string | null;
   /** When THAT send was committed. `sentAt` is the live row's, which is null once a correction exists. */
   sendRetrySentAt: string | null;
+  /**
+   * What the provider said about THAT send. `sendError` falls back to the live row's, which describes a
+   * different report once a correction exists.
+   *
+   * Read for the WORDING of the duplicate-risk confirmation, not for whether it appears. A `rejected:`
+   * prefix means that attempt created nothing and the dialog says so; it is not evidence about any
+   * earlier attempt, so the confirmation is still asked for.
+   */
+  sendRetrySendError: string | null;
   waitingOn: string | null;
   dismissalReason: string | null;
 }

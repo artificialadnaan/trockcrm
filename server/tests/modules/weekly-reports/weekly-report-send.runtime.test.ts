@@ -257,6 +257,17 @@ beforeAll(async () => {
   // joins `field_responders` and selects `trock_*_responder_id`. A suite that stops at 0227 fails on a
   // missing column rather than on its subject.
   await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
+  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
+  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
+  // than on its subject.
+  //
+  // These two used to sit in the BODY of "migration 0226 is replayable", which made the schema this
+  // whole file runs against a side effect of one test having executed first. The file passed, because
+  // vitest runs describes in source order — but `-t` any subset that excludes that test and every
+  // remaining test dies on a missing `carried_from_report_id`. A migration the suite depends on belongs
+  // where the suite is built, not inside an assertion about something else.
+  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
+  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -415,11 +426,6 @@ async function sendJobs(): Promise<Array<Record<string, any>>> {
 describe("migration 0226", () => {
   it("is replayable — running it a second time is a no-op, not an error", async () => {
     await expect(pg.exec(migrationSql("0226_weekly_report_send"))).resolves.toBeDefined();
-  // 0229 admits the rep_escalation reminder kind; 0230 adds `carried_from_report_id`, which the
-  // draft-creation INSERT now writes. A suite that stops short fails on a missing column rather
-  // than on its subject.
-  await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
-  await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
   });
 
   it("gives a NEW tenant the same columns the DO-loop gives an existing one", async () => {
@@ -1152,7 +1158,42 @@ describe("the assigned PM sends from the FIELD mount, not this one", () => {
 });
 
 describe("retrying a failed send", () => {
+  /**
+   * A send the provider PROVABLY refused — `send_error` carries the `rejected:` prefix.
+   *
+   * The prefix is not decoration. `weeklyReportSendFailureMessage` leads every stored error with the
+   * outcome `classifySendFailure` reached: `rejected:` means the request was refused before an email
+   * existed. The GATE does not read it — a rejection describes only ONE attempt, and not necessarily the
+   * most recent, since the statement that clears `send_error` is the one that also stamps the delivery.
+   * The retry dialog does read it, to tell the PM that a recorded attempt sent nothing.
+   */
   async function failedSend() {
+    return sentWithError(
+      "rejected: the email provider refused the message and sent nothing — " +
+        "validation_error (422): Invalid `to` field",
+    );
+  }
+
+  /**
+   * A send that FAILED WITHOUT SETTLING ANYTHING — `send_error` carries the `unknown:` prefix.
+   *
+   * A swallowed fetch, a 5xx, a 408, or a 409 `concurrent_idempotent_requests`: the request reached
+   * something that may well have enqueued the message. The row looks exactly like `failedSend` to the
+   * board — same "Send failed" chip — and the RETRY GATE does not tell them apart either: it reads
+   * `sent_at` and nothing else. The prefix changes only what the confirmation SAYS.
+   *
+   * Both fixtures exist so the test below can assert that indifference across both outcomes, which is
+   * what would fail if the outcome-based bypass were ever restored.
+   */
+  async function ambiguousSend() {
+    return sentWithError(
+      "unknown: the email provider never confirmed the message, so it may or may not have gone out — " +
+        "application_error: fetch failed",
+    );
+  }
+
+  /** Stand in for the worker's own failure bookkeeping, with whatever the provider outcome was. */
+  async function sentWithError(sendError: string) {
     const { reportId } = await seedApprovedReport();
     await sendWeeklyReport(db, {
       reportId,
@@ -1161,13 +1202,39 @@ describe("retrying a failed send", () => {
       payload: { recipients: ["jay@example.com"] },
       shareUrlFor,
     });
-    // Stand in for the worker's own failure bookkeeping.
     await pg.query(
       `UPDATE office_dallas.weekly_reports
-          SET send_attempts = 3, send_error = 'Resend timed out', send_last_attempt_at = now()
+          SET send_attempts = 3, send_error = $2, send_last_attempt_at = now()
         WHERE id = $1::uuid`,
-      [reportId],
+      [reportId, sendError],
     );
+    await pg.query(`DELETE FROM public.job_queue`);
+    return reportId;
+  }
+
+  /**
+   * Sent, and the record says NOTHING about what happened next — no delivery stamp, no error.
+   *
+   * The state `failedSend` cannot represent: the record says nothing either way.
+   * Two different histories produce it and the columns cannot tell them apart: the job never ran, or the
+   * provider ACCEPTED the message and the process died before `send_delivered_at` was stamped, which
+   * weekly-report-send.ts calls an ordinary outcome and dashboard-service.ts calls "the reason the whole
+   * idempotency-key design exists". The second history means the client already has the report, so past
+   * the provider's window a replay is a real second copy.
+   *
+   * The gate refuses on BOTH fixtures — it reads `sent_at` alone — so this one is not about the gate
+   * telling them apart. It is here because the dialog can offer no reassurance on a silent record, and
+   * because it is the history that makes the whole confirmation necessary in the first place.
+   */
+  async function silentSend() {
+    const { reportId } = await seedApprovedReport();
+    await sendWeeklyReport(db, {
+      reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
     await pg.query(`DELETE FROM public.job_queue`);
     return reportId;
   }
@@ -1249,12 +1316,54 @@ describe("retrying a failed send", () => {
     await expectAppError(retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT), 409, /has been sent/i);
   });
 
-  it("REFUSES unacknowledged once the provider's idempotency window has closed", async () => {
+  it("REFUSES unacknowledged once the window has closed on a send that recorded NOTHING", async () => {
     // The retry path's whole safety argument is that replaying the same key makes the worst outcome a
     // no-op. Resend keeps an idempotency key for 24 HOURS; this chip lives on the board for the 26-week
     // lookback. A PM clicking Retry the following Monday is far outside the window, the key no longer
     // dedupes, and the "no-op" is a second copy of the report in a client's inbox.
+    //
+    // `silentSend` here because it is the history the confirmation exists for: nothing was recorded
+    // either way, so the provider may well have accepted the message and lost the stamp — and the client
+    // would then already have the report this retry is about to send them again. The gate would refuse a
+    // `rejected:` send just the same; that case is asserted separately.
+    const reportId = await silentSend();
+    await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
+
+    await expectAppError(
+      retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT),
+      409,
+      /second copy in the client's inbox/i,
+    );
+    expect(await sendJobs()).toHaveLength(0);
+  });
+
+  it("REFUSES unacknowledged past the window on a provable rejection — a deliberate choice", async () => {
+    // THE REGRESSION GUARD for the bypass this branch tried and reverted. An earlier revision let a
+    // `rejected:` send through unacknowledged, on the reasoning that the provider refused it so there was
+    // nothing to duplicate. That does not survive contact with the column: `send_error` holds only the
+    // LATEST attempt, a retry clears it while keeping `send_attempts`, so an `unknown:` attempt that may
+    // have delivered can sit behind a later `rejected:` one — and the worst case, the provider accepting
+    // while the delivery-stamp write dies, records nothing at all.
+    //
+    // The gate is `sent_at` and nothing else. What the prefix changed instead is the SENTENCE: the prompt
+    // tells the PM this attempt sent nothing, without claiming an earlier one did not.
     const reportId = await failedSend();
+    await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
+
+    await expectAppError(
+      retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT),
+      409,
+      /second copy in the client's inbox/i,
+    );
+    expect(await sendJobs()).toHaveLength(0);
+  });
+
+  it("REFUSES unacknowledged past the window on an `unknown:` error too", async () => {
+    // The same verdict as the test above, and deliberately so — the gate does not tell these two apart.
+    // They are separate tests because the FIXTURES differ and only one is a regression guard: `unknown:`
+    // was always refused, `rejected:` is the one that briefly was not. Kept as two rather than a loop
+    // because `seedApprovedReport` allows one setup per project, so a single test cannot seed both.
+    const reportId = await ambiguousSend();
     await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
 
     await expectAppError(
@@ -1268,7 +1377,7 @@ describe("retrying a failed send", () => {
   it("allows it once the caller has acknowledged the duplicate risk", async () => {
     // Not blocked outright: an undelivered client report has to have a way forward. It is made a
     // deliberate act rather than a silent one.
-    const reportId = await failedSend();
+    const reportId = await silentSend();
     await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
     await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT, {
       acknowledgeDuplicateRisk: true,
@@ -1277,7 +1386,9 @@ describe("retrying a failed send", () => {
   });
 
   it("needs no acknowledgement inside the window, where the key really does dedupe", async () => {
-    const reportId = await failedSend();
+    // `silentSend` so this still tests the WINDOW. On a failed send the retry is now allowed for a
+    // second, independent reason, and the test would pass with the window check deleted entirely.
+    const reportId = await silentSend();
     await ageSend(reportId, PROVIDER_WINDOW_OPEN_MINUTES);
     await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
     expect(await sendJobs()).toHaveLength(1);
@@ -1382,6 +1493,8 @@ describe("the dashboard's view of a send", () => {
     expect(row!.sendFailed).toBe(true);
     expect(row!.sendAttempts).toBe(2);
     expect(row!.sendError).toBe("Resend timed out");
+    // The retry-scoped copy of it too — the field the dialog words itself from.
+    expect(row!.sendRetrySendError).toBe("Resend timed out");
     // And it names somebody to chase, rather than leaving the column empty on the one row needing a person.
     expect(row!.waitingOn).toBe("Adam Sherwood");
   });
@@ -1631,6 +1744,14 @@ describe("the dashboard's view of a send", () => {
     expect(row!.sendAttempts).toBe(3);
     expect(row!.sendRetryReportId).toBe(reportId);
     expect(row!.waitingOn).toBe("Adam Sherwood");
+    // AND ITS ERROR, read off the ORIGINAL rather than the live clone. This is what the retry dialog
+    // words itself from, and it had no server assertion at all: both emit sites could be deleted and
+    // every suite stayed green, because the CRM suites assert against a hand-written fixture row and
+    // would never notice the real payload had stopped carrying the field.
+    //
+    // The clone has no `send_error`, so reading the live row here yields null — which is exactly what
+    // makes this assertion discriminate provenance rather than merely presence.
+    expect(row!.sendRetrySendError).toBe("Resend timed out");
     // And the AGE of that send, not the clone's. The clone is `approved` and has no `sent_at` at all, so
     // a caller measuring the provider's 24-hour idempotency window off `row.sentAt` reads null — "outside
     // the window" — and warns the PM that retrying will put a second copy in the client's inbox, for a

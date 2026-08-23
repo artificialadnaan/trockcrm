@@ -12,6 +12,8 @@ import {
   weeklyReportEmailParagraphBlocks,
   weeklyReportEmailBodyText,
   weeklyReportSignatureLines,
+  WEEKLY_REPORT_SEND_OUTCOME_REJECTED,
+  WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN,
   type WeeklyReportEmailParts,
   type WeeklyReportSenderContact,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
@@ -332,10 +334,19 @@ export const WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV = "WEEKLY_REPORT_CLIENT_EMAI
  * to protect. Throwing rather than skipping keeps the refusal visible — it is recorded as `send_error` and
  * the dashboard raises the chip, rather than the send evaporating.
  */
+/**
+ * Thrown by the deployment guard, and TAGGED so the recorder can tell it apart.
+ *
+ * It is the one failure on this path that is provably a non-send: it fires BEFORE the provider is
+ * called, so no message exists anywhere. Every other throw in that try block either carries its own
+ * outcome prefix already or is genuinely ambiguous.
+ */
+class WeeklyReportSendRefusedBeforeSending extends Error {}
+
 function assertMayEmailRealClients(recipients: string[]): void {
   if (process.env.EMAIL_OVERRIDE_RECIPIENT?.trim()) return;
   if (process.env[WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV]?.trim().toLowerCase() === "true") return;
-  throw new Error(
+  throw new WeeklyReportSendRefusedBeforeSending(
     `Refusing to email ${recipients.length} client address(es): this deployment is not authorised to ` +
       `email real clients (set ${WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV}=true on the production worker, ` +
       "or set EMAIL_OVERRIDE_RECIPIENT to redirect the mail to an internal mailbox)",
@@ -353,20 +364,34 @@ function assertMayEmailRealClients(recipients: string[]): void {
  * env var — behind one indistinguishable string, with no way for a director to tell which they had.
  *
  * IT LEADS WITH THE OUTCOME, and that prefix is load-bearing rather than decorative. `rejected` means the
- * provider refused the request and created nothing, so this report is PROVABLY still undelivered and a
- * replay cannot duplicate it at any age; `unknown` means we never learned, so a replay might. The API's
- * retry route currently gates its duplicate-risk warning on AGE alone (`retryWeeklyReportSend`), which warns
- * a PM replaying a provable rejection that they may put a second copy in the client's inbox — false for that
- * case, and it trains click-through on a warning that is true for `unknown`. Keying that gate on this
- * outcome is the server half of the fix and is deliberately not made here.
+ * provider refused the request and created nothing, so THIS ATTEMPT is provably undelivered; `unknown`
+ * means we never learned, so it may have gone out.
+ *
+ * WHAT THAT PREFIX IS FOR, AND WHAT IT IS NOT. An earlier revision of this docblock proposed keying the
+ * retry's duplicate-risk gate on it, and that was tried and reverted: a `rejected:` here describes only the
+ * LATEST attempt. This column is overwritten per attempt and `retryWeeklyReportSend` clears it while
+ * keeping `send_attempts`, so an earlier `unknown:` that may have delivered can sit behind a later
+ * `rejected:` — and the worst case, the provider accepting while the delivery-stamp write dies, records
+ * nothing here at all. The gate is AGE ALONE and stays that way.
+ *
+ * The prefix drives the WORDING instead (`weeklyReportRetryDuplicateRiskPrompt`): a PM is told this attempt
+ * sent nothing, without being told the client received nothing.
  */
 export function weeklyReportSendFailureMessage(result: SendSystemEmailResult): string {
   // Anything not positively `rejected` is treated as ambiguous — the same conservative default
   // classifySendFailure applies, and it also covers a stub or an older build that omits the field.
-  const outcome = result.outcome === "rejected" ? "rejected" : "unknown";
+  //
+  // The two words come from `shared` rather than being spelled here, because the retry dialog PARSES
+  // this prefix back out (`weeklyReportSendErrorIsProvableRejection`) to decide what it tells the PM.
+  // Written as literals at both ends, renaming one would silently reclassify every provable rejection as
+  // ambiguous — which fails safe, and would therefore never be noticed.
+  const outcome =
+    result.outcome === WEEKLY_REPORT_SEND_OUTCOME_REJECTED
+      ? WEEKLY_REPORT_SEND_OUTCOME_REJECTED
+      : WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN;
   const detail = normalizeText(result.reason);
   const summary =
-    outcome === "rejected"
+    outcome === WEEKLY_REPORT_SEND_OUTCOME_REJECTED
       ? "the email provider refused the message and sent nothing"
       : "the email provider never confirmed the message, so it may or may not have gone out";
   return detail ? `${outcome}: ${summary} — ${detail}` : `${outcome}: ${summary}`;
@@ -636,6 +661,20 @@ export async function handleWeeklyReportSend(
     if (!result.success) throw new Error(weeklyReportSendFailureMessage(result));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // A DEPLOYMENT REFUSAL IS A PROVABLE NON-SEND, and it used to be recorded without one, which the
+    // retry dialog reads as ambiguous — telling a PM the client may already have the report when the
+    // provider was never called at all. On a worker missing WEEKLY_REPORT_CLIENT_EMAIL_ENABLED that is
+    // EVERY send, so every retry would carry a warning that is not merely unnecessary but false.
+    //
+    // Only this error is re-prefixed. The `!result.success` throw above already carries its own outcome,
+    // and blanket-wrapping the catch would bury a `rejected:` inside an `unknown:` and silently
+    // reclassify every provider refusal. Anything else reaching here is genuinely unknown and keeps the
+    // conservative default of no prefix.
+    const stored =
+      error instanceof WeeklyReportSendRefusedBeforeSending
+        ? `${WEEKLY_REPORT_SEND_OUTCOME_REJECTED}: this deployment refused to send before the provider ` +
+          `was called, so this attempt sent nothing — ${message}`
+        : message;
     // Written BEFORE the rethrow, so the failure is visible on the dashboard whether the queue retries or
     // dead-letters. This is the whole difference from the fire-and-forget scorecard path.
     //
@@ -645,7 +684,7 @@ export async function handleWeeklyReportSend(
     // — the outcome and the error name lead the string — without an unbounded row behind a hover.
     await recordAttempt(query, tenantSchema, reportId, {
       delivered: false,
-      error: message.slice(0, 500),
+      error: stored.slice(0, 500),
     });
     logger.error("[WeeklyReportSend] Failed to deliver weekly report", { reportId, error });
     throw error;

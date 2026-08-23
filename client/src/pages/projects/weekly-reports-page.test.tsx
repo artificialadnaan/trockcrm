@@ -64,6 +64,21 @@ import WeeklyReportsPage, { fmtWeek, latenessLabel } from "./weekly-reports-page
 let container: HTMLDivElement;
 let root: Root;
 
+/**
+ * The two shapes the worker persists into `send_error`.
+ *
+ * The prefix decides what the duplicate-risk dialog SAYS, never whether it appears — the gate is
+ * `sendRetrySentAt` and nothing else. `rejected:` means that attempt created nothing, so the dialog can
+ * say so; `unknown:` means we never learned and the client may have the report, so it cannot. A bare
+ * "SMTP timeout" fixture carries no prefix and would exercise neither branch honestly.
+ */
+const REJECTED_ERROR =
+  "rejected: the email provider refused the message and sent nothing — " +
+  "validation_error (422): Invalid `to` field";
+const UNKNOWN_ERROR =
+  "unknown: the email provider never confirmed the message, so it may or may not have gone out — " +
+  "application_error: fetch failed";
+
 function dashboardRow(overrides: Record<string, unknown> = {}) {
   return {
     weeklyReportProjectId: "p1",
@@ -100,6 +115,10 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     sendBounced: false,
     sendRetryReportId: null,
     sendRetrySentAt: null,
+    // THAT report's `send_error`, and not the same field as `sendError` above, which falls back to the
+    // live row's. It decides what the duplicate-risk dialog SAYS — whether it can tell the PM a recorded
+    // attempt sent nothing — not whether the dialog appears, which is age alone.
+    sendRetrySendError: null,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
     ...overrides,
@@ -373,6 +392,11 @@ describe("This Week board", () => {
     // Resend forgets an idempotency key after 24 hours while this chip lives on the board for 26 weeks,
     // so a replay past the window is a genuinely second email. The server refuses without the
     // acknowledgement; this is the UI that earns it.
+    //
+    // A STALLED send, not a failed one. Stalled is precisely the state where nothing was recorded either
+    // way — the job may never have run, or the provider accepted the message and the process died before
+    // the delivery stamp — so the dialog can offer no reassurance at all. A FAILED send still reaches
+    // this dialog; what differs there is the wording, asserted separately below.
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     mocks.retryWeeklyReportSend.mockResolvedValue({});
     mockDashboard([
@@ -382,8 +406,9 @@ describe("This Week board", () => {
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
         sendRetrySentAt: "2026-08-01T10:00:00.000Z",
-        sendError: "SMTP timeout",
-        sendFailed: true,
+        sendError: null,
+        sendRetrySendError: null,
+        sendStalled: true,
       }),
     ]);
     renderPage();
@@ -398,6 +423,106 @@ describe("This Week board", () => {
     confirm.mockRestore();
   });
 
+  it("STILL asks on a provable rejection, but SAYS that attempt sent nothing", async () => {
+    // The board's half of the same rule the History tab and the server's 409 now follow. `sendFailed` is
+    // the chip a PM is most likely to be looking at, and warning them about a duplicate that cannot
+    // happen is what pushed people towards Send correction — which mints a v2 and clears the failure off
+    // this board without the client ever receiving anything.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mocks.retryWeeklyReportSend.mockResolvedValue({});
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: REJECTED_ERROR,
+        sendRetrySendError: REJECTED_ERROR,
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/that attempt sent nothing/i));
+    // And the warning survives alongside it — the gate is age alone, so this retry is still deliberate.
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("r1", true);
+    confirm.mockRestore();
+  });
+
+  it("STILL asks on an `unknown:` error, where the provider never confirmed anything", async () => {
+    // `sendFailed` is true for both prefixes — the chip says "Send failed" either way — so the chip is
+    // not the thing to key on. Only `rejected:` proves nothing was created; `unknown:` covers a 5xx or a
+    // swallowed fetch that may have left the message enqueued.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: UNKNOWN_ERROR,
+        sendRetrySendError: UNKNOWN_ERROR,
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    // And it must NOT reassure — a prompt that claimed the refusal on every outcome would otherwise
+    // satisfy this test while telling the PM something the record does not support.
+    expect(confirm).not.toHaveBeenCalledWith(expect.stringMatching(/sent nothing/i));
+    expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("STILL asks when only the LIVE row carries an error and the replayed send is silent", async () => {
+    // Why `sendRetrySendError` is a separate field rather than a reuse of `sendError`. Once a correction
+    // is drafted over a failed send the two describe different reports: `sendError` falls back to the
+    // live clone, while Retry replays the ORIGINAL. Reading the fallback would tell the PM that an
+    // attempt on THIS send was refused, on the strength of an error belonging to a report the button is
+    // not going to send — reassurance the record does not support. The warning itself is unaffected;
+    // the gate is age alone.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r2",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: REJECTED_ERROR,
+        sendRetrySendError: null,
+        sendStalled: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    // And it must NOT reassure — a prompt that claimed the refusal on every outcome would otherwise
+    // satisfy this test while telling the PM something the record does not support.
+    expect(confirm).not.toHaveBeenCalledWith(expect.stringMatching(/sent nothing/i));
+    expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it("sends nothing when the PM declines that confirmation", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     mockDashboard([
@@ -407,8 +532,11 @@ describe("This Week board", () => {
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
         sendRetrySentAt: "2026-08-01T10:00:00.000Z",
-        sendError: "SMTP timeout",
-        sendFailed: true,
+        // Stalled, for the same reason as the test above: the silent record is the case where the
+        // dialog has nothing reassuring it can honestly say.
+        sendError: null,
+        sendRetrySendError: null,
+        sendStalled: true,
       }),
     ]);
     renderPage();
