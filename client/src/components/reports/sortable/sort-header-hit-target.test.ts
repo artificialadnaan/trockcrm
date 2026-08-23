@@ -43,22 +43,32 @@ const UNRESOLVABLE = Symbol("unresolvable min-height");
  * smaller floor — or none at all above a breakpoint. A guard that cannot see the override is not a guard.
  */
 function tokenFloorPx(token: string): number | typeof UNRESOLVABLE | null {
-  const match = /^(?:(sm|md|lg|xl|2xl):)?!?min-h-(.+)$/.exec(token);
+  // ANY modifier chain, not the five bare breakpoints. `max-md:min-h-0` and `sm:hover:min-h-0` are valid
+  // Tailwind and generate real overriding rules that survive tailwind-merge alongside `min-h-6`; a regex
+  // that only knew `sm|md|lg|xl|2xl` returned null for them, so the base 24 stood as the answer and the
+  // caller read as safe. The second review of this file found that the FIRST fix for it was still too
+  // narrow, which is the argument for matching the shape rather than enumerating the cases.
+  const arbitraryProperty = /^(?:[^:\s]+:)*!?\[min-height:(.+)\]$/.exec(token);
+  if (arbitraryProperty) return lengthToPx(arbitraryProperty[1]!);
+
+  const match = /^(?:[^:\s]+:)*!?min-h-(.+)$/.exec(token);
   if (!match) return null;
-  const value = match[2]!;
+  const value = match[1]!;
   if (value === "px") return 1;
-  if (/^\d+$/.test(value)) return Number(value) * 4;
-  if (/^\d+\.5$/.test(value)) return Number(value) * 4;
+  if (/^\d+(?:\.5)?$/.test(value)) return Number(value) * 4;
   const arbitrary = /^\[(.+)\]$/.exec(value);
-  if (arbitrary) {
-    const raw = arbitrary[1]!;
-    const px = /^([\d.]+)px$/.exec(raw);
-    if (px) return Number(px[1]);
-    const rem = /^([\d.]+)rem$/.exec(raw);
-    if (rem) return Number(rem[1]) * 16;
-    return UNRESOLVABLE;
-  }
-  // `full`, `screen`, `fit`, `min`, `max`, `dvh` … all depend on a container this sweep cannot see.
+  if (arbitrary) return lengthToPx(arbitrary[1]!);
+  // `full`, `screen`, `fit`, `min`, `max`, `dvh` … depend on a container this sweep cannot see.
+  return UNRESOLVABLE;
+}
+
+/** A CSS length in px, or UNRESOLVABLE when it depends on something static analysis cannot know. */
+function lengthToPx(raw: string): number | typeof UNRESOLVABLE {
+  const px = /^([\d.]+)px$/.exec(raw);
+  if (px) return Number(px[1]);
+  const rem = /^([\d.]+)rem$/.exec(raw);
+  if (rem) return Number(rem[1]) * 16;
+  if (/^0$/.test(raw)) return 0;
   return UNRESOLVABLE;
 }
 
@@ -125,6 +135,8 @@ interface Site {
   className: string;
   /** True when the classes live behind something this sweep could not follow. */
   opaque: boolean;
+  /** Names of `{...spread}` sources on this element — a spread can carry `className` at runtime. */
+  spreads: string[];
 }
 
 /**
@@ -223,11 +235,30 @@ function callSites(): Site[] {
           tag === "SortHeaderButton" ? "className" : tag === "SortableTableHead" ? "buttonClassName" : null;
 
         if (attrName && !(isForwarder && tag === "SortHeaderButton")) {
+          // Spreads are COLLECTED, not skipped. `{...getHeaderProps("project")}` could supply `className`
+          // at runtime and JSX precedence would apply it over an explicit attribute written earlier — and
+          // this sweep would record the explicit one and report the element safe. Nothing does that today;
+          // the assertion below is what makes that a checked fact rather than an assumption.
+          const spreads: string[] = [];
+          for (const property of opening.attributes.properties) {
+            if (ts.isJsxSpreadAttribute(property)) {
+              const expression = property.expression;
+              spreads.push(
+                ts.isCallExpression(expression) ? expression.expression.getText() : expression.getText(),
+              );
+            }
+          }
+          const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
+          let recorded = false;
           for (const property of opening.attributes.properties) {
             if (!ts.isJsxAttribute(property) || property.name.getText() !== attrName) continue;
             const { className, opaque } = classesOf(property.initializer, constants);
-            const { line } = source.getLineAndCharacterOfPosition(opening.getStart());
-            found.push({ file: relative, line: line + 1, className, opaque });
+            found.push({ file: relative, line: line + 1, className, opaque, spreads });
+            recorded = true;
+          }
+          // An element with no explicit className still matters: a spread could introduce one.
+          if (!recorded && spreads.length > 0) {
+            found.push({ file: relative, line: line + 1, className: "", opaque: false, spreads });
           }
         }
       }
@@ -266,6 +297,49 @@ describe("a sort header is big enough to hit", () => {
     ).toEqual([]);
   });
 
+  it("knows every {...spread} that reaches a sort header, and none of them carries a className", () => {
+    // A SPREAD CAN OVERRIDE AN EXPLICIT ATTRIBUTE. `<X className="a" {...props} />` applies `props.className`
+    // if it has one, and JSX precedence is positional — so a sweep that reads the explicit attribute and
+    // ignores the spread records the class that LOST. The previous version skipped every spread silently.
+    //
+    // Full type resolution is out of reach here, so this pins the set instead and checks each source at its
+    // declaration. A NEW spread source fails, which is the point at which somebody has to look at it.
+    //
+    // This assertion earned itself immediately: it found `sortHeaderProps`, a second source I had not
+    // known about, on the first run. Enumerating from the source beats enumerating from memory.
+    const sources = [...new Set(callSites().flatMap((site) => site.spreads))].sort();
+    expect(sources).toEqual(["getHeaderProps", "sortHeaderProps"]);
+
+    const hook = fs.readFileSync(path.join(SORTABLE_DIR, "use-sort-state.ts"), "utf8");
+    const source = ts.createSourceFile("use-sort-state.ts", hook, ts.ScriptTarget.Latest, true);
+
+    for (const name of sources) {
+      // EVERY declaration, not the first one found. `getHeaderProps` is declared twice — once as a
+      // property on the hook's return interface and once as the function itself — and checking whichever
+      // the walk reached first meant a className added to the OTHER one passed unnoticed. Found by
+      // mutation: adding `className?: string` to the interface signature left this test green.
+      const declaredReturns: string[] = [];
+      const visit = (node: ts.Node): void => {
+        const named =
+          (ts.isFunctionDeclaration(node) && node.name?.text === name) ||
+          (ts.isPropertySignature(node) && node.name.getText() === name) ||
+          (ts.isMethodSignature(node) && node.name.getText() === name);
+        if (named && (node as ts.SignatureDeclaration).type) {
+          declaredReturns.push((node as ts.SignatureDeclaration).type!.getText());
+        }
+        node.forEachChild(visit);
+      };
+      visit(source);
+
+      expect(declaredReturns.length, `no declared return type for ${name} — re-verify it by hand`)
+        .toBeGreaterThan(0);
+      for (const declared of declaredReturns) {
+        expect(declared, `${name} may now supply a className, which would override the swept one`)
+          .not.toContain("className");
+      }
+    }
+  });
+
   it("keeps that floor through every caller's className", () => {
     // `cn` is tailwind-merge, so a caller's `min-h-*` REPLACES the component's rather than losing to it —
     // silently, with no error and no visual cue. One caller can undo the fix for its own table while ten
@@ -287,6 +361,10 @@ describe("a sort header is big enough to hit", () => {
     ["md:min-h-0", "a breakpoint override — survives the merge in its own group"],
     ["min-h-[1px]", "an arbitrary value the old hard-coded map could not see"],
     ["min-h-5", "one step under the minimum"],
+    ["max-md:min-h-0", "a max-* breakpoint — valid Tailwind, invisible to the first two regexes"],
+    ["sm:hover:min-h-0", "a stacked modifier chain"],
+    ["[min-height:0px]", "the arbitrary-property form"],
+    ["min-h-[0.5rem]", "an arbitrary rem value"],
   ])("detects %s (%s), rather than always passing", (override) => {
     // The mirror, and the reason it is a table. Every one of these was a way for the sweep above to return
     // 24 for a button that is smaller than 24 — the prefixed and arbitrary forms because the first version
