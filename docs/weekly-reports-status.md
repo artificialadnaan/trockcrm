@@ -105,7 +105,10 @@ gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){p
 | **#1087** | Delivery made a **real fact**, not "the provider accepted the call" |
 | **#1088** | The PM has somewhere to go when their send fails |
 
-### Built and reviewed, sitting in #1089 — **not on main**
+### Shipped with #1089 — **on main and deployed since 2026-08-23**
+
+*Kept as the record of what this batch contained. The heading below used to read "sitting in #1089 — not
+on main"; that was true when it was written and is not now.*
 
 **#1090 — week-to-week continuity, escalation, duration, photo speed**
 
@@ -143,7 +146,10 @@ Two structural changes came out of it, and they matter more than the bugs: `outs
 on the server** so the count, chip and border cannot disagree again, and **two guards that could not fail**
 were found by mutation testing and given cases that reach them.
 
-### Built, tested, **unpushed** — `feat/weekly-report-open-tracking`
+### Shipped as #1092 — `feat/weekly-report-open-tracking`
+
+*Merged and deployed. This section used to read "Built, tested, unpushed"; the retention purge below is
+the only part of it that is still outstanding.*
 
 - Migration `0231` — `public.weekly_report_views`
 - Open logging on the page, PDF and photo routes
