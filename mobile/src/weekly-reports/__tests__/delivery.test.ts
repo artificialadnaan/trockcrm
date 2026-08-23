@@ -242,6 +242,15 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     expect(message).toMatch(/second copy/i);
   });
 
+  it("does not then ask about \"the first email\", which contradicts the sentence before it", () => {
+    // Same coherence guard as shared. Every clause-level assertion passed while the two halves of this
+    // message disagreed with each other; only reading the finished string caught it.
+    const { message } = weeklyReportRetryAcknowledgementPrompt(REJECTED_ERROR);
+    expect(message).not.toMatch(/the first email/i);
+    expect(message).toMatch(/no other attempt is accounted for/i);
+    expect(weeklyReportRetryAcknowledgementPrompt(UNKNOWN_ERROR).message).toMatch(/the first email/i);
+  });
+
   it("claims no such thing on an `unknown:`, blank, or legacy record", () => {
     // The control, and the one that carries the distinction now. `unknown:` covers a swallowed fetch, a
     // 5xx, a 408 and an in-flight idempotency 409 — all of which may have left the message enqueued.

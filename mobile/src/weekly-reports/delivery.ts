@@ -227,16 +227,19 @@ export function weeklyReportRetryAcknowledgementPrompt(sendError?: string | null
   title: string;
   message: string;
 } {
-  const closing =
+  // `subject` varies for coherence, matching shared. "the first email" is right when nothing is known
+  // about any attempt, and reads as a contradiction directly after telling the PM a recorded attempt sent
+  // nothing — so the rejected branch names the unaccounted-for attempts instead.
+  const risk = (subject: string) =>
     `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
-    "provider will no longer treat a retry as a duplicate. If the first email did go out, the client " +
+    `provider will no longer treat a retry as a duplicate. If ${subject} did go out, the client ` +
     "will receive a second copy.";
   return {
     title: "Send this again?",
     message: weeklyReportSendErrorIsProvableRejection(sendError)
-      ? "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing. " +
-        `No other attempt is accounted for. ${closing}`
-      : closing,
+      ? "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing " +
+        `— but no other attempt is accounted for. ${risk("one of those")}`
+      : risk("the first email"),
   };
 }
 

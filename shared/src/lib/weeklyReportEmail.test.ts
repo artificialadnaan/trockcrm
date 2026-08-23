@@ -171,6 +171,20 @@ describe("weeklyReportRetryDuplicateRiskPrompt", () => {
     expect(prompt).toMatch(/no other attempt is accounted for/i);
   });
 
+  it("does not then ask about \"the first email\", which contradicts the sentence before it", () => {
+    // Coherence, not vocabulary. The default closing asks what happened to "the first email", which is
+    // the right phrase when nothing is known — and a contradiction directly after telling the PM that a
+    // recorded attempt sent nothing. The rejected branch names the unaccounted-for attempts instead.
+    //
+    // This was found by PRINTING the finished string and reading it. Every assertion in this file passed
+    // while the two halves disagreed, because each checked its own clause and none read the whole.
+    const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
+    expect(prompt).not.toMatch(/the first email/i);
+    expect(prompt).toMatch(/no other attempt is accounted for/i);
+    // The default branch keeps it — there, nothing has been claimed about any attempt.
+    expect(weeklyReportRetryDuplicateRiskPrompt(UNKNOWN_ERROR)).toMatch(/the first email/i);
+  });
+
   it("always carries the duplicate warning, whatever the outcome was", () => {
     // The property that must hold across every branch: this dialog exists to warn, and no outcome
     // removes the warning any more. If a future edit reintroduces a silent path, this fails.

@@ -148,14 +148,18 @@ export function weeklyReportSendErrorIsProvableRejection(sendError: unknown): bo
  * only what the column can support: that some attempt was refused, not which, and nothing about the rest.
  */
 export function weeklyReportRetryDuplicateRiskPrompt(sendError?: string | null): string {
-  const closing =
+  // "the first email" only makes sense when nothing is known about any attempt. After telling a PM that a
+  // recorded attempt sent nothing, it reads as a contradiction of the sentence they just finished — so the
+  // rejected branch names what is actually unaccounted for instead. Found by printing the finished string
+  // and reading it, which no assertion here was ever going to do.
+  const risk = (subject: string) =>
     `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
-    "provider will no longer treat a retry as a duplicate. If the first email did go out, the client will " +
+    `provider will no longer treat a retry as a duplicate. If ${subject} did go out, the client will ` +
     "receive a second copy. Send it again?";
-  if (!weeklyReportSendErrorIsProvableRejection(sendError)) return closing;
+  if (!weeklyReportSendErrorIsProvableRejection(sendError)) return risk("the first email");
   return (
-    "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing. No " +
-    `other attempt is accounted for. ${closing}`
+    "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing — but " +
+    `no other attempt is accounted for. ${risk("one of those")}`
   );
 }
 
