@@ -28,8 +28,8 @@ gh api graphql -f query="{repository(owner:\"artificialadnaan\",name:\"trockcrm\
 | `origin/main` | **#1089 through #1095 are all merged and deployed.** The batch this file was written to track is done. |
 | Migrations on main | `0222`–`0231`. `0228`–`0230` are per-office (applied in `dallas`, `atlanta`, `pwauditoffice`); **`0231` is `public.weekly_report_views` and is verified in `public`** — it is deliberately not an office table, because a share link is opened by a route holding only a token, before any tenant is known. Do not go looking for a per-office 0231. |
 | `feat/weekly-report-open-tracking` | Shipped as **#1092**. The branch is pushed and merged; it is no longer a loose local branch. |
-| Still open | **#1096** dialog widths · **#1097** this correction · **#1099** the delivery-route regression from #1094 · **#1100** sort-header target size. |
-| Merged today | **#1094**, **#1095**, **#1098** (icon-button accessible names — on main as `1a0226a`). |
+| Still open | **#1096** dialog widths · **#1097** this correction · **#1100** sort-header target size. |
+| Merged today | **#1094**, **#1095**, **#1098** (icon-button accessible names, `1a0226a`), **#1099** (the delivery-route regression from #1094, `fa14f59`). |
 
 ---
 

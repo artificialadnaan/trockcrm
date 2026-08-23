@@ -2,9 +2,14 @@
 
 > **⚠️ ONE ITEM IN HERE IS NOT DONE: CREDENTIAL ROTATION (task 5).** `JWT_SECRET`, `ENCRYPTION_KEY`,
 > `RESEND_API_KEY` and the Procore client secret were printed into a transcript and still need rotating —
-> and were exposed again on 2026-08-23 by listing the Railway production variables. That task is the one
-> thing on this page that is not a preference, it is still outstanding, and the banner below must not be
-> read as covering it.
+> and were exposed again on 2026-08-23 by listing the Railway production variables. It is the only item
+> here that is not a preference, it is still outstanding, and the banner below must not be read as
+> covering it.
+>
+> It is not, however, the only unfinished work in this arc: `docs/weekly-reports-status.md` is the list,
+> and it still carries Playwright verification of the deployed app, worktree cleanup, and the open
+> decisions on the PDF layout pass and roster logins. Read that file for what is left; read this one only
+> for the rotation.
 >
 > **SUPERSEDED for everything else, 2026-08-23. DO NOT PASTE THIS.** The rest of what it instructs a fresh
 > session to do has shipped:
