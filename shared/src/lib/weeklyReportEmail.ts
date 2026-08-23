@@ -137,9 +137,15 @@ export function weeklyReportSendErrorIsProvableRejection(sendError: unknown): bo
  * looking at demonstrably sent nothing — so the obvious read was "retrying is dangerous", and the button
  * they reached for instead was Send correction, which mints a v2 and takes the failure off the board.
  *
- * So when the last attempt is a provable rejection this SAYS so, and is then careful about the rest: that
- * attempt sent nothing, an earlier one is not accounted for, and past the window a replay is a new email.
+ * So when the record carries a provable rejection this SAYS so, and is then careful about the rest: that
+ * attempt sent nothing, no other attempt is accounted for, and past the window a replay is a new email.
  * It states what is known and stops there.
+ *
+ * DELIBERATELY NOT "the last attempt". `send_error` is cleared only by the statement that also stamps the
+ * delivery, so a rejected attempt followed by a successful one whose stamp write dies leaves `rejected:`
+ * on a row the client HAS. Calling it the latest attempt would be a false claim in exactly the state that
+ * matters, and would encourage the duplicate this dialog exists to prevent. "A recorded attempt" asserts
+ * only what the column can support: that some attempt was refused, not which, and nothing about the rest.
  */
 export function weeklyReportRetryDuplicateRiskPrompt(sendError?: string | null): string {
   const closing =
@@ -148,8 +154,8 @@ export function weeklyReportRetryDuplicateRiskPrompt(sendError?: string | null):
     "receive a second copy. Send it again?";
   if (!weeklyReportSendErrorIsProvableRejection(sendError)) return closing;
   return (
-    "The last attempt was refused by the mail provider, so that attempt sent nothing. Any earlier attempt " +
-    `is not accounted for. ${closing}`
+    "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing. No " +
+    `other attempt is accounted for. ${closing}`
   );
 }
 

@@ -235,10 +235,10 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // `weeklyReportRetryNeedsAcknowledgement` takes `sentAt` and nothing else.
   });
 
-  it("says the last attempt sent nothing when the provider provably refused it", () => {
+  it("says a recorded attempt sent nothing when the provider provably refused it", () => {
     const { message } = weeklyReportRetryAcknowledgementPrompt(REJECTED_ERROR);
     expect(message).toMatch(/that attempt sent nothing/i);
-    expect(message).toMatch(/earlier attempt is not accounted for/i);
+    expect(message).toMatch(/no other attempt is accounted for/i);
     expect(message).toMatch(/second copy/i);
   });
 

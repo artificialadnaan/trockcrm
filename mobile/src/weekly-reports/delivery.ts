@@ -234,8 +234,8 @@ export function weeklyReportRetryAcknowledgementPrompt(sendError?: string | null
   return {
     title: "Send this again?",
     message: weeklyReportSendErrorIsProvableRejection(sendError)
-      ? "The last attempt was refused by the mail provider, so that attempt sent nothing. Any earlier " +
-        `attempt is not accounted for. ${closing}`
+      ? "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing. " +
+        `No other attempt is accounted for. ${closing}`
       : closing,
   };
 }

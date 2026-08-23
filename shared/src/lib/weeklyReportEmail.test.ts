@@ -130,7 +130,7 @@ describe("weeklyReportSendErrorIsProvableRejection", () => {
 // complaint was: a PM was told flatly that a retry might double-send, with nothing conceding that the
 // attempt in front of them demonstrably sent nothing.
 describe("weeklyReportRetryDuplicateRiskPrompt", () => {
-  it("says the last attempt sent nothing when the provider provably refused it", () => {
+  it("says a recorded attempt sent nothing when the provider provably refused it", () => {
     const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
     expect(prompt).toMatch(/refused by the mail provider, so that attempt sent nothing/i);
   });
@@ -139,7 +139,7 @@ describe("weeklyReportRetryDuplicateRiskPrompt", () => {
     // The line between what is known and what is being guessed. An earlier attempt may have delivered,
     // and this sentence is the one that stops the dialog overstating the evidence.
     const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
-    expect(prompt).toMatch(/earlier attempt is not accounted for/i);
+    expect(prompt).toMatch(/no other attempt is accounted for/i);
     expect(prompt).toMatch(/second copy/i);
   });
 
@@ -156,6 +156,19 @@ describe("weeklyReportRetryDuplicateRiskPrompt", () => {
       expect(prompt).not.toMatch(/sent nothing/i);
       expect(prompt).toMatch(/second copy/i);
     }
+  });
+
+  it("never calls the rejection the LATEST attempt, because the column cannot say that", () => {
+    // `send_error` is cleared only by the statement that also stamps the delivery, so a rejected attempt
+    // followed by a successful one whose stamp write dies leaves `rejected:` on a row the client HAS.
+    // Saying "the last attempt" there would be false in exactly the state that matters and would talk a
+    // PM into the duplicate this dialog exists to prevent.
+    //
+    // Asserted as an ABSENCE of the recency words rather than a presence of the current phrasing: a
+    // reworded prompt is free to change, but it must not reacquire the claim.
+    const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
+    expect(prompt).not.toMatch(/\b(last|latest|most recent) attempt\b/i);
+    expect(prompt).toMatch(/no other attempt is accounted for/i);
   });
 
   it("always carries the duplicate warning, whatever the outcome was", () => {
