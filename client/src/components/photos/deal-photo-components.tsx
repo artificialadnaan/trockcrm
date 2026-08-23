@@ -1051,10 +1051,10 @@ export function PhotoViewerModal({
                     Delete
                   </Button>
                   <div className="ml-auto flex gap-1">
-                    <Button variant="ghost" size="icon" disabled={selectedIndex <= 0} onClick={() => onSelectedIdChange(photos[selectedIndex - 1]?.id)}>
+                    <Button variant="ghost" size="icon" aria-label="Previous photo" disabled={selectedIndex <= 0} onClick={() => onSelectedIdChange(photos[selectedIndex - 1]?.id)}>
                       <ChevronLeft className="h-4 w-4" />
                     </Button>
-                    <Button variant="ghost" size="icon" disabled={selectedIndex >= photos.length - 1} onClick={() => onSelectedIdChange(photos[selectedIndex + 1]?.id)}>
+                    <Button variant="ghost" size="icon" aria-label="Next photo" disabled={selectedIndex >= photos.length - 1} onClick={() => onSelectedIdChange(photos[selectedIndex + 1]?.id)}>
                       <ChevronRight className="h-4 w-4" />
                     </Button>
                   </div>

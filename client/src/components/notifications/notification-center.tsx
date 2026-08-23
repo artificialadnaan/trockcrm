@@ -57,10 +57,19 @@ export function NotificationCenter() {
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         render={
-          <Button variant="ghost" size="icon" className="relative">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="relative"
+            // The count goes IN the name, not instead of it. Without this the badge's text is the only
+            // thing inside the button that a name can compute from, so the control announces itself as
+            // "5" — which reads as a real label and hides that the actual one is missing.
+            aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+          >
             <Bell className="h-4 w-4" />
             {unreadCount > 0 && (
               <Badge
+                aria-hidden="true"
                 className="absolute -top-1 -right-1 h-5 min-w-[20px] px-1 flex items-center justify-center bg-red-500 text-white text-xs rounded-full border-2 border-white"
               >
                 {unreadCount > 99 ? "99+" : unreadCount}

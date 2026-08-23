@@ -1003,7 +1003,7 @@ export function DealDetailPage() {
       <TaskCreateDialog defaultDealId={deal.id} onCreated={refetch} />
       <DropdownMenu>
         <DropdownMenuTrigger
-          render={<Button variant="outline" size="icon">
+          render={<Button variant="outline" size="icon" aria-label="More actions for this deal">
             <MoreHorizontal className="h-4 w-4" />
           </Button>}
         />

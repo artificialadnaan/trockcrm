@@ -416,6 +416,7 @@ export function Sidebar() {
             variant="ghost"
             size="icon"
             className="text-slate-500 hover:bg-slate-100 hover:text-slate-950"
+            aria-label="Sign out"
             onClick={logout}
           >
             <LogOut className="h-4 w-4" />

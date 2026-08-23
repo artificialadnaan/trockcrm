@@ -393,7 +393,7 @@ export function CompanyDetailPage() {
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
-            <Button variant="outline" size="icon" className="size-11 md:size-8">
+            <Button variant="outline" size="icon" className="size-11 md:size-8" aria-label="More actions for this company">
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           }

@@ -64,6 +64,12 @@ export function DealFilters({ filters, onFilterChange, onReset }: DealFiltersPro
           size="icon"
           onClick={() => setShowAdvanced(!showAdvanced)}
           className="relative"
+          aria-expanded={showAdvanced}
+          aria-label={
+            activeFilterCount > 0
+              ? `Advanced filters, ${activeFilterCount} active`
+              : "Advanced filters"
+          }
         >
           <SlidersHorizontal className="h-4 w-4" />
           {activeFilterCount > 0 && (
