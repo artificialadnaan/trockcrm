@@ -86,9 +86,14 @@ function widthOf(classes: string): number | typeof UNRESOLVABLE | null {
       else if (/^\d+(?:\.5)?$/.test(value)) px = Number(value) * 4;
       else {
         const arbitrary = /^\[(.+)\]$/.exec(value);
-        // `full`, `auto`, `fit`, `min`, `max`, fractions — all depend on a container, and none of them
-        // makes the button NARROWER than its label, which is what would break the criterion.
-        px = arbitrary ? lengthToPx(arbitrary[1]!) : null;
+        if (arbitrary) px = lengthToPx(arbitrary[1]!);
+        // A FRACTION IS LOUD, NOT IGNORED. `w-1/4` resolves against the header cell, which this sweep
+        // cannot measure — and a quarter of a narrow column is easily under 24px. Returning null said
+        // "unconstrained", which is a confident answer to a question static analysis cannot settle.
+        else if (/^\d+\/\d+$/.test(value)) px = UNRESOLVABLE;
+        // `full`, `auto`, `fit`, `min`, `max` — container-relative, and none makes the button NARROWER
+        // than its own label, which is what would break the criterion.
+        else px = null;
       }
     }
     if (px === null) continue;
@@ -351,6 +356,12 @@ describe("a sort header is big enough to hit", () => {
     const sources = [...new Set(callSites().flatMap((site) => site.spreads))].sort();
     expect(sources).toEqual(["getHeaderProps", "sortHeaderProps"]);
 
+    // WHAT THIS DOES NOT DO: follow a spread's callee across an import to the exact declaration that
+    // callee resolves to. It checks every declaration of the NAME within this module, which is stronger
+    // than one file and weaker than real symbol resolution — a same-named helper defined outside
+    // `SORTABLE_DIR` would be missed. Stated rather than implied, because a guard that reads as
+    // exhaustive and is not is worse than one whose limits are written down.
+    //
     // EVERY FILE in the module, not one hook. `getHeaderProps` is ALSO declared on `UseTableSortResult`
     // in use-table-sort.ts, and reading only use-sort-state.ts meant a `className` added there passed
     // unnoticed — the same defect as checking one of two declarations, one file over.
@@ -431,11 +442,29 @@ describe("a sort header is big enough to hit", () => {
     // SCOPED TO THE `6` ENTRY. A config-wide `spacing:` match would fail this suite for an unrelated
     // addition like `spacing: { 72: "18rem" }`, which changes nothing this file counts in — and a guard
     // that fails on correct config is one people delete.
+    // EXACTLY THE KEYS THIS FILE COMPUTES FROM, gathered from the real class strings rather than guessed.
+    // A blanket `spacing:` match cried wolf on `spacing: { 72: "18rem" }`, which changes nothing here; but
+    // pinning only `6` was too narrow the other way, because the evaluator turns every numeric token it
+    // meets — a caller's `min-h-5`, `w-4`, `size-8` — into px using the same default scale.
     const config = fs.readFileSync(path.resolve(CLIENT_SRC, "../tailwind.config.ts"), "utf8");
-    expect(config, "theme.spacing.6 is redefined — every px number in this file is now wrong")
-      .not.toMatch(/spacing\s*:\s*\{[^}]*(?:"6"|'6'|\b6)\s*:/s);
-    expect(config, "theme.minHeight.6 is redefined — every px number in this file is now wrong")
-      .not.toMatch(/minHeight\s*:\s*\{[^}]*(?:"6"|'6'|\b6)\s*:/s);
+    const base = baseClasses();
+    const used = new Set<string>();
+    for (const site of callSites()) {
+      for (const token of twMerge(base, site.className).split(/\s+/)) {
+        const numeric = /^(?:[^:\s]+:)*!?(?:min-h|max-w|size|w)-(\d+(?:\.5)?)$/.exec(token);
+        if (numeric) used.add(numeric[1]!);
+      }
+    }
+    expect(used.size, "no numeric scale tokens found — the evaluator is not resolving anything").toBeGreaterThan(0);
+
+    for (const key of used) {
+      const pattern = new RegExp(
+        `(?:spacing|minHeight|maxWidth|width)\\s*:\\s*\\{[^}]*(?:"${key}"|'${key}'|\\b${key})\\s*:`,
+        "s",
+      );
+      expect(config, `the theme redefines scale key ${key}, which this file converts to px by assumption`)
+        .not.toMatch(pattern);
+    }
   });
 
   it.each([
