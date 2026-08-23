@@ -159,7 +159,29 @@ export default function ReportsHubScreen() {
   // without this the re-mint action was reachable only while a send was failing or still in flight, which
   // is the opposite of when somebody asks for a replacement link.
   function openDelivery(reportId: string, projectName: string): void {
-    router.push({ pathname: "/(app)/reports/delivery/[reportId]", params: { reportId, projectName } });
+    // PARTICIPATES IN `openInFlight`, the synchronous ref — not just in `disabled`.
+    //
+    // `disabled={busyKey !== null}` cannot close this window. `busyKey` is React state, so two Pressables
+    // in one native event batch both read the value committed before either fired, and both proceed; the
+    // button is still rendered enabled at that instant because React has not re-rendered between them.
+    // reports/weekly/[draftId].tsx documents the same hazard on its photo import and solves it the same
+    // way, and `openWeek` above already takes this ref for exactly this reason.
+    //
+    // It is CHECKED AND SET, so both orders are covered. Week-then-delivery was the obvious one; but
+    // delivery-then-week fails identically — the delivery route pushes, then the completing week open
+    // pushes its editor on top, and the PM who asked for a client link is looking at a draft either way.
+    if (openInFlight.current) return;
+    openInFlight.current = true;
+    try {
+      router.push({ pathname: "/(app)/reports/delivery/[reportId]", params: { reportId, projectName } });
+    } finally {
+      // Released on the NEXT TICK rather than immediately: the guard exists to span the synchronous batch,
+      // and clearing it inline would let the very next handler in that same batch read it as free. A timer
+      // rather than a flag the navigation has to clear, so a failed push cannot strand the hub.
+      setTimeout(() => {
+        openInFlight.current = false;
+      }, 0);
+    }
   }
 
   async function openWeek(

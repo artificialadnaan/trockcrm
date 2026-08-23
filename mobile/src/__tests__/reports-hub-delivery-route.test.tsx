@@ -233,4 +233,73 @@ describe("the card offers a way back to the delivered report", () => {
       releaseOpen!();
     });
   });
+
+  it("loses the race to the week button when BOTH are pressed in one native event batch", async () => {
+    // `disabled={busyKey !== null}` DOES NOT CLOSE THIS. `busyKey` is React state, so two Pressables in
+    // the same native batch both read the value committed before either fired — null — and both proceed.
+    // The button renders as enabled at that instant because React has not re-rendered between them.
+    //
+    // This is the same hazard `reports-hub-concurrent-open.test.tsx` was written for, and the hub already
+    // solves it for week buttons with a synchronous `openInFlight` ref. The delivery route simply never
+    // joined that guard: it pushed immediately, then the completing `openWeek` pushed the editor on top,
+    // and the PM who asked for a client link ended up looking at a draft with a stray delivery screen
+    // underneath it in the back stack.
+    //
+    // Both presses go inside ONE `act` and are called directly rather than through `fireEvent`, because
+    // firing twice flushes state between them and quietly tests a batch that never happens on a phone.
+    setProjects(assignment({ currentState: "draft", currentReportId: "rep-this-week" }));
+
+    const tree = render(<ReportsHubScreen />);
+    const week = tree.UNSAFE_getAllByType(Button).find((n) => {
+      const t: unknown = n.props.title;
+      return typeof t === "string" && t.startsWith("Open week of");
+    })!;
+    const delivery = deliveryButtons(tree)[0]!;
+
+    await act(async () => {
+      week.props.onPress();
+      delivery.props.onPress();
+    });
+
+    const deliveryPushes = mockRouterPush.mock.calls.filter(
+      ([arg]) => arg?.pathname === "/(app)/reports/delivery/[reportId]",
+    );
+    expect(deliveryPushes).toHaveLength(0);
+
+    if (releaseOpen) {
+      await act(async () => {
+        releaseOpen!();
+      });
+    }
+  });
+
+  it("also loses the race when DELIVERY is pressed first — both orders end on the wrong screen", async () => {
+    // The mirror, and the reason the guard is checked AND set rather than only checked. Delivery-then-week
+    // fails identically to week-then-delivery: the delivery route pushes, then the completing `openWeek`
+    // pushes its editor over the top. Guarding only one order would leave a coin-flip.
+    setProjects(assignment({ currentState: "draft", currentReportId: "rep-this-week" }));
+
+    const tree = render(<ReportsHubScreen />);
+    const week = tree.UNSAFE_getAllByType(Button).find((n) => {
+      const t: unknown = n.props.title;
+      return typeof t === "string" && t.startsWith("Open week of");
+    })!;
+    const delivery = deliveryButtons(tree)[0]!;
+
+    await act(async () => {
+      delivery.props.onPress();
+      week.props.onPress();
+    });
+
+    // Exactly ONE navigation happened, and the week open never started.
+    expect(mockRouterPush).toHaveBeenCalledTimes(1);
+    expect(mockRouterPush.mock.calls[0]![0].pathname).toBe("/(app)/reports/delivery/[reportId]");
+    expect(mockGetWeeklyReport).not.toHaveBeenCalled();
+
+    if (releaseOpen) {
+      await act(async () => {
+        releaseOpen!();
+      });
+    }
+  });
 });
