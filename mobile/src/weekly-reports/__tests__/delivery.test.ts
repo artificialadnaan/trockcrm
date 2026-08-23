@@ -200,7 +200,10 @@ describe("the words on the chip", () => {
       { ...UNDELIVERED, sendError: REJECTED_ERROR, sendAttempts: 2 },
       "failed",
     );
-    expect(detail).toMatch(/refused this email/i);
+    expect(detail).toMatch(/was refused after 2 attempts, so nothing went out/i);
+    // And it does not say the MAIL PROVIDER refused it: `rejected:` is also written when the
+    // deployment guard stops a send before the provider is ever called.
+    expect(detail).not.toMatch(/mail provider refused/i);
   });
 
   it("does NOT claim a refusal when the provider never confirmed anything", () => {
@@ -288,7 +291,7 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
   it("says a recorded attempt sent nothing when the provider provably refused it", () => {
     const { message } = weeklyReportRetryAcknowledgementPrompt(REJECTED_ERROR);
     expect(message).toMatch(/that attempt sent nothing/i);
-    expect(message).toMatch(/no other attempt is accounted for/i);
+    expect(message).toMatch(/outcome of any other attempt is unknown/i);
     expect(message).toMatch(/second copy/i);
   });
 
@@ -298,8 +301,8 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // this screen did until now, telling a PM "if the first one did go out" about a send the provider had
     // demonstrably refused, and steering them to Send correction exactly as before.
     const screen = weeklyReportRetryWarning(REJECTED_ERROR);
-    expect(screen).toMatch(/refused by the mail provider/i);
-    expect(screen).toMatch(/reached nobody/i);
+    expect(screen).toMatch(/was refused, so that attempt reached nobody/i);
+    expect(screen).not.toMatch(/refused by the mail provider/i);
     expect(screen).not.toMatch(/the first one did go out/i);
     // And it still warns, in the same breath — the gate has not moved.
     expect(screen).toMatch(/second copy/i);
@@ -321,7 +324,7 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // message disagreed with each other; only reading the finished string caught it.
     const { message } = weeklyReportRetryAcknowledgementPrompt(REJECTED_ERROR);
     expect(message).not.toMatch(/the first email/i);
-    expect(message).toMatch(/no other attempt is accounted for/i);
+    expect(message).toMatch(/outcome of any other attempt is unknown/i);
     expect(weeklyReportRetryAcknowledgementPrompt(UNKNOWN_ERROR).message).toMatch(/the first email/i);
   });
 

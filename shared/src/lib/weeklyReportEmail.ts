@@ -138,8 +138,15 @@ export function weeklyReportSendErrorIsProvableRejection(sendError: unknown): bo
  * they reached for instead was Send correction, which mints a v2 and takes the failure off the board.
  *
  * So when the record carries a provable rejection this SAYS so, and is then careful about the rest: that
- * attempt sent nothing, no other attempt is accounted for, and past the window a replay is a new email.
- * It states what is known and stops there.
+ * attempt sent nothing, the outcome of any other attempt is unknown, and past the window a replay is a
+ * new email. It states what is known and stops there.
+ *
+ * IT DOES NOT NAME WHO REFUSED IT. `rejected:` is also written when the deployment guard stops a send
+ * before the provider is ever called, so "refused by the mail provider" would be false on exactly the
+ * rows where the platform is most certain nothing went out.
+ *
+ * AND "UNKNOWN OUTCOME", NOT "UNACCOUNTED FOR". A row with `send_attempts` of 3 has accounted for three
+ * attempts; what it has not kept is what became of two of them, since `send_error` holds only one.
  *
  * DELIBERATELY NOT "the last attempt". `send_error` is cleared only by the statement that also stamps the
  * delivery, so a rejected attempt followed by a successful one whose stamp write dies leaves `rejected:`
@@ -158,8 +165,8 @@ export function weeklyReportRetryDuplicateRiskPrompt(sendError?: string | null):
     "receive a second copy. Send it again?";
   if (!weeklyReportSendErrorIsProvableRejection(sendError)) return risk("the first email");
   return (
-    "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing — but " +
-    `no other attempt is accounted for. ${risk("one of those")}`
+    "A recorded attempt on this send was refused, so that attempt sent nothing. The outcome of any other " +
+    `attempt is unknown. ${risk("one of those")}`
   );
 }
 

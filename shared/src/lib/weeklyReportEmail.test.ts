@@ -132,14 +132,14 @@ describe("weeklyReportSendErrorIsProvableRejection", () => {
 describe("weeklyReportRetryDuplicateRiskPrompt", () => {
   it("says a recorded attempt sent nothing when the provider provably refused it", () => {
     const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
-    expect(prompt).toMatch(/refused by the mail provider, so that attempt sent nothing/i);
+    expect(prompt).toMatch(/was refused, so that attempt sent nothing/i);
   });
 
   it("does NOT claim the client received nothing — only that THAT attempt sent nothing", () => {
     // The line between what is known and what is being guessed. An earlier attempt may have delivered,
     // and this sentence is the one that stops the dialog overstating the evidence.
     const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
-    expect(prompt).toMatch(/no other attempt is accounted for/i);
+    expect(prompt).toMatch(/outcome of any other attempt is unknown/i);
     expect(prompt).toMatch(/second copy/i);
   });
 
@@ -158,6 +158,24 @@ describe("weeklyReportRetryDuplicateRiskPrompt", () => {
     }
   });
 
+  it("does not name the mail provider as the refuser, because it may not have been", () => {
+    // `rejected:` is also written when the deployment guard stops a send BEFORE the provider is called
+    // (`WeeklyReportSendRefusedBeforeSending`). On those rows the platform is at its most certain that
+    // nothing went out — and "refused by the mail provider" would be flatly false about who did it.
+    const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
+    expect(prompt).not.toMatch(/refused by the mail provider/i);
+    expect(prompt).toMatch(/was refused, so that attempt sent nothing/i);
+  });
+
+  it("calls the other attempts UNKNOWN rather than unaccounted for", () => {
+    // A row with `send_attempts` of 3 has accounted for three attempts. What it has not kept is what
+    // became of two of them, since `send_error` holds one outcome — so "no other attempt is accounted
+    // for" reads as a contradiction of the count the same screen shows.
+    const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
+    expect(prompt).toMatch(/outcome of any other attempt is unknown/i);
+    expect(prompt).not.toMatch(/accounted for/i);
+  });
+
   it("never calls the rejection the LATEST attempt, because the column cannot say that", () => {
     // `send_error` is cleared only by the statement that also stamps the delivery, so a rejected attempt
     // followed by a successful one whose stamp write dies leaves `rejected:` on a row the client HAS.
@@ -168,7 +186,7 @@ describe("weeklyReportRetryDuplicateRiskPrompt", () => {
     // reworded prompt is free to change, but it must not reacquire the claim.
     const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
     expect(prompt).not.toMatch(/\b(last|latest|most recent) attempt\b/i);
-    expect(prompt).toMatch(/no other attempt is accounted for/i);
+    expect(prompt).toMatch(/outcome of any other attempt is unknown/i);
   });
 
   it("does not then ask about \"the first email\", which contradicts the sentence before it", () => {
@@ -180,7 +198,7 @@ describe("weeklyReportRetryDuplicateRiskPrompt", () => {
     // while the two halves disagreed, because each checked its own clause and none read the whole.
     const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
     expect(prompt).not.toMatch(/the first email/i);
-    expect(prompt).toMatch(/no other attempt is accounted for/i);
+    expect(prompt).toMatch(/outcome of any other attempt is unknown/i);
     // The default branch keeps it — there, nothing has been claimed about any attempt.
     expect(weeklyReportRetryDuplicateRiskPrompt(UNKNOWN_ERROR)).toMatch(/the first email/i);
   });

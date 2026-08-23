@@ -173,7 +173,7 @@ export function weeklyReportDeliveryDetail(
       // confirmed the message, so it may or may not have gone out". It also disagreed with the retry
       // warning three lines below it on the same screen.
       return weeklyReportSendErrorIsProvableRejection(facts.sendError)
-        ? `The mail provider refused this email after ${tries}. ${weeklyReportSendErrorDetail(
+        ? `This send was refused after ${tries}, so nothing went out. ${weeklyReportSendErrorDetail(
             facts.sendError,
           )}`.trim()
         : `Delivery failed after ${tries}, and the provider never confirmed what became of it. ${weeklyReportSendErrorDetail(
@@ -275,8 +275,8 @@ export function weeklyReportRetryAcknowledgementPrompt(sendError?: string | null
   return {
     title: "Send this again?",
     message: weeklyReportSendErrorIsProvableRejection(sendError)
-      ? "A recorded attempt on this send was refused by the mail provider, so that attempt sent nothing " +
-        `— but no other attempt is accounted for. ${risk("one of those")}`
+      ? "A recorded attempt on this send was refused, so that attempt sent nothing. The outcome of any " +
+        `other attempt is unknown. ${risk("one of those")}`
       : risk("the first email"),
   };
 }
@@ -301,9 +301,9 @@ export function weeklyReportRetryWarning(sendError?: string | null): string {
     return `This send is more than a day old, so ${closing}. If the first one did go out, the client gets a second copy.`;
   }
   return (
-    "A recorded attempt on this send was refused by the mail provider, so that attempt reached nobody — " +
-    `but no other attempt is accounted for. This send is more than a day old, so ${closing}, and if one ` +
-    "of those did go out the client gets a second copy."
+    "A recorded attempt on this send was refused, so that attempt reached nobody. The outcome of any " +
+    `other attempt is unknown. This send is more than a day old, so ${closing}, and if one of those did ` +
+    "go out the client gets a second copy."
   );
 }
 
