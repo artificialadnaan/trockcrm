@@ -310,6 +310,12 @@ export type WeeklyReportAssignment = {
   currentWeekOf: string;
   currentState: WeeklyReportWeekStateValue;
   currentReportId: string | null;
+  /**
+   * The newest week this project SENT, which survives a cadence rollover — `currentReportId` does not.
+   * Null until something has gone out.
+   */
+  lastSentReportId: string | null;
+  lastSentWeekOf: string | null;
   currentReportStatus: WeeklyReportStatusValue | null;
   /**
    * False once reporting has ENDED but missed weeks remain: `currentWeekOf` is then past the cadence end
