@@ -11,8 +11,13 @@ and the working tree at the time of writing — re-verify before acting, because
 ## Where things actually are
 
 > **SUPERSEDED, 2026-08-23. Everything in the table below shipped.** #1089–#1092 are merged and
-> deployed, migrations 0228–0231 are applied in all three office schemas, and #15/#16/#17 are done or
-> in review. The state table is kept only so the record of what was believed on 2026-08-20 stays legible;
+> deployed, migrations 0228–0230 are applied in all three office schemas and 0231 in `public`, and
+> #15/#16/#17 are done or in review.
+>
+> The split matters if you go looking: `0231_weekly_report_views.sql` creates `public.weekly_report_views`
+> deliberately — a share link is opened by a route holding nothing but a token, before any tenant is known,
+> so the table carries `tenant_id` and `office_slug` as columns instead of living in an office schema.
+> Verifying it per-office sends you after a state that cannot exist. The state table is kept only so the record of what was believed on 2026-08-20 stays legible;
 > do not act on it.
 >
 > **AND ONE CLAIM IN IT WAS WRONG, not merely stale** — see "#15, and why its premise was wrong" below
@@ -114,9 +119,15 @@ provisioning, not a code change.
 
 - **#15** ~~duplicate-risk warning gates on age alone; should gate on outcome~~ — **DONE (#1093), but not
   as written.** The premise was wrong three separate ways; see below.
-- **#16** ~~decide whether the dictation endpoint needs rate limiting~~ — **DONE (#1095).** Yes: it reaches
-  `claude-opus-5` on every call and every field account in the company can authenticate against it. Burst
-  limit plus a daily cap, keyed per USER rather than per IP, because a crew shares a jobsite NAT.
+- **#16** ~~decide whether the dictation endpoint needs rate limiting~~ — **DONE (#1095).** Yes: an eligible
+  call reaches the configured model — `claude-opus-5` by default, overridable per deploy via
+  `WEEKLY_REPORT_DICTATION_MODEL` — and every field account in the company can authenticate against it.
+  Burst limit plus a daily cap, keyed per USER rather than per IP, because a crew shares a jobsite NAT.
+
+  *Not* every call is a paid one: `formatWeeklyReportDictation` returns a locally formatted result for a
+  blank transcript, for one over `MAX_DICTATION_TRANSCRIPT_CHARS`, and on any deploy without
+  `ANTHROPIC_API_KEY`. That does not weaken the case for the limit — a runaway loop sends eligible
+  requests — but "every call spends money" overstates it, and this file is the wrong place to overstate.
 - **#17** ~~a field PM cannot re-mint a share link they just sent~~ — **in review (#1094).** The capability
   existed; it sat on the CRM router behind an admin/director/rep gate a `construction` account cannot
   reach. Reaching it took three attempts — the button has to hang off the LAST SENT report, not the
@@ -124,11 +135,16 @@ provisioning, not a code change.
 
 ### #15, and why its premise was wrong
 
-This file said:
+This file said, in full:
+
+> #15 duplicate-risk warning gates on age alone; should gate on outcome
+
+The premise that shorthand rests on — reconstructed here, **not** quoted, because the file never spelled
+it out — is that a send's outcome is knowable from what the row records:
 
 > When `send_delivered_at` is null the provider never accepted it, so there is nothing to duplicate.
 
-**That is false, and implementing it would have created the duplicate it set out to prevent.** Three
+**That premise is false, and implementing it would have created the duplicate it set out to prevent.** Three
 rounds of review took it apart, and the corrections are the useful part:
 
 1. `send_delivered_at` is stamped by a SEPARATE statement after the provider call returns, so a process
