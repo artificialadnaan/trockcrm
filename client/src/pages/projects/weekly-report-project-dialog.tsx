@@ -229,7 +229,7 @@ export function WeeklyReportProjectDialog({
       <DialogContent
         // Wide enough for a two-column body at desktop and for the date+note pairs to sit on one line.
         // `!max-w-*` because the primitive pins `sm:max-w-sm`, which a plain utility loses to.
-        className="flex max-h-[92vh] w-full flex-col gap-0 overflow-hidden p-0 sm:!max-w-5xl"
+        className="flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0 sm:!max-w-5xl"
       >
         <DialogHeader className="border-b border-slate-200 px-6 py-4">
           <DialogTitle className="text-[16px] font-extrabold tracking-tight text-slate-950">
