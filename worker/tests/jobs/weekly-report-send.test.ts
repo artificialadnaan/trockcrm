@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WEEKLY_REPORT_SEND_REQUEST_KEYS } from "@trock-crm/shared/lib/weeklyReportEmail";
+import {
+  WEEKLY_REPORT_SEND_REQUEST_KEYS,
+  weeklyReportSendErrorIsProvableRejection,
+} from "@trock-crm/shared/lib/weeklyReportEmail";
 import {
   buildWeeklyReportClientEmail,
   handleWeeklyReportSend,
@@ -588,9 +591,14 @@ describe("not from a laptop", () => {
 
     expect(sendEmail).not.toHaveBeenCalled();
     // Refused loudly, not silently: the row says exactly what happened.
-    expect(String(updates.find((u) => u.sql.includes("send_attempts"))!.params[1])).toMatch(
-      /not authorised to email real clients/i,
-    );
+    const recorded = String(updates.find((u) => u.sql.includes("send_attempts"))!.params[1]);
+    expect(recorded).toMatch(/not authorised to email real clients/i);
+    // AND IT IS RECORDED AS A PROVABLE REJECTION. The guard fires before the provider is called, so this
+    // is the most definite non-send there is — and it used to be stored with no outcome prefix, which the
+    // retry dialog reads as ambiguous. A PM retrying would have been told the client may already have the
+    // report, for a send that never left the building. On a worker missing the env var that is EVERY
+    // send, so the false warning would be on every row rather than an edge case.
+    expect(weeklyReportSendErrorIsProvableRejection(recorded)).toBe(true);
   });
 
   it("stands aside when an override redirects the mail somewhere internal", async () => {

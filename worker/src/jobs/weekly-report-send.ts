@@ -334,10 +334,19 @@ export const WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV = "WEEKLY_REPORT_CLIENT_EMAI
  * to protect. Throwing rather than skipping keeps the refusal visible — it is recorded as `send_error` and
  * the dashboard raises the chip, rather than the send evaporating.
  */
+/**
+ * Thrown by the deployment guard, and TAGGED so the recorder can tell it apart.
+ *
+ * It is the one failure on this path that is provably a non-send: it fires BEFORE the provider is
+ * called, so no message exists anywhere. Every other throw in that try block either carries its own
+ * outcome prefix already or is genuinely ambiguous.
+ */
+class WeeklyReportSendRefusedBeforeSending extends Error {}
+
 function assertMayEmailRealClients(recipients: string[]): void {
   if (process.env.EMAIL_OVERRIDE_RECIPIENT?.trim()) return;
   if (process.env[WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV]?.trim().toLowerCase() === "true") return;
-  throw new Error(
+  throw new WeeklyReportSendRefusedBeforeSending(
     `Refusing to email ${recipients.length} client address(es): this deployment is not authorised to ` +
       `email real clients (set ${WEEKLY_REPORT_CLIENT_EMAIL_ENABLED_ENV}=true on the production worker, ` +
       "or set EMAIL_OVERRIDE_RECIPIENT to redirect the mail to an internal mailbox)",
@@ -652,6 +661,20 @@ export async function handleWeeklyReportSend(
     if (!result.success) throw new Error(weeklyReportSendFailureMessage(result));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // A DEPLOYMENT REFUSAL IS A PROVABLE NON-SEND, and it used to be recorded without one, which the
+    // retry dialog reads as ambiguous — telling a PM the client may already have the report when the
+    // provider was never called at all. On a worker missing WEEKLY_REPORT_CLIENT_EMAIL_ENABLED that is
+    // EVERY send, so every retry would carry a warning that is not merely unnecessary but false.
+    //
+    // Only this error is re-prefixed. The `!result.success` throw above already carries its own outcome,
+    // and blanket-wrapping the catch would bury a `rejected:` inside an `unknown:` and silently
+    // reclassify every provider refusal. Anything else reaching here is genuinely unknown and keeps the
+    // conservative default of no prefix.
+    const stored =
+      error instanceof WeeklyReportSendRefusedBeforeSending
+        ? `${WEEKLY_REPORT_SEND_OUTCOME_REJECTED}: this deployment refused to send before the provider ` +
+          `was called, so nothing went out — ${message}`
+        : message;
     // Written BEFORE the rethrow, so the failure is visible on the dashboard whether the queue retries or
     // dead-letters. This is the whole difference from the fire-and-forget scorecard path.
     //
@@ -661,7 +684,7 @@ export async function handleWeeklyReportSend(
     // — the outcome and the error name lead the string — without an unbounded row behind a hover.
     await recordAttempt(query, tenantSchema, reportId, {
       delivered: false,
-      error: message.slice(0, 500),
+      error: stored.slice(0, 500),
     });
     logger.error("[WeeklyReportSend] Failed to deliver weekly report", { reportId, error });
     throw error;
