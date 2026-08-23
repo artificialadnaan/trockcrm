@@ -36,9 +36,11 @@ vi.mock("sonner", () => ({ toast: { error: mocks.toastError, success: mocks.toas
 import { WeeklyReportHistoryPanel } from "./weekly-report-history-panel";
 
 /**
- * The two shapes the worker persists into `send_error`. The prefix is the distinction the retry gate turns
- * on — `rejected:` means the provider created nothing, `unknown:` means we never learned — so a fixture
- * without one exercises neither branch honestly.
+ * The two shapes the worker persists into `send_error`.
+ *
+ * The prefix decides what the duplicate-risk dialog SAYS, never whether it appears — the gate is `sentAt`
+ * and nothing else. `rejected:` means that attempt created nothing, so the dialog can say so; `unknown:`
+ * means we never learned. A fixture without a prefix exercises neither branch honestly.
  */
 const REJECTED_ERROR =
   "rejected: the email provider refused the message and sent nothing — " +

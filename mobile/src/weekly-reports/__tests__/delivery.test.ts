@@ -38,9 +38,9 @@ const SENT_AT = "2026-08-13T20:00:00.000Z";
  * The two shapes the worker actually persists into `send_error`, prefix and all.
  *
  * Written out rather than reduced to "an error string", because the prefix is the whole distinction the
- * retry gate turns on: `rejected:` is the provider refusing before an email existed, `unknown:` is a
- * swallowed fetch or a 5xx that may have left the message enqueued. A fixture of `"Refused"` would have
- * exercised neither branch honestly.
+ * DIALOG'S WORDING turns on — the gate is `sentAt` and nothing else. `rejected:` is the provider refusing
+ * before an email existed, `unknown:` is a swallowed fetch or a 5xx that may have left the message
+ * enqueued. A fixture of `"Refused"` would have exercised neither branch honestly.
  */
 const REJECTED_ERROR =
   "rejected: the email provider refused the message and sent nothing — " +

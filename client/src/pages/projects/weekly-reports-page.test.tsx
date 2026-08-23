@@ -65,9 +65,12 @@ let container: HTMLDivElement;
 let root: Root;
 
 /**
- * The two shapes the worker persists into `send_error`. The prefix is what the retry gate reads —
- * `rejected:` means the provider created nothing, `unknown:` means we never learned and the client may
- * have the report — so a bare "SMTP timeout" fixture would exercise neither branch honestly.
+ * The two shapes the worker persists into `send_error`.
+ *
+ * The prefix decides what the duplicate-risk dialog SAYS, never whether it appears — the gate is
+ * `sendRetrySentAt` and nothing else. `rejected:` means that attempt created nothing, so the dialog can
+ * say so; `unknown:` means we never learned and the client may have the report, so it cannot. A bare
+ * "SMTP timeout" fixture carries no prefix and would exercise neither branch honestly.
  */
 const REJECTED_ERROR =
   "rejected: the email provider refused the message and sent nothing — " +
