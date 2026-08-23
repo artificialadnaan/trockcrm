@@ -1493,6 +1493,8 @@ describe("the dashboard's view of a send", () => {
     expect(row!.sendFailed).toBe(true);
     expect(row!.sendAttempts).toBe(2);
     expect(row!.sendError).toBe("Resend timed out");
+    // The retry-scoped copy of it too — the field the dialog words itself from.
+    expect(row!.sendRetrySendError).toBe("Resend timed out");
     // And it names somebody to chase, rather than leaving the column empty on the one row needing a person.
     expect(row!.waitingOn).toBe("Adam Sherwood");
   });
@@ -1742,6 +1744,14 @@ describe("the dashboard's view of a send", () => {
     expect(row!.sendAttempts).toBe(3);
     expect(row!.sendRetryReportId).toBe(reportId);
     expect(row!.waitingOn).toBe("Adam Sherwood");
+    // AND ITS ERROR, read off the ORIGINAL rather than the live clone. This is what the retry dialog
+    // words itself from, and it had no server assertion at all: both emit sites could be deleted and
+    // every suite stayed green, because the CRM suites assert against a hand-written fixture row and
+    // would never notice the real payload had stopped carrying the field.
+    //
+    // The clone has no `send_error`, so reading the live row here yields null — which is exactly what
+    // makes this assertion discriminate provenance rather than merely presence.
+    expect(row!.sendRetrySendError).toBe("Resend timed out");
     // And the AGE of that send, not the clone's. The clone is `approved` and has no `sent_at` at all, so
     // a caller measuring the provider's 24-hour idempotency window off `row.sentAt` reads null — "outside
     // the window" — and warns the PM that retrying will put a second copy in the client's inbox, for a
