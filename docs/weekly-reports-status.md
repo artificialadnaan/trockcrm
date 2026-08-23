@@ -10,10 +10,12 @@ them, including the push that updates this file. For anything that moves, the co
 Run them; do not trust a remembered number.
 
 ```
-gh pr view 1089 --json state,headRefOid,mergeStateStatus
-gh pr checks 1089
-gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){pullRequest(number:1089){
-  reviewThreads(last:40){nodes{isResolved path comments(first:1){nodes{author{login}body}}}}}}}' \
+# Substitute the PR you actually care about — the open set is listed below.
+PR=1099
+gh pr view $PR --json state,headRefOid,mergeStateStatus
+gh pr checks $PR
+gh api graphql -f query="{repository(owner:\"artificialadnaan\",name:\"trockcrm\"){pullRequest(number:$PR){
+  reviewThreads(last:40){nodes{isResolved path comments(first:1){nodes{author{login}body}}}}}}}" \
   --jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)]'
 ```
 
@@ -26,19 +28,21 @@ gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){p
 | `origin/main` | **#1089 through #1095 are all merged and deployed.** The batch this file was written to track is done. |
 | Migrations on main | `0222`–`0231`. `0228`–`0230` are per-office (applied in `dallas`, `atlanta`, `pwauditoffice`); **`0231` is `public.weekly_report_views` and is verified in `public`** — it is deliberately not an office table, because a share link is opened by a route holding only a token, before any tenant is known. Do not go looking for a per-office 0231. |
 | `feat/weekly-report-open-tracking` | Shipped as **#1092**. The branch is pushed and merged; it is no longer a loose local branch. |
-| Still open | **#1096** dialog widths · **#1097** this correction · **#1098** icon-button labels · **#1099** the delivery-route regression from #1094. |
+| Still open | **#1096** dialog widths · **#1097** this correction · **#1099** the delivery-route regression from #1094 · **#1100** sort-header target size. |
+| Merged today | **#1094**, **#1095**, **#1098** (icon-button accessible names — on main as `1a0226a`). |
 
 ---
 
 ## Open work
 
-- [ ] **1. The 24-month retention purge.** The one piece of open-tracking that was never built. Worker job,
-  beside the dead-letter sweep, with the same table-exists probe the other jobs use.
+- [x] **The 24-month retention purge — SHIPPED with #1092.** `worker/src/jobs/weekly-report-view-purge.ts`
+  holds the batched purge and `worker/src/index.ts` schedules it daily. This was listed as open work in an
+  earlier revision of this file, which would have sent somebody to reimplement it.
 
-- [ ] **2. Playwright E2E against the deployed app.** #1091/#1092/#1093 have been verified live; the rest of
+- [ ] **1. Playwright E2E against the deployed app.** #1091/#1092/#1093 have been verified live; the rest of
   the batch has not been walked end to end.
 
-- [ ] **3. Clean up the merged weekly-report worktrees and stale branches.** ~18 branches, most merged.
+- [ ] **2. Clean up the merged weekly-report worktrees and stale branches.** ~18 branches, most merged.
   Judge by PR state; never remove a dirty tree.
 
 ### Landed since this file was last accurate
@@ -49,7 +53,9 @@ gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){p
   which is superseded for status but is the record of why.
 - **#8 → #1095.** Dictation rate limiting: burst plus a daily cap, keyed per USER, because a crew shares a
   jobsite NAT. Note that not every call is a paid one — blank transcripts, over-length transcripts, and
-  deploys without `ANTHROPIC_API_KEY` are formatted locally.
+  deploys without `ANTHROPIC_API_KEY` are formatted locally. "Over-length" means over the **private
+  4,000-character `MAX_MODEL_TRANSCRIPT_CHARS`** — the exported `MAX_DICTATION_TRANSCRIPT_CHARS` is 20,000
+  and REJECTS with a 400 rather than falling back.
 - **#9 → #1094**, and its follow-up **#1099**. The re-mint capability landed, but its entry point was placed
   inside the card's `done` branch, so the route closed itself as soon as the cadence rolled over — which is
   before anyone needs it. Fixed in #1099.
@@ -105,7 +111,7 @@ gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){p
 | **#1087** | Delivery made a **real fact**, not "the provider accepted the call" |
 | **#1088** | The PM has somewhere to go when their send fails |
 
-### Shipped with #1089 — **on main and deployed since 2026-08-23**
+### Shipped with #1089 — **on main since 2026-08-20**
 
 *Kept as the record of what this batch contained. The heading below used to read "sitting in #1089 — not
 on main"; that was true when it was written and is not now.*
@@ -146,15 +152,17 @@ Two structural changes came out of it, and they matter more than the bugs: `outs
 on the server** so the count, chip and border cannot disagree again, and **two guards that could not fail**
 were found by mutation testing and given cases that reach them.
 
-### Shipped as #1092 — `feat/weekly-report-open-tracking`
+### Shipped as #1092 — `feat/weekly-report-open-tracking` (merged 2026-08-21)
 
 *Merged and deployed. This section used to read "Built, tested, unpushed"; the retention purge below is
 the only part of it that is still outstanding.*
 
 - Migration `0231` — `public.weekly_report_views`
 - Open logging on the page, PDF and photo routes
-- The scanner-vs-person classifier: groups on IP **and** user agent within 30 min; engagement
-  (PDF download, photo loads) outranks the agent string
+- Session grouping on IP **and** user agent within 30 min. The scanner-vs-person LABELS that originally
+  went with it — "A person", "Email scanner" — were **removed before ship**: `summariseWeeklyReportViews`
+  groups fetches without judging them, and the audit dialog says so in place of a verdict it could not
+  stand behind. An earlier revision of this file still described the classifier as shipped.
 - The opens panel in the audit dialog
 
 ---
