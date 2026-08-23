@@ -154,8 +154,10 @@ were found by mutation testing and given cases that reach them.
 
 ### Shipped as #1092 — `feat/weekly-report-open-tracking` (merged 2026-08-21)
 
-*Merged and deployed. This section used to read "Built, tested, unpushed"; the retention purge below is
-the only part of it that is still outstanding.*
+*Merged and deployed, including the 24-month retention purge — `worker/src/jobs/weekly-report-view-purge.ts`,
+scheduled daily from `worker/src/index.ts`. This section used to read "Built, tested, unpushed", and an
+intermediate revision of this file still called the purge outstanding after correcting it elsewhere. Nothing
+in this section is outstanding.*
 
 - Migration `0231` — `public.weekly_report_views`
 - Open logging on the page, PDF and photo routes

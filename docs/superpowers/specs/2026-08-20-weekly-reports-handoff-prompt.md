@@ -1,5 +1,15 @@
 # Handoff prompt — Weekly Reports remaining work
 
+> **SUPERSEDED, 2026-08-23. DO NOT PASTE THIS.** Everything it instructs a fresh session to do has shipped:
+> #1089–#1095 are merged and deployed, migrations 0228–0230 are in all three office schemas and 0231 in
+> `public`, and follow-ups #15/#16/#17 landed as #1093/#1095/#1094 (with #1099 correcting #1094).
+>
+> Pasting it would start a session on work that is already done, which is worse than starting with nothing.
+> For current state use `docs/weekly-reports-status.md`; for why #15's premise was wrong see
+> `2026-08-20-weekly-reports-remaining-work.md`.
+>
+> Kept because the prompt itself — what a handoff needs to carry — is the useful part, not its contents.
+
 Paste the block below into a fresh session. It is written to be pasted verbatim.
 
 ---
