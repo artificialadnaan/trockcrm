@@ -15,6 +15,7 @@ import {
   weeklyReportRetryIsProviderDeduped,
   weeklyReportRetryAcknowledgementPrompt,
   weeklyReportRetryNeedsAcknowledgement,
+  weeklyReportRetryWarning,
   weeklyReportUndeliveredSummary,
   type WeeklyReportCorrectionPort,
   type WeeklyReportRetryPort,
@@ -240,6 +241,30 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     expect(message).toMatch(/that attempt sent nothing/i);
     expect(message).toMatch(/no other attempt is accounted for/i);
     expect(message).toMatch(/second copy/i);
+  });
+
+  it("puts the SAME verdict on the screen as in the dialog, not a generic warning", () => {
+    // The screen's warning is the real decision point: a PM who reads it and walks away never opens the
+    // dialog at all. A generic sentence there defeats an outcome-aware dialog completely — which is what
+    // this screen did until now, telling a PM "if the first one did go out" about a send the provider had
+    // demonstrably refused, and steering them to Send correction exactly as before.
+    const screen = weeklyReportRetryWarning(REJECTED_ERROR);
+    expect(screen).toMatch(/refused by the mail provider/i);
+    expect(screen).toMatch(/reached nobody/i);
+    expect(screen).not.toMatch(/the first one did go out/i);
+    // And it still warns, in the same breath — the gate has not moved.
+    expect(screen).toMatch(/second copy/i);
+  });
+
+  it("keeps the generic warning where nothing is known about any attempt", () => {
+    // The control. A screen warning that claimed the refusal unconditionally would pass the test above
+    // and would be the same overstatement in a new place.
+    for (const sendError of [UNKNOWN_ERROR, "Resend timed out", null, undefined]) {
+      const screen = weeklyReportRetryWarning(sendError);
+      expect(screen).toMatch(/the first one did go out/i);
+      expect(screen).not.toMatch(/reached nobody/i);
+      expect(screen).toMatch(/second copy/i);
+    }
   });
 
   it("does not then ask about \"the first email\", which contradicts the sentence before it", () => {

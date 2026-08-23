@@ -22,6 +22,7 @@ import {
   weeklyReportDeliveryLabel,
   weeklyReportDeliveryState,
   weeklyReportRetryNeedsAcknowledgement,
+  weeklyReportRetryWarning,
 } from "../../../../src/weekly-reports/delivery";
 import { formatWeekOf } from "../../../../src/weekly-reports/status";
 import { Button, EmptyState, LoadingState, SectionLabel } from "../../../../src/components/ui";
@@ -265,12 +266,13 @@ export default function WeeklyReportDeliveryScreen() {
 
         {/* Shown BEFORE the button, not in the dialog alone. A PM who knows what the confirmation will say
             can decide whether to open it at all, and the sentence is the reason this screen refuses to
-            make Retry a one-tap action past the window. */}
+            make Retry a one-tap action past the window.
+
+            Which makes it the REAL decision point, so the words come from `weeklyReportRetryWarning` and
+            not from here: a generic warning at this spot defeats an outcome-aware dialog entirely, since
+            the PM who reads it and walks away never opens the dialog at all. */}
         {canRetry && weeklyReportRetryNeedsAcknowledgement(report) ? (
-          <Text style={styles.warning}>
-            This send is more than a day old, so a retry is a genuinely new email rather than a repeat the
-            mail provider will ignore. If the first one did go out, the client gets a second copy.
-          </Text>
+          <Text style={styles.warning}>{weeklyReportRetryWarning(report.sendError)}</Text>
         ) : null}
 
         {canRetry ? (

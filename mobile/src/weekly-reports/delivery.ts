@@ -243,6 +243,32 @@ export function weeklyReportRetryAcknowledgementPrompt(sendError?: string | null
   };
 }
 
+/**
+ * The sentence shown ON THE SCREEN, above the Retry button — not in the dialog.
+ *
+ * It exists because a PM who knows what the confirmation will say can decide whether to open it at all,
+ * which makes it the REAL decision point: the dialog only ever gets read by someone who has already
+ * chosen to tap. So a generic warning here defeats an outcome-aware dialog entirely — the PM sees "if the
+ * first one did go out, the client gets a second copy" on a send the provider demonstrably refused, and
+ * reaches for Send correction exactly as before.
+ *
+ * Same rule and the same evidence as `weeklyReportRetryAcknowledgementPrompt`, kept as a shorter
+ * paraphrase because this is body copy on a phone rather than an alert. The two must never disagree:
+ * being told one thing on the screen and another in the dialog is worse than either alone.
+ */
+export function weeklyReportRetryWarning(sendError?: string | null): string {
+  const closing =
+    "a retry is a genuinely new email rather than a repeat the mail provider will ignore";
+  if (!weeklyReportSendErrorIsProvableRejection(sendError)) {
+    return `This send is more than a day old, so ${closing}. If the first one did go out, the client gets a second copy.`;
+  }
+  return (
+    "A recorded attempt on this send was refused by the mail provider, so that attempt reached nobody — " +
+    `but no other attempt is accounted for. This send is more than a day old, so ${closing}, and if one ` +
+    "of those did go out the client gets a second copy."
+  );
+}
+
 export interface WeeklyReportRetryPort {
   /**
    * Ask the PM to confirm. Resolves TRUE only on an explicit yes.
