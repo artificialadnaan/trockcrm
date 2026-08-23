@@ -173,10 +173,12 @@ export function weeklyReportDeliveryDetail(
       // confirmed the message, so it may or may not have gone out". It also disagreed with the retry
       // warning three lines below it on the same screen.
       return weeklyReportSendErrorIsProvableRejection(facts.sendError)
-        ? `The mail provider refused this email after ${tries}. ${facts.sendError ?? ""}`.trim()
-        : `Delivery failed after ${tries}, and the provider never confirmed what became of it. ${
-            facts.sendError ?? ""
-          }`.trim();
+        ? `The mail provider refused this email after ${tries}. ${weeklyReportSendErrorDetail(
+            facts.sendError,
+          )}`.trim()
+        : `Delivery failed after ${tries}, and the provider never confirmed what became of it. ${weeklyReportSendErrorDetail(
+            facts.sendError,
+          )}`.trim();
     case "stuck":
       return attempts > 0
         ? `Sent, and delivery has been tried ${tries}, but the mail provider has never been recorded as accepting it and the last attempt reported no error.`
@@ -186,6 +188,32 @@ export function weeklyReportDeliveryDetail(
         ? `Still going out — ${tries} so far. Give it a few minutes before retrying.`
         : "Still going out. Give it a few minutes before retrying.";
   }
+}
+
+/**
+ * The part of `send_error` worth showing a PM, once the sentence around it already states the outcome.
+ *
+ * The stored value is `${outcome}: ${summary} — ${detail}`. `outcome` is a machine token and `summary` is
+ * the same fact the surrounding copy now states in human words, so printing the whole string says it
+ * twice and leaks "rejected:" into prose:
+ *
+ *   The mail provider refused this email after 3 attempts. rejected: the email provider refused the
+ *   message and sent nothing — validation_error (422): Invalid `to` field
+ *
+ * Only `detail` carries anything new — the provider's own words, which are the actionable half and the
+ * reason this column stopped being a single constant.
+ *
+ * A value with no recognised prefix is a LEGACY row and is shown whole: it is the only diagnostic there
+ * is, and dropping it would leave a PM with a failure and no reason for it.
+ */
+export function weeklyReportSendErrorDetail(sendError: string | null | undefined): string {
+  if (typeof sendError !== "string") return "";
+  const trimmed = sendError.trim();
+  const lower = trimmed.toLowerCase();
+  const prefixed = lower.startsWith("rejected:") || lower.startsWith("unknown:");
+  if (!prefixed) return trimmed;
+  const split = trimmed.indexOf(" — ");
+  return split === -1 ? "" : trimmed.slice(split + 3).trim();
 }
 
 /**

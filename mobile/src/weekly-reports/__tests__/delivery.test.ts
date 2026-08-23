@@ -167,6 +167,30 @@ describe("the words on the chip", () => {
     expect(detail).toContain("2 attempts");
   });
 
+  it("does not print the outcome token, or say the same thing twice", () => {
+    // `send_error` is `${outcome}: ${summary} — ${detail}`. The sentence around it now states the outcome
+    // in human words, so printing the whole value repeats it and leaks "rejected:" into prose. Only the
+    // provider's own detail carries anything new.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: REJECTED_ERROR, sendAttempts: 2 },
+      "failed",
+    );
+    expect(detail).not.toMatch(/rejected:/i);
+    expect(detail).toContain("Invalid `to` field");
+    // "refused" once, from the sentence — not twice, from the appended summary as well.
+    expect(detail.toLowerCase().split("refused").length - 1).toBe(1);
+  });
+
+  it("shows a LEGACY error whole, since it is the only diagnostic there is", () => {
+    // No recognised prefix means nothing can be stripped safely. Dropping it would leave a PM looking at
+    // a failure with no reason for it.
+    const detail = weeklyReportDeliveryDetail(
+      { ...UNDELIVERED, sendError: "Resend timed out", sendAttempts: 1 },
+      "failed",
+    );
+    expect(detail).toContain("Resend timed out");
+  });
+
   it("says REFUSED only when the provider actually refused it", () => {
     // `failed` is reached on ANY recorded error, so this sentence used to assert a refusal for an
     // `unknown:` outcome too — and `send_error` is appended verbatim, so the paragraph contradicted
