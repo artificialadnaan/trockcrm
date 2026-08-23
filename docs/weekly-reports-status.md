@@ -2,7 +2,7 @@
 
 Living document. Update it when something lands; do not date-stamp it.
 
-Verified against GitHub and the working tree on **2026-08-20**.
+Verified against GitHub and the working tree on **2026-08-23**.
 
 **No commit SHAs for live PR state below, on purpose.** An earlier version of this file pinned #1089 to a
 tip and a check count, and both were wrong within the hour — every push during a review loop invalidates
@@ -10,10 +10,12 @@ them, including the push that updates this file. For anything that moves, the co
 Run them; do not trust a remembered number.
 
 ```
-gh pr view 1089 --json state,headRefOid,mergeStateStatus
-gh pr checks 1089
-gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){pullRequest(number:1089){
-  reviewThreads(last:40){nodes{isResolved path comments(first:1){nodes{author{login}body}}}}}}}' \
+# Substitute the PR you actually care about — the open set is listed below.
+PR=1099
+gh pr view $PR --json state,headRefOid,mergeStateStatus
+gh pr checks $PR
+gh api graphql -f query="{repository(owner:\"artificialadnaan\",name:\"trockcrm\"){pullRequest(number:$PR){
+  reviewThreads(last:40){nodes{isResolved path comments(first:1){nodes{author{login}body}}}}}}}" \
   --jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)]'
 ```
 
@@ -23,61 +25,40 @@ gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){p
 
 | | Where it is |
 |---|---|
-| `origin/main` | `20ab7cb5b` — the merge of **#1088**. Everything through the 19 Aug batch is on main. *(A merged SHA is safe to name; it does not move.)* |
-| **PR #1089** `feat/weekly-report-setup-roster` | **OPEN**, and the whole of this batch sits behind it. Check its tip, checks and threads with the commands above. |
-| **PR #1090** | MERGED — but into **#1089's branch**, not main. It ships when #1089 does. |
-| `feat/weekly-report-open-tracking` | 3 commits, **never pushed**, no upstream, based on `8fb22cfb5` (pre-#1090-merge). |
-| Migrations on main | `0222`–`0227`. |
-| Migrations NOT on main | `0228`, `0229`, `0230` (in #1089) · `0231` (unpushed branch). |
-
-**Nothing in #1089 or #1090 is in production.** Two full batches of work are sitting behind one PR.
+| `origin/main` | **#1089 through #1095 are all merged and deployed.** The batch this file was written to track is done. |
+| Migrations on main | `0222`–`0231`. `0228`–`0230` are per-office (applied in `dallas`, `atlanta`, `pwauditoffice`); **`0231` is `public.weekly_report_views` and is verified in `public`** — it is deliberately not an office table, because a share link is opened by a route holding only a token, before any tenant is known. Do not go looking for a per-office 0231. |
+| `feat/weekly-report-open-tracking` | Shipped as **#1092**. The branch is pushed and merged; it is no longer a loose local branch. |
+| Still open | **#1096** dialog widths · **#1097** this correction · **#1100** sort-header target size. |
+| Merged today | **#1094**, **#1095**, **#1098** (icon-button accessible names, `1a0226a`), **#1099** (the delivery-route regression from #1094, `fa14f59`). |
 
 ---
 
 ## Open work
 
-### Blocking the merge
+- [x] **The 24-month retention purge — SHIPPED with #1092.** `worker/src/jobs/weekly-report-view-purge.ts`
+  holds the batched purge and `worker/src/index.ts` schedules it daily. This was listed as open work in an
+  earlier revision of this file, which would have sent somebody to reimplement it.
 
-- [ ] **1. The review loop must land clean on the CURRENT tip.**
-  Three rounds of findings have been fixed (see *Recently completed*), and every one of the last three
-  tips produced a real defect — so "the last round was clean" is not evidence about this round.
-  The bar: `gh pr checks 1089` all green with **`build-gate` SUCCESS, not CANCELLED**, and zero
-  unresolved threads, both **on the tip that will actually be merged**.
+- [ ] **1. Playwright E2E against the deployed app.** #1091/#1092/#1093 have been verified live; the rest of
+  the batch has not been walked end to end.
 
-### Then, in order
-
-- [ ] **2. Merge #1089 → deploy → verify.** **Adnaan merges this one** — the merge authorisation given this
-  session was for #1090 specifically.
-  **Merge before 11:00 CT.** The reminder cron runs 07:00 with catch-up at 09:00 and 11:00; a later deploy
-  costs that day's t−2/t−1 nudges and the digest.
-  Deploy order does not matter — the worker probes for every column it needs and skips offices cleanly
-  until the API migrates.
-  After deploy, verify against production rather than assuming:
-  - `0228`/`0229`/`0230` applied in **all three** office schemas (`dallas`, `atlanta`, `pwauditoffice`)
-  - the PM picker offers all **15** roster people (it offered 6 before this work)
-  - worker logs show the **17:00 CT** escalation cron registered
-  - **be present for that cron's first firing.** It is new and it emails a sales rep.
-
-- [ ] **3. Ship open-tracking.** Branch is built and tested but **not pushed** and its base predates the
-  #1090 merge — **rebase onto main after #1089 lands**, do not merge the old base forward.
-  Built: migration `0231` (`public.weekly_report_views`), the classifier in `shared/lib/weeklyReportViews`,
-  logging on all three public routes, the audit-dialog panel.
-  Decisions already taken, **do not relitigate**: log raw and classify at read time · full IP + user agent ·
-  24-month retention · **no client-facing disclosure** (Adnaan decided this explicitly).
-
-- [ ] **4. The 24-month retention purge.** The one piece of open-tracking that is not built. Worker job,
-  beside the dead-letter sweep, with the same table-exists probe the other jobs use.
-
-- [ ] **5. Playwright E2E against the deployed app.** Cannot start until #1089 deploys.
-
-- [ ] **6. Clean up the merged weekly-report worktrees and stale branches.** ~18 branches, most merged.
+- [ ] **2. Clean up the merged weekly-report worktrees and stale branches.** ~18 branches, most merged.
   Judge by PR state; never remove a dirty tree.
 
-### Older follow-ups, still open
+### Landed since this file was last accurate
 
-- [ ] **7.** The duplicate-risk warning gates on **age alone**; it should gate on **outcome**.
-- [ ] **8.** Decide whether the dictation endpoint needs **rate limiting**.
-- [ ] **9.** A field PM **cannot re-mint a share link** they just sent.
+- **#7 → #1093.** The duplicate-risk warning. **The follow-up's premise was wrong** — a send's outcome is
+  not recoverable from `send_delivered_at` / `send_error` / `send_attempts`, so the gate stayed on age and
+  the WORDING was corrected instead. See `docs/superpowers/specs/2026-08-20-weekly-reports-remaining-work.md`,
+  which is superseded for status but is the record of why.
+- **#8 → #1095.** Dictation rate limiting: burst plus a daily cap, keyed per USER, because a crew shares a
+  jobsite NAT. Note that not every call is a paid one — blank transcripts, over-length transcripts, and
+  deploys without `ANTHROPIC_API_KEY` are formatted locally. "Over-length" means over the **private
+  4,000-character `MAX_MODEL_TRANSCRIPT_CHARS`** — the exported `MAX_DICTATION_TRANSCRIPT_CHARS` is 20,000
+  and REJECTS with a 400 rather than falling back.
+- **#9 → #1094**, and its follow-up **#1099**. The re-mint capability landed, but its entry point was placed
+  inside the card's `done` branch, so the route closed itself as soon as the cadence rolled over — which is
+  before anyone needs it. Fixed in #1099.
 
 ---
 
@@ -130,7 +111,10 @@ gh api graphql -f query='{repository(owner:"artificialadnaan",name:"trockcrm"){p
 | **#1087** | Delivery made a **real fact**, not "the provider accepted the call" |
 | **#1088** | The PM has somewhere to go when their send fails |
 
-### Built and reviewed, sitting in #1089 — **not on main**
+### Shipped with #1089 — **on main since 2026-08-20**
+
+*Kept as the record of what this batch contained. The heading below used to read "sitting in #1089 — not
+on main"; that was true when it was written and is not now.*
 
 **#1090 — week-to-week continuity, escalation, duration, photo speed**
 
@@ -168,12 +152,19 @@ Two structural changes came out of it, and they matter more than the bugs: `outs
 on the server** so the count, chip and border cannot disagree again, and **two guards that could not fail**
 were found by mutation testing and given cases that reach them.
 
-### Built, tested, **unpushed** — `feat/weekly-report-open-tracking`
+### Shipped as #1092 — `feat/weekly-report-open-tracking` (merged 2026-08-21)
+
+*Merged and deployed, including the 24-month retention purge — `worker/src/jobs/weekly-report-view-purge.ts`,
+scheduled daily from `worker/src/index.ts`. This section used to read "Built, tested, unpushed", and an
+intermediate revision of this file still called the purge outstanding after correcting it elsewhere. Nothing
+in this section is outstanding.*
 
 - Migration `0231` — `public.weekly_report_views`
 - Open logging on the page, PDF and photo routes
-- The scanner-vs-person classifier: groups on IP **and** user agent within 30 min; engagement
-  (PDF download, photo loads) outranks the agent string
+- Session grouping on IP **and** user agent within 30 min. The scanner-vs-person LABELS that originally
+  went with it — "A person", "Email scanner" — were **removed before ship**: `summariseWeeklyReportViews`
+  groups fetches without judging them, and the audit dialog says so in place of a verdict it could not
+  stand behind. An earlier revision of this file still described the classifier as shipped.
 - The opens panel in the audit dialog
 
 ---

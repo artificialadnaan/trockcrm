@@ -3,8 +3,18 @@ import { describe, expect, it, vi } from "vitest";
 
 // THE ONE AUTHENTICATED ROUTE IN THIS APP THAT SPENDS MONEY PER CALL.
 //
-// `/api/field/weekly-reports/dictation` reaches Anthropic with `claude-opus-5` on every request, and every
-// field account in the company can authenticate against the surface it is mounted on. The per-call cost was
+// `/api/field/weekly-reports/dictation` reaches Anthropic on an eligible request — `claude-opus-5` by
+// default, overridable per deploy via `WEEKLY_REPORT_DICTATION_MODEL` — and every field account in the
+// company can authenticate against the surface it is mounted on.
+//
+// NOT every request is a paid one, and the first version of this comment said it was.
+// `formatWeeklyReportDictation` returns a locally formatted result for a blank transcript, for one over the
+// private 4,000-character `MAX_MODEL_TRANSCRIPT_CHARS`, and on any deploy without `ANTHROPIC_API_KEY`.
+// NOT the exported `MAX_DICTATION_TRANSCRIPT_CHARS` — that one is 20,000 and REJECTS with a 400 rather than
+// falling back, so naming it here would describe an explicitly refused input as quietly succeeding. None of that weakens the
+// case for a limit — a runaway loop sends eligible requests, which is exactly the traffic that spends — but
+// a guard justified by an overstatement invites someone to check it, find the fallbacks, and discount the
+// whole rationale. The per-call cost was
 // already bounded — 4k-char transcript in, section ceiling out — but nothing bounded calls per ACTOR, so a
 // stuck retry loop in the app or one stolen field token could spend without limit, and the first sign of it
 // would have been an invoice.
