@@ -36,7 +36,7 @@ import {
   type WeeklyReportActor,
   type WeeklyReportDetail,
 } from "./reports-service.js";
-import { mintWeeklyReportToken } from "./tokens-service.js";
+import { isWeeklyReportShareableStatus, mintWeeklyReportToken } from "./tokens-service.js";
 
 // The send flow: compose the email SERVER-SIDE, commit the transition, mint the link, queue the delivery.
 //
@@ -507,6 +507,51 @@ async function enqueueWeeklyReportSendJob(
       input.office.tenantId,
     ],
   );
+}
+
+/**
+ * Mint a FRESH client link for a report that already has one.
+ *
+ * #17: a field PM sends from the phone, is shown the link once, leaves the screen, and cannot get it back.
+ * The raw token is returned exactly once and only its SHA-256 hash is stored, so nothing can hand the old
+ * value back — re-minting is the only route to a usable link. That route existed, on the CRM router behind
+ * its admin/director/rep gate, which a `construction` PM cannot reach. The result was a PM asking a
+ * director for a link to a report they wrote and sent themselves.
+ *
+ * THE GATE IS `canPublishWeeklyReport`, THE SAME ONE SENDING USES, and that is the point of putting this in
+ * the service rather than in each router. A share link is a durable, login-free credential to a client
+ * document for 180 days; whoever may mint one has to be whoever may publish one. Deriving it here means the
+ * phone and the CRM cannot drift into two different answers about who that is — the CRM route now calls
+ * this too, so the rule has one home.
+ *
+ * A NEW TOKEN, never the existing one. The rule `mintWeeklyReportToken` already documents: revoking the
+ * link you just emailed must not kill the one a client is already reading. Both stay valid, and the view
+ * log is keyed on `weekly_report_id` rather than on the token, so a second link does not fragment the
+ * audit that answers "did they open it".
+ */
+export async function remintWeeklyReportShareLink(
+  client: QueryExecutor,
+  reportId: string,
+  actor: WeeklyReportActor,
+  office: WeeklyReportSendOffice,
+  shareUrlFor: (rawToken: string) => string,
+): Promise<{ url: string; token: Record<string, unknown> }> {
+  const { reportRow, projectRow } = await loadSendTarget(client, reportId);
+  if (!canPublishWeeklyReport(projectRow, actor)) {
+    throw new AppError(403, "Only the assigned project manager can create a client link for this report");
+  }
+  // Re-checked here rather than trusted from the caller: `approved` is not terminal, so a report can be
+  // pulled back and rewritten between one mint and the next.
+  if (!isWeeklyReportShareableStatus(reportRow.status)) {
+    throw new AppError(409, "A client link can only be created once the PM has approved the report");
+  }
+  const { rawToken, token } = await mintWeeklyReportToken(client, {
+    weeklyReportId: reportId,
+    tenantId: office.tenantId,
+    officeSlug: office.slug,
+    createdByUserId: actor.id,
+  });
+  return { url: shareUrlFor(rawToken), token: token as unknown as Record<string, unknown> };
 }
 
 /**

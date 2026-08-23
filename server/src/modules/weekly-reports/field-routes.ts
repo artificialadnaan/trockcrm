@@ -32,6 +32,7 @@ import {
 import {
   buildWeeklyReportSendDraft,
   createWeeklyReportCorrection,
+  remintWeeklyReportShareLink,
   retryWeeklyReportSend,
   sendWeeklyReport,
 } from "./send-service.js";
@@ -446,6 +447,38 @@ router.post("/reports/:id/send", async (req, res, next) => {
     const photos = await withPhotoUrls(req.tenantClient!, report.photos);
     await req.commitTransaction!();
     res.status(202).json({ report: { ...report, photos }, shareUrl });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Mint a fresh client link for a report this PM already sent.
+ *
+ * #17. The send screen shows the link exactly once and says so; only a SHA-256 hash is stored, so nothing
+ * can hand the original back. Until now the only way to get another was `POST /reports/:id/share-link` on
+ * the CRM router, behind its admin/director/rep gate — which a `construction` PM cannot reach. A field PM
+ * who closed the screen had to ask a director for a link to a report they wrote and sent themselves.
+ *
+ * The gate is `canPublishWeeklyReport`, enforced in the service and shared with the CRM route, so the two
+ * surfaces cannot answer "who may mint a client credential" differently.
+ */
+router.post("/reports/:id/share-link", async (req, res, next) => {
+  try {
+    // Same reasoning as the field send: from a jobsite there is no way to notice that a link points at a
+    // host which does not serve /wr, and the PM is about to hand this to somebody.
+    assertClientLinksAreConfigured();
+    const office = officeContextFrom(req);
+    const { url, token } = await remintWeeklyReportShareLink(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      actorFrom(req),
+      { tenantId: office.tenantId, slug: office.slug },
+      (rawToken) => weeklyReportShareUrl(req, rawToken),
+    );
+    await req.commitTransaction!();
+    // 201 and the raw URL, returned EXACTLY ONCE, exactly as the CRM route does.
+    res.status(201).json({ url, token });
   } catch (error) {
     next(error);
   }

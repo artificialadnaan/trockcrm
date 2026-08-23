@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, ScrollView, Share, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQueryClient } from "@tanstack/react-query";
@@ -9,6 +9,7 @@ import { useAuth } from "../../../../src/auth/AuthContext";
 import {
   createWeeklyReportCorrection,
   getWeeklyReport,
+  remintWeeklyReportShareLink,
   retryWeeklyReportSend,
 } from "../../../../src/api/endpoints";
 import type { WeeklyReportDetailView } from "../../../../src/api/types";
@@ -40,12 +41,19 @@ import { ScreenHeader } from "../../../../src/components/ScreenHeader";
  * CI beyond a typecheck and the app has no OTA, so a rule that exists only inside a React component ships
  * to phones with nothing having executed it. What stays here is layout, the two dialogs, and the fetch.
  *
- * IT HOLDS NO CLIENT LINK, and must not start to. The share URL is returned exactly once, by the send
- * itself; the retry response carries the report and no URL, and the correction answers with a fresh unsent
- * version that has no link yet. This file imports no storage module and makes no console call, which
- * src/weekly-reports/__tests__/send.test.ts asserts structurally rather than leaving to review — the same
- * guard the send screen carries, extended here because the correction path hands the PM straight to that
- * screen and a leak anywhere along it is the same leak.
+ * IT HOLDS A CLIENT LINK ONLY IN STATE, AND ONLY AFTER A DELIBERATE TAP. That changed with #17: the
+ * re-mint button exists because the send screen shows the link once and only a SHA-256 hash is stored, so
+ * a PM who left that screen previously had to ask a director for a link to their own report.
+ *
+ * The rule the screen kept is the one that matters, and it is about PERSISTENCE rather than possession:
+ * the minted URL lives in component state that dies with the screen, this file imports no storage module
+ * and makes no console call, and src/weekly-reports/__tests__/send.test.ts asserts both structurally by
+ * parsing the AST rather than leaving them to review. `mobile/` is not in CI and the app has no OTA, so a
+ * link written to the keychain or a crash breadcrumb would ship to phones and live there for days with
+ * nothing able to revoke it.
+ *
+ * The retry response still carries the report and no URL, and a correction answers with a fresh unsent
+ * version that has no link yet — the ONE way a link reaches this screen is the re-mint call.
  */
 export default function WeeklyReportDeliveryScreen() {
   const router = useRouter();
@@ -62,7 +70,10 @@ export default function WeeklyReportDeliveryScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [noticeTone, setNoticeTone] = useState<"error" | "success">("error");
-  const [busy, setBusy] = useState<null | "retry" | "correction">(null);
+  const [busy, setBusy] = useState<null | "retry" | "correction" | "remint">(null);
+  // Held in state, never persisted and never logged: this is a live, login-free client credential.
+  // Lost on navigation exactly as the send screen's is, which the copy beside it says plainly.
+  const [mintedUrl, setMintedUrl] = useState<string | null>(null);
 
   // `busy` drives the spinners; this ref is what actually bars a second POST. React state does not update
   // before a second tap in the SAME native event batch re-reads it, and here the second tap is not a
@@ -165,6 +176,34 @@ export default function WeeklyReportDeliveryScreen() {
     } finally {
       actionInFlight.current = false;
       setBusy(null);
+    }
+  }
+
+  async function onRemint() {
+    if (!report || actionInFlight.current) return;
+    actionInFlight.current = true;
+    setBusy("remint");
+    setNotice(null);
+    try {
+      const { url } = await remintWeeklyReportShareLink(fetcher, reportId);
+      setMintedUrl(url);
+      setNoticeTone("success");
+      setNotice("New link created. It is shown once — copy it before leaving this screen.");
+    } catch (error) {
+      setNoticeTone("error");
+      setNotice(weeklyReportDeliveryErrorMessage(error));
+    } finally {
+      actionInFlight.current = false;
+      setBusy(null);
+    }
+  }
+
+  async function shareMinted() {
+    if (!mintedUrl) return;
+    try {
+      await Share.share({ message: mintedUrl, url: mintedUrl });
+    } catch {
+      // The sheet failed to present. The URL is on screen and selectable, which is the fallback.
     }
   }
 
@@ -309,6 +348,40 @@ export default function WeeklyReportDeliveryScreen() {
           </>
         ) : null}
 
+        {/* #17. The send screen shows the client link ONCE and says so; only a SHA-256 hash is stored, so
+            nothing can hand the original back. Before this, a PM who left that screen had to ask a
+            director for a link to a report they wrote and sent themselves — the one re-mint route lived
+            on the CRM router, which a `construction` account cannot reach.
+
+            Offered on any shareable version, not only an undelivered one: "the client says they lost the
+            email" has nothing to do with whether delivery succeeded. */}
+        <SectionLabel>The client needs the link again</SectionLabel>
+        <Text style={styles.hint}>
+          Creates a NEW link to this report. The one already emailed keeps working — a fresh link is not a
+          replacement, so nothing the client already has stops opening.
+        </Text>
+        <Button
+          title="Create a new link"
+          variant="ghost"
+          onPress={() => void onRemint()}
+          loading={busy === "remint"}
+          disabled={busy !== null}
+          accessibilityLabel="Create a new client link for this report"
+        />
+        {mintedUrl ? (
+          <>
+            {/* SHOWN ONCE HERE TOO, and the copy says so, because leaving this screen loses it exactly as
+                it does on the send screen. */}
+            <Text style={styles.warning}>
+              This is the only time this link is shown. It opens the report without a login for 180 days.
+            </Text>
+            <Text selectable style={styles.url}>
+              {mintedUrl}
+            </Text>
+            <Button title="Share link" variant="ghost" onPress={() => void shareMinted()} />
+          </>
+        ) : null}
+
         {!canRetry && !canCorrect ? (
           // Reachable when a newer version has already been sent: this row is superseded, so neither
           // action belongs on it. Says where the work went rather than showing two disabled buttons.
@@ -336,5 +409,14 @@ const styles = StyleSheet.create({
   stateTitle: { fontFamily: theme.font.semibold, fontSize: 18 },
   paragraph: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textPrimary },
   hint: { fontFamily: theme.font.body, fontSize: 12.5, color: theme.color.textMuted },
+  // Mirrors the send screen's, so a client link looks the same wherever it is shown once.
+  url: {
+    fontFamily: theme.font.body,
+    fontSize: 13,
+    color: theme.color.textPrimary,
+    backgroundColor: theme.color.surfaceMuted,
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+  },
   warning: { fontFamily: theme.font.medium, fontSize: 13, color: theme.color.warning },
 });

@@ -37,6 +37,7 @@ import {
   WEEKLY_REPORT_SEND_JOB,
   buildWeeklyReportSendDraft,
   createWeeklyReportCorrection,
+  remintWeeklyReportShareLink,
   retryWeeklyReportSend,
   sendWeeklyReport,
 } from "../../../src/modules/weekly-reports/send-service.js";
@@ -1281,6 +1282,53 @@ describe("retrying a failed send", () => {
     await ageSend(reportId, PROVIDER_WINDOW_OPEN_MINUTES);
     await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
     expect(await sendJobs()).toHaveLength(1);
+  });
+
+  it("re-mints a client link for the ASSIGNED PM, which is what a field send needs", async () => {
+    // #17. A field PM sends from the phone, is shown the link once, walks away from the screen, and can
+    // never get it back: the raw token is returned exactly once and only its SHA-256 hash is stored. The
+    // one re-mint route lived on the CRM router behind its admin/director/rep gate, so a `construction`
+    // PM could not reach it — they had to ask a director for a link to their own report.
+    const reportId = await failedSend();
+
+    const { url } = await remintWeeklyReportShareLink(db, reportId, SENDER, OFFICE_CONTEXT, (raw) =>
+      `https://example.test/wr/${raw}`,
+    );
+
+    expect(url).toMatch(/^https:\/\/example\.test\/wr\/.+/);
+  });
+
+  it("mints a NEW link rather than handing back the old one", async () => {
+    // The established rule for this token, and it is about revocation: revoking the link just emailed must
+    // not kill the one a client is already reading. Both remain valid, and the view log is keyed on
+    // `weekly_report_id`, so a second link does not fragment the audit either.
+    const reportId = await failedSend();
+    const first = await remintWeeklyReportShareLink(db, reportId, SENDER, OFFICE_CONTEXT, (raw) => raw);
+    const second = await remintWeeklyReportShareLink(db, reportId, SENDER, OFFICE_CONTEXT, (raw) => raw);
+    expect(first.url).not.toBe(second.url);
+  });
+
+  it("is refused to the superintendent, who cannot publish to a client", async () => {
+    // Same gate as sending. A link is a durable, login-free client credential for 180 days, so whoever may
+    // mint one must be whoever may publish — not merely whoever may edit the report.
+    const reportId = await failedSend();
+    await expectAppError(
+      remintWeeklyReportShareLink(db, reportId, SUPER_ACTOR, OFFICE_CONTEXT, (raw) => raw),
+      403,
+    );
+  });
+
+  it("REFUSES to mint for a report the PM has not approved", async () => {
+    // A link to a draft is a link to content nobody reviewed, in front of the client — that defeats the
+    // approval gate rather than bending it.
+    const { reportId } = await seedApprovedReport({ weekOf: "2026-07-30" });
+    await pg.query(`UPDATE office_dallas.weekly_reports SET status = 'draft' WHERE id = $1::uuid`, [
+      reportId,
+    ]);
+    await expectAppError(
+      remintWeeklyReportShareLink(db, reportId, SENDER, OFFICE_CONTEXT, (raw) => raw),
+      409,
+    );
   });
 
   it("is refused to the superintendent", async () => {
