@@ -1178,8 +1178,11 @@ describe("retrying a failed send", () => {
    *
    * A swallowed fetch, a 5xx, a 408, or a 409 `concurrent_idempotent_requests`: the request reached
    * something that may well have enqueued the message. The row looks exactly like `failedSend` to the
-   * board — same "Send failed" chip — and is the opposite of it to the retry gate, which is the whole
-   * reason that gate reads the prefix rather than merely checking whether an error is present.
+   * board — same "Send failed" chip — and the RETRY GATE does not tell them apart either: it reads
+   * `sent_at` and nothing else. The prefix changes only what the confirmation SAYS.
+   *
+   * Both fixtures exist so the test below can assert that indifference across both outcomes, which is
+   * what would fail if the outcome-based bypass were ever restored.
    */
   async function ambiguousSend() {
     return sentWithError(
@@ -1331,16 +1334,16 @@ describe("retrying a failed send", () => {
     expect(await sendJobs()).toHaveLength(0);
   });
 
-  it("REFUSES unacknowledged EVEN on a provable rejection, which is a deliberate choice", async () => {
-    // An earlier revision let this through: a `rejected:` error means the provider refused the message, so
-    // that attempt created nothing to duplicate. Review found the reasoning does not survive contact with
-    // the column. `send_error` holds only the LATEST attempt and a retry clears it while keeping
-    // `send_attempts`, so an `unknown:` attempt that may have delivered can sit behind a later `rejected:`
-    // one — and the worst case, the provider accepting and the delivery-stamp write dying, records
-    // nothing at all.
+  it("REFUSES unacknowledged past the window on a provable rejection — a deliberate choice", async () => {
+    // THE REGRESSION GUARD for the bypass this branch tried and reverted. An earlier revision let a
+    // `rejected:` send through unacknowledged, on the reasoning that the provider refused it so there was
+    // nothing to duplicate. That does not survive contact with the column: `send_error` holds only the
+    // LATEST attempt, a retry clears it while keeping `send_attempts`, so an `unknown:` attempt that may
+    // have delivered can sit behind a later `rejected:` one — and the worst case, the provider accepting
+    // while the delivery-stamp write dies, records nothing at all.
     //
-    // So the gate is age alone and this test pins that. What changed instead is the SENTENCE: the prompt
-    // now tells the PM this attempt sent nothing, without claiming an earlier one did not.
+    // The gate is `sent_at` and nothing else. What the prefix changed instead is the SENTENCE: the prompt
+    // tells the PM this attempt sent nothing, without claiming an earlier one did not.
     const reportId = await failedSend();
     await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
 
@@ -1352,11 +1355,11 @@ describe("retrying a failed send", () => {
     expect(await sendJobs()).toHaveLength(0);
   });
 
-  it("REFUSES unacknowledged on an `unknown:` error, which settles nothing", async () => {
-    // The distinction that makes "was an error recorded" the wrong question. `unknown:` is written for a
-    // swallowed fetch, a 5xx, a 408 and an in-flight idempotency 409 — the request reached something that
-    // may have enqueued the message, so the client may already have this report. Identical to the test
-    // above on the board and in the column's presence; opposite here.
+  it("REFUSES unacknowledged past the window on an `unknown:` error too", async () => {
+    // The same verdict as the test above, and deliberately so — the gate does not tell these two apart.
+    // They are separate tests because the FIXTURES differ and only one is a regression guard: `unknown:`
+    // was always refused, `rejected:` is the one that briefly was not. Kept as two rather than a loop
+    // because `seedApprovedReport` allows one setup per project, so a single test cannot seed both.
     const reportId = await ambiguousSend();
     await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
 
