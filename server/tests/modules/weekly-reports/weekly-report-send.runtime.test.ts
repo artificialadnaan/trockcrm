@@ -1163,8 +1163,9 @@ describe("retrying a failed send", () => {
    *
    * The prefix is not decoration. `weeklyReportSendFailureMessage` leads every stored error with the
    * outcome `classifySendFailure` reached: `rejected:` means the request was refused before an email
-   * existed. The GATE does not read it — a rejection describes only the latest attempt — but the retry
-   * dialog does, to tell the PM that attempt sent nothing.
+   * existed. The GATE does not read it — a rejection describes only ONE attempt, and not necessarily the
+   * most recent, since the statement that clears `send_error` is the one that also stamps the delivery.
+   * The retry dialog does read it, to tell the PM that a recorded attempt sent nothing.
    */
   async function failedSend() {
     return sentWithError(
@@ -1214,15 +1215,16 @@ describe("retrying a failed send", () => {
   /**
    * Sent, and the record says NOTHING about what happened next — no delivery stamp, no error.
    *
-   * The state `failedSend` cannot represent, and the one the duplicate-risk gate actually exists for.
+   * The state `failedSend` cannot represent: the record says nothing either way.
    * Two different histories produce it and the columns cannot tell them apart: the job never ran, or the
    * provider ACCEPTED the message and the process died before `send_delivered_at` was stamped, which
    * weekly-report-send.ts calls an ordinary outcome and dashboard-service.ts calls "the reason the whole
    * idempotency-key design exists". The second history means the client already has the report, so past
    * the provider's window a replay is a real second copy.
    *
-   * Every test below that asserts the gate still refuses uses THIS, not `failedSend`. On a failed send
-   * the refusal is now wrong, so keeping those fixtures would have asserted the bug as correct.
+   * The gate refuses on BOTH fixtures — it reads `sent_at` alone — so this one is not about the gate
+   * telling them apart. It is here because the dialog can offer no reassurance on a silent record, and
+   * because it is the history that makes the whole confirmation necessary in the first place.
    */
   async function silentSend() {
     const { reportId } = await seedApprovedReport();
@@ -1320,9 +1322,10 @@ describe("retrying a failed send", () => {
     // lookback. A PM clicking Retry the following Monday is far outside the window, the key no longer
     // dedupes, and the "no-op" is a second copy of the report in a client's inbox.
     //
-    // `silentSend`, not `failedSend`: this is the case where the gate is still right. Nothing was
-    // recorded either way, so the provider may well have accepted the message and lost the stamp — and
-    // the client would then already have the report this retry is about to send them again.
+    // `silentSend` here because it is the history the confirmation exists for: nothing was recorded
+    // either way, so the provider may well have accepted the message and lost the stamp — and the client
+    // would then already have the report this retry is about to send them again. The gate would refuse a
+    // `rejected:` send just the same; that case is asserted separately.
     const reportId = await silentSend();
     await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
 

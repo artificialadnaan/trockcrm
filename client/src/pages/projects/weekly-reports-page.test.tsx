@@ -116,7 +116,7 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     sendRetryReportId: null,
     sendRetrySentAt: null,
     // THAT report's `send_error`, and not the same field as `sendError` above, which falls back to the
-    // live row's. It decides what the duplicate-risk dialog SAYS — whether it can tell the PM the last
+    // live row's. It decides what the duplicate-risk dialog SAYS — whether it can tell the PM a recorded
     // attempt sent nothing — not whether the dialog appears, which is age alone.
     sendRetrySendError: null,
     waitingOn: "Steve Sanchez",
@@ -395,8 +395,8 @@ describe("This Week board", () => {
     //
     // A STALLED send, not a failed one. Stalled is precisely the state where nothing was recorded either
     // way — the job may never have run, or the provider accepted the message and the process died before
-    // the delivery stamp — so a replay really can be a second copy. On a FAILED send the provider said
-    // why it refused, no first copy exists, and this dialog no longer appears at all.
+    // the delivery stamp — so the dialog can offer no reassurance at all. A FAILED send still reaches
+    // this dialog; what differs there is the wording, asserted separately below.
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     mocks.retryWeeklyReportSend.mockResolvedValue({});
     mockDashboard([
@@ -530,7 +530,8 @@ describe("This Week board", () => {
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
         sendRetrySentAt: "2026-08-01T10:00:00.000Z",
-        // Stalled, for the same reason as the test above: a failed send never reaches the dialog now.
+        // Stalled, for the same reason as the test above: the silent record is the case where the
+        // dialog has nothing reassuring it can honestly say.
         sendError: null,
         sendRetrySendError: null,
         sendStalled: true,
