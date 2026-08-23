@@ -1,4 +1,6 @@
-import { Outlet } from "react-router-dom";
+import { useEffect } from "react";
+import { Outlet, useLocation } from "react-router-dom";
+import { titleForPath } from "@/lib/document-title";
 import { usePlatformUsageTracker } from "@/hooks/use-platform-usage-tracker";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
@@ -6,6 +8,17 @@ import { MobileNav } from "./mobile-nav";
 
 export function AppShell() {
   usePlatformUsageTracker();
+  const { pathname } = useLocation();
+
+  // The tab, the history entry and the bookmark all read `document.title`, and nothing in this app ever
+  // wrote it — so all three said "T Rock CRM" on every route. Set here rather than per page: the shell is
+  // the one place that sees every navigation, and 30-odd pages each remembering to do it is 30 chances to
+  // forget. `document-title.test.ts` pins the map against the sidebar so a new nav item cannot ship
+  // untitled.
+  useEffect(() => {
+    document.title = titleForPath(pathname);
+  }, [pathname]);
+
   return (
     <div className="flex min-h-screen bg-slate-100">
       {/*

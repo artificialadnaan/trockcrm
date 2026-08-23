@@ -34,6 +34,7 @@ vi.mock("@/hooks/use-platform-usage-tracker", () => ({
 
 vi.mock("react-router-dom", () => ({
   Outlet: () => <div data-slot="outlet" />,
+  useLocation: () => ({ pathname: "/deals" }),
 }));
 
 vi.mock("./sidebar", () => ({
