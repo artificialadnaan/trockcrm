@@ -13,6 +13,7 @@ import {
   weeklyReportDeliveryLabel,
   weeklyReportDeliveryState,
   weeklyReportRetryIsProviderDeduped,
+  weeklyReportRetryAcknowledgementPrompt,
   weeklyReportRetryNeedsAcknowledgement,
   weeklyReportUndeliveredSummary,
   type WeeklyReportCorrectionPort,
@@ -224,15 +225,32 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     ).toBe(true);
   });
 
-  it("does NOT ask when the provider recorded why it refused, however old the send", () => {
-    // A recorded error is positive evidence of refusal, so there is no first copy to duplicate. The CRM
-    // and the server now both take this branch; the phone must not be the surface that still warns.
+  it("STILL asks on a provable rejection — the gate is age alone", () => {
+    // A `rejected:` error says THAT attempt created nothing. It says nothing about an earlier attempt,
+    // and `send_error` holds only the latest one, so it cannot carry the gate. What it changes is the
+    // WORDING (below), which is where the real complaint was.
     expect(
       weeklyReportRetryNeedsAcknowledgement(
         { sentAt: SENT_AT, sendError: REJECTED_ERROR },
         NOW_OUTSIDE_WINDOW,
       ),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("says the last attempt sent nothing when the provider provably refused it", () => {
+    const { message } = weeklyReportRetryAcknowledgementPrompt(REJECTED_ERROR);
+    expect(message).toMatch(/that attempt sent nothing/i);
+    expect(message).toMatch(/earlier attempt is not accounted for/i);
+    expect(message).toMatch(/second copy/i);
+  });
+
+  it("claims no such thing on an `unknown:` or legacy record", () => {
+    // The control. A prompt that mentioned the refusal unconditionally would pass the test above.
+    for (const sendError of [UNKNOWN_ERROR, "Resend timed out", null, undefined]) {
+      const { message } = weeklyReportRetryAcknowledgementPrompt(sendError);
+      expect(message).not.toMatch(/sent nothing/i);
+      expect(message).toMatch(/second copy/i);
+    }
   });
 
   it("treats a blank error as no evidence of refusal", () => {
@@ -348,10 +366,9 @@ describe("running the retry", () => {
     expect(retries).toEqual([true]);
   });
 
-  it("asks NOTHING outside the window when the provider recorded why it refused", async () => {
-    // The failed-send case, end to end through the port: no dialog, and — just as important — no
-    // acknowledgement posted. Sending `true` here would switch off a server gate that was never in the
-    // way, on a report where nothing was ever delivered to duplicate.
+  it("carries the refusal into the DIALOG, end to end, and still asks", async () => {
+    // The failed-send case through the port. The confirmation is still raised — the gate is age alone —
+    // but the sentence the PM reads now credits what the record actually shows.
     const { port, confirms, retries, retried } = retryPort();
 
     const outcome = await runWeeklyReportRetry(
@@ -360,8 +377,10 @@ describe("running the retry", () => {
     );
 
     expect(outcome).toBe("retried");
-    expect(confirms).toEqual([]);
-    expect(retries).toEqual([false]);
+    expect(confirms).toHaveLength(1);
+    expect(confirms[0]!.message).toMatch(/that attempt sent nothing/i);
+    expect(confirms[0]!.message).toMatch(/second copy/i);
+    expect(retries).toEqual([true]);
     expect(retried).toHaveLength(1);
   });
 

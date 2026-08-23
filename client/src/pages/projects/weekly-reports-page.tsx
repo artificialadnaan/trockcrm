@@ -10,8 +10,8 @@ import {
   type WeeklyReportWeekState,
 } from "@trock-crm/shared/types";
 import {
-  WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
-  weeklyReportRetryNeedsDuplicateRiskAck,
+  weeklyReportRetryDuplicateRiskPrompt,
+  weeklyReportRetryIsProviderDeduped,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
 import {
   dismissWeeklyReportWeek,
@@ -606,15 +606,8 @@ function RetryButton({
       size="sm"
       disabled={busy}
       onClick={async () => {
-        const needsAck = weeklyReportRetryNeedsDuplicateRiskAck({ sentAt, sendError });
-        if (
-          needsAck &&
-          !window.confirm(
-            `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the ` +
-              "mail provider will no longer treat a retry as a duplicate. If the first email did go out, " +
-              "the client will receive a second copy. Send it again?",
-          )
-        ) {
+        const needsAck = !weeklyReportRetryIsProviderDeduped(sentAt);
+        if (needsAck && !window.confirm(weeklyReportRetryDuplicateRiskPrompt(sendError))) {
           return;
         }
         setBusy(true);

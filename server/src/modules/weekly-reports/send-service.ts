@@ -9,7 +9,7 @@ import {
   weeklyReportEmailSubject,
   weeklyReportGreeting,
   weeklyReportGreetingNameFor,
-  weeklyReportRetryNeedsDuplicateRiskAck,
+  weeklyReportRetryIsProviderDeduped,
   type WeeklyReportRecipientOption,
   type WeeklyReportSenderContact,
   type WeeklyReportSendRequest,
@@ -601,19 +601,19 @@ export async function retryWeeklyReportSend(
       "This report's email was already accepted by the mail provider — issue a correction to send it again",
     );
   }
-  // AGE ALONE WAS THE WRONG QUESTION. A recorded `send_error` is positive evidence the provider REFUSED
-  // this message, so there is no first copy for a retry to duplicate and no risk to acknowledge — the gate
-  // was demanding a confirmation for an outcome that cannot happen, on precisely the retry a PM staring at
-  // a "Send failed" chip should make without hesitating.
+  // AGE ALONE, DELIBERATELY. An earlier revision made this outcome-aware — a `send_error` showing the
+  // provider had refused the message skipped the acknowledgement, since a refused send has no first copy
+  // to duplicate. Review produced three counterexamples of the same shape, ending in one no column can
+  // rule out: `send_error` records only the LATEST attempt, a retry clears it while keeping
+  // `send_attempts`, and the case that matters most — the provider accepts and the delivery-stamp write
+  // dies — writes nothing at all by construction.
   //
-  // It still refuses when the record is SILENT, which is the case it was really written for: no stamp and
-  // no error does not mean no email. See `weeklyReportRetryNeedsDuplicateRiskAck`.
+  // So this stopped trying to prove a negative the schema cannot support. What was actually wrong was the
+  // SENTENCE, and that moved to `weeklyReportRetryDuplicateRiskPrompt`, which tells a PM the last attempt
+  // sent nothing when that is known without claiming an earlier one did not.
   if (
     !options.acknowledgeDuplicateRisk &&
-    weeklyReportRetryNeedsDuplicateRiskAck(
-      { sentAt: reportRow.sent_at, sendError: text(reportRow.send_error) },
-      options.now,
-    )
+    !weeklyReportRetryIsProviderDeduped(reportRow.sent_at, options.now)
   ) {
     throw new AppError(
       409,

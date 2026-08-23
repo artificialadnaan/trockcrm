@@ -1330,20 +1330,25 @@ describe("retrying a failed send", () => {
     expect(await sendJobs()).toHaveLength(0);
   });
 
-  it("needs NO acknowledgement when the provider recorded why it refused, however old", async () => {
-    // A recorded `send_error` is positive evidence the message was REFUSED — the worker writes it on the
-    // path where the send itself failed, and only there. Nothing left, so nothing can arrive twice, and
-    // there is no duplicate to acknowledge however long the chip has sat on the board.
+  it("REFUSES unacknowledged EVEN on a provable rejection, which is a deliberate choice", async () => {
+    // An earlier revision let this through: a `rejected:` error means the provider refused the message, so
+    // that attempt created nothing to duplicate. Review found the reasoning does not survive contact with
+    // the column. `send_error` holds only the LATEST attempt and a retry clears it while keeping
+    // `send_attempts`, so an `unknown:` attempt that may have delivered can sit behind a later `rejected:`
+    // one — and the worst case, the provider accepting and the delivery-stamp write dying, records
+    // nothing at all.
     //
-    // The gate used to refuse this, which is worse than an unnecessary click: the PM in front of a "Send
-    // failed" chip was told that retrying might double-send, so they reached for Send correction
-    // instead — which mints a v2, takes the failure off the board, and leaves the client with nothing at
-    // all if they are pulled away before finishing it.
+    // So the gate is age alone and this test pins that. What changed instead is the SENTENCE: the prompt
+    // now tells the PM this attempt sent nothing, without claiming an earlier one did not.
     const reportId = await failedSend();
     await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
 
-    await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
-    expect(await sendJobs()).toHaveLength(1);
+    await expectAppError(
+      retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT),
+      409,
+      /second copy in the client's inbox/i,
+    );
+    expect(await sendJobs()).toHaveLength(0);
   });
 
   it("REFUSES unacknowledged on an `unknown:` error, which settles nothing", async () => {

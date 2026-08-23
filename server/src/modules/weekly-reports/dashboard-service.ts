@@ -151,9 +151,10 @@ export interface WeeklyReportDashboardRow {
    * Retry actually replays. A caller deciding whether that click is dangerous has to read the error of the
    * send being replayed, not of whatever is currently live.
    *
-   * A recorded error is positive evidence the provider REFUSED the message, so no first copy exists and
-   * there is no duplicate risk to acknowledge. NULL is not the opposite: the delivery stamp is written by a
-   * separate statement after the provider call returns, so a silent row may be one the client already has.
+   * Published for the WORDING of the retry confirmation rather than for the gate, which is age alone. A
+   * `rejected:` prefix means that attempt created nothing, which the dialog can say plainly. It is not
+   * evidence about earlier attempts: `send_error` holds only the latest, a retry clears it while keeping
+   * `send_attempts`, and an accepted send whose delivery stamp was lost records nothing at all.
    */
   sendRetrySendError: string | null;
   /** Who the week is waiting on, in plain words — the column a director actually reads. */

@@ -117,37 +117,40 @@ export function weeklyReportSendErrorIsProvableRejection(sendError: unknown): bo
 }
 
 /**
- * Must the PM be warned that retrying this send can put a SECOND copy in the client's inbox?
+ * What the PM is asked to agree to before a retry the provider will no longer dedupe.
  *
- * The question the retry gate actually has to answer, and it is not the same question as "is the key still
- * deduped". Two facts decide it, and every surface that offers Retry has to weigh both the same way — the
- * CRM's History panel, the phone's field route, and `retryWeeklyReportSend`, which is the one that refuses.
- * They were each gating on age alone, so all three warned about a duplicate that could not exist.
+ * WHEN it is asked is decided by AGE ALONE (`weeklyReportRetryIsProviderDeduped`). This function changes
+ * only what the dialog SAYS, and that division is the whole point.
  *
- * ONLY A `rejected:` ERROR BUYS THE PM OUT OF IT, not merely the presence of one. That distinction is the
- * whole of this predicate and it is not a refinement: `unknown:` covers a swallowed fetch, a 5xx, a 408 and
- * an in-flight idempotency 409, every one of which may have left the message enqueued. A row can carry a
- * long, specific, entirely genuine `send_error` and still be a report the client has. Reading "an error was
- * recorded" as "nothing was sent" is the same mistake as reading a missing delivery stamp that way, one
- * layer further in. `weekly-report-send.ts` says so where the prefix is written: "`rejected` means the
- * provider refused the request and created nothing ... `unknown` means we never learned, so a replay might."
+ * Three rounds of review went into trying to make the GATE outcome-aware — suppressing the confirmation on
+ * a send we could show had failed — and each round produced a new counterexample of the same shape:
+ * `send_delivered_at IS NULL` is not proof of non-delivery; a non-blank `send_error` is not proof of
+ * refusal; and a `rejected:` on the LATEST attempt is not proof that an EARLIER attempt did not deliver,
+ * because `send_error` is overwritten per attempt and a retry clears it while keeping `send_attempts`.
  *
- * WHAT THIS DELIBERATELY DOES NOT DO is read `send_delivered_at IS NULL` as "never sent". The stamp is
- * written by a SEPARATE statement after the provider call returns, so a process that dies in between
- * leaves a report the client HAS with no stamp and no error at all — "an ordinary outcome for this worker",
- * as dashboard-service.ts puts it, "the reason the whole idempotency-key design exists". A SILENT record is
- * not evidence of failure. When nothing was recorded either way this still asks, exactly as before.
+ * The question is underdetermined by the columns, and the case that matters most cannot be recorded at all:
+ * when the provider accepts and the delivery stamp write dies, nothing is written by construction. So the
+ * platform stopped trying to prove a negative it cannot prove, and the confirmation stayed.
  *
- * Blank counts as silent, and so does a legacy row written before the prefix existed. `send_error` is also
- * cleared to NULL on every retry, so "no error" is a state the column genuinely reaches on a report that
- * has already been through this path.
+ * WHAT WAS ACTUALLY WRONG was the sentence, not the gate. A PM in front of a "Send failed" chip was told
+ * flatly that the client might get a second copy, with nothing acknowledging that the attempt they are
+ * looking at demonstrably sent nothing — so the obvious read was "retrying is dangerous", and the button
+ * they reached for instead was Send correction, which mints a v2 and takes the failure off the board.
+ *
+ * So when the last attempt is a provable rejection this SAYS so, and is then careful about the rest: that
+ * attempt sent nothing, an earlier one is not accounted for, and past the window a replay is a new email.
+ * It states what is known and stops there.
  */
-export function weeklyReportRetryNeedsDuplicateRiskAck(
-  report: { sentAt: string | Date | null | undefined; sendError: string | null | undefined },
-  now: Date = new Date(),
-): boolean {
-  if (weeklyReportSendErrorIsProvableRejection(report.sendError)) return false;
-  return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);
+export function weeklyReportRetryDuplicateRiskPrompt(sendError?: string | null): string {
+  const closing =
+    `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
+    "provider will no longer treat a retry as a duplicate. If the first email did go out, the client will " +
+    "receive a second copy. Send it again?";
+  if (!weeklyReportSendErrorIsProvableRejection(sendError)) return closing;
+  return (
+    "The last attempt was refused by the mail provider, so that attempt sent nothing. Any earlier attempt " +
+    `is not accounted for. ${closing}`
+  );
 }
 
 /**

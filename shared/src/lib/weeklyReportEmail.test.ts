@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
   weeklyReportRetryIsProviderDeduped,
-  weeklyReportRetryNeedsDuplicateRiskAck,
+  weeklyReportRetryDuplicateRiskPrompt,
   weeklyReportSendErrorIsProvableRejection,
   WEEKLY_REPORT_SEND_OUTCOME_REJECTED,
   WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN,
@@ -88,111 +88,6 @@ describe("weeklyReportRetryIsProviderDeduped", () => {
   });
 });
 
-// The age of the send is only HALF the question, and on its own it asks the wrong PM to think twice.
-//
-// `weeklyReportRetryIsProviderDeduped` answers "would the provider still swallow a replay of this key".
-// What the retry gate actually needs to know is "can a replay put a second copy in the client's inbox",
-// and those come apart in the case a PM meets most often: the provider REFUSED the message and said why.
-// `send_error` is the record of that refusal, so nothing was delivered and there is nothing to duplicate —
-// yet the age gate warned anyway, which talks a PM out of the one retry that is unambiguously correct.
-//
-// The other direction is the trap, and it is why this predicate is not simply `send_delivered_at IS NULL`.
-// `send_delivered_at` is stamped by a SEPARATE statement after the provider call returns
-// (worker/src/jobs/weekly-report-send.ts), so a process that dies in between leaves a report the client
-// HAS with no stamp and no error — dashboard-service.ts calls that "an ordinary outcome for this worker
-// ... the reason the whole idempotency-key design exists". A silent record is therefore not evidence of
-// failure, and past the window such a retry sends a real second copy. Absence is not proof here either.
-describe("weeklyReportRetryNeedsDuplicateRiskAck", () => {
-  it("does not ask when the provider recorded why it refused, however old the send", () => {
-    // The whole point. An old send with a recorded error is the "Send failed" chip, and retrying it is
-    // exactly what the PM should do — being asked to confirm a duplicate that cannot exist is what made
-    // people reach for Send correction instead, which creates a v2 and takes the failure off the board.
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: REJECTED_ERROR }, OUTSIDE),
-    ).toBe(false);
-  });
-
-  it("STILL asks when the record is silent and the window has closed", () => {
-    // The case the old predicate got right and a `send_delivered_at IS NULL` rewrite would get wrong.
-    // No error recorded does not mean no email sent: the provider may have accepted it and the process
-    // died before the stamp. Past the window a replay is a genuine second email, so it stays a deliberate
-    // act. This is the guard that must not be relaxed.
-    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, OUTSIDE)).toBe(true);
-  });
-
-  it("does not ask inside the provider's window, error or not", () => {
-    // Inside the window the key still dedupes, so a replay is a no-op whatever the record says.
-    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, INSIDE)).toBe(false);
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: REJECTED_ERROR }, INSIDE),
-    ).toBe(false);
-  });
-
-  it("flips exactly at the boundary when the record is silent", () => {
-    // The same boundary the deduped predicate is pinned on, re-asserted THROUGH this function so a
-    // rewrite that stops consulting the window at all cannot stay green.
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, JUST_INSIDE),
-    ).toBe(false);
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, JUST_OUTSIDE),
-    ).toBe(true);
-  });
-
-  it("treats a blank error as no evidence of refusal", () => {
-    // Fail safe, and not hypothetical: `send_error` is cleared to NULL on every retry
-    // (send-service.ts), so "empty" is a state this column really reaches. An empty string says nothing
-    // about what the provider did, so it must not buy the PM out of the confirmation.
-    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "" }, OUTSIDE)).toBe(true);
-    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "   " }, OUTSIDE)).toBe(
-      true,
-    );
-  });
-
-  it("asks when the send has no usable stamp and nothing was recorded", () => {
-    // Unknown age, unknown outcome. The conservative answer is the confirmation.
-    expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: null }, OUTSIDE)).toBe(true);
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: "not a date", sendError: null }, OUTSIDE),
-    ).toBe(true);
-  });
-
-  it("does not ask when the send has no usable stamp but the provider recorded a refusal", () => {
-    // Evidence of refusal settles it without needing to know how old the send is.
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: REJECTED_ERROR }, OUTSIDE),
-    ).toBe(false);
-  });
-
-  it("STILL asks on an `unknown:` error, which is not evidence of anything", () => {
-    // THE CASE THAT MAKES "an error was recorded" THE WRONG QUESTION. `classifySendFailure` writes
-    // `unknown` for a swallowed fetch, a 5xx, a 408, and a 409 `concurrent_idempotent_requests` — every
-    // one of which is a request that may well have reached a server that enqueued it. The row has a
-    // non-blank `send_error` and the client may still have the report.
-    //
-    // Treating any non-blank error as a refusal is exactly the mistake this whole change exists to
-    // correct, made one layer further in.
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: UNKNOWN_ERROR }, OUTSIDE),
-    ).toBe(true);
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: UNKNOWN_ERROR }, OUTSIDE),
-    ).toBe(true);
-  });
-
-  it("STILL asks on a legacy error written before the outcome prefix existed", () => {
-    // Rows already in production carry the old single-constant text. They cannot be classified, so they
-    // are ambiguous, so they keep the confirmation — the direction that costs a click rather than a
-    // client's second copy.
-    expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "Resend timed out" }, OUTSIDE),
-    ).toBe(true);
-  });
-});
-
-// The prefix is a CONTRACT between the worker that writes `send_error` and everything that reads it, which
-// is why both halves of it are named here rather than spelled out at each end. `weeklyReportSendFailureMessage`
-// builds the string from these constants; this predicate takes it apart again.
 describe("weeklyReportSendErrorIsProvableRejection", () => {
   it("recognises the rejected prefix the worker writes", () => {
     expect(weeklyReportSendErrorIsProvableRejection(REJECTED_ERROR)).toBe(true);
@@ -221,5 +116,55 @@ describe("weeklyReportSendErrorIsProvableRejection", () => {
 
   it("requires the colon, so a longer word starting with the prefix is not a match", () => {
     expect(weeklyReportSendErrorIsProvableRejection("rejectedish: something else")).toBe(false);
+  });
+});
+
+// WHAT THE DIALOG SAYS — and, by its absence here, what it no longer decides.
+//
+// An earlier revision of this change made the GATE outcome-aware: a provable rejection skipped the
+// confirmation entirely. Three rounds of review produced three counterexamples of the same shape, ending
+// with one that no column can rule out — the provider accepts, the delivery-stamp write dies, and NOTHING
+// is recorded. `send_error` holds only the latest attempt and a retry clears it while keeping
+// `send_attempts`, so "this send definitely never reached anyone" is not a statement these columns can
+// support. The gate went back to age alone and the fix moved into the wording, which is where the actual
+// complaint was: a PM was told flatly that a retry might double-send, with nothing conceding that the
+// attempt in front of them demonstrably sent nothing.
+describe("weeklyReportRetryDuplicateRiskPrompt", () => {
+  it("says the last attempt sent nothing when the provider provably refused it", () => {
+    const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
+    expect(prompt).toMatch(/refused by the mail provider, so that attempt sent nothing/i);
+  });
+
+  it("does NOT claim the client received nothing — only that THAT attempt sent nothing", () => {
+    // The line between what is known and what is being guessed. An earlier attempt may have delivered,
+    // and this sentence is the one that stops the dialog overstating the evidence.
+    const prompt = weeklyReportRetryDuplicateRiskPrompt(REJECTED_ERROR);
+    expect(prompt).toMatch(/earlier attempt is not accounted for/i);
+    expect(prompt).toMatch(/second copy/i);
+  });
+
+  it("says nothing about a refusal on an `unknown:` error", () => {
+    // The control. A prompt that mentioned the refusal unconditionally would pass the first test above.
+    const prompt = weeklyReportRetryDuplicateRiskPrompt(UNKNOWN_ERROR);
+    expect(prompt).not.toMatch(/sent nothing/i);
+    expect(prompt).toMatch(/second copy/i);
+  });
+
+  it("says nothing about a refusal on a silent or legacy record", () => {
+    for (const sendError of [null, undefined, "", "   ", "Resend timed out"]) {
+      const prompt = weeklyReportRetryDuplicateRiskPrompt(sendError);
+      expect(prompt).not.toMatch(/sent nothing/i);
+      expect(prompt).toMatch(/second copy/i);
+    }
+  });
+
+  it("always carries the duplicate warning, whatever the outcome was", () => {
+    // The property that must hold across every branch: this dialog exists to warn, and no outcome
+    // removes the warning any more. If a future edit reintroduces a silent path, this fails.
+    for (const sendError of [REJECTED_ERROR, UNKNOWN_ERROR, null, "Resend timed out"]) {
+      expect(weeklyReportRetryDuplicateRiskPrompt(sendError)).toMatch(
+        new RegExp(`${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old`),
+      );
+    }
   });
 });

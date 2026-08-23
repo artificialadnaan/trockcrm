@@ -196,10 +196,9 @@ export function weeklyReportDeliveryDetail(
  * warns where the others do not is a PM told two different things about the same click.
  */
 export function weeklyReportRetryNeedsAcknowledgement(
-  report: { sentAt: string | null | undefined; sendError: string | null | undefined },
+  report: { sentAt: string | null | undefined; sendError?: string | null },
   now: Date = new Date(),
 ): boolean {
-  if (weeklyReportSendErrorIsProvableRejection(report.sendError)) return false;
   return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);
 }
 
@@ -226,13 +225,20 @@ function weeklyReportSendErrorIsProvableRejection(sendError: string | null | und
  * Mirrors the CRM dialog's substance (weekly-report-history-panel.tsx `RetryButton`) — the two surfaces
  * take the same action against the same service, so a PM must not be warned on one and not the other.
  */
-export function weeklyReportRetryAcknowledgementPrompt(): { title: string; message: string } {
+export function weeklyReportRetryAcknowledgementPrompt(sendError?: string | null): {
+  title: string;
+  message: string;
+} {
+  const closing =
+    `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
+    "provider will no longer treat a retry as a duplicate. If the first email did go out, the client " +
+    "will receive a second copy.";
   return {
     title: "Send this again?",
-    message:
-      `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
-      "provider will no longer treat a retry as a duplicate. If the first email did go out, the client " +
-      "will receive a second copy.",
+    message: weeklyReportSendErrorIsProvableRejection(sendError)
+      ? "The last attempt was refused by the mail provider, so that attempt sent nothing. Any earlier " +
+        `attempt is not accounted for. ${closing}`
+      : closing,
   };
 }
 
@@ -267,11 +273,11 @@ export async function runWeeklyReportRetry(
   port: WeeklyReportRetryPort,
 ): Promise<"retried" | "cancelled"> {
   const needsAcknowledgement = weeklyReportRetryNeedsAcknowledgement(
-    { sentAt: input.sentAt, sendError: input.sendError ?? null },
+    { sentAt: input.sentAt },
     input.now ?? new Date(),
   );
   if (needsAcknowledgement) {
-    const confirmed = await port.confirm(weeklyReportRetryAcknowledgementPrompt());
+    const confirmed = await port.confirm(weeklyReportRetryAcknowledgementPrompt(input.sendError));
     if (!confirmed) return "cancelled";
   }
   const report = await port.retry(needsAcknowledgement);

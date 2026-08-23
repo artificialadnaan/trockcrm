@@ -113,8 +113,8 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     sendRetryReportId: null,
     sendRetrySentAt: null,
     // THAT report's `send_error`, and not the same field as `sendError` above, which falls back to the
-    // live row's. It is what says whether a Retry can duplicate anything: an error means the provider
-    // refused the message, so there is no first copy.
+    // live row's. It decides what the duplicate-risk dialog SAYS — whether it can tell the PM the last
+    // attempt sent nothing — not whether the dialog appears, which is age alone.
     sendRetrySendError: null,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
@@ -420,7 +420,7 @@ describe("This Week board", () => {
     confirm.mockRestore();
   });
 
-  it("asks nothing when the provider recorded why it refused the send a Retry would replay", async () => {
+  it("STILL asks on a provable rejection, but SAYS that attempt sent nothing", async () => {
     // The board's half of the same rule the History tab and the server's 409 now follow. `sendFailed` is
     // the chip a PM is most likely to be looking at, and warning them about a duplicate that cannot
     // happen is what pushed people towards Send correction — which mints a v2 and clears the failure off
@@ -446,10 +446,10 @@ describe("This Week board", () => {
     await act(async () => {
       retry!.click();
     });
-    expect(confirm).not.toHaveBeenCalled();
-    // And no acknowledgement is claimed on the wire. Asserting `false` rather than only the absent
-    // dialog: sending `true` here would disable a server gate the CRM never needed to disable.
-    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("r1", false);
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/that attempt sent nothing/i));
+    // And the warning survives alongside it — the gate is age alone, so this retry is still deliberate.
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("r1", true);
     confirm.mockRestore();
   });
 
@@ -478,6 +478,9 @@ describe("This Week board", () => {
       retry!.click();
     });
     expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    // And it must NOT reassure — a prompt that claimed the refusal on every outcome would otherwise
+    // satisfy this test while telling the PM something the record does not support.
+    expect(confirm).not.toHaveBeenCalledWith(expect.stringMatching(/sent nothing/i));
     expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
     confirm.mockRestore();
   });
@@ -508,6 +511,9 @@ describe("This Week board", () => {
       retry!.click();
     });
     expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    // And it must NOT reassure — a prompt that claimed the refusal on every outcome would otherwise
+    // satisfy this test while telling the PM something the record does not support.
+    expect(confirm).not.toHaveBeenCalledWith(expect.stringMatching(/sent nothing/i));
     expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
     confirm.mockRestore();
   });

@@ -66,8 +66,9 @@ export interface WeeklyReportDashboardRow {
    * What the provider said about THAT send. `sendError` falls back to the live row's, which describes a
    * different report once a correction exists.
    *
-   * A recorded error means the message was refused, so a retry cannot duplicate anything. Null does not
-   * mean the opposite — an accepted send whose delivery stamp was lost looks exactly the same.
+   * Read for the WORDING of the duplicate-risk confirmation, not for whether it appears. A `rejected:`
+   * prefix means that attempt created nothing and the dialog says so; it is not evidence about any
+   * earlier attempt, so the confirmation is still asked for.
    */
   sendRetrySendError: string | null;
   waitingOn: string | null;

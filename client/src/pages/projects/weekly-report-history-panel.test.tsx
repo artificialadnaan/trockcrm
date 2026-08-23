@@ -167,15 +167,18 @@ describe("a sent report the client has not received", () => {
     try {
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
       mocks.retryWeeklyReportSend.mockResolvedValue({});
-      // `sendError: null` — the SILENT record, which is the only case the warning is still right for.
-      // With an error recorded this retry no longer warns at all (see the test below), so leaving the old
-      // fixture here would have asserted the removed behaviour as correct.
+      // `sendError: null` — the SILENT record: nothing was written either way, so the dialog can offer
+      // no reassurance at all. The prompt's rejected-attempt sentence is asserted separately below; this
+      // case must not acquire it.
       mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: null })];
       render();
       await act(async () => {
         button("Retry send")!.click();
       });
       expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      // And it must NOT reassure. Without this the prompt could claim "that attempt sent nothing" on
+      // every outcome and this test would still pass — the exact overstatement being removed here.
+      expect(confirm).not.toHaveBeenCalledWith(expect.stringMatching(/sent nothing/i));
       expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
       confirm.mockRestore();
     } finally {
@@ -228,11 +231,13 @@ describe("a sent report the client has not received", () => {
     }
   });
 
-  it("asks nothing when the provider recorded why it refused, however old the send", async () => {
-    // `send_error` is positive evidence the message was REFUSED, so there is no first copy to duplicate
-    // and nothing to acknowledge. History is exactly where a PM lands chasing a "Send failed" chip, and
-    // warning them here about a duplicate that cannot happen is what sent them to Send correction
-    // instead — which mints a v2 and takes the failure off the board.
+  it("STILL asks on a provable rejection, but SAYS that attempt sent nothing", async () => {
+    // History is where a PM lands chasing a "Send failed" chip, and the original complaint was that this
+    // dialog reads as "retrying is dangerous" — which sent them to Send correction instead, minting a v2
+    // and taking the failure off the board.
+    //
+    // The fix is the sentence, not the gate. It still asks, because a `rejected:` on the LATEST attempt
+    // does not prove an earlier attempt failed to reach anyone — but it now credits what is known.
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     try {
@@ -243,10 +248,11 @@ describe("a sent report the client has not received", () => {
       await act(async () => {
         button("Retry send")!.click();
       });
-      expect(confirm).not.toHaveBeenCalled();
-      // And it must not claim an acknowledgement nobody gave. `false` is also what keeps the server's
-      // own gate meaningful: the CRM asserting `true` here would disable a 409 it never needed.
-      expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/that attempt sent nothing/i));
+      // BOTH halves asserted. A prompt that only reassured would satisfy the line above and would be
+      // exactly the overstatement this round removed; the warning has to survive alongside it.
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", true);
       confirm.mockRestore();
     } finally {
       vi.useRealTimers();
@@ -269,6 +275,9 @@ describe("a sent report the client has not received", () => {
         button("Retry send")!.click();
       });
       expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      // And it must NOT reassure. Without this the prompt could claim "that attempt sent nothing" on
+      // every outcome and this test would still pass — the exact overstatement being removed here.
+      expect(confirm).not.toHaveBeenCalledWith(expect.stringMatching(/sent nothing/i));
       expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
       confirm.mockRestore();
     } finally {
