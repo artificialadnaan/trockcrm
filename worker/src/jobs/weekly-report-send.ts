@@ -12,6 +12,8 @@ import {
   weeklyReportEmailParagraphBlocks,
   weeklyReportEmailBodyText,
   weeklyReportSignatureLines,
+  WEEKLY_REPORT_SEND_OUTCOME_REJECTED,
+  WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN,
   type WeeklyReportEmailParts,
   type WeeklyReportSenderContact,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
@@ -363,10 +365,18 @@ function assertMayEmailRealClients(recipients: string[]): void {
 export function weeklyReportSendFailureMessage(result: SendSystemEmailResult): string {
   // Anything not positively `rejected` is treated as ambiguous — the same conservative default
   // classifySendFailure applies, and it also covers a stub or an older build that omits the field.
-  const outcome = result.outcome === "rejected" ? "rejected" : "unknown";
+  //
+  // The two words come from `shared` rather than being spelled here, because the retry gate now PARSES
+  // this prefix back out (`weeklyReportSendErrorIsProvableRejection`) to decide whether a replay can
+  // duplicate anything. Written as literals at both ends, renaming one would silently reclassify every
+  // provable rejection as ambiguous — which fails safe, and would therefore never be noticed.
+  const outcome =
+    result.outcome === WEEKLY_REPORT_SEND_OUTCOME_REJECTED
+      ? WEEKLY_REPORT_SEND_OUTCOME_REJECTED
+      : WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN;
   const detail = normalizeText(result.reason);
   const summary =
-    outcome === "rejected"
+    outcome === WEEKLY_REPORT_SEND_OUTCOME_REJECTED
       ? "the email provider refused the message and sent nothing"
       : "the email provider never confirmed the message, so it may or may not have gone out";
   return detail ? `${outcome}: ${summary} — ${detail}` : `${outcome}: ${summary}`;

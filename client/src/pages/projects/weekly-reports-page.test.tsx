@@ -64,6 +64,18 @@ import WeeklyReportsPage, { fmtWeek, latenessLabel } from "./weekly-reports-page
 let container: HTMLDivElement;
 let root: Root;
 
+/**
+ * The two shapes the worker persists into `send_error`. The prefix is what the retry gate reads —
+ * `rejected:` means the provider created nothing, `unknown:` means we never learned and the client may
+ * have the report — so a bare "SMTP timeout" fixture would exercise neither branch honestly.
+ */
+const REJECTED_ERROR =
+  "rejected: the email provider refused the message and sent nothing — " +
+  "validation_error (422): Invalid `to` field";
+const UNKNOWN_ERROR =
+  "unknown: the email provider never confirmed the message, so it may or may not have gone out — " +
+  "application_error: fetch failed";
+
 function dashboardRow(overrides: Record<string, unknown> = {}) {
   return {
     weeklyReportProjectId: "p1",
@@ -422,8 +434,8 @@ describe("This Week board", () => {
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
         sendRetrySentAt: "2026-08-01T10:00:00.000Z",
-        sendError: "SMTP timeout",
-        sendRetrySendError: "SMTP timeout",
+        sendError: REJECTED_ERROR,
+        sendRetrySendError: REJECTED_ERROR,
         sendFailed: true,
       }),
     ]);
@@ -441,6 +453,35 @@ describe("This Week board", () => {
     confirm.mockRestore();
   });
 
+  it("STILL asks on an `unknown:` error, where the provider never confirmed anything", async () => {
+    // `sendFailed` is true for both prefixes — the chip says "Send failed" either way — so the chip is
+    // not the thing to key on. Only `rejected:` proves nothing was created; `unknown:` covers a 5xx or a
+    // swallowed fetch that may have left the message enqueued.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
+        sendError: UNKNOWN_ERROR,
+        sendRetrySendError: UNKNOWN_ERROR,
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it("STILL asks when only the LIVE row carries an error and the replayed send is silent", async () => {
     // Why `sendRetrySendError` is a separate field rather than a reuse of `sendError`. Once a correction
     // is drafted over a failed send the two describe different reports: `sendError` falls back to the
@@ -454,7 +495,7 @@ describe("This Week board", () => {
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
         sendRetrySentAt: "2026-08-01T10:00:00.000Z",
-        sendError: "SMTP timeout",
+        sendError: REJECTED_ERROR,
         sendRetrySendError: null,
         sendStalled: true,
       }),

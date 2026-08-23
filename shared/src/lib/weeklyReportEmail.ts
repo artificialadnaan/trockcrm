@@ -85,6 +85,38 @@ export function weeklyReportRetryIsProviderDeduped(
 }
 
 /**
+ * The two outcomes a failed send is classified into, and the prefix `send_error` is written with.
+ *
+ * A CONTRACT between the worker that writes the column and everything that reads it, named here so the two
+ * ends cannot drift apart. `weeklyReportSendFailureMessage` builds the stored string from these;
+ * `weeklyReportSendErrorIsProvableRejection` takes it apart again.
+ *
+ * `rejected` — the provider refused the request and created nothing, so the report is PROVABLY undelivered.
+ * `unknown` — we never learned. A swallowed fetch, a 5xx, a 408, or a 409 `concurrent_idempotent_requests`
+ * all reached something that may have enqueued the message. See `classifySendFailure`, whose default is
+ * `unknown` for the same reason: over-reporting `unknown` costs a retry declined, over-reporting `rejected`
+ * costs a duplicate delivery.
+ */
+export const WEEKLY_REPORT_SEND_OUTCOME_REJECTED = "rejected";
+export const WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN = "unknown";
+
+/**
+ * Does this stored `send_error` PROVE the provider created nothing?
+ *
+ * Only the `rejected:` prefix does. Everything else — `unknown:`, a legacy row written before the prefix
+ * existed, a blank, an absent value — is ambiguous and must be treated as "the client may already have it".
+ *
+ * ANCHORED AT THE START AND REQUIRING THE COLON, not a substring search: `unknown: ... the address was
+ * rejected by the receiving server` contains the word and proves the opposite of what it would be read as.
+ * Whitespace and casing are tolerated because this parses a value out of a database column rather than a
+ * literal the caller just built.
+ */
+export function weeklyReportSendErrorIsProvableRejection(sendError: unknown): boolean {
+  if (typeof sendError !== "string") return false;
+  return sendError.trimStart().toLowerCase().startsWith(`${WEEKLY_REPORT_SEND_OUTCOME_REJECTED}:`);
+}
+
+/**
  * Must the PM be warned that retrying this send can put a SECOND copy in the client's inbox?
  *
  * The question the retry gate actually has to answer, and it is not the same question as "is the key still
@@ -92,11 +124,13 @@ export function weeklyReportRetryIsProviderDeduped(
  * CRM's History panel, the phone's field route, and `retryWeeklyReportSend`, which is the one that refuses.
  * They were each gating on age alone, so all three warned about a duplicate that could not exist.
  *
- * `sendError` is POSITIVE EVIDENCE THE PROVIDER REFUSED the message: the worker writes it, in the same
- * statement that records the attempt, only on the path where the send itself failed. Nothing left, so
- * nothing can arrive twice, and the confirmation is pure friction on the one retry that is unambiguously
- * correct — friction that pushed PMs towards Send correction, which makes a v2 and takes the failure off
- * the board.
+ * ONLY A `rejected:` ERROR BUYS THE PM OUT OF IT, not merely the presence of one. That distinction is the
+ * whole of this predicate and it is not a refinement: `unknown:` covers a swallowed fetch, a 5xx, a 408 and
+ * an in-flight idempotency 409, every one of which may have left the message enqueued. A row can carry a
+ * long, specific, entirely genuine `send_error` and still be a report the client has. Reading "an error was
+ * recorded" as "nothing was sent" is the same mistake as reading a missing delivery stamp that way, one
+ * layer further in. `weekly-report-send.ts` says so where the prefix is written: "`rejected` means the
+ * provider refused the request and created nothing ... `unknown` means we never learned, so a replay might."
  *
  * WHAT THIS DELIBERATELY DOES NOT DO is read `send_delivered_at IS NULL` as "never sent". The stamp is
  * written by a SEPARATE statement after the provider call returns, so a process that dies in between
@@ -104,14 +138,15 @@ export function weeklyReportRetryIsProviderDeduped(
  * as dashboard-service.ts puts it, "the reason the whole idempotency-key design exists". A SILENT record is
  * not evidence of failure. When nothing was recorded either way this still asks, exactly as before.
  *
- * Blank counts as silent. `send_error` is cleared to NULL on every retry, so "no error" is a state the
- * column genuinely reaches on a report that has already been through this path.
+ * Blank counts as silent, and so does a legacy row written before the prefix existed. `send_error` is also
+ * cleared to NULL on every retry, so "no error" is a state the column genuinely reaches on a report that
+ * has already been through this path.
  */
 export function weeklyReportRetryNeedsDuplicateRiskAck(
   report: { sentAt: string | Date | null | undefined; sendError: string | null | undefined },
   now: Date = new Date(),
 ): boolean {
-  if (typeof report.sendError === "string" && report.sendError.trim().length > 0) return false;
+  if (weeklyReportSendErrorIsProvableRejection(report.sendError)) return false;
   return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);
 }
 

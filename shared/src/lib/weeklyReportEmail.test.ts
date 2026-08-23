@@ -21,7 +21,18 @@ import {
   WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
   weeklyReportRetryIsProviderDeduped,
   weeklyReportRetryNeedsDuplicateRiskAck,
+  weeklyReportSendErrorIsProvableRejection,
+  WEEKLY_REPORT_SEND_OUTCOME_REJECTED,
+  WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN,
 } from "./weeklyReportEmail.js";
+
+/** The two shapes the worker actually persists, built the way `weeklyReportSendFailureMessage` builds them. */
+const REJECTED_ERROR =
+  `${WEEKLY_REPORT_SEND_OUTCOME_REJECTED}: the email provider refused the message and sent nothing — ` +
+  "validation_error (422): Invalid `to` field";
+const UNKNOWN_ERROR =
+  `${WEEKLY_REPORT_SEND_OUTCOME_UNKNOWN}: the email provider never confirmed the message, so it may or ` +
+  "may not have gone out — application_error: fetch failed";
 
 const SENT_AT = "2026-08-01T10:00:00.000Z";
 /** 23 h after SENT_AT — inside the window. */
@@ -97,7 +108,7 @@ describe("weeklyReportRetryNeedsDuplicateRiskAck", () => {
     // exactly what the PM should do — being asked to confirm a duplicate that cannot exist is what made
     // people reach for Send correction instead, which creates a v2 and takes the failure off the board.
     expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "Invalid `to` field" }, OUTSIDE),
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: REJECTED_ERROR }, OUTSIDE),
     ).toBe(false);
   });
 
@@ -113,7 +124,7 @@ describe("weeklyReportRetryNeedsDuplicateRiskAck", () => {
     // Inside the window the key still dedupes, so a replay is a no-op whatever the record says.
     expect(weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: null }, INSIDE)).toBe(false);
     expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "bounced" }, INSIDE),
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: REJECTED_ERROR }, INSIDE),
     ).toBe(false);
   });
 
@@ -149,7 +160,66 @@ describe("weeklyReportRetryNeedsDuplicateRiskAck", () => {
   it("does not ask when the send has no usable stamp but the provider recorded a refusal", () => {
     // Evidence of refusal settles it without needing to know how old the send is.
     expect(
-      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: "Invalid `to` field" }, OUTSIDE),
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: REJECTED_ERROR }, OUTSIDE),
     ).toBe(false);
+  });
+
+  it("STILL asks on an `unknown:` error, which is not evidence of anything", () => {
+    // THE CASE THAT MAKES "an error was recorded" THE WRONG QUESTION. `classifySendFailure` writes
+    // `unknown` for a swallowed fetch, a 5xx, a 408, and a 409 `concurrent_idempotent_requests` — every
+    // one of which is a request that may well have reached a server that enqueued it. The row has a
+    // non-blank `send_error` and the client may still have the report.
+    //
+    // Treating any non-blank error as a refusal is exactly the mistake this whole change exists to
+    // correct, made one layer further in.
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: UNKNOWN_ERROR }, OUTSIDE),
+    ).toBe(true);
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: null, sendError: UNKNOWN_ERROR }, OUTSIDE),
+    ).toBe(true);
+  });
+
+  it("STILL asks on a legacy error written before the outcome prefix existed", () => {
+    // Rows already in production carry the old single-constant text. They cannot be classified, so they
+    // are ambiguous, so they keep the confirmation — the direction that costs a click rather than a
+    // client's second copy.
+    expect(
+      weeklyReportRetryNeedsDuplicateRiskAck({ sentAt: SENT_AT, sendError: "Resend timed out" }, OUTSIDE),
+    ).toBe(true);
+  });
+});
+
+// The prefix is a CONTRACT between the worker that writes `send_error` and everything that reads it, which
+// is why both halves of it are named here rather than spelled out at each end. `weeklyReportSendFailureMessage`
+// builds the string from these constants; this predicate takes it apart again.
+describe("weeklyReportSendErrorIsProvableRejection", () => {
+  it("recognises the rejected prefix the worker writes", () => {
+    expect(weeklyReportSendErrorIsProvableRejection(REJECTED_ERROR)).toBe(true);
+  });
+
+  it("refuses the unknown prefix", () => {
+    expect(weeklyReportSendErrorIsProvableRejection(UNKNOWN_ERROR)).toBe(false);
+  });
+
+  it("refuses anything it cannot positively place", () => {
+    // Legacy text, blank, absent, and a string that merely CONTAINS the word somewhere — a substring
+    // match would call "unknown: ... the address was rejected by the server" a provable rejection.
+    expect(weeklyReportSendErrorIsProvableRejection("Resend timed out")).toBe(false);
+    expect(weeklyReportSendErrorIsProvableRejection("")).toBe(false);
+    expect(weeklyReportSendErrorIsProvableRejection(null)).toBe(false);
+    expect(weeklyReportSendErrorIsProvableRejection(undefined)).toBe(false);
+    expect(
+      weeklyReportSendErrorIsProvableRejection("unknown: the recipient rejected: it was refused"),
+    ).toBe(false);
+  });
+
+  it("tolerates leading whitespace and casing, since it parses a stored string", () => {
+    expect(weeklyReportSendErrorIsProvableRejection("  rejected: refused")).toBe(true);
+    expect(weeklyReportSendErrorIsProvableRejection("REJECTED: refused")).toBe(true);
+  });
+
+  it("requires the colon, so a longer word starting with the prefix is not a match", () => {
+    expect(weeklyReportSendErrorIsProvableRejection("rejectedish: something else")).toBe(false);
   });
 });

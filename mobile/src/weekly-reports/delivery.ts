@@ -199,8 +199,25 @@ export function weeklyReportRetryNeedsAcknowledgement(
   report: { sentAt: string | null | undefined; sendError: string | null | undefined },
   now: Date = new Date(),
 ): boolean {
-  if (typeof report.sendError === "string" && report.sendError.trim().length > 0) return false;
+  if (weeklyReportSendErrorIsProvableRejection(report.sendError)) return false;
   return !weeklyReportRetryIsProviderDeduped(report.sentAt, now);
+}
+
+/**
+ * Does this stored `send_error` PROVE the provider created nothing?
+ *
+ * Mirrors `weeklyReportSendErrorIsProvableRejection` in shared. The worker writes `send_error` with an
+ * outcome prefix — `rejected:` when the provider refused the request and created nothing, `unknown:` when
+ * we never learned. ONLY the first is evidence. `unknown:` covers a swallowed fetch, a 5xx, a 408 and an
+ * in-flight idempotency 409, all of which may have left the message enqueued, so a row can carry a real
+ * `send_error` and still be a report the client has.
+ *
+ * Anchored at the start and requiring the colon: `unknown: ... the address was rejected by the receiving
+ * server` contains the word and means the opposite.
+ */
+function weeklyReportSendErrorIsProvableRejection(sendError: string | null | undefined): boolean {
+  if (typeof sendError !== "string") return false;
+  return sendError.trimStart().toLowerCase().startsWith("rejected:");
 }
 
 /**

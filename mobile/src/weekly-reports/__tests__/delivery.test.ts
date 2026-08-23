@@ -33,6 +33,21 @@ import type { WeeklyReportDetailView } from "../../api/types";
  */
 const SENT_AT = "2026-08-13T20:00:00.000Z";
 
+/**
+ * The two shapes the worker actually persists into `send_error`, prefix and all.
+ *
+ * Written out rather than reduced to "an error string", because the prefix is the whole distinction the
+ * retry gate turns on: `rejected:` is the provider refusing before an email existed, `unknown:` is a
+ * swallowed fetch or a 5xx that may have left the message enqueued. A fixture of `"Refused"` would have
+ * exercised neither branch honestly.
+ */
+const REJECTED_ERROR =
+  "rejected: the email provider refused the message and sent nothing — " +
+  "validation_error (422): Invalid `to` field";
+const UNKNOWN_ERROR =
+  "unknown: the email provider never confirmed the message, so it may or may not have gone out — " +
+  "application_error: fetch failed";
+
 /** 11 hours after the send — comfortably inside a 24-hour provider window. */
 const NOW_INSIDE_WINDOW = new Date("2026-08-14T07:00:00.000Z");
 /** 48 hours after the send — comfortably outside it. */
@@ -214,7 +229,7 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // and the server now both take this branch; the phone must not be the surface that still warns.
     expect(
       weeklyReportRetryNeedsAcknowledgement(
-        { sentAt: SENT_AT, sendError: "Invalid `to` field" },
+        { sentAt: SENT_AT, sendError: REJECTED_ERROR },
         NOW_OUTSIDE_WINDOW,
       ),
     ).toBe(false);
@@ -224,6 +239,45 @@ describe("whether a retry needs the duplicate-risk acknowledgement", () => {
     // `send_error` is cleared to NULL on every retry, so blank is a state this really reaches.
     expect(
       weeklyReportRetryNeedsAcknowledgement({ sentAt: SENT_AT, sendError: "   " }, NOW_OUTSIDE_WINDOW),
+    ).toBe(true);
+  });
+
+  it("STILL asks on an `unknown:` error, which proves nothing either way", () => {
+    // A recorded error is not automatically evidence. `unknown:` is written for a swallowed fetch, a 5xx,
+    // a 408 and an in-flight idempotency 409 — all of which may have left the message enqueued, so the
+    // client may already have this report. The phone must reach the same verdict as the CRM and the
+    // server here, or a PM is warned on one surface and waved through on another.
+    expect(
+      weeklyReportRetryNeedsAcknowledgement(
+        { sentAt: SENT_AT, sendError: UNKNOWN_ERROR },
+        NOW_OUTSIDE_WINDOW,
+      ),
+    ).toBe(true);
+  });
+
+  it("STILL asks on a legacy error written before the outcome prefix existed", () => {
+    expect(
+      weeklyReportRetryNeedsAcknowledgement(
+        { sentAt: SENT_AT, sendError: "Resend timed out" },
+        NOW_OUTSIDE_WINDOW,
+      ),
+    ).toBe(true);
+  });
+
+  it("reads the prefix as a PREFIX, not as a word appearing somewhere in the sentence", () => {
+    // The provider's own text is quoted into `send_error`, and it is free to contain the word. A
+    // substring match calls this ambiguous row a provable rejection and waves the retry through — and
+    // every other test in this block still passes with that bug in place, which is why this one exists.
+    expect(
+      weeklyReportRetryNeedsAcknowledgement(
+        {
+          sentAt: SENT_AT,
+          sendError:
+            "unknown: the email provider never confirmed the message, so it may or may not have gone " +
+            "out — smtp_error (502): the receiving server rejected: 4.7.0 try again later",
+        },
+        NOW_OUTSIDE_WINDOW,
+      ),
     ).toBe(true);
   });
 
@@ -301,7 +355,7 @@ describe("running the retry", () => {
     const { port, confirms, retries, retried } = retryPort();
 
     const outcome = await runWeeklyReportRetry(
-      { sentAt: SENT_AT, sendError: "Invalid `to` field", now: NOW_OUTSIDE_WINDOW },
+      { sentAt: SENT_AT, sendError: REJECTED_ERROR, now: NOW_OUTSIDE_WINDOW },
       port,
     );
 

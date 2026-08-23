@@ -35,6 +35,18 @@ vi.mock("sonner", () => ({ toast: { error: mocks.toastError, success: mocks.toas
 
 import { WeeklyReportHistoryPanel } from "./weekly-report-history-panel";
 
+/**
+ * The two shapes the worker persists into `send_error`. The prefix is the distinction the retry gate turns
+ * on — `rejected:` means the provider created nothing, `unknown:` means we never learned — so a fixture
+ * without one exercises neither branch honestly.
+ */
+const REJECTED_ERROR =
+  "rejected: the email provider refused the message and sent nothing — " +
+  "validation_error (422): Invalid `to` field";
+const UNKNOWN_ERROR =
+  "unknown: the email provider never confirmed the message, so it may or may not have gone out — " +
+  "application_error: fetch failed";
+
 const PROJECT = {
   id: "p1",
   propertyDisplayName: "4123 Cedar Springs",
@@ -117,14 +129,14 @@ function button(label: string): HTMLButtonElement | undefined {
 
 describe("a sent report the client has not received", () => {
   it("offers Retry send, not only a correction", () => {
-    mocks.reports = [report({ sendError: "Resend timed out" })];
+    mocks.reports = [report({ sendError: REJECTED_ERROR })];
     render();
     expect(button("Retry send")).toBeDefined();
   });
 
   it("retries that exact report, inside the provider's dedupe window", async () => {
     mocks.retryWeeklyReportSend.mockResolvedValue({});
-    mocks.reports = [report({ id: "v1", sendError: "Resend timed out" })];
+    mocks.reports = [report({ id: "v1", sendError: REJECTED_ERROR })];
     render();
     await act(async () => {
       button("Retry send")!.click();
@@ -226,7 +238,7 @@ describe("a sent report the client has not received", () => {
     try {
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
       mocks.retryWeeklyReportSend.mockResolvedValue({});
-      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: "Resend timed out" })];
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: REJECTED_ERROR })];
       render();
       await act(async () => {
         button("Retry send")!.click();
@@ -241,12 +253,35 @@ describe("a sent report the client has not received", () => {
     }
   });
 
+  it("STILL warns on an `unknown:` error, which is not evidence the send failed", async () => {
+    // The distinction the prefix carries. `unknown:` is a swallowed fetch, a 5xx, a 408 or an in-flight
+    // idempotency 409 — the request reached something that may have enqueued it, so the client may have
+    // the report already. A row here has a long, specific, entirely real `send_error` and still cannot be
+    // retried past the window without the PM agreeing.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      mocks.retryWeeklyReportSend.mockResolvedValue({});
+      mocks.reports = [report({ id: "v1", sentAt: SENT_25H_AGO, sendError: UNKNOWN_ERROR })];
+      render();
+      await act(async () => {
+        button("Retry send")!.click();
+      });
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+      expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+      confirm.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("warns before a correction that the send never reached the client", async () => {
     // The old confirm text described what a correction does to a client who HAS the report, which is the
     // wrong client entirely when the email failed. A PM reading it had no way to know this is not how a
     // failed send is fixed.
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
-    mocks.reports = [report({ sendError: "Resend timed out" })];
+    mocks.reports = [report({ sendError: REJECTED_ERROR })];
     render();
     await act(async () => {
       button("Send correction")!.click();
@@ -296,7 +331,7 @@ describe("a superseded version is never re-sent", () => {
         supersededById: "v2",
         // The whole trap: undelivered, so the guard the button DID have passes.
         sendDeliveredAt: null,
-        sendError: "Resend timed out",
+        sendError: REJECTED_ERROR,
         sendAttempts: 3,
       }),
     ];
@@ -321,7 +356,7 @@ describe("a superseded version is never re-sent", () => {
     // client is owed, and retrying it is exactly right. The board points its own Retry at v1 here too.
     mocks.reports = [
       report({ id: "v2", version: 2, status: "approved", sentAt: null, sendDeliveredAt: null }),
-      report({ id: "v1", version: 1, supersededById: null, sendError: "Resend timed out" }),
+      report({ id: "v1", version: 1, supersededById: null, sendError: REJECTED_ERROR }),
     ];
     render();
     expect(button("Retry send")).toBeDefined();

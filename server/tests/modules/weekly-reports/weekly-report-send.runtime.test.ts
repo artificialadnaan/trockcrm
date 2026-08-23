@@ -1158,7 +1158,37 @@ describe("the assigned PM sends from the FIELD mount, not this one", () => {
 });
 
 describe("retrying a failed send", () => {
+  /**
+   * A send the provider PROVABLY refused — `send_error` carries the `rejected:` prefix.
+   *
+   * The prefix is not decoration. `weeklyReportSendFailureMessage` leads every stored error with the
+   * outcome `classifySendFailure` reached, and the retry gate reads it back: `rejected:` means the request
+   * was refused before an email existed, so a replay cannot duplicate anything at any age.
+   */
   async function failedSend() {
+    return sentWithError(
+      "rejected: the email provider refused the message and sent nothing — " +
+        "validation_error (422): Invalid `to` field",
+    );
+  }
+
+  /**
+   * A send that FAILED WITHOUT SETTLING ANYTHING — `send_error` carries the `unknown:` prefix.
+   *
+   * A swallowed fetch, a 5xx, a 408, or a 409 `concurrent_idempotent_requests`: the request reached
+   * something that may well have enqueued the message. The row looks exactly like `failedSend` to the
+   * board — same "Send failed" chip — and is the opposite of it to the retry gate, which is the whole
+   * reason that gate reads the prefix rather than merely checking whether an error is present.
+   */
+  async function ambiguousSend() {
+    return sentWithError(
+      "unknown: the email provider never confirmed the message, so it may or may not have gone out — " +
+        "application_error: fetch failed",
+    );
+  }
+
+  /** Stand in for the worker's own failure bookkeeping, with whatever the provider outcome was. */
+  async function sentWithError(sendError: string) {
     const { reportId } = await seedApprovedReport();
     await sendWeeklyReport(db, {
       reportId,
@@ -1167,12 +1197,11 @@ describe("retrying a failed send", () => {
       payload: { recipients: ["jay@example.com"] },
       shareUrlFor,
     });
-    // Stand in for the worker's own failure bookkeeping.
     await pg.query(
       `UPDATE office_dallas.weekly_reports
-          SET send_attempts = 3, send_error = 'Resend timed out', send_last_attempt_at = now()
+          SET send_attempts = 3, send_error = $2, send_last_attempt_at = now()
         WHERE id = $1::uuid`,
-      [reportId],
+      [reportId, sendError],
     );
     await pg.query(`DELETE FROM public.job_queue`);
     return reportId;
@@ -1315,6 +1344,22 @@ describe("retrying a failed send", () => {
 
     await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
     expect(await sendJobs()).toHaveLength(1);
+  });
+
+  it("REFUSES unacknowledged on an `unknown:` error, which settles nothing", async () => {
+    // The distinction that makes "was an error recorded" the wrong question. `unknown:` is written for a
+    // swallowed fetch, a 5xx, a 408 and an in-flight idempotency 409 — the request reached something that
+    // may have enqueued the message, so the client may already have this report. Identical to the test
+    // above on the board and in the column's presence; opposite here.
+    const reportId = await ambiguousSend();
+    await ageSend(reportId, PROVIDER_WINDOW_CLOSED_MINUTES);
+
+    await expectAppError(
+      retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT),
+      409,
+      /second copy in the client's inbox/i,
+    );
+    expect(await sendJobs()).toHaveLength(0);
   });
 
   it("allows it once the caller has acknowledged the duplicate risk", async () => {
