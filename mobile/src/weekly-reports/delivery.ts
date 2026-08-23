@@ -274,7 +274,7 @@ export function weeklyReportRetryAcknowledgementPrompt(sendError?: string | null
   // about any attempt, and reads as a contradiction directly after telling the PM a recorded attempt sent
   // nothing — so the rejected branch names the unaccounted-for attempts instead.
   const risk = (subject: string) =>
-    `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
+    `This send is at least ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
     `provider will no longer treat a retry as a duplicate. If ${subject} did go out, the client ` +
     "will receive a second copy.";
   return {
@@ -303,11 +303,11 @@ export function weeklyReportRetryWarning(sendError?: string | null): string {
   const closing =
     "a retry is a genuinely new email rather than a repeat the mail provider will ignore";
   if (!weeklyReportSendErrorIsProvableRejection(sendError)) {
-    return `This send is more than a day old, so ${closing}. If the first one did go out, the client gets a second copy.`;
+    return `This send is a day or more old, so ${closing}. If the first one did go out, the client gets a second copy.`;
   }
   return (
     "A recorded attempt on this send was refused, so that attempt reached nobody. The outcome of any " +
-    `other attempt is unknown. This send is more than a day old, so ${closing}, and if one of those did ` +
+    `other attempt is unknown. This send is a day or more old, so ${closing}, and if one of those did ` +
     "go out the client gets a second copy."
   );
 }

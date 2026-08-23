@@ -160,7 +160,7 @@ export function weeklyReportRetryDuplicateRiskPrompt(sendError?: string | null):
   // rejected branch names what is actually unaccounted for instead. Found by printing the finished string
   // and reading it, which no assertion here was ever going to do.
   const risk = (subject: string) =>
-    `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
+    `This send is at least ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the mail ` +
     `provider will no longer treat a retry as a duplicate. If ${subject} did go out, the client will ` +
     "receive a second copy. Send it again?";
   if (!weeklyReportSendErrorIsProvableRejection(sendError)) return risk("the first email");

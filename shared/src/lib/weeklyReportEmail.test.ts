@@ -203,6 +203,19 @@ describe("weeklyReportRetryDuplicateRiskPrompt", () => {
     expect(weeklyReportRetryDuplicateRiskPrompt(UNKNOWN_ERROR)).toMatch(/the first email/i);
   });
 
+  it("says AT LEAST 24 hours, matching the gate's boundary rather than overshooting it", () => {
+    // `weeklyReportRetryIsProviderDeduped` is `elapsed < 24`, so at exactly 24 hours the dialog fires —
+    // and "more than 24 hours old" is false in that instant. A small thing, and precisely the kind this
+    // change exists to stop: the copy must not claim more than the predicate behind it supports.
+    for (const sendError of [REJECTED_ERROR, UNKNOWN_ERROR, null]) {
+      const prompt = weeklyReportRetryDuplicateRiskPrompt(sendError);
+      expect(prompt).toMatch(
+        new RegExp(`at least ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old`),
+      );
+      expect(prompt).not.toMatch(/more than \d+ hours old/);
+    }
+  });
+
   it("always carries the duplicate warning, whatever the outcome was", () => {
     // The property that must hold across every branch: this dialog exists to warn, and no outcome
     // removes the warning any more. If a future edit reintroduces a silent path, this fails.
