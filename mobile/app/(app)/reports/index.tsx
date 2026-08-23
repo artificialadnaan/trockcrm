@@ -48,6 +48,7 @@ import {
 } from "../../../src/weekly-reports/delivery";
 import {
   formatWeekOf,
+  weeklyReportDeliveryEntryPoint,
   weeklyReportDueLabel,
   weeklyReportProjectAction,
   weeklyReportQueueTruncationNote,
@@ -158,7 +159,29 @@ export default function ReportsHubScreen() {
   // without this the re-mint action was reachable only while a send was failing or still in flight, which
   // is the opposite of when somebody asks for a replacement link.
   function openDelivery(reportId: string, projectName: string): void {
-    router.push({ pathname: "/(app)/reports/delivery/[reportId]", params: { reportId, projectName } });
+    // PARTICIPATES IN `openInFlight`, the synchronous ref — not just in `disabled`.
+    //
+    // `disabled={busyKey !== null}` cannot close this window. `busyKey` is React state, so two Pressables
+    // in one native event batch both read the value committed before either fired, and both proceed; the
+    // button is still rendered enabled at that instant because React has not re-rendered between them.
+    // reports/weekly/[draftId].tsx documents the same hazard on its photo import and solves it the same
+    // way, and `openWeek` above already takes this ref for exactly this reason.
+    //
+    // It is CHECKED AND SET, so both orders are covered. Week-then-delivery was the obvious one; but
+    // delivery-then-week fails identically — the delivery route pushes, then the completing week open
+    // pushes its editor on top, and the PM who asked for a client link is looking at a draft either way.
+    if (openInFlight.current) return;
+    openInFlight.current = true;
+    try {
+      router.push({ pathname: "/(app)/reports/delivery/[reportId]", params: { reportId, projectName } });
+    } finally {
+      // Released on the NEXT TICK rather than immediately: the guard exists to span the synchronous batch,
+      // and clearing it inline would let the very next handler in that same batch read it as free. A timer
+      // rather than a flag the navigation has to clear, so a failed push cannot strand the hub.
+      setTimeout(() => {
+        openInFlight.current = false;
+      }, 0);
+    }
   }
 
   async function openWeek(
@@ -690,6 +713,10 @@ function ProjectCard({
   // approved report is the PM's alone, and a submitted one is with them. Offering the action anyway
   // would walk a superintendent into a 403 on a report that is simply not theirs any more.
   const action = weeklyReportProjectAction(project);
+  // ASKED UNCONDITIONALLY, and that is the point. This used to live inside the `done` branch below, so the
+  // route to an already-delivered report existed only while the CURRENT week was still `sent` — it closed
+  // itself the moment the cadence rolled over, which is well before anyone needs it.
+  const deliveryEntry = weeklyReportDeliveryEntryPoint(project);
   const week = formatWeekOf(project.currentWeekOf);
 
   return (
@@ -715,31 +742,9 @@ function ProjectCard({
         // A line of text beats a button that fails: the state chip already says what is happening, this
         // says whose move it is.
         <Text style={styles.cardSub}>This week is with the project manager.</Text>
-      ) : action.kind === "done" ? (
-        // THE WEEK IS SENT, and this branch used to render nothing — which is how #17's actual case stayed
-        // unreachable. The delivery screen was only ever linked from "Not delivered to the client", and
-        // that list carries `send_delivered_at IS NULL`, so a report the client DID receive dropped out of
-        // every path the phone had. "The client lost the email" happens weeks later, not during a failure.
-        //
-        // `lastSentReportId`, NOT `currentReportId`. The first version of this used the current week's id,
-        // which the server defines for `currentWeekOf` alone — so the moment the cadence rolled over the
-        // delivered report went unreachable all over again. Two reviewers caught that independently.
-        //
-        // GATED ON `isPm` because the action is: minting a client link needs `canPublishWeeklyReport`, and
-        // an assigned superintendent is not that. They appear on this feed for their own projects and the
-        // week reads `done` for them too, so without this they get a button that always ends in a 403 —
-        // an app advertising something the person holding it cannot do.
-        project.isPm && project.lastSentReportId ? (
-          <Button
-            title="Delivery & client link"
-            variant="ghost"
-            onPress={() => onOpenDelivery(project.lastSentReportId!, project.projectName)}
-            accessibilityLabel={`Delivery status and client link for the week of ${
-              project.lastSentWeekOf ? formatWeekOf(project.lastSentWeekOf) : week
-            }`}
-          />
-        ) : null
-      ) : (
+      ) : action.kind === "done" ? // The week is sent; there is nothing to do to it. The delivery route is rendered below,
+      // OUTSIDE this branch, because it is not a fact about the current week.
+      null : (
         <Button
           title={
             action.kind === "start"
@@ -753,6 +758,29 @@ function ProjectCard({
           onPress={() => onOpenWeek(project, project.currentWeekOf, action.mode)}
         />
       )}
+
+      {deliveryEntry ? (
+        // Independent of the current week's state. `lastSentReportId` is the route to a report the client
+        // already received; minting them a replacement link is a thing a PM does weeks later, by which
+        // point this week is always something other than `done`.
+        <Button
+          title="Delivery & client link"
+          variant="ghost"
+          // INERT WHILE A WEEK IS OPENING. This button has no week of its own, so unlike the week buttons
+          // it is disabled by ANY open in flight rather than by "an open that is not mine".
+          //
+          // The hazard only exists because the button moved out of the `done` branch: a rolled-over project
+          // now shows a week action AND this one, which the old layout never did. Two Pressables in one
+          // native event batch both read the render-time `opening`, so without this the delivery route
+          // pushes first and the completing `openWeek` pushes the editor on top of it — the PM asked for a
+          // client link and lands on a draft.
+          disabled={busyKey !== null}
+          onPress={() => onOpenDelivery(deliveryEntry.reportId, project.projectName)}
+          accessibilityLabel={`Delivery status and client link for the week of ${
+            deliveryEntry.weekOf ? formatWeekOf(deliveryEntry.weekOf) : week
+          }`}
+        />
+      ) : null}
 
       {project.outstandingWeeks.length > 0 ? (
         <View style={{ gap: theme.space.sm }}>

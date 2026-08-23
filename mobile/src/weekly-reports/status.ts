@@ -109,6 +109,34 @@ export function weeklyReportProjectAction(project: {
 }
 
 /**
+ * The route to a report the client has already received, or null when there is none to offer.
+ *
+ * SEPARATE FROM `weeklyReportProjectAction`, and that separation is the fix. #1094 rendered this entry point
+ * inside the card's `done` branch, which means it existed only while the CURRENT week was `sent`. A cadence
+ * rollover flips the action to `start`, `resume`, or `review`, and the previously delivered report — still
+ * named by `lastSentReportId`, still perfectly openable — lost every route the phone had to it.
+ *
+ * The two questions are genuinely independent: "what should this PM do about THIS week" and "is there an
+ * earlier week the client may still ask about". Answering the second through the first is what made a
+ * feature for "the client lost the email weeks later" reachable only in the days when they had not.
+ *
+ * GATED ON `isPm`. Minting a client link needs `canPublishWeeklyReport`; an assigned superintendent appears
+ * on this feed for their own projects and sees the same week states, so offering it to them is a button
+ * that always ends in a 403.
+ */
+export function weeklyReportDeliveryEntryPoint(project: {
+  isPm: boolean;
+  /** Absent on an API build older than #1094 — read as "nothing delivered", never as a crash. */
+  lastSentReportId?: string | null;
+  lastSentWeekOf?: string | null;
+}): { reportId: string; weekOf: string | null } | null {
+  if (!project.isPm) return null;
+  if (!project.lastSentReportId) return null;
+  // The week is a LABEL and the id is the ROUTE. A missing label is worth a vaguer button, not a missing one.
+  return { reportId: project.lastSentReportId, weekOf: project.lastSentWeekOf ?? null };
+}
+
+/**
  * What to say when the review queue came back capped, or null when the list is complete.
  *
  * The server sends the newest rows and the true depth. Saying nothing would present somebody's partial
