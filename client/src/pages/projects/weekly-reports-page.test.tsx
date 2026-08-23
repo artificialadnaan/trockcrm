@@ -491,8 +491,10 @@ describe("This Week board", () => {
   it("STILL asks when only the LIVE row carries an error and the replayed send is silent", async () => {
     // Why `sendRetrySendError` is a separate field rather than a reuse of `sendError`. Once a correction
     // is drafted over a failed send the two describe different reports: `sendError` falls back to the
-    // live clone, while Retry replays the ORIGINAL. Reading the fallback would suppress the warning on
-    // the strength of an error belonging to a report this button is not going to send.
+    // live clone, while Retry replays the ORIGINAL. Reading the fallback would tell the PM that an
+    // attempt on THIS send was refused, on the strength of an error belonging to a report the button is
+    // not going to send — reassurance the record does not support. The warning itself is unaffected;
+    // the gate is age alone.
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     mockDashboard([
       dashboardRow({
