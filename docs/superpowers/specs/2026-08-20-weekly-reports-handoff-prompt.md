@@ -1,6 +1,13 @@
 # Handoff prompt — Weekly Reports remaining work
 
-> **SUPERSEDED, 2026-08-23. DO NOT PASTE THIS.** Everything it instructs a fresh session to do has shipped:
+> **⚠️ ONE ITEM IN HERE IS NOT DONE: CREDENTIAL ROTATION (task 5).** `JWT_SECRET`, `ENCRYPTION_KEY`,
+> `RESEND_API_KEY` and the Procore client secret were printed into a transcript and still need rotating —
+> and were exposed again on 2026-08-23 by listing the Railway production variables. That task is the one
+> thing on this page that is not a preference, it is still outstanding, and the banner below must not be
+> read as covering it.
+>
+> **SUPERSEDED for everything else, 2026-08-23. DO NOT PASTE THIS.** The rest of what it instructs a fresh
+> session to do has shipped:
 > #1089–#1095 are merged and deployed, migrations 0228–0230 are in all three office schemas and 0231 in
 > `public`, and follow-ups #15/#16/#17 landed as #1093/#1095/#1094 (with #1099 correcting #1094).
 >
@@ -8,7 +15,9 @@
 > For current state use `docs/weekly-reports-status.md`; for why #15's premise was wrong see
 > `2026-08-20-weekly-reports-remaining-work.md`.
 >
-> Kept because the prompt itself — what a handoff needs to carry — is the useful part, not its contents.
+> Kept because the prompt itself — what a handoff needs to carry — is the useful part, and because task 5
+> is still live. An earlier version of this banner claimed everything here had shipped, which would have
+> told somebody the credential rotation was done.
 
 Paste the block below into a fresh session. It is written to be pasted verbatim.
 
