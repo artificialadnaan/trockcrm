@@ -48,6 +48,7 @@ import {
 } from "../../../src/weekly-reports/delivery";
 import {
   formatWeekOf,
+  weeklyReportDeliveryEntryPoint,
   weeklyReportDueLabel,
   weeklyReportProjectAction,
   weeklyReportQueueTruncationNote,
@@ -690,6 +691,10 @@ function ProjectCard({
   // approved report is the PM's alone, and a submitted one is with them. Offering the action anyway
   // would walk a superintendent into a 403 on a report that is simply not theirs any more.
   const action = weeklyReportProjectAction(project);
+  // ASKED UNCONDITIONALLY, and that is the point. This used to live inside the `done` branch below, so the
+  // route to an already-delivered report existed only while the CURRENT week was still `sent` — it closed
+  // itself the moment the cadence rolled over, which is well before anyone needs it.
+  const deliveryEntry = weeklyReportDeliveryEntryPoint(project);
   const week = formatWeekOf(project.currentWeekOf);
 
   return (
@@ -715,31 +720,9 @@ function ProjectCard({
         // A line of text beats a button that fails: the state chip already says what is happening, this
         // says whose move it is.
         <Text style={styles.cardSub}>This week is with the project manager.</Text>
-      ) : action.kind === "done" ? (
-        // THE WEEK IS SENT, and this branch used to render nothing — which is how #17's actual case stayed
-        // unreachable. The delivery screen was only ever linked from "Not delivered to the client", and
-        // that list carries `send_delivered_at IS NULL`, so a report the client DID receive dropped out of
-        // every path the phone had. "The client lost the email" happens weeks later, not during a failure.
-        //
-        // `lastSentReportId`, NOT `currentReportId`. The first version of this used the current week's id,
-        // which the server defines for `currentWeekOf` alone — so the moment the cadence rolled over the
-        // delivered report went unreachable all over again. Two reviewers caught that independently.
-        //
-        // GATED ON `isPm` because the action is: minting a client link needs `canPublishWeeklyReport`, and
-        // an assigned superintendent is not that. They appear on this feed for their own projects and the
-        // week reads `done` for them too, so without this they get a button that always ends in a 403 —
-        // an app advertising something the person holding it cannot do.
-        project.isPm && project.lastSentReportId ? (
-          <Button
-            title="Delivery & client link"
-            variant="ghost"
-            onPress={() => onOpenDelivery(project.lastSentReportId!, project.projectName)}
-            accessibilityLabel={`Delivery status and client link for the week of ${
-              project.lastSentWeekOf ? formatWeekOf(project.lastSentWeekOf) : week
-            }`}
-          />
-        ) : null
-      ) : (
+      ) : action.kind === "done" ? // The week is sent; there is nothing to do to it. The delivery route is rendered below,
+      // OUTSIDE this branch, because it is not a fact about the current week.
+      null : (
         <Button
           title={
             action.kind === "start"
@@ -753,6 +736,20 @@ function ProjectCard({
           onPress={() => onOpenWeek(project, project.currentWeekOf, action.mode)}
         />
       )}
+
+      {deliveryEntry ? (
+        // Independent of the current week's state. `lastSentReportId` is the route to a report the client
+        // already received; minting them a replacement link is a thing a PM does weeks later, by which
+        // point this week is always something other than `done`.
+        <Button
+          title="Delivery & client link"
+          variant="ghost"
+          onPress={() => onOpenDelivery(deliveryEntry.reportId, project.projectName)}
+          accessibilityLabel={`Delivery status and client link for the week of ${
+            deliveryEntry.weekOf ? formatWeekOf(deliveryEntry.weekOf) : week
+          }`}
+        />
+      ) : null}
 
       {project.outstandingWeeks.length > 0 ? (
         <View style={{ gap: theme.space.sm }}>
