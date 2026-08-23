@@ -67,7 +67,11 @@ interface CallSite {
  * quietly covers less than it claims is the exact failure this file exists to prevent, so it now asks the
  * TypeScript parser where the element ends instead of guessing from punctuation.
  */
+let cachedSites: CallSite[] | null = null;
+
+/** Parsed once. Four assertions used to reparse every TSX file under client/src, ~5.5s of repeated work. */
 function dialogCallSites(): CallSite[] {
+  if (cachedSites) return cachedSites;
   const found: CallSite[] = [];
   unresolvable.length = 0;
 
@@ -123,6 +127,7 @@ function dialogCallSites(): CallSite[] {
   };
 
   walk(CLIENT_SRC);
+  cachedSites = found;
   return found;
 }
 
@@ -231,24 +236,35 @@ describe("a dialog gets the width it asks for", () => {
     ).toEqual([]);
   });
 
-  it("keeps the mobile inset, which an unprefixed caller width destroys", () => {
-    // The other half of the same bug, and the half nobody notices: `max-w-2xl` replaces
-    // `max-w-[calc(100%-2rem)]`, so the dialog goes edge-to-edge on a phone. A `sm:`-prefixed width does
-    // not, because it is in a different group from the unprefixed inset — the same mechanism that causes
-    // the desktop bug prevents this one.
+  it("leaves no dialog pinned edge to edge by its own w-full", () => {
+    // THE SECOND HALF OF THE SAME BUG, and the half the first fix only half-solved.
+    //
+    // The inset used to be `w-full max-w-[calc(100%-2rem)]`. `max-w-*` is one property, so a caller's
+    // `sm:max-w-5xl` did not lose to it — above 640px the responsive rule simply wins, `w-full` keeps the
+    // box viewport-wide, and the dialog goes edge to edge. On an 800px tablet that is an 800px dialog with
+    // no margin at all. Prefixing the caller fixed the phone and left this band broken.
+    //
+    // The primitive's inset is now `w-[calc(100%-2rem)]`, a WIDTH: no `max-width` in any group at any
+    // breakpoint can override a different property, so the inset survives everything. What CAN still
+    // remove it is a caller setting its own width — and `w-full` is exactly the old bug written by hand.
+    //
+    // A caller with a deliberate width of its own is fine and is NOT flagged:
+    // `w-[min(96vw,1040px)]` carries its own 96vw inset. The defect is specifically `w-full`.
     const base = baseClassesOf("components/ui/dialog.tsx", "fixed top-1/2 left-1/2");
-    const inset = base.split(/\s+/).find((c) => /^max-w-\[calc/.test(c));
-    expect(inset, "the primitive no longer sets a mobile inset — update this test").toBeDefined();
-
-    const lostInset = dialogCallSites().filter(
-      (site) =>
-        !NARROWER_THAN_BREAKPOINT.test(site.requested) &&
-        !twMerge(base, site.className).split(/\s+/).includes(inset!),
+    const edgeToEdge = dialogCallSites().filter((site) =>
+      twMerge(base, site.className).split(/\s+/).includes("w-full"),
     );
 
     expect(
-      lostInset.map((d) => `${d.file}:${d.line} (${d.requested})`),
-      "these dialogs lose the phone inset because their width is not breakpoint-prefixed",
+      edgeToEdge.map((d) => `${d.file}:${d.line} (${d.requested})`),
+      "these dialogs sit edge to edge — w-full replaces the primitive's inset",
     ).toEqual([]);
+  });
+
+  it("no longer carries a max-width inset a caller could beat above the breakpoint", () => {
+    // The regression guard for the fix itself. Reintroducing `max-w-[calc(100%-2rem)]` would restore the
+    // exact defeat described above, and every other assertion in this file would stay green.
+    const base = baseClassesOf("components/ui/dialog.tsx", "fixed top-1/2 left-1/2");
+    expect(base).not.toMatch(/max-w-\[calc/);
   });
 });
