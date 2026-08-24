@@ -53,7 +53,9 @@ const BOLD = /\bfont-(?:bold|extrabold|black)\b/;
  * REGENERATED for the per-ATTRIBUTE scanner. Each widening of the scanner has raised this number, and
  * every rise was debt the previous version could not see rather than debt newly added: 137 when it read
  * per line, 166 once `text-sm`/`text-base` and template literals were included, 173 once composed
- * `cn(...)` arguments were read as one element's classes. The earlier note follows.
+ * `cn(...)` arguments were read as one element's classes, 217 once an inherited size counted, and 219 once
+ * classes referenced BY NAME resolved — see `moduleConstants` for why that last one mattered most. The
+ * earlier note follows.
  *
  * Formerly: regenerated after the per-class-string correction below. Judging per LINE had counted 5 sites that are
  * not sites at all — a class string carrying `text-slate-400` without a small size, on a line where some
@@ -111,7 +113,9 @@ const BASELINE: Record<string, number> = {
   "pages/projects/projects-page.tsx": 2,
   "pages/projects/weekly-report-history-panel.tsx": 14,
   "pages/projects/weekly-report-project-audit-dialog.tsx": 2,
-  "pages/projects/weekly-report-project-dialog.tsx": 1,
+  // 1 → 3 when class constants started resolving: a shared input class-string const carrying
+  // `placeholder:text-slate-400`, referenced from two attributes that read as empty before.
+  "pages/projects/weekly-report-project-dialog.tsx": 3,
   "pages/projects/weekly-report-send-dialog.tsx": 8,
   "pages/projects/weekly-report-settings-dialog.tsx": 2,
   "pages/projects/weekly-reports-page.tsx": 2,
@@ -135,7 +139,8 @@ const BASELINE: Record<string, number> = {
   "preview/companies-preview.tsx": 3,
   "preview/company-detail-preview.tsx": 2,
   "preview/contacts-preview.tsx": 2,
-  "preview/deal-detail-preview.tsx": 2,
+  // 2 → 3: a tone picked by ternary into a local const, then referenced from the attribute.
+  "preview/deal-detail-preview.tsx": 3,
   "preview/deals-preview.tsx": 4,
   "preview/director-dashboard-preview.tsx": 2,
   "preview/email-preview.tsx": 1,
@@ -194,6 +199,111 @@ function isNormalSize(px: number | null, classes: string): boolean {
   return !(px >= 24 || (px >= 18.66 && BOLD.test(classes)));
 }
 
+const CONSTANTS = new WeakMap<ts.SourceFile, Map<string, ts.Node>>();
+
+/**
+ * Every `const NAME = …` initializer in a file, so classes referenced BY NAME can be followed.
+ *
+ * A `className` does not have to contain its classes. The audited weekly-reports page routes them through
+ * a lookup table, which is the ordinary way to write a variant map here:
+ *
+ *   const STATE_BADGE: Record<WeeklyReportWeekState, string> = { dismissed: "… bg-white text-slate-500", … }
+ *   <Badge className={`${STATE_BADGE[row.state]} whitespace-nowrap`}>
+ *
+ * A reader that only collects literals INSIDE the attribute sees `whitespace-nowrap` and nothing else — so
+ * reverting the `dismissed` entry to `text-slate-400` left both guards green, one of them the very ratchet
+ * that exists to stop exactly that. Verified by making the edit and watching 6/6 pass.
+ *
+ * SAME FILE ONLY, and first declaration wins on a name collision. An imported map is still invisible; that
+ * is a smaller hole than the one this closes, and it is stated rather than silently handled.
+ */
+function moduleConstants(source: ts.SourceFile): Map<string, ts.Node> {
+  const cached = CONSTANTS.get(source);
+  if (cached) return cached;
+  const table = new Map<string, ts.Node>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      if (!table.has(node.name.text)) table.set(node.name.text, node.initializer);
+    }
+    node.forEachChild(visit);
+  };
+  visit(source);
+  CONSTANTS.set(source, table);
+  return table;
+}
+
+/**
+ * The initializers a class-carrying REFERENCE can resolve to, in declaration order.
+ *
+ * A dynamic key (`STATE_BADGE[row.state]`) can select any entry, so every value is returned — the
+ * pessimistic reading, which is the right one for "could this render low contrast". A literal key
+ * (`STATE_BADGE.dismissed`) returns just that entry.
+ */
+function resolveReference(node: ts.Node, seen: Set<ts.Node>): ts.Node[] {
+  const table = moduleConstants(node.getSourceFile());
+  if (ts.isIdentifier(node)) {
+    const declaration = table.get(node.text);
+    return declaration && !seen.has(declaration) ? [declaration] : [];
+  }
+  if (!ts.isPropertyAccessExpression(node) && !ts.isElementAccessExpression(node)) return [];
+  if (!ts.isIdentifier(node.expression)) return [];
+  const declaration = table.get(node.expression.text);
+  if (!declaration || !ts.isObjectLiteralExpression(declaration) || seen.has(declaration)) return [];
+  const key = ts.isPropertyAccessExpression(node)
+    ? node.name.text
+    : ts.isStringLiteral(node.argumentExpression)
+      ? node.argumentExpression.text
+      : null;
+  const values: ts.Node[] = [];
+  for (const property of declaration.properties) {
+    if (!ts.isPropertyAssignment(property)) continue;
+    const name = ts.isIdentifier(property.name)
+      ? property.name.text
+      : ts.isStringLiteral(property.name)
+        ? property.name.text
+        : null;
+    if (key !== null && name !== key) continue;
+    if (!seen.has(property.initializer)) values.push(property.initializer);
+  }
+  return values;
+}
+
+/** Is this node a reference that `resolveReference` knows how to follow? */
+function isReference(node: ts.Node): boolean {
+  return ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node);
+}
+
+/**
+ * Every class literal a `className` expression can contribute, FLATTENED — the union across branches and
+ * across a lookup table's entries.
+ *
+ * Union, not enumeration, and deliberately: this answers the ratchet's question ("could this element ever
+ * render `text-slate-400`?"), where merging branches is the correct pessimism. `classVariants` answers the
+ * different question of which classes land together, and pays a combinatorial cost for it that is not
+ * worth spending on every file in the tree.
+ */
+function literalClasses(node: ts.Node, seen: Set<ts.Node> = new Set()): string {
+  const parts: string[] = [];
+  const gather = (n: ts.Node, visited: Set<ts.Node>): void => {
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
+    else if (ts.isTemplateExpression(n)) {
+      parts.push(n.head.text);
+      for (const span of n.templateSpans) parts.push(span.literal.text);
+    }
+    if (isReference(n)) {
+      for (const target of resolveReference(n, visited)) {
+        const next = new Set(visited);
+        next.add(target);
+        gather(target, next);
+      }
+      return; // the reference's own children are the object name and the key, never classes
+    }
+    n.forEachChild((child) => gather(child, visited));
+  };
+  gather(node, seen);
+  return parts.join(" ");
+}
+
 /**
  * Every `className` expression in a file, flattened to the classes it can apply to ONE element.
  *
@@ -237,17 +347,7 @@ function classNameAttributes(
     for (const property of opening.attributes.properties) {
       if (!ts.isJsxAttribute(property) || property.name.getText() !== "className") continue;
       if (!property.initializer) return "";
-      const parts: string[] = [];
-      const gather = (n: ts.Node): void => {
-        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
-        else if (ts.isTemplateExpression(n)) {
-          parts.push(n.head.text);
-          for (const span of n.templateSpans) parts.push(span.literal.text);
-        }
-        n.forEachChild(gather);
-      };
-      gather(property.initializer);
-      return parts.join(" ");
+      return literalClasses(property.initializer);
     }
     return "";
   };
@@ -278,19 +378,9 @@ function classNameAttributes(
 
   const visit = (node: ts.Node): void => {
     if (ts.isJsxAttribute(node) && node.name.getText() === "className" && node.initializer) {
-      const parts: string[] = [];
-      const gather = (n: ts.Node): void => {
-        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
-        else if (ts.isTemplateExpression(n)) {
-          parts.push(n.head.text);
-          for (const span of n.templateSpans) parts.push(span.literal.text);
-        }
-        n.forEachChild(gather);
-      };
-      gather(node.initializer);
-      if (parts.length > 0) {
+      const classes = literalClasses(node.initializer);
+      if (classes.trim().length > 0) {
         const { line } = source.getLineAndCharacterOfPosition(node.getStart());
-        const classes = parts.join(" ");
         const own = statedSizePx(classes);
         const inherited = own === null ? effectiveSize(node) : null;
         // `classes` stays the element's OWN classes — the colour is whatever it sets, and folding an
@@ -337,7 +427,8 @@ const MAX_VARIANTS = 64;
  * for `cn(...)` arguments (all of them apply at once), and `""` for anything unresolvable — an identifier
  * such as `accent.grad` contributes no literal, exactly as the flattened read did.
  */
-function classVariants(node: ts.Node): string[] {
+function classVariants(node: ts.Node, seen: Set<ts.Node> = new Set()): string[] {
+  const recurse = (child: ts.Node): string[] => classVariants(child, seen);
   const cap = (values: string[]): string[] => {
     if (values.length > MAX_VARIANTS) {
       throw new Error(`className expands to ${values.length} branch combinations, over the ${MAX_VARIANTS} cap`);
@@ -348,38 +439,38 @@ function classVariants(node: ts.Node): string[] {
   const product = (left: string[], right: string[]): string[] =>
     cap(left.flatMap((a) => right.map((b) => `${a} ${b}`)));
 
-  if (ts.isJsxExpression(node)) return node.expression ? classVariants(node.expression) : [""];
-  if (ts.isParenthesizedExpression(node)) return classVariants(node.expression);
+  if (ts.isJsxExpression(node)) return node.expression ? recurse(node.expression) : [""];
+  if (ts.isParenthesizedExpression(node)) return recurse(node.expression);
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
   if (ts.isTemplateExpression(node)) {
     let acc = [node.head.text];
     for (const span of node.templateSpans) {
-      acc = product(product(acc, classVariants(span.expression)), [span.literal.text]);
+      acc = product(product(acc, recurse(span.expression)), [span.literal.text]);
     }
     return acc;
   }
   if (ts.isConditionalExpression(node)) {
-    return union(classVariants(node.whenTrue), classVariants(node.whenFalse));
+    return union(recurse(node.whenTrue), recurse(node.whenFalse));
   }
   if (ts.isBinaryExpression(node)) {
     const op = node.operatorToken.kind;
     // `cond && "…"` renders the classes or nothing at all — both are real states.
-    if (op === ts.SyntaxKind.AmpersandAmpersandToken) return union([""], classVariants(node.right));
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) return union([""], recurse(node.right));
     if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) {
-      return union(classVariants(node.left), classVariants(node.right));
+      return union(recurse(node.left), recurse(node.right));
     }
-    if (op === ts.SyntaxKind.PlusToken) return product(classVariants(node.left), classVariants(node.right));
+    if (op === ts.SyntaxKind.PlusToken) return product(recurse(node.left), recurse(node.right));
     return [""];
   }
   // `cn(a, b, c)` / `clsx([...])` — every argument lands on the same element, so they multiply.
   if (ts.isCallExpression(node)) {
     let acc = [""];
-    for (const argument of node.arguments) acc = product(acc, classVariants(argument));
+    for (const argument of node.arguments) acc = product(acc, recurse(argument));
     return acc;
   }
   if (ts.isArrayLiteralExpression(node)) {
     let acc = [""];
-    for (const element of node.elements) acc = product(acc, classVariants(element));
+    for (const element of node.elements) acc = product(acc, recurse(element));
     return acc;
   }
   // clsx's object form: `{ "text-slate-400": muted }` — each key applies independently or not at all.
@@ -389,6 +480,19 @@ function classVariants(node: ts.Node): string[] {
       if (!ts.isPropertyAssignment(property)) continue;
       const name = property.name;
       if (ts.isStringLiteral(name) || ts.isIdentifier(name)) acc = product(acc, ["", name.text]);
+    }
+    return acc;
+  }
+  // Classes reached BY NAME. Each entry a reference can resolve to is a separate rendered state, so they
+  // union — the same relationship a ternary's branches have, which is what a keyed lookup table is.
+  if (isReference(node)) {
+    const targets = resolveReference(node, seen);
+    if (targets.length === 0) return [""];
+    let acc: string[] = [];
+    for (const target of targets) {
+      const next = new Set(seen);
+      next.add(target);
+      acc = union(acc, classVariants(target, next));
     }
     return acc;
   }
@@ -564,6 +668,18 @@ describe("muted text does not get quieter", () => {
     expect(pairs.map((pair) => `text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`)).toEqual([
       "text-white on bg-slate-800 → 14.63:1",
       "text-slate-500 on bg-slate-100 → 4.34:1",
+    ]);
+  });
+
+  it("follows classes referenced by name out of the attribute", () => {
+    // The blind spot that let the ratchet certify a reverted fix: a `className` need not contain its
+    // classes. `TONE[tone]` is a dynamic key, so every entry is a state this element can render and each
+    // is judged on its own.
+    const fixture = path.join(CLIENT_SRC, "lib/__fixtures__/class-constant-lookup.tsx");
+
+    expect(statedPairs(fixture).map((pair) => `text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`)).toEqual([
+      "text-slate-500 on bg-slate-100 → 4.34:1",
+      "text-white on bg-slate-900 → 17.85:1",
     ]);
   });
 });
