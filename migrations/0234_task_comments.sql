@@ -91,7 +91,15 @@ BEGIN
                        CONSTRAINT task_comments_body_not_blank CHECK (body ~ '[^[:space:]]'),
           kind       varchar(20) NOT NULL DEFAULT 'reply'
                        CONSTRAINT task_comments_kind_check CHECK (kind IN ('reply', 'note', 'system')),
-          created_at timestamptz NOT NULL DEFAULT now()
+          -- clock_timestamp(), NOT now(). now() is transaction-START, and this column is what
+          -- decides whether a reply counts as unread. Two overlapping requests are enough to lose
+          -- one: T1 opens and stalls, T2 posts a reply, the assigner reads and acknowledges up to
+          -- it, and only THEN does T1 commit an insert stamped with its own BEGIN -- older than the
+          -- acknowledgement that never saw it, so it never re-enters "Needs your attention".
+          -- Reading the wall clock at INSERT shrinks that window from the whole transaction to the
+          -- gap between the insert and its commit. It does not close it entirely: nothing short of a
+          -- commit-order sequence would, and that is a bigger change than this table warrants.
+          created_at timestamptz NOT NULL DEFAULT clock_timestamp()
         );
       $sql$,
       schema_name
@@ -147,7 +155,7 @@ CREATE TABLE IF NOT EXISTS office_dallas.task_comments (
                CONSTRAINT task_comments_body_not_blank CHECK (body ~ '[^[:space:]]'),
   kind       varchar(20) NOT NULL DEFAULT 'reply'
                CONSTRAINT task_comments_kind_check CHECK (kind IN ('reply', 'note', 'system')),
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE INDEX IF NOT EXISTS task_comments_task_created_idx

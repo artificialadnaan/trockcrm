@@ -552,14 +552,33 @@ export function useTaskComments(taskId: string | undefined) {
   const [comments, setComments] = useState<TaskComment[]>([]);
   const [loop, setLoop] = useState<TaskLoopDescriptor | null>(null);
   const [unreadReplyCount, setUnreadReplyCount] = useState(0);
+  /**
+   * Whether the SERVER will accept a comment from this viewer. Not re-derived here: opening a task and
+   * speaking on it are two different permissions, and a client copy of the second rule drifts from it.
+   * `undefined` until the first response, so the composer can render optimistically rather than
+   * flickering closed on every open.
+   */
+  const [canComment, setCanComment] = useState<boolean | undefined>(undefined);
   const [loading, setLoading] = useState(Boolean(taskId));
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Last-write-wins, matching useTasks/useTaskCounts.
+   *
+   * Not cosmetic here: the drawer derives its acknowledgement timestamp from whatever comments are in
+   * state, so a slow response for the PREVIOUS task landing after the drawer switched would show one
+   * task's thread while the ack was POSTed against another — recording an assigner as having read
+   * replies that were never on screen.
+   */
+  const requestIdRef = useRef(0);
+
   const fetchComments = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     if (!taskId) {
       setComments([]);
       setLoop(null);
       setUnreadReplyCount(0);
+      setCanComment(undefined);
       setLoading(false);
       return;
     }
@@ -571,14 +590,18 @@ export function useTaskComments(taskId: string | undefined) {
         comments: TaskComment[];
         loop: TaskLoopDescriptor;
         unreadReplyCount: number;
+        canComment?: boolean;
       }>(`/tasks/${encodeURIComponent(taskId)}/comments`);
+      if (requestId !== requestIdRef.current) return; // a newer request superseded this one
       setComments(data.comments);
       setLoop(data.loop);
       setUnreadReplyCount(data.unreadReplyCount ?? 0);
+      setCanComment(data.canComment);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load the conversation");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [taskId]);
 
@@ -586,7 +609,7 @@ export function useTaskComments(taskId: string | undefined) {
     fetchComments();
   }, [fetchComments]);
 
-  return { comments, loop, unreadReplyCount, loading, error, refetch: fetchComments };
+  return { comments, loop, unreadReplyCount, canComment, loading, error, refetch: fetchComments };
 }
 
 export function useTaskTimeline(taskId: string | undefined) {
@@ -594,7 +617,12 @@ export function useTaskTimeline(taskId: string | undefined) {
   const [loading, setLoading] = useState(Boolean(taskId));
   const [error, setError] = useState<string | null>(null);
 
+  // Same last-write-wins guard as useTaskComments — the two are fetched together and a stale timeline
+  // rendered against the current task is the same lie in a different pane.
+  const requestIdRef = useRef(0);
+
   const fetchTimeline = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     if (!taskId) {
       setEntries([]);
       setLoading(false);
@@ -607,11 +635,13 @@ export function useTaskTimeline(taskId: string | undefined) {
       const data = await api<{ entries: TaskTimelineEntry[] }>(
         `/tasks/${encodeURIComponent(taskId)}/timeline`
       );
+      if (requestId !== requestIdRef.current) return;
       setEntries(data.entries);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load the timeline");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [taskId]);
 

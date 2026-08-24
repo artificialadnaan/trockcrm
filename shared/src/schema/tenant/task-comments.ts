@@ -43,7 +43,14 @@ export const taskComments = pgTable(
     authorId: uuid("author_id").references(() => users.id),
     body: text("body").notNull(),
     kind: varchar("kind", { length: 20 }).default("reply").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    // Migration 0234 defaults this to clock_timestamp(), not now(): now() is transaction-START, and
+    // a reply committed by a slow transaction would carry a timestamp older than an acknowledgement
+    // that never saw it, permanently hiding it from "Needs your attention". Drizzle's defaultNow()
+    // renders now(), so 0234's SQL is authoritative for the default -- this marker exists for the
+    // column's type and nullability.
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
   },
   (table) => [
     // Serves the thread read (one task, oldest->newest or newest-first) and the unread-since-ack count.

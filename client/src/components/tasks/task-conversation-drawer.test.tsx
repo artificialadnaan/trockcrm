@@ -41,6 +41,7 @@ vi.mock("@/components/ui/button", () => ({
 
 const ASSIGNER = "user-adam";
 const ASSIGNEE = "user-derek";
+const STRANGER = "user-nobody";
 
 const task = {
   id: "task-1",
@@ -94,11 +95,19 @@ function setComments(comments: unknown[], extra: Record<string, unknown> = {}) {
     comments,
     loop: liveLoop,
     unreadReplyCount: comments.length,
+    canComment: true,
     loading: false,
     error: null,
     refetch: vi.fn().mockResolvedValue(undefined),
     ...extra,
   });
+}
+
+/** Switch to the History tab. */
+function openHistoryTab() {
+  const tabs = [...container.querySelectorAll<HTMLElement>('button[role="tab"]')];
+  const history = tabs.find((t) => t.textContent?.includes("History"))!;
+  act(() => history.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 }
 
 function click(selector: string) {
@@ -284,11 +293,113 @@ describe("acknowledgement", () => {
     expect(mocks.ackTaskRepliesMock).not.toHaveBeenCalled();
   });
 
+  // The acknowledgement is a claim that a specific person SAW something. Recording it while the
+  // conversation is not even on screen is the one guarantee this feature sells.
+  it("does NOT acknowledge while the History tab is showing", async () => {
+    setComments([comment()]);
+    await act(async () => { render(); });
+    expect(mocks.ackTaskRepliesMock).toHaveBeenCalledTimes(1);
+
+    mocks.ackTaskRepliesMock.mockClear();
+    openHistoryTab();
+    setComments([comment(), comment({ id: "c2", createdAt: "2026-05-01T12:00:00.000Z" })]);
+    await act(async () => { render(); });
+
+    expect(mocks.ackTaskRepliesMock).not.toHaveBeenCalled();
+  });
+
   it("does not re-acknowledge the same thread head on a re-render", async () => {
     setComments([comment()]);
     await act(async () => { render(); });
     await act(async () => { render(); });
     expect(mocks.ackTaskRepliesMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("what the UI is allowed to claim", () => {
+  // The assignee's own replies are not "new replies" TO THEM — they wrote them. The badge is an
+  // assigner-only indicator, exactly as the list row already treats it.
+  it("shows the unread count to the assigner and not to the assignee", () => {
+    setComments([comment(), comment({ id: "c2" })]);
+    render();
+    expect(container.textContent).toContain("2 new replies");
+
+    act(() => root.unmount());
+    container.remove();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    act(() => { root = createRoot(container); });
+    render({ currentUserId: ASSIGNEE });
+    expect(container.textContent).not.toContain("new replies");
+  });
+
+  // completeTask only moves pending/in_progress/waiting_on/blocked, and the transition table has no
+  // scheduled -> completed edge. Offering the button anyway produces a misleading "already completed
+  // or dismissed" error on every click.
+  it("offers Mark complete only for statuses the API will actually accept", () => {
+    for (const status of ["pending", "in_progress", "waiting_on", "blocked"]) {
+      setComments([]);
+      render({ task: { ...task, status } as any });
+      expect(container.textContent, status).toContain("Mark complete");
+    }
+    for (const status of ["scheduled", "completed", "dismissed"]) {
+      setComments([]);
+      render({ task: { ...task, status } as any });
+      expect(container.textContent, status).not.toContain("Mark complete");
+    }
+  });
+
+  // Construction and field_contractor users can OPEN any task in the office but may not speak on one
+  // they are unrelated to. The server answers this; the composer must not offer a Send it will 403.
+  it("hides the composer when the server says the viewer cannot comment", () => {
+    setComments([], { canComment: false });
+    render({ currentUserId: STRANGER });
+
+    expect(container.querySelector("#task-reply-composer")).toBeNull();
+    expect(container.textContent).toContain("cannot reply");
+  });
+
+  it("shows the composer when the viewer may comment", () => {
+    setComments([], { canComment: true });
+    render();
+    expect(container.querySelector("#task-reply-composer")).not.toBeNull();
+  });
+
+  // "Nothing has happened yet" and "we could not load the history" are different facts, and rendering
+  // the first when the second is true is an authoritative-looking lie.
+  it("surfaces a timeline failure instead of claiming an empty history", () => {
+    mocks.useTaskTimelineMock.mockReturnValue({
+      entries: [], loading: false, error: "Failed to load the timeline", refetch: vi.fn(),
+    });
+    setComments([]);
+    render();
+    openHistoryTab();
+
+    expect(container.textContent).toContain("Failed to load the timeline");
+    expect(container.textContent).not.toContain("Nothing has happened yet");
+  });
+
+  // The summary already says "(+N more)". Saying it and then providing no way to see them is worse
+  // than not mentioning them.
+  it("renders the field changes an audit entry reports", () => {
+    mocks.useTaskTimelineMock.mockReturnValue({
+      entries: [{
+        id: "audit:1", kind: "audit", occurredAt: "2026-05-01T09:00:00.000Z",
+        actorId: ASSIGNER, actorLabel: "Adam Shaw", actorType: "user", action: "update",
+        summary: "Adam Shaw changed Priority from normal to urgent (+1 more)", body: null,
+        fieldChanges: [
+          { key: "priority", label: "Priority", fromDisplay: "normal", toDisplay: "urgent", transition: "changed" },
+          { key: "due_date", label: "Due date", fromDisplay: null, toDisplay: "2026-05-09", transition: "set" },
+        ],
+      }],
+      loading: false, error: null, refetch: vi.fn(),
+    });
+    setComments([]);
+    render();
+    openHistoryTab();
+
+    expect(container.textContent).toContain("Due date");
+    expect(container.textContent).toContain("2026-05-09");
   });
 });
 
@@ -316,6 +427,38 @@ describe("the history tab", () => {
     expect(text).toContain("System created this task");
     expect(text).toContain("Derek Barr replied");
     expect(text.indexOf("System created this task")).toBeLessThan(text.indexOf("Derek Barr replied"));
+  });
+});
+
+// The reply email's second CTA. A dead affordance in an accountability feature is worse than none:
+// the assigner clicks it, believes the loop is closed, and it is not.
+describe("the emailed Mark complete CTA", () => {
+  it("focuses and highlights the completion action when opened with ?complete=1", async () => {
+    setComments([]);
+    await act(async () => { render({ completeRequested: true }); });
+
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Mark complete")
+    )!;
+    expect(button.getAttribute("data-complete-requested")).toBe("true");
+    expect(document.activeElement).toBe(button);
+  });
+
+  // It must NOT complete on its own: a link in an email is a GET, and a GET that mutates is one
+  // mail-scanner prefetch away from closing tasks nobody touched.
+  it("does not complete the task on its own", async () => {
+    setComments([]);
+    await act(async () => { render({ completeRequested: true }); });
+    expect(mocks.completeTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves the button unfocused on an ordinary open", async () => {
+    setComments([]);
+    await act(async () => { render(); });
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Mark complete")
+    )!;
+    expect(button.getAttribute("data-complete-requested")).toBe("false");
   });
 });
 

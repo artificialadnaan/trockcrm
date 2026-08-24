@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Check,
@@ -163,6 +163,9 @@ function TaskRow({
   showUnreadReplies?: boolean;
 }) {
   const navigate = useNavigate();
+  // The ROUTER's location, not window.location — they diverge under a MemoryRouter and, more to the
+  // point, the router is the authority for where the app actually is.
+  const { search } = useLocation();
   const [editOpen, setEditOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // While the bucket is refetching (e.g. right after this row's own complete/snooze), these rows are
@@ -217,9 +220,14 @@ function TaskRow({
 
   // Navigates rather than opening local state, so the URL the emails deep-link to and the URL a click
   // produces are the same one — /tasks/<id> is the task's address, and the drawer just renders it.
+  //
+  // The query string rides along. Opening a conversation from a `?source=`/`?assignee=` filtered list
+  // and landing back on an unfiltered one destroys the triage context the drawer exists to preserve —
+  // and `?officeId` is load-bearing besides: dropping it re-resolves the tenant from the reader's
+  // home office and 404s a cross-office task.
   const openConversation = (event: React.MouseEvent) => {
     event.stopPropagation();
-    navigate(`/tasks/${task.id}`);
+    navigate(`/tasks/${task.id}${search}`);
   };
 
   const unreadReplies = showUnreadReplies ? task.unreadReplyCount ?? 0 : 0;
@@ -641,6 +649,7 @@ function TaskListPageContent({ role, userId }: { role: string; userId: string })
   const {
     tasks: awaitingMeTasks,
     loading: awaitingMeLoading,
+    error: awaitingMeError,
     refetch: refetchAwaitingMe,
   } = useTasksAwaitingMe();
 
@@ -652,7 +661,12 @@ function TaskListPageContent({ role, userId }: { role: string; userId: string })
     completed: completedLoading,
   };
   const loading = countsLoading || overdueLoading || todayLoading || thisWeekLoading || laterLoading || completedLoading || linkedTaskLoading;
-  const error = linkedTaskError ?? overdueError ?? todayError ?? thisWeekError ?? laterError ?? completedError;
+  // awaitingMeError is FIRST, and that ordering is the point. NeedsAttentionGroup hides itself when
+  // it has nothing, so a failed /tasks/awaiting-me renders byte-identically to "nothing needs you" —
+  // the assigner is told they are clear when the truth is that we could not find out. Silence and
+  // zero must never look the same on a surface whose whole job is to say what is waiting.
+  const error =
+    awaitingMeError ?? linkedTaskError ?? overdueError ?? todayError ?? thisWeekError ?? laterError ?? completedError;
 
   const updateAssignee = (assigneeId: string) => {
     const next = new URLSearchParams(searchParams);
@@ -737,7 +751,17 @@ function TaskListPageContent({ role, userId }: { role: string; userId: string })
         <TaskConversationDrawer
           task={linkedTask}
           currentUserId={userId}
-          onClose={() => navigate("/tasks")}
+          // The reply email's "Mark complete" CTA lands here as ?complete=1. It focuses the action;
+          // it never performs it — an emailed link is a GET, and a GET that mutates is one
+          // mail-scanner prefetch away from closing tasks nobody touched.
+          completeRequested={searchParams.get("complete") === "1"}
+          onClose={() => {
+            // Keep the filters, drop the one-shot ?complete flag so a re-open does not re-focus it.
+            const next = new URLSearchParams(searchParams);
+            next.delete("complete");
+            const qs = next.toString();
+            navigate(`/tasks${qs ? `?${qs}` : ""}`);
+          }}
           onChanged={refetchAll}
         />
       ) : null}

@@ -214,6 +214,39 @@ describe("migration 0234 — task_comments and the closed-loop columns", () => {
     expect(result.rows[0]?.kind).toBe("reply");
   });
 
+  // `now()` is transaction-START in Postgres, and comment ordering is what decides "unread". Two
+  // overlapping reply requests are enough to lose one: T1 opens (now() = t1) and stalls, T2 posts a
+  // reply at t2 > t1, the assigner reads and acknowledges up to t2, and only THEN does T1 commit its
+  // insert carrying created_at = t1. The reply is older than the acknowledgement that never saw it, so
+  // it never re-enters "Needs your attention". clock_timestamp() reads the wall clock at INSERT rather
+  // than at BEGIN, which shrinks that window from the whole transaction to the gap between the insert
+  // and its commit.
+  it("stamps created_at at INSERT time, not at transaction start", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(migrationSql(MIGRATION));
+    await seedTask("office_dallas");
+
+    // Both rows are inserted inside ONE transaction. Under now() they are byte-identical; under
+    // clock_timestamp() they are not — which is the entire distinction, and it cannot be read off a
+    // catalog default string with any confidence.
+    await pg.exec(`
+      BEGIN;
+      INSERT INTO office_dallas.task_comments (task_id, author_id, body) VALUES ('${TASK}', '${ASSIGNEE}', 'first');
+      INSERT INTO office_dallas.task_comments (task_id, author_id, body) VALUES ('${TASK}', '${ASSIGNEE}', 'second');
+      COMMIT;
+    `);
+
+    const rows = await pg.query<{ body: string; created_at: Date }>(
+      `SELECT body, created_at FROM office_dallas.task_comments ORDER BY body`
+    );
+    expect(rows.rows).toHaveLength(2);
+    const [first, second] = rows.rows;
+    expect(
+      first!.created_at.getTime(),
+      "two inserts in one transaction must not share a timestamp"
+    ).not.toBe(second!.created_at.getTime());
+  });
+
   // C9: author_id mirrors tasks.created_by, which HAS a FK. Without one, a comment can name a user
   // that never existed and the timeline's LEFT JOIN silently renders it as "System".
   it("REFUSES an author_id that is not a real user", async () => {

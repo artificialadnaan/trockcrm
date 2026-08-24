@@ -9,7 +9,7 @@
 // the ordinary list query would be permanently empty and look fine.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -105,6 +105,15 @@ function mockApi(awaitingMe: unknown[]) {
 
 let container: HTMLDivElement;
 let root: Root | null;
+/** Live view of the router location, so a navigation can be asserted on. */
+const locationRef = { pathname: "", search: "" };
+
+function LocationProbe() {
+  const location = useLocation();
+  locationRef.pathname = location.pathname;
+  locationRef.search = location.search;
+  return null;
+}
 
 const flush = async () => {
   await act(async () => {});
@@ -115,6 +124,7 @@ function renderPage(path = "/tasks") {
     root = createRoot(container);
     root.render(
       <MemoryRouter initialEntries={[path]}>
+        <LocationProbe />
         <Routes>
           <Route path="/tasks" element={<TaskListPage />} />
           <Route path="/tasks/:taskId" element={<TaskListPage />} />
@@ -203,6 +213,64 @@ describe("Needs your attention", () => {
 
     expect(container.textContent).toContain("My own task");
     expect(container.textContent).not.toContain("5 replies");
+  });
+});
+
+// SILENCE AND ZERO MUST NOT RENDER THE SAME. NeedsAttentionGroup hides itself when empty, so a failed
+// /tasks/awaiting-me rendered exactly like "nothing needs you" — Adam is told he is clear when the
+// truth is that we could not find out.
+describe("when the attention bucket cannot be loaded", () => {
+  it("says so instead of rendering as though nothing is waiting", async () => {
+    apiMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/tasks/awaiting-me")) throw new Error("Failed to load replies awaiting you");
+      if (url.startsWith("/tasks/counts")) return EMPTY_COUNTS;
+      return EMPTY_LIST;
+    });
+    renderPage();
+    await flush();
+
+    expect(container.textContent).toContain("Failed to load replies awaiting you");
+    // ...and it must not silently render the "nothing waiting" shape.
+    expect(container.querySelector('[data-testid="needs-attention-group"]')).toBeNull();
+  });
+
+  it("stays quiet when the bucket is genuinely empty", async () => {
+    mockApi([]);
+    renderPage();
+    await flush();
+
+    expect(container.textContent).not.toContain("Failed to load replies awaiting you");
+  });
+});
+
+// Opening a conversation from a filtered list and closing it must return to that list, not to an
+// unfiltered one — the whole reason this is a drawer over the list rather than a separate page.
+describe("triage context is preserved", () => {
+  it("keeps the active filters in the URL when opening a conversation", async () => {
+    apiMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/tasks/awaiting-me")) return { tasks: [] };
+      if (url.startsWith("/tasks/counts")) return EMPTY_COUNTS;
+      if (url.includes("section=overdue")) {
+        return {
+          tasks: [taskFixture({ id: "own-1", title: "Filtered task" })],
+          pagination: { page: 1, limit: 100, total: 1, totalPages: 1 },
+        };
+      }
+      return EMPTY_LIST;
+    });
+    renderPage("/tasks?source=manual&assignee=user-derek");
+    await flush();
+
+    const open = container.querySelector<HTMLElement>(
+      'button[aria-label="Open the conversation for Filtered task"]'
+    )!;
+    await act(async () => {
+      open.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(locationRef.pathname).toBe("/tasks/own-1");
+    expect(locationRef.search).toContain("source=manual");
+    expect(locationRef.search).toContain("assignee=user-derek");
   });
 });
 

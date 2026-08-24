@@ -195,10 +195,15 @@ export function mapTaskAuditChanges(changes: unknown): TaskTimelineFieldChange[]
  */
 export function buildTaskAuditActorLabel(
   task: { source: string; originRule: string | null },
+  action: string,
   changedBy: string | null,
   actorDisplayName: string | null
 ): { actorLabel: string; actorType: "user" | "system" } {
-  if (task.source === "automated") {
+  // SCOPED TO THE CREATION EVENT, and only that. `source` records who MADE the task; it says nothing
+  // about who touched it afterwards. Applying it to every row was an over-correction in the opposite
+  // direction — a person who later re-prioritises or reassigns a machine-generated task had their own
+  // edit captured as "System", which hides a real human decision in an accountability surface.
+  if (action === "insert" && task.source === "automated") {
     return {
       actorLabel: task.originRule ? `System (${task.originRule})` : "System",
       actorType: "system",
@@ -307,6 +312,7 @@ export async function listTaskComments(
   comments: TaskCommentRecord[];
   loop: TaskLoopDescriptor;
   unreadReplyCount: number;
+  canComment: boolean;
 }> {
   const task = await loadLoopTask(tenantDb, taskId, userRole, userId);
 
@@ -345,15 +351,41 @@ export async function listTaskComments(
     })),
     loop: await getTaskLoopDescriptor(tenantDb, task),
     unreadReplyCount,
+    // ANSWERED BY THE SERVER, not re-derived in the browser. Opening a task and speaking on it are
+    // two different permissions -- visibility only narrows reps, so a construction or field_contractor
+    // user can open any task in the office while the comment rule admits only the assignee, the
+    // assigner and admin/director. A client that re-implements the second rule drifts from it; this
+    // hands over the same assertion's verdict so the composer cannot offer a Send the server 403s.
+    canComment: canUserCommentOnTask(task, userRole, userId),
   };
+}
+
+/** The comment-authority assertion as a boolean, so the read path can report it without throwing. */
+function canUserCommentOnTask(
+  task: { assignedTo: string; createdBy: string | null },
+  userRole: string,
+  userId: string
+) {
+  try {
+    assertTaskCommentAuthority(task, userRole, userId);
+    return true;
+  } catch (err) {
+    if (err instanceof AppError && err.statusCode === 403) return false;
+    throw err;
+  }
 }
 
 export async function getTaskTimeline(
   tenantDb: TenantDb,
   taskId: string,
   userRole: string,
-  userId: string
+  userId: string,
+  options: { limit?: number } = {}
 ): Promise<TaskTimelineEntry[]> {
+  // NEWEST-FIRST UNDER THE CAP, then presented chronologically by the sort at the bottom of this
+  // function. An ascending LIMIT would pin a busy task to its FIRST 200 events and hide everything
+  // recent — the exact opposite of what a timeline is for.
+  const limit = options.limit ?? TIMELINE_LIMIT;
   const task = await loadLoopTask(tenantDb, taskId, userRole, userId);
 
   // FILTERED ON table_name/record_id, NOT entity_type. The trigger writes only
@@ -366,8 +398,8 @@ export async function getTaskTimeline(
       FROM audit_log a
       LEFT JOIN public.users u ON u.id = a.changed_by
      WHERE a.table_name = 'tasks' AND a.record_id = ${taskId}
-     ORDER BY a.created_at ASC, a.id ASC
-     LIMIT ${TIMELINE_LIMIT}
+     ORDER BY a.created_at DESC, a.id DESC
+     LIMIT ${limit}
   `);
   const auditRows = ((auditResult as any).rows ?? auditResult) as Array<{
     id: number | string;
@@ -388,6 +420,7 @@ export async function getTaskTimeline(
 
     const { actorLabel, actorType } = buildTaskAuditActorLabel(
       task,
+      row.action,
       row.changed_by,
       row.actor_display_name
     );
@@ -416,8 +449,9 @@ export async function getTaskTimeline(
     })
     .from(taskComments)
     .where(eq(taskComments.taskId, taskId))
-    .orderBy(asc(taskComments.createdAt), asc(taskComments.id))
-    .limit(TIMELINE_LIMIT);
+    // Same reason as the audit half: take the newest window, present it ascending.
+    .orderBy(desc(taskComments.createdAt), desc(taskComments.id))
+    .limit(limit);
 
   for (const row of commentRows) {
     // The author is recorded on the row, so it is used directly — see buildTaskAuditActorLabel for why

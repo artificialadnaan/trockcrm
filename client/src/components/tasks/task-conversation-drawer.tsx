@@ -33,6 +33,15 @@ import {
  * to a back-navigation.
  */
 
+/**
+ * The statuses `completeTask` will actually accept.
+ *
+ * Mirrors the service's conditional UPDATE (pending / in_progress / waiting_on / blocked) and the
+ * transition table, which has no `scheduled -> completed` edge. Offering the button outside this set
+ * produced a misleading "Task already completed or dismissed" on every click.
+ */
+const COMPLETABLE_STATUSES = new Set(["pending", "in_progress", "waiting_on", "blocked"]);
+
 function initialsOf(name: string | null | undefined) {
   if (!name) return "SY";
   return name
@@ -99,10 +108,28 @@ function CommentBubble({ comment }: { comment: TaskComment }) {
 }
 
 function TimelineRow({ entry }: { entry: TaskTimelineEntry }) {
+  // The summary names the first change and appends "(+N more)". Saying that and then providing no way
+  // to see the rest is worse than not mentioning them, so every reported change is listed.
+  const extraChanges = entry.fieldChanges.length > 1 ? entry.fieldChanges : [];
+
   return (
     <li className="flex gap-3 border-l-2 border-slate-200 pl-4">
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-slate-800">{entry.summary}</p>
+        {extraChanges.length > 0 ? (
+          <ul className="mt-1 space-y-0.5">
+            {extraChanges.map((change) => (
+              <li key={change.key} className="text-xs font-medium text-slate-600">
+                <span className="font-black">{change.label}</span>
+                {change.transition === "set"
+                  ? `: set to ${change.toDisplay}`
+                  : change.transition === "cleared"
+                    ? ": cleared"
+                    : `: ${change.fromDisplay} → ${change.toDisplay}`}
+              </li>
+            ))}
+          </ul>
+        ) : null}
         <p className="text-xs font-semibold text-slate-500">{formatWhen(entry.occurredAt)}</p>
       </div>
     </li>
@@ -114,11 +141,20 @@ export function TaskConversationDrawer({
   currentUserId,
   onClose,
   onChanged,
+  completeRequested = false,
 }: {
   task: Task;
   currentUserId: string;
   onClose: () => void;
   onChanged: () => void;
+  /**
+   * Arrived from the reply email's "Mark complete" CTA (`?complete=1`).
+   *
+   * It FOCUSES the action; it deliberately does not perform it. A link in an email is a GET, and a GET
+   * that mutates is one mail-scanner prefetch away from closing tasks nobody touched — so the close
+   * still costs one deliberate click by an authenticated assigner.
+   */
+  completeRequested?: boolean;
 }) {
   const [tab, setTab] = useState<"conversation" | "timeline">("conversation");
   const [draft, setDraft] = useState("");
@@ -129,16 +165,35 @@ export function TaskConversationDrawer({
     comments,
     loop,
     unreadReplyCount,
+    canComment,
     loading: commentsLoading,
     error: commentsError,
     refetch: refetchComments,
   } = useTaskComments(task.id);
-  const { entries, loading: timelineLoading, refetch: refetchTimeline } = useTaskTimeline(task.id);
+  const {
+    entries,
+    loading: timelineLoading,
+    error: timelineError,
+    refetch: refetchTimeline,
+  } = useTaskTimeline(task.id);
 
   const isAssigner = Boolean(task.createdBy) && task.createdBy === currentUserId;
   const isDone = isTerminalTaskStatus(task.status);
+  const canComplete = COMPLETABLE_STATUSES.has(task.status);
   const projectContext = getTaskProjectContext(task);
   const notice = loopNotice(loop);
+
+  // Reset to the conversation whenever the drawer swings to a different task, so a tab left on
+  // History cannot carry over and suppress (or silently permit) the next task's acknowledgement.
+  useEffect(() => {
+    setTab("conversation");
+  }, [task.id]);
+
+  const completeButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!completeRequested || !canComplete) return;
+    completeButtonRef.current?.focus();
+  }, [completeRequested, canComplete]);
 
   /**
    * The timestamp the user has actually RENDERED — the newest comment on screen, not `Date.now()`.
@@ -163,6 +218,10 @@ export function TaskConversationDrawer({
   // that returns the same head does not re-post.
   const ackedRef = useRef<string | null>(null);
   useEffect(() => {
+    // ...AND ONLY WHILE THE CONVERSATION IS ON SCREEN. The acknowledgement is a claim that a specific
+    // person SAW something; recording it while the History tab is showing would take the task out of
+    // their bucket on the strength of replies they were never shown.
+    if (tab !== "conversation") return;
     if (!isAssigner || !renderedUpTo || ackedRef.current === renderedUpTo) return;
     ackedRef.current = renderedUpTo;
     ackTaskReplies(task.id, renderedUpTo)
@@ -174,7 +233,7 @@ export function TaskConversationDrawer({
         console.error("[tasks] ack failed", error);
         ackedRef.current = null;
       });
-  }, [isAssigner, renderedUpTo, task.id, onChanged]);
+  }, [tab, isAssigner, renderedUpTo, task.id, onChanged]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -229,7 +288,8 @@ export function TaskConversationDrawer({
                 arriving from the assignment email needs first, and it is the requirement the old
                 "Linked task" banner carried — the drawer replaces that banner, so it inherits it. */}
             {projectContext ? <span className="truncate">{projectContext}</span> : null}
-            {unreadReplyCount > 0 ? (
+            {/* Assigner-only: the assignee's own replies are not "new" to the person who wrote them. */}
+            {isAssigner && unreadReplyCount > 0 ? (
               <span className="font-black text-brand-red">
                 {unreadReplyCount} new {unreadReplyCount === 1 ? "reply" : "replies"}
               </span>
@@ -237,8 +297,16 @@ export function TaskConversationDrawer({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {!isDone ? (
-            <Button type="button" size="sm" onClick={complete} disabled={closing}>
+          {canComplete ? (
+            <Button
+              ref={completeButtonRef}
+              type="button"
+              size="sm"
+              onClick={complete}
+              disabled={closing}
+              data-complete-requested={completeRequested ? "true" : "false"}
+              className={cn(completeRequested ? "ring-2 ring-brand-red ring-offset-2" : "")}
+            >
               <Check className="mr-2 h-4 w-4" />
               Mark complete
             </Button>
@@ -302,6 +370,12 @@ export function TaskConversationDrawer({
             </p>
           ) : null}
 
+          {canComment === false ? (
+            <p className="border-t border-slate-200 px-4 py-3 text-xs font-semibold text-slate-500">
+              You cannot reply to this task — only the assignee, the person who assigned it, or an
+              admin can.
+            </p>
+          ) : (
           <form onSubmit={submit} className="flex items-end gap-2 border-t border-slate-200 p-3">
             <label htmlFor="task-reply-composer" className="sr-only">
               Reply to this task
@@ -319,10 +393,14 @@ export function TaskConversationDrawer({
               Send
             </Button>
           </form>
+          )}
         </div>
       ) : (
         <div className="max-h-96 overflow-y-auto px-4 py-4">
-          {timelineLoading ? (
+          {timelineError ? (
+            // "Nothing has happened yet" and "we could not load the history" are different facts.
+            <p className="text-sm font-semibold text-brand-red">{timelineError}</p>
+          ) : timelineLoading ? (
             <p className="text-sm font-semibold text-slate-500">Loading the history…</p>
           ) : entries.length === 0 ? (
             <p className="text-sm font-semibold text-slate-500">Nothing has happened yet.</p>

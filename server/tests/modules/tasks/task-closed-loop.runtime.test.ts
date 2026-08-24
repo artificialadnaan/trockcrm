@@ -285,6 +285,20 @@ describe("the reply notification outbox", () => {
     expect(loop.reason).toBe("assigner_inactive");
   });
 
+  // The client must not offer a Send button the server will 403. Answered BY THE SERVER rather than
+  // re-derived in the browser: construction and field_contractor users can OPEN any task in the office
+  // (visibility only narrows reps) while the comment rule admits only the assignee, the assigner and
+  // admin/director — two different rules, and duplicating the second one client-side is how they drift.
+  it("reports whether the viewer may actually comment", async () => {
+    for (const [role, id] of [["rep", ASSIGNEE], ["rep", ASSIGNER], ["admin", STRANGER]] as const) {
+      const { canComment } = await listTaskComments(tdb, TASK, role, id);
+      expect(canComment, `${role}/${id}`).toBe(true);
+    }
+
+    const { canComment } = await listTaskComments(tdb, TASK, "construction", STRANGER);
+    expect(canComment, "an unrelated construction user").toBe(false);
+  });
+
   it("reports a live loop on an ordinary task so the composer can say so", async () => {
     const { loop } = await listTaskComments(tdb, TASK, "rep", ASSIGNEE);
     expect(loop).toMatchObject({
@@ -515,27 +529,59 @@ describe("the merged timeline", () => {
     expect(audit.at(-1)).toMatchObject({ actorLabel: "Adam Shaw", actorType: "user" });
   });
 
-  // C4 — THE MISATTRIBUTION THIS RULE EXISTS TO PREVENT. The worker DOES set app.current_user_id
-  // (email-sync.ts:1348, via withTenantAuditContext), and one of its call sites wraps the whole 25-rule
-  // engine. So a cron-written task lands in audit_log with changed_by = a REAL HUMAN, and rendering
-  // changed_by would caption a machine's work "Adam Shaw created this task". The label is derived from
-  // the TASK'S OWN `source` column instead.
-  it("renders a machine task's audit rows as System even though changed_by is a real person", async () => {
+  // C4 — THE MISATTRIBUTION THIS RULE EXISTS TO PREVENT, scoped to the event it is true of.
+  //
+  // The worker DOES set app.current_user_id (email-sync.ts:1348, via withTenantAuditContext), and one
+  // of its call sites wraps the whole 25-rule engine — so a cron-written task's CREATION lands in
+  // audit_log with changed_by = a REAL HUMAN whose GUC the job borrowed, and rendering it would
+  // caption a machine's work "Adam Shaw created this task".
+  //
+  // That is true of the creation event and of nothing else. A task's `source` describes who MADE it,
+  // not who touched it afterwards, so applying the rule to every row was an over-correction in the
+  // opposite direction: a person who later re-prioritises a machine-generated task had their own edit
+  // captured as "System". Same insight as comments staying author-derived, one level down.
+  it("renders a machine task's CREATION as System even though changed_by is a real person", async () => {
+    await pg.exec(`SELECT set_config('app.current_user_id', '${ASSIGNER}', false)`);
+    await pg.exec(`
+      INSERT INTO tasks (id, title, type, priority, status, assigned_to, created_by, source, origin_rule)
+      VALUES ('${uid("b7")}', 'Cron made this', 'system','normal','pending','${ASSIGNEE}', NULL, 'automated', 'deal_stalled');
+    `);
+    await pg.exec(`SELECT set_config('app.current_user_id', '', false)`);
+
+    const changed = await pg.query<{ changed_by: string }>(
+      `SELECT changed_by FROM audit_log WHERE record_id = '${uid("b7")}' AND action = 'insert'`
+    );
+    expect(changed.rows[0]!.changed_by, "the fixture must really carry a human").toBe(ASSIGNER);
+
+    const entries = await getTaskTimeline(tdb, uid("b7"), "rep", ASSIGNEE);
+    const creation = entries.find((e) => e.kind === "audit" && e.action === "insert")!;
+    expect(creation.actorType).toBe("system");
+    expect(creation.actorLabel).toBe("System (deal_stalled)");
+    expect(creation.actorLabel).not.toContain("Adam");
+  });
+
+  // The other half. Over-correcting here is its own misattribution: the person who made the edit is
+  // recorded on the row, and calling their work "System" hides a real human decision in an
+  // accountability surface.
+  it("names the HUMAN who later edits a machine-created task", async () => {
     await pg.exec(`SELECT set_config('app.current_user_id', '${ASSIGNER}', false)`);
     await pg.exec(`UPDATE tasks SET priority = 'urgent' WHERE id = '${MACHINE_TASK}'`);
     await pg.exec(`SELECT set_config('app.current_user_id', '', false)`);
 
-    const changed = await pg.query<{ changed_by: string }>(
-      `SELECT changed_by FROM audit_log WHERE record_id = '${MACHINE_TASK}' AND action = 'update'`
+    const audit = (await getTaskTimeline(tdb, MACHINE_TASK, "rep", ASSIGNEE)).filter(
+      (e) => e.kind === "audit" && e.action === "update"
     );
-    expect(changed.rows[0]!.changed_by, "the fixture must really carry a human").toBe(ASSIGNER);
+    expect(audit.at(-1)).toMatchObject({ actorLabel: "Adam Shaw", actorType: "user" });
+  });
+
+  // ...and an UPDATE with no attributable actor still reads as System rather than as an empty name.
+  it("renders an unattributed edit to a machine task as System", async () => {
+    await pg.exec(`UPDATE tasks SET priority = 'low' WHERE id = '${MACHINE_TASK}'`);
 
     const audit = (await getTaskTimeline(tdb, MACHINE_TASK, "rep", ASSIGNEE)).filter(
-      (e) => e.kind === "audit"
+      (e) => e.kind === "audit" && e.action === "update"
     );
-    expect(audit.at(-1)!.actorType).toBe("system");
-    expect(audit.at(-1)!.actorLabel).toBe("System (deal_stalled)");
-    expect(audit.at(-1)!.actorLabel).not.toContain("Adam");
+    expect(audit.at(-1)).toMatchObject({ actorLabel: "System", actorType: "system" });
   });
 
   // ...but a COMMENT on that same machine task was written by a person, and must say so. The source
@@ -554,6 +600,29 @@ describe("the merged timeline", () => {
 
     const audit = (await getTaskTimeline(tdb, TASK, "rep", ASSIGNER)).filter((e) => e.kind === "audit");
     expect(audit.at(-1)).toMatchObject({ actorLabel: "System", actorType: "system" });
+  });
+
+  // A timeline capped with an ASCENDING limit shows a busy task its FIRST 200 events and hides
+  // everything recent — the exact opposite of what the surface is for. The window is taken
+  // newest-first and then presented in chronological order.
+  it("keeps the NEWEST events when a task has more history than the window", async () => {
+    await pg.exec(`SELECT set_config('app.current_user_id', '${ASSIGNER}', false)`);
+    // Each UPDATE must change the value: audit_trigger_func only writes a row for columns that
+    // actually differ, so a loop writing the same title produces ONE audit row, not thirty.
+    for (let i = 0; i < 30; i += 1) {
+      await pg.exec(`UPDATE tasks SET title = 'edit ${i}' WHERE id = '${TASK}'`);
+    }
+    await pg.exec(`SELECT set_config('app.current_user_id', '', false)`);
+
+    const entries = await getTaskTimeline(tdb, TASK, "rep", ASSIGNER, { limit: 5 });
+
+    expect(entries).toHaveLength(5);
+    // Still oldest-first for display...
+    const times = entries.map((e) => new Date(e.occurredAt).getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    // ...but the window is the tail of the history, not its head.
+    expect(entries.at(-1)!.summary).toContain("edit 29");
+    expect(entries.some((e) => e.summary.includes("created this task"))).toBe(false);
   });
 
   it("403s a user who cannot see the task", async () => {

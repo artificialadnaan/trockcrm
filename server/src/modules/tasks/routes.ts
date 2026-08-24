@@ -274,6 +274,8 @@ router.get("/:id/comments", async (req, res, next) => {
       comments: result.comments,
       loop: result.loop,
       unreadReplyCount: result.unreadReplyCount,
+      // So the composer can hide itself rather than offering a Send the server will 403.
+      canComment: result.canComment,
     });
   } catch (err) {
     next(err);

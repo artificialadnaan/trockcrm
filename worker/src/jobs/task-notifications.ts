@@ -1,7 +1,15 @@
 /**
  * In-app notifications for the task loop: `task.assigned` (existing, moved here) and `task.replied`
- * (new). Both write a row into the recipient's office `notifications` table and PG NOTIFY so the
- * server's SSE manager can push it.
+ * (new). Both write a row into the recipient's office `notifications` table and emit PG NOTIFY.
+ *
+ * ⚠️ THE NOTIFY DOES NOT CURRENTLY REACH A LISTENER, and this file must not claim otherwise. The only
+ * `LISTEN crm_events` in the repository is worker/src/listener.ts, whose callback logs; the server's
+ * SSE manager consumes its own in-process eventBus and never sees a worker-emitted event. So the row
+ * is correct-on-open, not live — the bell shows it the next time the popover fetches, which is also
+ * the only time it fetches. Bridging worker NOTIFY into the server's SSE process is a platform-level
+ * change well outside this feature, and the closed loop is deliberately designed around the EMAIL as
+ * the channel that actually arrives. The NOTIFY is kept because it costs nothing and becomes correct
+ * the day that bridge exists.
  *
  * EXTRACTED FROM jobs/index.ts so both handlers are testable. `worker/src/jobs/index.ts` imports ~40
  * job modules at load time, so a suite that imports it to reach one handler is a suite nobody writes —
@@ -30,6 +38,7 @@ async function insertNotification(
     [row.userId, row.type, row.title, row.body, row.link]
   );
 
+  // See the file header: nothing in the server process listens for this yet.
   await workerPool.query(`SELECT pg_notify('crm_events', $1)`, [
     JSON.stringify({
       eventName: "notification.created",
