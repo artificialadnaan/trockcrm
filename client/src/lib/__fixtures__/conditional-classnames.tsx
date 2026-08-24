@@ -23,7 +23,7 @@ export function ConditionalClassNamesFixture({ dark, snapshot }: { dark: boolean
           snapshot ? "bg-slate-100 text-slate-500" : "bg-indigo-50 text-indigo-600"
         }`}
       >
-        below AA in one branch, off-palette in the other
+        below AA in one branch, comfortably above it in the other
       </span>
     </>
   );

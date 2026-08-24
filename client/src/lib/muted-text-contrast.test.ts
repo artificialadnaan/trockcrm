@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import tailwindColors from "tailwindcss/colors";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
@@ -46,6 +47,9 @@ const TEXT_SIZE_PX: Record<string, number> = {
 
 /** Weights at or above 700, which is what WCAG means by bold. `font-semibold` is 600 and does not count. */
 const BOLD = /\bfont-(?:bold|extrabold|black)\b/;
+
+/** Any stated font weight. A branch that sets one is judged on it rather than on an inherited weight. */
+const WEIGHT = /\bfont-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black)\b/;
 
 /**
  * Per-FILE counts at the time the measured failures were fixed.
@@ -152,20 +156,63 @@ const BASELINE: Record<string, number> = {
   "preview/tasks-preview.tsx": 2,
 };
 
-/** Tailwind slate scale + white, as RGB. Only the tokens this codebase actually pairs. */
-const PALETTE: Record<string, [number, number, number]> = {
-  white: [255, 255, 255],
-  "slate-50": [248, 250, 252],
-  "slate-100": [241, 245, 249],
-  "slate-200": [226, 232, 240],
-  "slate-300": [203, 213, 225],
-  "slate-400": [148, 163, 184],
-  "slate-500": [100, 116, 139],
-  "slate-600": [71, 85, 105],
-  "slate-700": [51, 65, 85],
-  "slate-800": [30, 41, 59],
-  "slate-900": [15, 23, 42],
-  "slate-950": [2, 6, 23],
+/**
+ * Tailwind's palette, READ FROM THE INSTALLED PACKAGE rather than transcribed.
+ *
+ * It used to be a hand-written slate scale, and being slate-only was a hole with a cost: reverting an
+ * audited fix to `text-gray-400` — the same ~2.5:1 against white, a different family — was silently
+ * DROPPED rather than failed, and the ratchet watches only `text-slate-400`, so nothing caught it.
+ * Verified by making that edit and watching 7/7 pass.
+ *
+ * Reading the real module also removes the transcription risk that made hand-typing 60 more RGB triples
+ * unappealing in the first place. The deprecated v2 aliases (`lightBlue`, `blueGray`, …) are excluded by
+ * name because merely enumerating them prints a migration warning.
+ */
+const COLOR_FAMILIES = [
+  "slate", "gray", "zinc", "neutral", "stone", "red", "orange", "amber", "yellow", "lime", "green",
+  "emerald", "teal", "cyan", "sky", "blue", "indigo", "violet", "purple", "fuchsia", "pink", "rose",
+];
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return null;
+  const value = parseInt(match[1]!, 16);
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+const PALETTE: Record<string, [number, number, number]> = (() => {
+  const palette: Record<string, [number, number, number]> = {
+    white: [255, 255, 255],
+    black: [0, 0, 0],
+  };
+  const colors = tailwindColors as unknown as Record<string, Record<string, string> | string>;
+  for (const family of COLOR_FAMILIES) {
+    const shades = colors[family];
+    if (!shades || typeof shades === "string") continue;
+    for (const [shade, value] of Object.entries(shades)) {
+      const rgb = typeof value === "string" ? hexToRgb(value) : null;
+      if (rgb) palette[`${family}-${shade}`] = rgb;
+    }
+  }
+  return palette;
+})();
+
+/** A colour token as it appears after `bg-` or `text-`. Resolvability is checked against PALETTE. */
+const COLOR_TOKEN = String.raw`[a-z]+-\d{2,3}|white|black`;
+
+/**
+ * The pages whose contrast failures were measured in a browser, each with the number of pairs the scanner
+ * must still find in it.
+ *
+ * The floor is a CONTROL, and it is per file because a single floor on one member proves nothing about the
+ * others: if a resolver regression took weekly-reports-page to zero pairs, the outcome assertion would
+ * still report clean and the floor on region-report-page would still pass. Raise these as coverage grows;
+ * a drop means the scanner is reading less than it used to.
+ */
+const AUDITED: Record<string, number> = {
+  "pages/projects/weekly-reports-page.tsx": 1,
+  "pages/reports/monday-showcase/variants.tsx": 1,
+  "pages/reports/region-report-page.tsx": 4,
 };
 
 /**
@@ -211,6 +258,26 @@ function statedSizePx(classes: string): number | null {
 function isNormalSize(px: number | null, classes: string): boolean {
   if (px === null) return false;
   return !(px >= 24 || (px >= 18.66 && BOLD.test(classes)));
+}
+
+/**
+ * Strip the wrappers that sit between a declaration and its value.
+ *
+ * `const TONE = { … } as const` is an `AsExpression`, not an `ObjectLiteralExpression`, so a resolver that
+ * type-checks for the latter treats the whole map as empty. That shape is already in use here —
+ * `preview/deals-preview.tsx:77` — and adding `text-slate-400` to such a map passed every assertion.
+ */
+function unwrapExpression(node: ts.Node): ts.Node {
+  let current = node;
+  while (
+    ts.isAsExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isParenthesizedExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
 }
 
 const CONSTANTS = new WeakMap<ts.SourceFile, Map<string, ts.Node>>();
@@ -261,7 +328,8 @@ function resolveReference(node: ts.Node, seen: Set<ts.Node>): ts.Node[] {
   }
   if (!ts.isPropertyAccessExpression(node) && !ts.isElementAccessExpression(node)) return [];
   if (!ts.isIdentifier(node.expression)) return [];
-  const declaration = table.get(node.expression.text);
+  const bound = table.get(node.expression.text);
+  const declaration = bound ? unwrapExpression(bound) : undefined;
   if (!declaration || !ts.isObjectLiteralExpression(declaration) || seen.has(declaration)) return [];
   const key = ts.isPropertyAccessExpression(node)
     ? node.name.text
@@ -390,6 +458,32 @@ function classNameAttributes(
     return { px: null, weightClasses };
   };
 
+  /**
+   * The weight this element INHERITS — the nearest ancestor stating one, and nothing of its own.
+   *
+   * Ancestor-only on purpose. Folding the element's own classes in here defeats the whole point: a
+   * conditionally-bold element flattens to a string containing `font-bold`, so the branch that renders at
+   * normal weight inherits a boldness it does not have, and a 20px label gets waved through as large text.
+   * Its own weight belongs to the VARIANT, which is where each branch can be seen separately.
+   */
+  const inheritedWeight = (attribute: ts.Node): string => {
+    // Walk past the element this attribute BELONGS to first. Starting at `attribute.parent` reaches that
+    // element's own opening tag, so it inherits its own classes from itself — and a conditionally-bold
+    // element then looks unconditionally bold no matter how carefully the variants are enumerated. That
+    // is the whole defect, one level up from where it appeared.
+    let node: ts.Node | undefined = attribute.parent;
+    while (node && !ts.isJsxElement(node) && !ts.isJsxSelfClosingElement(node)) node = node.parent;
+    node = node?.parent;
+    while (node) {
+      if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const classes = ownClasses(node);
+        if (WEIGHT.test(classes)) return classes;
+      }
+      node = node.parent;
+    }
+    return "";
+  };
+
   const visit = (node: ts.Node): void => {
     if (ts.isJsxAttribute(node) && node.name.getText() === "className" && node.initializer) {
       const classes = literalClasses(node.initializer);
@@ -405,7 +499,7 @@ function classNameAttributes(
           line: line + 1,
           initializer: node.initializer!,
           sizePx: own ?? inherited?.px ?? null,
-          weightClasses: inherited?.weightClasses || classes,
+          weightClasses: inheritedWeight(node),
         });
       }
     }
@@ -454,7 +548,14 @@ function classVariants(node: ts.Node, seen: Set<ts.Node> = new Set()): string[] 
     cap(left.flatMap((a) => right.map((b) => `${a} ${b}`)));
 
   if (ts.isJsxExpression(node)) return node.expression ? recurse(node.expression) : [""];
-  if (ts.isParenthesizedExpression(node)) return recurse(node.expression);
+  if (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isTypeAssertionExpression(node)
+  ) {
+    return recurse(node.expression);
+  }
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
   if (ts.isTemplateExpression(node)) {
     let acc = [node.head.text];
@@ -553,13 +654,24 @@ function statedPairs(file: string): { bg: string; fg: string; ratio: number; lin
       // The size can be stated in a branch of its own, so resolve it per variant and fall back to the
       // attribute's own-or-inherited size when this branch states none.
       const sizePx = statedSizePx(variant) ?? attribute.sizePx;
-      if (!isNormalSize(sizePx, attribute.weightClasses)) continue;
-      const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(variant);
-      const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(variant);
+      // WEIGHT PER VARIANT TOO, and for the same reason. `cn("text-xl text-slate-400", loud && "font-bold")`
+      // flattens to a string containing `font-bold`, so judging weight on the union calls a 20px element
+      // large text and drops it — including the branch that renders at normal weight and does need 4.5:1.
+      // A branch that states its own weight is judged on it; one that states none inherits.
+      const weightClasses = WEIGHT.test(variant) ? variant : attribute.weightClasses;
+      if (!isNormalSize(sizePx, weightClasses)) continue;
+      const bg = new RegExp(String.raw`(?:^|\s)bg-(${COLOR_TOKEN})(?![\w/-])`).exec(variant);
+      const fg = new RegExp(String.raw`(?:^|\s)text-(${COLOR_TOKEN})(?![\w/-])`).exec(variant);
       if (!bg || !fg) continue;
       const bgColor = PALETTE[bg[1]!];
       const fgColor = PALETTE[fg[1]!];
-      if (!bgColor || !fgColor) continue;
+      // An UNRESOLVED colour is reported, not dropped. Dropping is how `text-gray-400` slipped past a
+      // slate-only reader; a token shaped like a colour that this palette cannot price is a gap in the
+      // instrument, and the assertion should say so rather than quietly shrink its own scope.
+      if (!bgColor || !fgColor) {
+        out.push({ bg: bg[1]!, fg: fg[1]!, ratio: Number.NaN, line: attribute.line });
+        continue;
+      }
       out.push({
         bg: bg[1]!,
         fg: fg[1]!,
@@ -569,6 +681,29 @@ function statedPairs(file: string): { bg: string; fg: string; ratio: number; lin
     }
   }
   return out;
+}
+
+/**
+ * Does this element render as NORMAL text in any state it can reach?
+ *
+ * Bold only decides in the 18.66–23.99px band, and bold is frequently conditional — so in that band the
+ * question has to be asked of each rendered state rather than of the flattened string. Everywhere else the
+ * size settles it and no expansion is needed, which keeps the cost off the ~1000-file walk.
+ */
+function rendersAsNormalText(attribute: {
+  sizePx: number | null;
+  weightClasses: string;
+  initializer: ts.Node;
+}): boolean {
+  const px = attribute.sizePx;
+  if (px === null) return false;
+  if (px >= 24) return false;
+  if (px < 18.66) return true;
+  for (const variant of classVariants(attribute.initializer)) {
+    const weight = WEIGHT.test(variant) ? variant : attribute.weightClasses;
+    if (!BOLD.test(weight)) return true;
+  }
+  return false;
 }
 
 function smallSlate400Sites(): string[] {
@@ -584,7 +719,7 @@ function smallSlate400Sites(): string[] {
       if (!entry.name.endsWith(".tsx") || entry.name.includes(".test.")) continue;
       for (const attribute of classNameAttributes(full)) {
         if (!attribute.classes.includes("text-slate-400")) continue;
-        if (!isNormalSize(attribute.sizePx, attribute.weightClasses)) continue;
+        if (!rendersAsNormalText(attribute)) continue;
         found.push(`${path.relative(CLIENT_SRC, full)}:${attribute.line}`);
       }
     }
@@ -642,16 +777,14 @@ describe("muted text does not get quieter", () => {
     //
     // This computes the actual ratio for every foreground/background pair stated together on small text in
     // the three files whose failures were measured in a browser.
-    const audited = [
-      "pages/projects/weekly-reports-page.tsx",
-      "pages/reports/monday-showcase/variants.tsx",
-      "pages/reports/region-report-page.tsx",
-    ];
-
     const failures: string[] = [];
-    for (const file of audited) {
+    for (const file of Object.keys(AUDITED)) {
       for (const pair of statedPairs(path.join(CLIENT_SRC, file))) {
-        if (pair.ratio < 4.5) {
+        // NaN is an unresolved colour, and it fails rather than passing. `<` alone would let it through,
+        // which is the silent-drop this assertion was widened to stop.
+        if (Number.isNaN(pair.ratio)) {
+          failures.push(`${file}:${pair.line} text-${pair.fg} on bg-${pair.bg} → colour not in the palette`);
+        } else if (pair.ratio < 4.5) {
           failures.push(`${file}:${pair.line} text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`);
         }
       }
@@ -660,15 +793,23 @@ describe("muted text does not get quieter", () => {
     expect(failures, "audited pages still carry small text below the 4.5:1 AA minimum").toEqual([]);
   });
 
-  it("still finds pairs to judge in those files — an empty scan would assert nothing", () => {
+  it("still finds pairs to judge in EVERY audited file — an empty scan would assert nothing", () => {
     // The scanner still skips opacity-modified tokens, for good reason. Skip too much and the assertion
     // above passes over a file it never actually read.
     //
-    // RAISED 3 → 4 when conditional attributes stopped being discarded. The fourth is ScopeBadge, whose
-    // contrast this PR fixed and which the guard had never once looked at.
-    expect(
-      statedPairs(path.join(CLIENT_SRC, "pages/reports/region-report-page.tsx")).length,
-    ).toBeGreaterThanOrEqual(4);
+    // ONE FLOOR PER FILE, not one floor for the set. A single floor on region-report-page left the other
+    // two files with no control at all: weekly-reports-page could have dropped to zero pairs — which is
+    // exactly what a resolver regression looks like — and the audited assertion would have gone on
+    // reporting clean. A control that covers one member of a set is not a control on the set.
+    const measured = Object.fromEntries(
+      Object.keys(AUDITED).map((file) => [file, statedPairs(path.join(CLIENT_SRC, file)).length]),
+    );
+
+    const starved = Object.entries(AUDITED)
+      .filter(([file, floor]) => (measured[file] ?? 0) < floor)
+      .map(([file, floor]) => `${file}: ${measured[file]} pairs, floor ${floor}`);
+
+    expect(starved, "an audited file stopped yielding pairs — the scanner is reading less than it did").toEqual([]);
   });
 
   it("judges each branch of a conditional separately, rather than against the other branch", () => {
@@ -681,6 +822,20 @@ describe("muted text does not get quieter", () => {
 
     expect(pairs.map((pair) => `text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`)).toEqual([
       "text-white on bg-slate-800 → 14.63:1",
+      "text-slate-500 on bg-slate-100 → 4.34:1",
+      // Priced rather than skipped once the palette came from Tailwind instead of a hand-written slate
+      // scale. It passes at 5.62:1 — the point is that it is now MEASURED and not silently dropped.
+      "text-indigo-600 on bg-indigo-50 → 5.62:1",
+    ]);
+  });
+
+  it("judges weight per branch, so a conditionally-bold element is not large text in every state", () => {
+    // 20px at 4.34:1 passes as large text and fails as normal text, so the classification decides the
+    // verdict. Judging weight on the flattened string called both branches bold and dropped the element
+    // whole; only the branch that actually states `font-bold` may be treated as large.
+    const fixture = path.join(CLIENT_SRC, "lib/__fixtures__/conditional-weight.tsx");
+
+    expect(statedPairs(fixture).map((pair) => `text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`)).toEqual([
       "text-slate-500 on bg-slate-100 → 4.34:1",
     ]);
   });
