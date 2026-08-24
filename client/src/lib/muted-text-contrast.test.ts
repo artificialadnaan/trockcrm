@@ -37,6 +37,11 @@ const ICON = /\bh-\d(?:\.\d)?\s+w-\d(?:\.\d)?\b|\bsize-\d\b/;
 /**
  * Per-FILE counts at the time the measured failures were fixed.
  *
+ * REGENERATED after the per-class-string correction below. Judging per LINE had counted 5 sites that are
+ * not sites at all — a class string carrying `text-slate-400` without a small size, on a line where some
+ * other element supplied one. A baseline 5 too high is 5 real regressions the ratchet would absorb in
+ * silence, which is the same slack the aggregate-count version was rejected for.
+ *
  * PER FILE, NOT A TOTAL, and that distinction is the whole guard. A single aggregate with a tolerance —
  * which is what this was — lets a change delete five sites in one file, add five in another, and pass
  * both assertions while shipping five new low-contrast labels. Balanced books, unchanged number, real
@@ -66,31 +71,31 @@ const BASELINE: Record<string, number> = {
   "components/reports/data-mining-section.tsx": 5,
   "components/reports/forecast-variance-section.tsx": 6,
   "components/reports/regional-ownership-section.tsx": 7,
-  "components/reports/source-performance-section.tsx": 2,
+  "components/reports/source-performance-section.tsx": 1,
   "pages/admin/pipeline-config-page.tsx": 2,
   "pages/admin/users-page.tsx": 7,
   "pages/commissions/team-commissions-page.tsx": 3,
   "pages/companies/company-list-page.tsx": 2,
   "pages/contacts/contact-list-page.tsx": 1,
   "pages/dashboard/rep-dashboard-page.tsx": 3,
-  "pages/deals/deal-billing-tab.tsx": 3,
+  "pages/deals/deal-billing-tab.tsx": 2,
   "pages/deals/deal-detail-page.tsx": 1,
   "pages/director/director-rep-detail.tsx": 3,
   "pages/files/files-page.tsx": 1,
   "pages/leads/lead-list-page.tsx": 1,
   "pages/projects/projects-page.tsx": 1,
-  "pages/projects/weekly-report-history-panel.tsx": 7,
+  "pages/projects/weekly-report-history-panel.tsx": 6,
   "pages/projects/weekly-report-send-dialog.tsx": 6,
   "pages/properties/property-list-page.tsx": 3,
   "pages/public/daily-summary-page.tsx": 8,
   "pages/reports/at-risk-page.tsx": 2,
   "pages/reports/daily-activity-log-page.tsx": 1,
-  "pages/reports/field-team-page.tsx": 2,
+  "pages/reports/field-team-page.tsx": 1,
   "pages/reports/forecast-confidence-page.tsx": 4,
   "pages/reports/monday-showcase/evidence-drawer.tsx": 1,
   "pages/reports/platform-usage-page.tsx": 5,
   "pages/reports/platform-usage-rep-detail-page.tsx": 2,
-  "pages/reports/qc-reports-page.tsx": 4,
+  "pages/reports/qc-reports-page.tsx": 3,
   "pages/reports/rep-pack-page.tsx": 5,
   "pages/scorecards/corrective-action-responder.tsx": 1,
   "preview-main.tsx": 1,
@@ -173,6 +178,22 @@ function statedPairs(source: string): { bg: string; fg: string; ratio: number; l
   return out;
 }
 
+/**
+ * Every `text-slate-400` applied to SMALL TEXT, judged per class string rather than per line.
+ *
+ * PER ELEMENT, and that is the correction. The first version excluded any LINE containing icon sizing —
+ * so this, which is ordinary JSX, vanished from the guard entirely:
+ *
+ *   <span className="text-xs text-slate-400"><Check className="h-3 w-3" /> Done</span>
+ *
+ * The label is a real low-contrast site; the `h-3 w-3` belongs to the icon beside it. A line-wide
+ * exclusion threw both away, so a new low-contrast label could be introduced on any line that happens to
+ * contain an inline icon and bypass BOTH ratchet assertions. Inline icon-and-label markup is everywhere in
+ * this codebase, so that is not a narrow escape hatch.
+ *
+ * Each quoted class string is now judged on its own: it counts when IT carries both the colour and a small
+ * size, and is skipped only when IT is the icon.
+ */
 function smallSlate400Sites(): string[] {
   const found: string[] = [];
   const walk = (dir: string): void => {
@@ -188,9 +209,12 @@ function smallSlate400Sites(): string[] {
         .split("\n")
         .forEach((line, index) => {
           if (!line.includes("text-slate-400")) return;
-          if (!SMALL_TEXT.test(line)) return;
-          if (ICON.test(line)) return;
-          found.push(`${path.relative(CLIENT_SRC, full)}:${index + 1}`);
+          for (const [, classes] of line.matchAll(/"([^"]*)"/g)) {
+            if (!classes.includes("text-slate-400")) continue;
+            if (!SMALL_TEXT.test(classes)) continue;
+            if (ICON.test(classes)) continue;
+            found.push(`${path.relative(CLIENT_SRC, full)}:${index + 1}`);
+          }
         });
     }
   };
