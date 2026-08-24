@@ -48,40 +48,6 @@ const TEXT_SIZE_PX: Record<string, number> = {
 const BOLD = /\bfont-(?:bold|extrabold|black)\b/;
 
 /**
- * Does this class string set NORMAL-size text — the case AA holds to 4.5:1 rather than 3:1?
- *
- * WCAG's "large text" is 24px, or 18.66px when bold. Everything below that is normal, and the first
- * version of this only looked at `text-xs` and `text-[9–12px]` — so `text-sm text-slate-400` on white,
- * which fails at exactly the same 2.56:1, was invisible to the guard. `text-sm` is the most common size in
- * this codebase; excluding it left the ratchet policing the minority of cases.
- *
- * A string with no explicit size is skipped: the size is inherited and this cannot know it.
- */
-function isNormalSizeText(classes: string): boolean {
-  let px: number | null = null;
-  const arbitrary = /(?:^|\s)text-\[(\d+(?:\.\d+)?)px\]/.exec(classes);
-  if (arbitrary) px = Number(arbitrary[1]);
-  else {
-    for (const [token, size] of Object.entries(TEXT_SIZE_PX)) {
-      if (new RegExp(`(?:^|\\s)${token}(?![\\w-])`).test(classes)) {
-        px = size;
-        break;
-      }
-    }
-  }
-  if (px === null) return false;
-  const large = px >= 24 || (px >= 18.66 && BOLD.test(classes));
-  return !large;
-}
-
-// NO ICON HEURISTIC ANY MORE, and its absence is the point. Reading per LINE meant an icon's `h-3 w-3`
-// sat beside a label's classes and had to be guessed apart — badly, as it turned out, since excluding the
-// whole line discarded the label too. Scoped to the ATTRIBUTE, an icon's classes are simply not in the
-// label's attribute, so the distinction is structural rather than a regex someone has to maintain. Icons
-// fall under SC 1.4.11 at 3:1 and remain out of scope: one with no text-size class is skipped by
-// `isNormalSizeText` on its own merits.
-
-/**
  * Per-FILE counts at the time the measured failures were fixed.
  *
  * REGENERATED for the per-ATTRIBUTE scanner. Each widening of the scanner has raised this number, and
@@ -110,8 +76,10 @@ function isNormalSizeText(classes: string): boolean {
 const BASELINE: Record<string, number> = {
   "components/__harness__/list-detail-harness.tsx": 5,
   "components/__harness__/mobile-ui-harness.tsx": 1,
+  "components/audit/activity-feed-entry.tsx": 1,
   "components/auth/auth-entry-screen.tsx": 3,
-  "components/deals/deals-list-section.tsx": 3,
+  "components/comms/email-list.tsx": 1,
+  "components/deals/deals-list-section.tsx": 6,
   "components/deals/decorated-kanban-card.tsx": 1,
   "components/deals/pipeline-progress.tsx": 2,
   "components/director/rep-commission-drilldown.tsx": 6,
@@ -133,44 +101,51 @@ const BASELINE: Record<string, number> = {
   "pages/companies/company-list-page.tsx": 2,
   "pages/contacts/contact-list-page.tsx": 1,
   "pages/dashboard/rep-dashboard-page.tsx": 3,
-  "pages/deals/deal-billing-tab.tsx": 3,
+  "pages/deals/deal-billing-tab.tsx": 5,
   "pages/deals/deal-detail-page.tsx": 1,
+  "pages/deals/deal-list-page.tsx": 1,
   "pages/director/director-rep-detail.tsx": 3,
-  "pages/files/files-page.tsx": 1,
-  "pages/leads/lead-list-page.tsx": 1,
-  "pages/projects/projects-page.tsx": 1,
-  "pages/projects/weekly-report-history-panel.tsx": 10,
+  "pages/email/email-inbox-page.tsx": 1,
+  "pages/files/files-page.tsx": 2,
+  "pages/leads/lead-list-page.tsx": 2,
+  "pages/projects/projects-page.tsx": 2,
+  "pages/projects/weekly-report-history-panel.tsx": 14,
+  "pages/projects/weekly-report-project-audit-dialog.tsx": 2,
   "pages/projects/weekly-report-project-dialog.tsx": 1,
-  "pages/projects/weekly-report-send-dialog.tsx": 7,
-  "pages/projects/weekly-report-settings-dialog.tsx": 1,
+  "pages/projects/weekly-report-send-dialog.tsx": 8,
+  "pages/projects/weekly-report-settings-dialog.tsx": 2,
+  "pages/projects/weekly-reports-page.tsx": 2,
   "pages/properties/property-list-page.tsx": 3,
   "pages/public/daily-summary-page.tsx": 9,
   "pages/reports/at-risk-page.tsx": 2,
-  "pages/reports/daily-activity-log-page.tsx": 1,
-  "pages/reports/field-team-page.tsx": 2,
+  "pages/reports/canvassing-activity-page.tsx": 2,
+  "pages/reports/daily-activity-log-page.tsx": 2,
+  "pages/reports/field-team-page.tsx": 4,
   "pages/reports/forecast-confidence-page.tsx": 4,
   "pages/reports/monday-showcase/evidence-drawer.tsx": 1,
   "pages/reports/performance-report-ui.tsx": 1,
   "pages/reports/platform-usage-page.tsx": 5,
   "pages/reports/platform-usage-rep-detail-page.tsx": 2,
-  "pages/reports/qc-reports-page.tsx": 5,
+  "pages/reports/qc-reports-page.tsx": 6,
   "pages/reports/rep-pack-page.tsx": 6,
   "pages/scorecards/corrective-action-responder.tsx": 1,
   "preview-main.tsx": 1,
   "preview/commissions-preview.tsx": 1,
-  "preview/companies-preview.tsx": 1,
+  "preview/comms-preview.tsx": 1,
+  "preview/companies-preview.tsx": 3,
   "preview/company-detail-preview.tsx": 2,
-  "preview/contacts-preview.tsx": 1,
+  "preview/contacts-preview.tsx": 2,
   "preview/deal-detail-preview.tsx": 2,
-  "preview/deals-preview.tsx": 2,
+  "preview/deals-preview.tsx": 4,
   "preview/director-dashboard-preview.tsx": 2,
-  "preview/files-page-preview.tsx": 1,
-  "preview/leads-preview.tsx": 2,
-  "preview/properties-preview.tsx": 1,
+  "preview/email-preview.tsx": 1,
+  "preview/files-page-preview.tsx": 2,
+  "preview/leads-preview.tsx": 4,
+  "preview/properties-preview.tsx": 3,
   "preview/rep-dashboard-preview.tsx": 3,
-  "preview/tasks-preview.tsx": 1,
+  "preview/reports-preview.tsx": 2,
+  "preview/tasks-preview.tsx": 2,
 };
-
 
 /** Tailwind slate scale + white, as RGB. Only the tokens this codebase actually pairs. */
 const PALETTE: Record<string, [number, number, number]> = {
@@ -187,6 +162,27 @@ const PALETTE: Record<string, [number, number, number]> = {
   "slate-900": [15, 23, 42],
   "slate-950": [2, 6, 23],
 };
+
+/** The px size a class string states, or null when it states none (and therefore inherits one). */
+function statedSizePx(classes: string): number | null {
+  const arbitrary = /(?:^|\s)text-\[(\d+(?:\.\d+)?)px\]/.exec(classes);
+  if (arbitrary) return Number(arbitrary[1]);
+  for (const [token, size] of Object.entries(TEXT_SIZE_PX)) {
+    if (new RegExp(`(?:^|\\s)${token}(?![\\w-])`).test(classes)) return size;
+  }
+  return null;
+}
+
+/**
+ * Is text at this size, with this weight, NORMAL — the case AA holds to 4.5:1 rather than 3:1?
+ *
+ * WCAG's "large text" is 24px, or 18.66px when bold. `font-semibold` is 600 and does NOT count; only
+ * 700+ does.
+ */
+function isNormalSize(px: number | null, classes: string): boolean {
+  if (px === null) return false;
+  return !(px >= 24 || (px >= 18.66 && BOLD.test(classes)));
+}
 
 /**
  * Every `className` expression in a file, flattened to the classes it can apply to ONE element.
@@ -207,10 +203,68 @@ const PALETTE: Record<string, [number, number, number]> = {
  * contrast". It is also why an icon's classes no longer need a heuristic: they live in the icon's own
  * attribute and never join this one.
  */
-function classNameAttributes(file: string): { classes: string; line: number; conditional: boolean }[] {
+function classNameAttributes(
+  file: string,
+): { classes: string; line: number; conditional: boolean; sizePx: number | null; weightClasses: string }[] {
   const text = fs.readFileSync(file, "utf8");
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const out: { classes: string; line: number; conditional: boolean }[] = [];
+  const out: {
+    classes: string;
+    line: number;
+    conditional: boolean;
+    sizePx: number | null;
+    weightClasses: string;
+  }[] = [];
+
+  /** Literal classes on a JSX element's own className attribute, or "" when it has none. */
+  const ownClasses = (element: ts.Node): string => {
+    const opening = ts.isJsxElement(element)
+      ? element.openingElement
+      : ts.isJsxSelfClosingElement(element)
+        ? element
+        : null;
+    if (!opening) return "";
+    for (const property of opening.attributes.properties) {
+      if (!ts.isJsxAttribute(property) || property.name.getText() !== "className") continue;
+      if (!property.initializer) return "";
+      const parts: string[] = [];
+      const gather = (n: ts.Node): void => {
+        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
+        else if (ts.isTemplateExpression(n)) {
+          parts.push(n.head.text);
+          for (const span of n.templateSpans) parts.push(span.literal.text);
+        }
+        n.forEachChild(gather);
+      };
+      gather(property.initializer);
+      return parts.join(" ");
+    }
+    return "";
+  };
+
+  /**
+   * The size this element renders at: its own, or the nearest ancestor that states one.
+   *
+   * FONT SIZE INHERITS, and skipping every attribute without a size token meant a muted child of a sized
+   * parent was invisible — `<h3 className="text-sm …">Contract <span className="text-slate-400">(optional)
+   * </span></h3>` is 14px normal text at 2.56:1, and it is an existing convention here, not a corner case.
+   * Only the SIZE is inherited; the colour is whatever the child itself sets, which is why they are
+   * resolved separately.
+   */
+  const effectiveSize = (attribute: ts.Node): { px: number | null; weightClasses: string } => {
+    let node: ts.Node | undefined = attribute.parent;
+    let weightClasses = "";
+    while (node) {
+      if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const classes = ownClasses(node);
+        if (!weightClasses && BOLD.test(classes)) weightClasses = classes;
+        const px = statedSizePx(classes);
+        if (px !== null) return { px, weightClasses: weightClasses || classes };
+      }
+      node = node.parent;
+    }
+    return { px: null, weightClasses };
+  };
 
   const visit = (node: ts.Node): void => {
     if (ts.isJsxAttribute(node) && node.name.getText() === "className" && node.initializer) {
@@ -232,7 +286,19 @@ function classNameAttributes(file: string): { classes: string; line: number; con
           n.forEachChild(seek);
         };
         seek(node.initializer!);
-        out.push({ classes: parts.join(" "), line: line + 1, conditional });
+        const classes = parts.join(" ");
+        const own = statedSizePx(classes);
+        const inherited = own === null ? effectiveSize(node) : null;
+        // `classes` stays the element's OWN classes — the colour is whatever it sets, and folding an
+        // ancestor's classes in here would let a parent's `text-slate-400` be attributed to a child that
+        // never set it. Only the SIZE and the WEIGHT are inherited, and they travel separately.
+        out.push({
+          classes,
+          line: line + 1,
+          conditional,
+          sizePx: own ?? inherited?.px ?? null,
+          weightClasses: inherited?.weightClasses || classes,
+        });
       }
     }
     node.forEachChild(visit);
@@ -275,7 +341,7 @@ function statedPairs(file: string): { bg: string; fg: string; ratio: number; lin
     // `${dark ? "bg-white/20 text-white" : …}` reported white-on-white at 1.0:1 seven times when this
     // scanner conflated the two questions.
     if (attribute.conditional) continue;
-    if (!isNormalSizeText(attribute.classes)) continue;
+    if (!isNormalSize(attribute.sizePx, attribute.weightClasses)) continue;
     const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(attribute.classes);
     const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(attribute.classes);
     if (!bg || !fg) continue;
@@ -305,7 +371,7 @@ function smallSlate400Sites(): string[] {
       if (!entry.name.endsWith(".tsx") || entry.name.includes(".test.")) continue;
       for (const attribute of classNameAttributes(full)) {
         if (!attribute.classes.includes("text-slate-400")) continue;
-        if (!isNormalSizeText(attribute.classes)) continue;
+        if (!isNormalSize(attribute.sizePx, attribute.weightClasses)) continue;
         found.push(`${path.relative(CLIENT_SRC, full)}:${attribute.line}`);
       }
     }
