@@ -265,6 +265,164 @@ export function buildTaskAssignmentEmail(input: {
   return { subject, html, text, link };
 }
 
+// ---------------------------------------------------------------------------------------------
+// F4 — task closed loop: the reply email back to the assigner
+// ---------------------------------------------------------------------------------------------
+
+type TaskReplyEmailRecipient = {
+  id: string;
+  email: string;
+  displayName: string;
+  firstName: string | null;
+};
+
+export type TaskReplyEmailInput = {
+  task: { id: string; title: string };
+  assigner: TaskReplyEmailRecipient;
+  authorName: string | null;
+  replyBody: string;
+  repliedAt: string;
+};
+
+export type PreparedTaskReplyEmail = {
+  to: string;
+  subject: string;
+  html: string;
+  options: { text: string };
+};
+
+/** The one-click close CTA. No token auth — it deep-links to the task with the complete action
+ *  focused, so the assigner still authenticates as themselves before anything is written. */
+function taskCompleteUrl(taskId: string) {
+  return `${taskUrl(taskId)}?complete=1`;
+}
+
+/** HTML-escape first, THEN turn newlines into <br> — the reverse order would emit unescaped markup. */
+function escapeHtmlWithBreaks(value: string) {
+  return escapeHtml(value).replace(/\r\n|\r|\n/g, "<br />");
+}
+
+function formatRepliedAt(repliedAt: string) {
+  const date = new Date(repliedAt);
+  if (Number.isNaN(date.getTime())) return repliedAt;
+  return date.toLocaleString("en-US", { timeZone: "America/Chicago" });
+}
+
+/**
+ * "<Name> replied to: <task title>" — with the reply text IN the email.
+ *
+ * The ask is explicit that the assigner should be told "that they replied AND what they replied", and
+ * this is the channel that actually gets there: worker-written in-app notifications never push over
+ * SSE, and the bell only fetches while its popover is open. An email that says "you have a reply" and
+ * nothing else makes the assigner open the CRM to read one sentence.
+ */
+export function buildTaskReplyEmail(input: TaskReplyEmailInput) {
+  const link = taskUrl(input.task.id);
+  const completeLink = taskCompleteUrl(input.task.id);
+  const assignerFirstName = firstNameFor(input.assigner);
+  // A display name is nullable on public.users, and "  replied to: X" reads as a bug.
+  const replier = input.authorName?.trim() || "The assignee";
+  const when = formatRepliedAt(input.repliedAt);
+  const subject = sanitizeSubject(`${replier} replied to: ${input.task.title}`);
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:640px;margin:0 auto;padding:24px;">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:24px;color:#111827;line-height:1.5;">
+      <p>Hi ${escapeHtml(assignerFirstName)},</p>
+      <p>${escapeHtml(replier)} replied to the task you assigned: ${escapeHtml(input.task.title)}</p>
+      <blockquote style="margin:16px 0;padding:12px 16px;border-left:4px solid #e5e7eb;background:#f9fafb;color:#111827;">
+        ${escapeHtmlWithBreaks(input.replyBody)}
+      </blockquote>
+      <p style="color:#6b7280;font-size:13px;">${escapeHtml(replier)} &middot; ${escapeHtml(when)}</p>
+      <p>
+        <a href="${escapeHtml(link)}">Open the task</a>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        <a href="${escapeHtml(completeLink)}">Mark complete</a>
+      </p>
+      <p style="color:#6b7280;font-size:12px;">${escapeHtml(link)}</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  const text = [
+    `Hi ${assignerFirstName},`,
+    "",
+    `${replier} replied to the task you assigned: ${input.task.title}`,
+    "",
+    input.replyBody,
+    "",
+    `${replier} - ${when}`,
+    "",
+    `Open the task: ${link}`,
+    `Mark complete: ${completeLink}`,
+  ].join("\n");
+
+  return { subject, html, text, link, completeLink };
+}
+
+export async function prepareTaskReplyEmail(
+  tenantDb: TenantDb,
+  input: {
+    task: { id: string; title: string };
+    assignerId: string;
+    authorName: string | null;
+    replyBody: string;
+    repliedAt: string;
+  }
+): Promise<PreparedTaskReplyEmail | null> {
+  // Savepointed for the same reason the assignment reads are: this runs inside the OPEN comment
+  // transaction, and a failed statement in Postgres poisons the whole transaction — the later COMMIT
+  // would silently degrade to a ROLLBACK while the route still reported the comment as posted.
+  const assigner = await readInSavepoint<TaskReplyEmailRecipient | null>(
+    tenantDb,
+    async () => {
+      const [row] = await tenantDb
+        .select({
+          id: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          firstName: users.firstName,
+        })
+        .from(users)
+        .where(eq(users.id, input.assignerId))
+        .limit(1);
+      return (row ?? null) as TaskReplyEmailRecipient | null;
+    },
+    null
+  );
+
+  if (!assigner?.email) {
+    console.warn("[Tasks] No assigner email found — skipping task reply email");
+    return null;
+  }
+
+  const email = buildTaskReplyEmail({
+    task: input.task,
+    assigner,
+    authorName: input.authorName,
+    replyBody: input.replyBody,
+    repliedAt: input.repliedAt,
+  });
+
+  return {
+    to: assigner.email,
+    subject: email.subject,
+    html: email.html,
+    options: { text: email.text },
+  };
+}
+
+export async function sendPreparedTaskReplyEmail(email: PreparedTaskReplyEmail) {
+  return sendSystemEmail(email.to, email.subject, email.html, email.options);
+}
+
 export async function prepareTaskAssignmentEmail(
   tenantDb: TenantDb,
   input: TaskAssignmentEmailInput

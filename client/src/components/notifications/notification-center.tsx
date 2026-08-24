@@ -15,6 +15,9 @@ const typeColors: Record<string, string> = {
   stale_deal: "bg-amber-500",
   inbound_email: "bg-blue-500",
   task_assigned: "bg-red-500",
+  // A reply is a different event from an assignment and needs its own dot: without an entry here the
+  // lookup falls through to undefined and the row renders with no colour at all.
+  task_replied: "bg-violet-500",
   approval_needed: "bg-orange-500",
   activity_drop: "bg-red-500",
   deal_won: "bg-green-500",

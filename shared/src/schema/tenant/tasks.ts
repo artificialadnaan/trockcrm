@@ -56,6 +56,22 @@ export const tasks = pgTable(
     // `created_by` holds a real human on two machine paths. Migration 0233; DEFAULT 'automated' there
     // only covers the deploy window, so every write site sets this explicitly.
     source: varchar("source", { length: 20 }).default("automated").notNull(),
+    // ---- Closed loop (migration 0234) -----------------------------------------------------------
+    // Denormalised head of the task's thread, so "who has unread replies" is one indexed predicate
+    // instead of a correlated MAX() over task_comments on every list render.
+    lastReplyAt: timestamp("last_reply_at", { withTimezone: true }),
+    lastReplyBy: uuid("last_reply_by"),
+    /**
+     * How far up the thread the ASSIGNER has confirmed reading -- MONOTONIC, never cleared.
+     *
+     * A design that cleared this on every new reply would make `assigner_ack_at < last_reply_at`
+     * unreachable (ack only ever writes a timestamp >= the reply it acks), so the "a reply after an
+     * ack re-raises the task" rule would be carried entirely by the IS NULL branch and the comparison
+     * could be mutated away without a single test noticing. Keeping it monotonic and having the ack
+     * carry the timestamp the client actually rendered makes the comparison load-bearing AND closes
+     * the read-modify-write race where a reply landing mid-ack is marked seen forever.
+     */
+    assignerAckAt: timestamp("assigner_ack_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -77,5 +93,11 @@ export const tasks = pgTable(
     // carry the bucket predicates. Source-of-truth marker; migration 0233 builds it per-office, and the
     // runner's pre-step builds it CONCURRENTLY so API boot never blocks task writes on it.
     index("tasks_assigned_source_status_idx").on(table.assignedTo, table.source, table.status, table.dueDate),
+    // Serves /tasks/awaiting-me: "tasks I assigned that have a reply I have not acknowledged".
+    // Source-of-truth marker; migration 0234 builds it per-office PARTIAL on the unacked condition
+    // (last_reply_at IS NOT NULL AND (assigner_ack_at IS NULL OR assigner_ack_at < last_reply_at)),
+    // so the predicate is answered BY the index rather than filtered after it. Drizzle's index()
+    // cannot express that predicate here, hence the divergence -- 0234's SQL is authoritative.
+    index("tasks_creator_awaiting_ack_idx").on(table.createdBy, table.lastReplyAt),
   ]
 );

@@ -224,6 +224,14 @@ export async function transitionTaskStatus(
     throw new AppError(400, `Cannot move task from ${existing.status} to ${input.nextStatus}`);
   }
 
+  // Scoped to TERMINAL targets only. `pending -> completed` is an allowed transition, so without this
+  // line /transition closes a task without ever entering completeTask — the bypass that made a guard
+  // on completeTask alone decorative. Non-terminal moves stay open to anyone who can see the task:
+  // "somebody else picked this up" was never the accountability concern.
+  if (TERMINAL_STATUSES.includes(input.nextStatus)) {
+    assertTaskCloseAuthority(existing, userRole, userId);
+  }
+
   const updates: Record<string, any> = {
     status: input.nextStatus,
   };
@@ -718,11 +726,118 @@ export async function getTaskCounts(
   };
 }
 
-/** Reps may only ever see their own tasks — shared by both read paths so the rule can't drift. */
-function assertTaskVisible(task: { assignedTo: string } | null, userRole: string, userId: string) {
-  if (task && userRole === "rep" && task.assignedTo !== userId) {
-    throw new AppError(403, "You can only view your own tasks");
+/**
+ * Reps may only ever see their own tasks — shared by both read paths so the rule can't drift.
+ *
+ * "Their own" now means ASSIGNED TO THEM **or** ASSIGNED BY THEM. The second half is new, and without
+ * it the closed loop simply does not exist for a rep: the ask is "Adam assigns a task and then forgets
+ * what he assigned", and until now a rep who assigned a task to somebody else got a 403 from
+ * `getTaskById` on the task they had themselves created — so they could not open it, could not read
+ * the reply, could not acknowledge it and could not close it. Every closed-loop endpoint funnels
+ * through here, so widening it here is what makes /:id/comments, /:id/timeline, /:id/ack and the
+ * assigner-only close rule reachable by the person the feature is FOR.
+ *
+ * The list is deliberately NOT widened with it: `getTasks` keeps its own `assigned_to = me` clause for
+ * reps, so a rep's task list still shows only their own work. Tasks they assigned surface in the
+ * separate "Needs your attention" bucket (/tasks/awaiting-me), which is scoped to `created_by = me`.
+ */
+function assertTaskVisible(
+  task: { assignedTo: string; createdBy?: string | null } | null,
+  userRole: string,
+  userId: string
+) {
+  if (!task || userRole !== "rep") return;
+  if (task.assignedTo === userId) return;
+  // `createdBy` is NULL on every rules-engine and AI-disconnect task, so the truthiness test matters:
+  // a NULL assigner must never match a caller, whatever their id is.
+  if (task.createdBy && task.createdBy === userId) return;
+  throw new AppError(403, "You can only view tasks assigned to you or by you");
+}
+
+/**
+ * Roles that may close ANY task they can see.
+ *
+ * An ALLOWLIST, not "everything except rep" — and that distinction is the bug it fixes. The old rule
+ * was `assertTaskVisible` alone, which narrows `rep` and nothing else, so `construction` and
+ * `field_contractor` users could complete or dismiss any task in the office. Both are enumerated as
+ * excluded by their ABSENCE here rather than by a negative test, so adding a new role defaults it to
+ * "no close authority" instead of silently granting it.
+ */
+export const TASK_CLOSE_ELEVATED_ROLES = ["admin", "director"] as const;
+
+/**
+ * The two INTERNAL callers that close tasks as neither assignee nor assigner.
+ *
+ * Enumerated rather than accepting a free-form string so the bypass cannot be widened by accident, and
+ * a route cannot construct one: both values name a specific server-side code path.
+ *   email_association        email/service.ts completeInboundEmailTasks — auto-completes the open
+ *                            inbound_email tasks for a message when ANY user associates it to a deal.
+ *                            Those tasks are assigned to the MAILBOX OWNER, who is usually not the
+ *                            person doing the associating.
+ *   ai_disconnect_resolution ai-copilot/intervention-service.ts syncGeneratedTaskResolution — the
+ *                            AI-disconnect task carries created_by = NULL, so there is no assigner to
+ *                            fall back on at all.
+ */
+export const TASK_CLOSE_SYSTEM_ACTORS = ["email_association", "ai_disconnect_resolution"] as const;
+export type TaskCloseSystemActor = (typeof TASK_CLOSE_SYSTEM_ACTORS)[number];
+
+export interface TaskCloseOptions {
+  /** Set ONLY by an internal caller. No HTTP handler constructs one. */
+  systemActor?: TaskCloseSystemActor;
+}
+
+/** Shared predicate behind both "may close" and "may comment" — one definition, two error messages. */
+function isTaskParticipant(
+  task: { assignedTo: string; createdBy?: string | null },
+  userRole: string,
+  userId: string
+) {
+  if ((TASK_CLOSE_ELEVATED_ROLES as readonly string[]).includes(userRole)) return true;
+  if (task.assignedTo === userId) return true;
+  // `x === null` is false for every real user id, but spelling the null check out keeps a future
+  // `userId` of undefined/null from ever matching a NULL assigner.
+  return Boolean(task.createdBy) && task.createdBy === userId;
+}
+
+/**
+ * WHO MAY MOVE A TASK TO A TERMINAL STATUS. Called from completeTask, dismissTask AND
+ * transitionTaskStatus, because all three reach `completed`/`dismissed` and a guard on one of them is
+ * one HTTP call from being bypassed (`pending -> completed` is an allowed transition, so /transition
+ * never enters completeTask; /dismiss had no check at all while `dismissed` is just as terminal, and
+ * additionally writes a suppression window that stops the rules engine ever raising the task again).
+ */
+export function assertTaskCloseAuthority(
+  task: { assignedTo: string; createdBy?: string | null },
+  userRole: string,
+  userId: string,
+  options: TaskCloseOptions = {}
+) {
+  if (options.systemActor !== undefined) {
+    if (!(TASK_CLOSE_SYSTEM_ACTORS as readonly string[]).includes(options.systemActor)) {
+      throw new AppError(500, `Unknown task close system actor: ${String(options.systemActor)}`);
+    }
+    return;
   }
+
+  if (isTaskParticipant(task, userRole, userId)) return;
+  throw new AppError(
+    403,
+    "Only the assignee, the person who assigned this task, or an admin can close it"
+  );
+}
+
+/** WHO MAY SPEAK ON A TASK. Same participant set as closing it, deliberately a separate assertion so
+ *  the two rules can diverge later without one silently carrying the other. */
+export function assertTaskCommentAuthority(
+  task: { assignedTo: string; createdBy?: string | null },
+  userRole: string,
+  userId: string
+) {
+  if (isTaskParticipant(task, userRole, userId)) return;
+  throw new AppError(
+    403,
+    "Only the assignee, the person who assigned this task, or an admin can comment on it"
+  );
 }
 
 /**
@@ -736,13 +851,20 @@ export async function getTaskRowById(
   tenantDb: TenantDb,
   taskId: string,
   userRole: string,
-  userId: string
+  userId: string,
+  options: TaskCloseOptions = {}
 ) {
   const result = await tenantDb.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
 
   const task = (result[0] ?? null) as any;
   if (!task) return null;
-  assertTaskVisible(task, userRole, userId);
+  // A system actor is not a person and has no "own tasks": completeInboundEmailTasks closes a task
+  // assigned to the MAILBOX OWNER on behalf of whoever associated the email, so the visibility rule
+  // would 403 the machine path before assertTaskCloseAuthority ever got to allow it. Only the two
+  // enumerated internal callers can reach this — no route constructs a systemActor.
+  if (options.systemActor === undefined) {
+    assertTaskVisible(task, userRole, userId);
+  }
   return task;
 }
 
@@ -935,11 +1057,14 @@ export async function completeTask(
   tenantDb: TenantDb,
   taskId: string,
   userRole: string,
-  userId: string
+  userId: string,
+  options: TaskCloseOptions = {}
 ) {
   // RBAC check: getTaskRowById enforces rep-only-own-tasks
-  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId);
+  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId, options);
   if (!existing) throw new AppError(404, "Task not found");
+
+  assertTaskCloseAuthority(existing, userRole, userId, options);
 
   // Conditional update: only complete if task is in a completable state
   const result = await tenantDb
@@ -968,10 +1093,15 @@ export async function dismissTask(
   tenantDb: TenantDb,
   taskId: string,
   userRole: string,
-  userId: string
+  userId: string,
+  options: TaskCloseOptions = {}
 ) {
-  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId);
+  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId, options);
   if (!existing) throw new AppError(404, "Task not found");
+
+  // `dismissed` is terminal AND writes a suppression window that stops the rules engine ever raising
+  // the task again, so it needs the same authority as completing — it had none at all before.
+  assertTaskCloseAuthority(existing, userRole, userId, options);
 
   if (existing.status === "completed" || existing.status === "dismissed") {
     throw new AppError(400, `Task is already ${existing.status}`);

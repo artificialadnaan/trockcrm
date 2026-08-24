@@ -49,6 +49,80 @@ export interface Task {
   isOverdue: boolean;
   createdAt: string;
   updatedAt: string;
+  // ---- Closed loop (F4). Optional so a row from an API that predates them still types. ----
+  /** Head of the task's thread — set only by a reply from the ASSIGNEE. */
+  lastReplyAt?: string | null;
+  lastReplyBy?: string | null;
+  lastReplyByName?: string | null;
+  lastReplyBody?: string | null;
+  /** How far up the thread the assigner has confirmed reading. Monotonic; never cleared. */
+  assignerAckAt?: string | null;
+  /** Replies made since `assignerAckAt`. Server-computed — never derived from a loaded page. */
+  unreadReplyCount?: number;
+}
+
+/**
+ * Does a task you assigned have something you have not read?
+ *
+ * The SAME predicate the server's /tasks/awaiting-me query and the partial index use, restated once
+ * here so the affordance on a row and the bucket it belongs to cannot disagree. Note the `<`: an
+ * acknowledgement is monotonic, so a reply landing after one leaves `assignerAckAt < lastReplyAt` and
+ * re-raises the task — that branch is reachable, and it is the one that carries the behaviour.
+ */
+export function taskHasUnreadReply(
+  task: Pick<Task, "lastReplyAt" | "assignerAckAt">
+): boolean {
+  if (!task.lastReplyAt) return false;
+  if (!task.assignerAckAt) return true;
+  return new Date(task.assignerAckAt).getTime() < new Date(task.lastReplyAt).getTime();
+}
+
+export type TaskCommentKind = "reply" | "note" | "system";
+
+export interface TaskComment {
+  id: string;
+  taskId: string;
+  authorId: string | null;
+  authorName: string | null;
+  body: string;
+  kind: TaskCommentKind | string;
+  createdAt: string;
+}
+
+/**
+ * Whether a reply on this task reaches anybody, and if not why.
+ *
+ * Both negative states are structural rather than rare: `created_by` is NULL on every rules-engine and
+ * AI-disconnect task, and the app deactivates departing employees rather than deleting them. The
+ * composer says so instead of posting into a void.
+ */
+export interface TaskLoopDescriptor {
+  assignerId: string | null;
+  assignerName: string | null;
+  assignerIsActive: boolean;
+  notifiesAssigner: boolean;
+  reason: "ok" | "no_assigner" | "assigner_inactive";
+}
+
+export interface TaskTimelineFieldChange {
+  key: string;
+  label: string;
+  fromDisplay: string | null;
+  toDisplay: string | null;
+  transition: "changed" | "set" | "cleared";
+}
+
+export interface TaskTimelineEntry {
+  id: string;
+  kind: "audit" | "comment";
+  occurredAt: string;
+  actorId: string | null;
+  actorLabel: string;
+  actorType: "user" | "system";
+  action: string;
+  summary: string;
+  body: string | null;
+  fieldChanges: TaskTimelineFieldChange[];
 }
 
 export interface TaskTransitionInput {
@@ -468,4 +542,136 @@ export async function dismissTask(taskId: string) {
 
 export async function snoozeTask(taskId: string, dueDate: string) {
   return api<{ task: Task }>(`/tasks/${taskId}/snooze`, { method: "POST", json: { dueDate } });
+}
+
+// -------------------------------------------------------------------------------------------------
+// F4 — task closed loop
+// -------------------------------------------------------------------------------------------------
+
+export function useTaskComments(taskId: string | undefined) {
+  const [comments, setComments] = useState<TaskComment[]>([]);
+  const [loop, setLoop] = useState<TaskLoopDescriptor | null>(null);
+  const [unreadReplyCount, setUnreadReplyCount] = useState(0);
+  const [loading, setLoading] = useState(Boolean(taskId));
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchComments = useCallback(async () => {
+    if (!taskId) {
+      setComments([]);
+      setLoop(null);
+      setUnreadReplyCount(0);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{
+        comments: TaskComment[];
+        loop: TaskLoopDescriptor;
+        unreadReplyCount: number;
+      }>(`/tasks/${encodeURIComponent(taskId)}/comments`);
+      setComments(data.comments);
+      setLoop(data.loop);
+      setUnreadReplyCount(data.unreadReplyCount ?? 0);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load the conversation");
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    fetchComments();
+  }, [fetchComments]);
+
+  return { comments, loop, unreadReplyCount, loading, error, refetch: fetchComments };
+}
+
+export function useTaskTimeline(taskId: string | undefined) {
+  const [entries, setEntries] = useState<TaskTimelineEntry[]>([]);
+  const [loading, setLoading] = useState(Boolean(taskId));
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTimeline = useCallback(async () => {
+    if (!taskId) {
+      setEntries([]);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ entries: TaskTimelineEntry[] }>(
+        `/tasks/${encodeURIComponent(taskId)}/timeline`
+      );
+      setEntries(data.entries);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load the timeline");
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    fetchTimeline();
+  }, [fetchTimeline]);
+
+  return { entries, loading, error, refetch: fetchTimeline };
+}
+
+/**
+ * Tasks YOU assigned that are waiting on you.
+ *
+ * A separate endpoint rather than a `useTasks` filter, because these tasks are by construction
+ * assigned to somebody ELSE — `/tasks` scopes reps to `assigned_to = me`, which is exactly why they
+ * appear nowhere in the assigner's list today.
+ */
+export function useTasksAwaitingMe() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchAwaitingMe = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ tasks: Task[] }>("/tasks/awaiting-me");
+      setTasks(data.tasks);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load replies awaiting you");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAwaitingMe();
+  }, [fetchAwaitingMe]);
+
+  return { tasks, loading, error, refetch: fetchAwaitingMe };
+}
+
+export async function postTaskComment(taskId: string, body: string) {
+  return api<{ comment: TaskComment; loop: TaskLoopDescriptor }>(
+    `/tasks/${encodeURIComponent(taskId)}/comments`,
+    { method: "POST", json: { body } }
+  );
+}
+
+/**
+ * Acknowledge replies up to the timestamp the UI actually RENDERED — never `now()`.
+ *
+ * Sending the render point is what stops a reply that lands between the render and the click from
+ * being marked read by somebody who never saw it. The server refuses a `seenUpTo` ahead of the newest
+ * reply, and takes GREATEST() with the existing value, so a stale or duplicated call can neither
+ * over-acknowledge nor walk the acknowledgement backwards.
+ */
+export async function ackTaskReplies(taskId: string, seenUpTo: string) {
+  return api<{ acknowledged: boolean; lastReplyAt: string | null; assignerAckAt: string | null }>(
+    `/tasks/${encodeURIComponent(taskId)}/ack`,
+    { method: "POST", json: { seenUpTo } }
+  );
 }

@@ -2928,7 +2928,13 @@ async function completeInboundEmailTasks(
 
   for (const taskRow of openTasks as Array<any>) {
     if (taskRow.status === "completed" || taskRow.status === "dismissed") continue;
-    const completedTask = await completeTask(tenantDb, taskRow.id, userRole, userId);
+    // Explicit system-actor bypass. These tasks are assigned to the MAILBOX OWNER, and the person
+    // associating the email to a deal is routinely somebody else — so the close-authority rule
+    // (assignee / assigner / admin) would 403 this whole loop and the inbound_email task would simply
+    // never close. Enumerated in tasks/service.ts TASK_CLOSE_SYSTEM_ACTORS; not reachable from a route.
+    const completedTask = await completeTask(tenantDb, taskRow.id, userRole, userId, {
+      systemActor: "email_association",
+    });
     const completionRule = completedTask.originRule
       ? TASK_RULES.find((rule) => rule.id === completedTask.originRule)
       : null;

@@ -24,10 +24,21 @@ import {
   type TaskSortDir,
 } from "./service.js";
 import {
+  ackTaskReplies,
+  getTaskTimeline,
+  getTasksAwaitingMe,
+  listTaskComments,
+  postTaskComment,
+  type TaskReplyNotification,
+} from "./closed-loop-service.js";
+import {
   prepareTaskAssignmentEmail,
+  prepareTaskReplyEmail,
   sendPreparedTaskAssignmentEmail,
+  sendPreparedTaskReplyEmail,
   TaskTransactionUnusableError,
   type PreparedTaskAssignmentEmail,
+  type PreparedTaskReplyEmail,
 } from "./notifications.js";
 
 const router = Router();
@@ -118,6 +129,38 @@ async function sendTaskAssignmentEmailBestEffort(email: PreparedTaskAssignmentEm
   }
 }
 
+async function prepareTaskReplyEmailBestEffort(
+  tenantDb: any,
+  notify: TaskReplyNotification
+): Promise<PreparedTaskReplyEmail | null> {
+  try {
+    return await prepareTaskReplyEmail(tenantDb, {
+      task: { id: notify.taskId, title: notify.taskTitle },
+      assignerId: notify.assignerId,
+      authorName: notify.authorName,
+      replyBody: notify.replyBody,
+      repliedAt: notify.repliedAt,
+    });
+  } catch (err) {
+    // Same rule as the assignment email: best-effort EXCEPT when the failure means the comment's
+    // transaction can no longer be committed safely. Swallowing that would let the COMMIT below
+    // degrade to a silent ROLLBACK while we returned 201 for a reply that was never written.
+    if (err instanceof TaskTransactionUnusableError) throw err;
+    console.error("[Tasks] Failed to prepare task reply email:", err);
+    return null;
+  }
+}
+
+async function sendTaskReplyEmailBestEffort(email: PreparedTaskReplyEmail | null) {
+  if (!email) return;
+
+  try {
+    await sendPreparedTaskReplyEmail(email);
+  } catch (err) {
+    console.error("[Tasks] Failed to send task reply email:", err);
+  }
+}
+
 // GET /api/tasks/assignees — list active users for the assignee picker.
 router.get("/assignees", async (req, res, next) => {
   try {
@@ -185,6 +228,137 @@ router.get("/counts", async (req, res, next) => {
     next(err);
   }
 });
+
+// =============================================================================================
+// F4 — TASK CLOSED LOOP (replies, acknowledgement, timeline, "needs your attention").
+//
+// ONE CONTIGUOUS BLOCK, on purpose: a parallel branch adding its own routes lands its block adjacent
+// to this one and git produces a single clean conflict hunk instead of five interleaved ones.
+//
+// It sits ABOVE the anchor below because `GET /awaiting-me` is single-segment and would otherwise be
+// swallowed by the catch-all `GET /:id` — see that comment for what that failure looks like.
+// =============================================================================================
+
+// GET /api/tasks/awaiting-me — tasks YOU assigned that carry a reply you have not acknowledged.
+//
+// No role gate: the scope is `created_by = you`, i.e. your own data by definition. Gating it on
+// admin/director (as the sibling assignee filter is) would hide a rep's own assignments from them, and
+// a rep who assigns work is precisely the person the ask describes.
+router.get("/awaiting-me", async (req, res, next) => {
+  try {
+    const tasks = await getTasksAwaitingMe(req.tenantDb!, req.user!.id);
+    await req.commitTransaction!();
+    res.json({ tasks });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/tasks/:id/comments — the thread, plus whether a reply on it reaches anybody.
+router.get("/:id/comments", async (req, res, next) => {
+  try {
+    const result = await listTaskComments(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.role,
+      req.user!.id
+    );
+    await req.commitTransaction!();
+    res.json({
+      comments: result.comments,
+      loop: result.loop,
+      unreadReplyCount: result.unreadReplyCount,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tasks/:id/comments — reply to a task.
+//
+// Allowed on a COMPLETED task, deliberately: updateTask's "no edits after completion" rule is about
+// task FIELDS, and "it was closed and then they answered" is a real sequence the loop must record.
+router.post("/:id/comments", async (req, res, next) => {
+  try {
+    const { body } = req.body ?? {};
+    if (typeof body !== "string") throw new AppError(400, "body is required");
+
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const result = await postTaskComment(
+      req.tenantDb!,
+      req.params.id,
+      { body, officeId },
+      req.user!.role,
+      req.user!.id
+    );
+
+    // Prepared BEFORE the commit (inside the open transaction, savepointed) and sent AFTER it — the
+    // same shape the assignment email uses. Deliberately NOT folded into the worker's task.replied
+    // handler alongside the in-app notification: one unhandled throw there would take the whole job
+    // down and lose the notification too, and the email is the channel this design actually leans on.
+    const replyEmail = result.notify
+      ? await prepareTaskReplyEmailBestEffort(req.tenantDb!, result.notify)
+      : null;
+
+    await req.commitTransaction!();
+
+    await sendTaskReplyEmailBestEffort(replyEmail);
+
+    res.status(201).json({ comment: result.comment, loop: result.loop });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/tasks/:id/timeline — audit rows and comments, merged in timestamp order.
+router.get("/:id/timeline", async (req, res, next) => {
+  try {
+    const entries = await getTaskTimeline(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.role,
+      req.user!.id
+    );
+    await req.commitTransaction!();
+    res.json({ entries });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tasks/:id/ack — the ASSIGNER marks replies read, up to the point they actually rendered.
+//
+// `seenUpTo` is required rather than defaulted to now(): defaulting it re-creates the lost-update race
+// the whole ack model exists to close (a reply landing between the render and the click would be
+// marked seen by somebody who never saw it), and it would make the service's comparison unreachable.
+router.post("/:id/ack", async (req, res, next) => {
+  try {
+    const { seenUpTo } = req.body ?? {};
+    if (typeof seenUpTo !== "string" || seenUpTo.trim().length === 0) {
+      throw new AppError(400, "seenUpTo is required — send the timestamp of the newest reply you rendered");
+    }
+    const seenUpToDate = new Date(seenUpTo);
+    if (Number.isNaN(seenUpToDate.getTime())) {
+      throw new AppError(400, "seenUpTo must be a valid ISO timestamp");
+    }
+
+    const result = await ackTaskReplies(
+      req.tenantDb!,
+      req.params.id,
+      seenUpToDate,
+      req.user!.role,
+      req.user!.id
+    );
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =============================================================================================
+// END F4 — TASK CLOSED LOOP
+// =============================================================================================
 
 // ---------------------------------------------------------------------------------------------
 // ADD NEW SINGLE-SEGMENT GET ROUTES ABOVE THIS LINE.

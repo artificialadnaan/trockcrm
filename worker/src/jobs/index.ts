@@ -11,6 +11,7 @@ import { runBidDeadlineCountdown } from "./bid-deadline.js";
 import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
 import { enqueueProcorePhotoSingle, handleProcorePhotoSyncJob } from "./procore-photos.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
+import { handleTaskAssignedEvent, handleTaskRepliedEvent } from "./task-notifications.js";
 import { runAiIndexDocument } from "./ai-index-document.js";
 import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
 import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
@@ -873,52 +874,13 @@ export function registerAllJobs() {
     );
   });
 
-  // Domain event: task.assigned -> create notification for assignee
-  domainEventHandlers.set("task.assigned", async (payload, _officeId) => {
-    console.log(`[Worker] task.assigned: ${payload.taskId} — ${payload.title}`);
+  // Domain event: task.assigned -> create notification for assignee.
+  // Body lives in ./task-notifications.js so it is reachable by a test without importing this whole
+  // module (~40 job imports). That is also how its link stayed pointed at the bare list for so long.
+  domainEventHandlers.set("task.assigned", handleTaskAssignedEvent);
 
-    if (!payload.assignedTo) return;
-
-    const { pool: workerPool } = await import("../db.js");
-    const userResult = await workerPool.query(
-      "SELECT office_id FROM public.users WHERE id = $1",
-      [payload.assignedTo]
-    );
-    if (userResult.rows.length === 0) return;
-
-    const officeResult = await workerPool.query(
-      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-      [userResult.rows[0].office_id]
-    );
-    if (officeResult.rows.length === 0) return;
-
-    const slug = officeResult.rows[0].slug;
-    const slugRegex = /^[a-z][a-z0-9_]*$/;
-    if (!slugRegex.test(slug)) return;
-
-    const schemaName = `office_${slug}`;
-
-    const taskNotifResult = await workerPool.query(
-      `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-       VALUES ($1, 'task_assigned', $2, $3, $4)
-       RETURNING id`,
-      [
-        payload.assignedTo,
-        `New task assigned: ${payload.title}`,
-        payload.title,
-        "/tasks",
-      ]
-    );
-    // PG NOTIFY so the server SSE manager can push to connected clients
-    await workerPool.query(
-      `SELECT pg_notify('crm_events', $1)`,
-      [JSON.stringify({
-        eventName: "notification.created",
-        userId: payload.assignedTo,
-        notificationId: taskNotifResult.rows[0]?.id,
-      })]
-    );
-  });
+  // Domain event: task.replied -> tell the ASSIGNER that their assignee answered.
+  domainEventHandlers.set("task.replied", handleTaskRepliedEvent);
 
   // Domain event: task.completed -> create activity record
   domainEventHandlers.set("task.completed", async (payload, officeId) => {
