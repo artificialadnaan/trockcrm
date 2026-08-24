@@ -1,5 +1,10 @@
 import { CLOSE_TARGET_HOLD_HORIZON_DAYS } from "./deal-hold-risk.js";
-import { GENUINE_ESTIMATING_DEAL_STAGE_SLUGS } from "./workflow.js";
+import {
+  CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+  GENUINE_ESTIMATING_DEAL_STAGE_SLUGS,
+  LOST_DEAL_STAGE_SLUGS,
+  WON_DEAL_STAGE_SLUGS,
+} from "./workflow.js";
 
 type DealReportabilityLike = {
   onHold?: boolean | null;
@@ -13,9 +18,30 @@ const CT_TODAY_SQL = "(now() AT TIME ZONE 'America/Chicago')::date";
 
 // Compile-time constants from the workflow module, never user input — but quote-escaped anyway so this
 // stays injection-proof if the slug list is ever sourced from data.
-const GENUINE_ESTIMATING_STAGE_SLUG_SQL_LIST = GENUINE_ESTIMATING_DEAL_STAGE_SLUGS.map(
-  (slug) => `'${slug.replace(/'/g, "''")}'`
-).join(", ");
+function sqlSlugList(slugs: readonly string[]): string {
+  return slugs.map((slug) => `'${slug.replace(/'/g, "''")}'`).join(", ");
+}
+
+const GENUINE_ESTIMATING_STAGE_SLUG_SQL_LIST = sqlSlugList(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS);
+
+/**
+ * Every stage slug that means a deal is REALIZED — won or lost, canonical or legacy alias.
+ *
+ * The same derivation `server/src/modules/shared/pipeline-terminal-stages.ts` used to make privately,
+ * moved here so the ONE list is reachable from `worker/` too. It is re-exported from there rather than
+ * restated, because a second copy of this union is how a stage rename ends up terminal on one surface and
+ * open on another — and the surfaces that disagree would be a report's population and the dollars it
+ * quotes.
+ */
+export const TERMINAL_DEAL_STAGE_SLUGS = [
+  ...new Set([
+    ...CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+    ...WON_DEAL_STAGE_SLUGS,
+    ...LOST_DEAL_STAGE_SLUGS,
+  ]),
+] as readonly string[];
+
+const TERMINAL_STAGE_SLUG_SQL_LIST = sqlSlugList(TERMINAL_DEAL_STAGE_SLUGS);
 
 export function isDealActivelyOnHold(deal: DealReportabilityLike): boolean {
   return deal.onHold === true;
@@ -68,7 +94,10 @@ export function effectiveOnHoldSqlPredicate(identifierPath?: string): string {
  * qualification is required (tenant queries run with the office schema first on the search_path) and
  * Postgres hoists the subselect to a one-shot InitPlan.
  */
-function genuineEstimatingStageSqlPredicate(identifierPath?: string): string {
+export function genuineEstimatingStageSqlPredicate(identifierPath?: string): string {
+  if (identifierPath && !SQL_IDENTIFIER_PATH.test(identifierPath)) {
+    throw new Error(`Invalid genuine-estimating SQL identifier: ${identifierPath}`);
+  }
   const stageId = identifierPath ? `${identifierPath}.stage_id` : "stage_id";
   return (
     `${stageId} IN (SELECT id FROM public.pipeline_stage_config ` +
@@ -145,4 +174,95 @@ export function closeTargetFarOutSqlPredicate(identifierPath?: string): string {
     `(${horizonDate}) IS NOT NULL AND ` +
     `(${horizonDate}) > ${CT_TODAY_SQL} + INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`
   );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// WORKER-REACHABLE STRING TWINS of the server's three "standard exclusion" builders.
+//
+// `aliasedActiveDealCountFilterSql`, `aliasedBidBoardTerminalSql` and `aliasedEffectiveOnHoldConditionSql`
+// live in server/src/modules/shared/deal-value-sql.ts and return drizzle `SQL` objects. A worker cron
+// issues raw `client.query("…")` strings and `worker/tsconfig.json` pins `rootDir: ./src`, so no worker
+// source can import them at all — which left the only options "hand-roll the predicates" (three existing
+// entries in this codebase's own violations ledger) or "report on a different population than the app
+// does". These are the third option. They render from the SAME constants as the drizzle builders, so the
+// two cannot drift on a stage rename.
+//
+// `bidBoardTerminalSqlPredicate` and `TERMINAL_DEAL_STAGE_SLUGS` are re-exported by the server modules
+// that used to own them, rather than copied — see pipeline-terminal-stages.ts and deal-value-sql.ts.
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * Twin of `aliasedActiveDealCountFilterSql`. That helper is a one-line alias of the reportability rule
+ * and this is the same alias, kept under the server's name so a reader porting a query from a report
+ * service finds the predicate they went looking for instead of concluding one does not exist.
+ */
+export function activeDealCountFilterSqlPredicate(identifierPath?: string): string {
+  return reportableDealSqlPredicate(identifierPath);
+}
+
+/**
+ * Twin of `aliasedBidBoardTerminalSql`: true when a deal is won/lost in the BID BOARD MIRROR, whatever
+ * its CRM stage says. A Bid-Board-owned deal can be `closed_won` in `bid_board_stage_slug` while its
+ * `stage_id` still points at estimating, so a population selected by CRM stage alone contains realized
+ * work — which is the whole of C3.
+ *
+ * Unparenthesized, matching the server's string form; callers compose it (`AND NOT (…)`).
+ */
+export function bidBoardTerminalSqlPredicate(dealAlias: string): string {
+  if (!SQL_IDENTIFIER_PATH.test(dealAlias)) {
+    throw new Error(`Invalid Bid Board terminal SQL identifier: ${dealAlias}`);
+  }
+  return `COALESCE(${dealAlias}.bid_board_stage_slug, '') IN (${TERMINAL_STAGE_SLUG_SQL_LIST})`;
+}
+
+/**
+ * The terminal CRM stage IDS, as a SUBSELECT rather than a caller-threaded array.
+ *
+ * `aliasedEffectiveOnHoldConditionSql(alias, terminalStageIds)` needs actual uuids, which a server
+ * request has already loaded and a worker cron has not. Handing a raw-SQL caller a subselect closes that
+ * gap without a round trip: `pipeline_stage_config` is a 38-row table that lives only in `public` (so the
+ * qualification is required — tenant queries run with the office schema first on the search_path), and
+ * Postgres hoists this to a one-shot InitPlan.
+ */
+export function terminalDealStageIdSubselectSql(): string {
+  return `SELECT id FROM public.pipeline_stage_config WHERE slug IN (${TERMINAL_STAGE_SLUG_SQL_LIST})`;
+}
+
+/**
+ * Twin of `aliasedEffectiveOnHoldConditionSql` — the TERMINAL-AWARE effective-on-hold condition.
+ *
+ * Stored `on_hold` OR — for an open deal only — a hold horizon date more than
+ * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days out. Two independent terminal signals gate the far-out leg,
+ * exactly as the drizzle twin does: the CRM stage id is won/lost, and the Bid Board mirror is terminal.
+ * A realized deal must never be auto-parked by a stale forecast date.
+ *
+ * THE DEFAULT DIFFERS FROM THE DRIZZLE TWIN, DELIBERATELY. `aliasedEffectiveOnHoldConditionSql` defaults
+ * `terminalStageIds` to `[]` and therefore emits NO stage-id leg unless a caller resolves and threads the
+ * ids — so calling it the way the surrounding code reads drops half the terminal guard silently. A raw-SQL
+ * caller has no id list to thread and would hit that trap every time, so here the safe form is what you
+ * get for free: pass `null` for the legacy open-only shape, and only when you know the population has no
+ * terminal rows.
+ *
+ * REQUIRED COLUMNS at the alias: `on_hold`, `stage_id`, `bid_board_stage_slug`, `bid_due_date`,
+ * `expected_close_date`.
+ */
+export function effectiveOnHoldConditionSqlPredicate(
+  identifierPath = "deals",
+  terminalStageIdsSql: string | null = terminalDealStageIdSubselectSql()
+): string {
+  // closeTargetFarOutSqlPredicate validates too, but the stage-id and mirror columns below are built
+  // here — the guard has to sit on every door that reaches raw SQL, not just the oldest one.
+  if (!SQL_IDENTIFIER_PATH.test(identifierPath)) {
+    throw new Error(`Invalid effective on-hold SQL identifier: ${identifierPath}`);
+  }
+  const guards: string[] = [];
+  if (terminalStageIdsSql) {
+    guards.push(`${identifierPath}.stage_id NOT IN (${terminalStageIdsSql})`);
+  }
+  guards.push(
+    `COALESCE(${identifierPath}.bid_board_stage_slug, '') NOT IN (${TERMINAL_STAGE_SLUG_SQL_LIST})`
+  );
+  const stored = `COALESCE(${identifierPath}.on_hold, false) = true`;
+  const farOutForOpen = `${guards.join(" AND ")} AND (${closeTargetFarOutSqlPredicate(identifierPath)})`;
+  return `(${stored} OR (${farOutForOpen}))`;
 }

@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
   reportableDealSqlPredicate,
+  bidBoardTerminalSqlPredicate,
   closeTargetFarOutSqlPredicate,
   PROJECT_TYPE_CODE_BY_VALUE,
   PROJECT_TYPE_VALUES,
@@ -444,11 +445,14 @@ export function aliasedTerminalDealBySlugSql(dealAlias: string, stageSlugColumn:
 // The Bid Board MIRROR terminal signal alone: true when a deal is won/lost in bid_board_stage_slug. Use on a
 // population already constrained to a single OPEN CRM stage (a stage page) or filtered CRM-non-terminal,
 // where the only remaining terminal exposure is a BB-owned deal whose mirror is terminal while its CRM stage
-// is still open. Returns a raw SQL string fragment so worker raw-SQL callers can reuse it.
-export function bidBoardTerminalSqlPredicate(dealAlias: string): string {
-  const slugs = TERMINAL_STAGE_SLUGS.map((slug) => `'${slug.replace(/'/g, "''")}'`).join(", ");
-  return `COALESCE(${dealAlias}.bid_board_stage_slug, '') IN (${slugs})`;
-}
+// is still open.
+//
+// RE-EXPORTED FROM `shared`, not defined here. The string form existed "so worker raw-SQL callers can reuse
+// it" and they could not: nothing under worker/src can import server/src. It now lives beside the other two
+// standard-exclusion string twins in shared/src/types/deal-reporting.ts, where a worker cron can actually
+// reach it, and this name is kept so the server's call sites are untouched. Same output, plus the shared
+// identifier validation.
+export { bidBoardTerminalSqlPredicate };
 
 export function aliasedBidBoardTerminalSql(dealAlias: string): SQL {
   return sql.raw(`(${bidBoardTerminalSqlPredicate(dealAlias)})`);

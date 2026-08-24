@@ -69,6 +69,17 @@ export const NOTIFICATION_RECIPIENT_GROUPS: readonly NotificationRecipientGroupD
     fallbackToAdminsAndDirectors: false,
   },
   {
+    key: "bid_due_date_report_cc",
+    name: "Bid Due Date Report (Cc)",
+    description: "Copied on the weekly Wednesday estimating report of upcoming bid due dates.",
+    emptyWarning: "The weekly bid due date report will still be sent, but nobody will be copied on it.",
+    // A SEPARATE group rather than a flag on a row in the one above, because the two lists answer
+    // different questions and fail differently. The `to` list is the report's audience — empty means
+    // the report reaches nobody, which the job treats as a hard error. This one is oversight, and an
+    // empty oversight list is a choice somebody is allowed to make; the job warns and sends anyway.
+    fallbackToAdminsAndDirectors: false,
+  },
+  {
     key: "marketing_expense_approver",
     name: "Marketing Expense Approver",
     description: "Approves marketing and advertising expense requests.",
