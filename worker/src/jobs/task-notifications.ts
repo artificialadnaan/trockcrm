@@ -14,35 +14,9 @@
  * loses the other half with it. They fail independently on purpose.
  */
 
-type WorkerPool = {
-  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, any>> }>;
-};
+import { resolveOfficeSchema, type OfficeSchemaPool } from "./office-schema.js";
 
-/**
- * Resolve the tenant schema for a user, or null if it cannot be resolved safely.
- *
- * The slug regex is a SQL-injection guard, not a formatting nicety: the slug is interpolated into the
- * statement below because a schema name cannot be a bind parameter.
- */
-async function resolveUserSchema(workerPool: WorkerPool, userId: string): Promise<string | null> {
-  const userResult = await workerPool.query(
-    "SELECT office_id FROM public.users WHERE id = $1",
-    [userId]
-  );
-  if (userResult.rows.length === 0) return null;
-
-  const officeResult = await workerPool.query(
-    "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-    [userResult.rows[0].office_id]
-  );
-  if (officeResult.rows.length === 0) return null;
-
-  const slug = officeResult.rows[0].slug;
-  const slugRegex = /^[a-z][a-z0-9_]*$/;
-  if (!slugRegex.test(slug)) return null;
-
-  return `office_${slug}`;
-}
+type WorkerPool = OfficeSchemaPool;
 
 async function insertNotification(
   workerPool: WorkerPool,
@@ -65,27 +39,43 @@ async function insertNotification(
   ]);
 }
 
-/** Deep link to the task itself. Both notification types use it — `task_assigned` linked to the bare
- *  `/tasks` list until now, which dropped the recipient into an unfiltered list and made them hunt for
- *  the task they had just been told about. */
-export function taskNotificationLink(taskId: string | null | undefined) {
-  return taskId ? `/tasks/${encodeURIComponent(taskId)}` : "/tasks";
+/**
+ * Deep link to the task itself.
+ *
+ * `task_assigned` linked to the bare `/tasks` list until now, which dropped the recipient into an
+ * unfiltered list and made them hunt for the task they had just been told about.
+ *
+ * ⚠️ IT CARRIES ?officeId, AND THAT IS NOT DECORATION. Office context in the CRM is URL-DRIVEN:
+ * client/src/lib/api.ts reads `?officeId` off window.location and injects it as the `x-office-id`
+ * header; with no param the server falls back to the reader's own active office. So a bare
+ * `/tasks/<id>` for a task in another office resolves against the WRONG schema and 404s — the same
+ * standing trap that sent property-edit users home. The office is appended only when known, so a
+ * single-office link is byte-identical to what it was.
+ */
+export function taskNotificationLink(
+  taskId: string | null | undefined,
+  officeId?: string | null
+) {
+  if (!taskId) return "/tasks";
+  const path = `/tasks/${encodeURIComponent(taskId)}`;
+  return officeId ? `${path}?officeId=${encodeURIComponent(officeId)}` : path;
 }
 
-export async function handleTaskAssignedEvent(payload: any, _officeId: string | null) {
+export async function handleTaskAssignedEvent(payload: any, officeId: string | null) {
   console.log(`[Worker] task.assigned: ${payload?.taskId} — ${payload?.title}`);
   if (!payload?.assignedTo) return;
 
   const { pool: workerPool } = await import("../db.js");
-  const schemaName = await resolveUserSchema(workerPool as WorkerPool, payload.assignedTo);
-  if (!schemaName) return;
+  // The EVENT's office, with the assignee's home office only as a fallback — see office-schema.ts.
+  const resolved = await resolveOfficeSchema(workerPool as WorkerPool, officeId, payload.assignedTo);
+  if (!resolved) return;
 
-  await insertNotification(workerPool as WorkerPool, schemaName, {
+  await insertNotification(workerPool as WorkerPool, resolved.schemaName, {
     userId: payload.assignedTo,
     type: "task_assigned",
     title: `New task assigned: ${payload.title}`,
     body: payload.title,
-    link: taskNotificationLink(payload.taskId),
+    link: taskNotificationLink(payload.taskId, resolved.officeId),
   });
 }
 
@@ -97,19 +87,22 @@ export async function handleTaskAssignedEvent(payload: any, _officeId: string | 
  * an assigner and that they are still active, so a payload that reaches here always has one; the guard
  * below is a belt-and-braces check against a hand-enqueued or replayed job.
  */
-export async function handleTaskRepliedEvent(payload: any, _officeId: string | null) {
+export async function handleTaskRepliedEvent(payload: any, officeId: string | null) {
   console.log(`[Worker] task.replied: ${payload?.taskId} — ${payload?.taskTitle}`);
   if (!payload?.assignerId || !payload?.taskId) return;
 
   const { pool: workerPool } = await import("../db.js");
-  const schemaName = await resolveUserSchema(workerPool as WorkerPool, payload.assignerId);
-  if (!schemaName) return;
+  // The EVENT's office, not the assigner's home office. The reply, the task and the notifications the
+  // assigner actually reads all live in the tenant the comment was written into; resolving from
+  // public.users would file the row in a schema they never look at.
+  const resolved = await resolveOfficeSchema(workerPool as WorkerPool, officeId, payload.assignerId);
+  if (!resolved) return;
 
   const replier = typeof payload.authorName === "string" && payload.authorName.trim().length > 0
     ? payload.authorName.trim()
     : "The assignee";
 
-  await insertNotification(workerPool as WorkerPool, schemaName, {
+  await insertNotification(workerPool as WorkerPool, resolved.schemaName, {
     userId: payload.assignerId,
     type: "task_replied",
     title: `${replier} replied to: ${payload.taskTitle ?? "a task"}`,
@@ -117,6 +110,6 @@ export async function handleTaskRepliedEvent(payload: any, _officeId: string | n
     // notifications.body is TEXT, but the popover renders it inline — a wall of text there is its own
     // failure, so it is capped and the full thread is one click away.
     body: typeof payload.replyBody === "string" ? payload.replyBody.slice(0, 500) : null,
-    link: taskNotificationLink(payload.taskId),
+    link: taskNotificationLink(payload.taskId, resolved.officeId),
   });
 }

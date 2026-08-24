@@ -73,6 +73,36 @@ describe("buildTaskReplyEmail", () => {
     expect(email.text).toContain(email.completeLink);
   });
 
+  // Office context in the CRM is URL-DRIVEN — client/src/lib/api.ts reads ?officeId off the location
+  // and injects it as x-office-id, and with no param the server falls back to the READER's own active
+  // office. The recipient of this email is the assigner, whose active office is not necessarily the
+  // one the task lives in, so a bare /tasks/<id> resolves against the wrong schema and 404s. Same
+  // standing trap that sent property-edit users home.
+  it("carries the task's office on both CTAs so a cross-office link resolves", () => {
+    const email = buildTaskReplyEmail({ ...base, officeId: "office-2" });
+
+    expect(email.link).toBe(`https://trockcrm.com/tasks/${TASK_ID}?officeId=office-2`);
+    // The EXACT url, not two toContain()s: `?officeId=office-2?complete=1` contains both substrings
+    // and is a malformed query string that drops the office on the floor.
+    expect(email.completeLink).toBe(
+      `https://trockcrm.com/tasks/${TASK_ID}?officeId=office-2&complete=1`
+    );
+    expect(email.html).toContain("officeId=office-2");
+    expect(email.text).toContain("officeId=office-2");
+  });
+
+  it("encodes the office rather than pasting it into the URL raw", () => {
+    const email = buildTaskReplyEmail({ ...base, officeId: "a&b=c" });
+    expect(email.link).toContain("officeId=a%26b%3Dc");
+  });
+
+  // A single-office link must stay byte-identical to what it was.
+  it("omits the office when it is not known", () => {
+    const email = buildTaskReplyEmail({ ...base, officeId: null });
+    expect(email.link).toBe(`https://trockcrm.com/tasks/${TASK_ID}`);
+    expect(email.completeLink).toBe(`https://trockcrm.com/tasks/${TASK_ID}?complete=1`);
+  });
+
   it("greets the assigner by first name and names who replied", () => {
     const email = buildTaskReplyEmail(base);
     expect(email.html).toContain("Hi Adam,");

@@ -12,6 +12,9 @@ import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from ".
 import { enqueueProcorePhotoSingle, handleProcorePhotoSyncJob } from "./procore-photos.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
 import { handleTaskAssignedEvent, handleTaskRepliedEvent } from "./task-notifications.js";
+// Moved out of this file so handlers living elsewhere can share ONE definition — see office-schema.ts
+// for why the event's officeId must win over the user's home office.
+import { resolveOfficeSchema } from "./office-schema.js";
 import { runAiIndexDocument } from "./ai-index-document.js";
 import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
 import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
@@ -103,36 +106,6 @@ async function loadTaskRuleDependencies() {
   ])) as any;
 
   return { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence };
-}
-
-async function resolveOfficeSchema(
-  pool: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> },
-  officeId: string | null,
-  userId?: string | null
-): Promise<{ officeId: string; schemaName: string } | null> {
-  let resolvedOfficeId = officeId;
-
-  if (!resolvedOfficeId && userId) {
-    const userRes = await pool.query("SELECT office_id FROM public.users WHERE id = $1", [userId]);
-    resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
-  }
-
-  if (!resolvedOfficeId) return null;
-
-  const officeResult = await pool.query(
-    "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-    [resolvedOfficeId]
-  );
-  if (officeResult.rows.length === 0) return null;
-
-  const slug = officeResult.rows[0].slug;
-  const slugRegex = /^[a-z][a-z0-9_]*$/;
-  if (!slugRegex.test(slug)) return null;
-
-  return {
-    officeId: resolvedOfficeId,
-    schemaName: `office_${slug}`,
-  };
 }
 
 function countTaskRuleCreations(outcomes: Array<{ action: string }>) {

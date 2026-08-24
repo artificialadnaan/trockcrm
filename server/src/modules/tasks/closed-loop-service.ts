@@ -55,6 +55,9 @@ export interface TaskReplyNotification {
   authorName: string | null;
   replyBody: string;
   repliedAt: string;
+  /** The tenant the comment was written into — carried so the email's deep link resolves for a
+   *  recipient whose own active office is a different one. */
+  officeId: string;
 }
 
 export interface TaskTimelineFieldChange {
@@ -674,15 +677,26 @@ export async function postTaskComment(
       authorName: author?.displayName ?? null,
       replyBody: body,
       repliedAt: createdAtIso,
+      officeId: input.officeId,
     };
 
     // Outbox: the in-app notification is written by the worker's task.replied handler, and the row goes
     // in BEFORE the caller commits so the event survives a crash between here and the response.
     await tenantDb.insert(jobQueue).values({
       jobType: "domain_event",
+      // Listed explicitly rather than spread, so the payload carries only what the worker reads. In
+      // particular it does NOT carry the office: `job_queue.office_id` below is the single persisted
+      // authority for which tenant this event belongs to, and the worker resolves the schema from it
+      // (queue.ts hands it to every handler). A second copy on the payload could disagree with it.
       payload: {
         eventName: "task.replied",
-        ...notify,
+        taskId: notify.taskId,
+        taskTitle: notify.taskTitle,
+        assignerId: notify.assignerId,
+        authorId: notify.authorId,
+        authorName: notify.authorName,
+        replyBody: notify.replyBody,
+        repliedAt: notify.repliedAt,
       },
       officeId: input.officeId,
       status: "pending",

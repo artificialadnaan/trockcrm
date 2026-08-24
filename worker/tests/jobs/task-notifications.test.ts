@@ -22,16 +22,33 @@ const ASSIGNEE = "user-assignee";
 const ASSIGNER = "user-assigner";
 const TASK = "3f0f9d1e-0000-4000-8000-00000000abcd";
 
-/** Resolves the office lookups; everything else returns an empty result set. */
-function mockOffice(slug: string | null) {
-  queryMock.mockImplementation(async (sql: string) => {
-    if (sql.includes("FROM public.users")) return { rows: [{ office_id: "office-1" }] };
+/**
+ * Resolves the office lookups.
+ *
+ * `slugByOfficeId` is keyed by office UUID so a test can make the RECIPIENT'S HOME office and the
+ * office the EVENT happened in resolve to different schemas — the whole point of the cross-office
+ * cases below. `homeOfficeId` is what public.users reports for the recipient.
+ */
+function mockOffices(
+  slugByOfficeId: Record<string, string | null>,
+  homeOfficeId: string | null = "office-1"
+) {
+  queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
+    if (sql.includes("FROM public.users")) {
+      return { rows: homeOfficeId === null ? [] : [{ office_id: homeOfficeId }] };
+    }
     if (sql.includes("FROM public.offices")) {
-      return { rows: slug === null ? [] : [{ slug }] };
+      const slug = slugByOfficeId[String((params ?? [])[0])];
+      return { rows: slug == null ? [] : [{ slug }] };
     }
     if (sql.includes("INSERT INTO")) return { rows: [{ id: "notif-1" }] };
     return { rows: [] };
   });
+}
+
+/** The common single-office arrangement: the event office and the home office are the same one. */
+function mockOffice(slug: string | null) {
+  mockOffices({ "office-1": slug }, "office-1");
 }
 
 function insertCall() {
@@ -55,8 +72,22 @@ describe("taskNotificationLink", () => {
     expect(taskNotificationLink(TASK)).toBe(`/tasks/${TASK}`);
   });
 
-  it("encodes the id rather than pasting it into the path raw", () => {
+  // Office context in the CRM is URL-driven: client/src/lib/api.ts reads ?officeId off the location
+  // and turns it into the x-office-id header, and with no param the server falls back to the reader's
+  // OWN active office. A bare link to a task in another office therefore resolves against the wrong
+  // schema and 404s — the standing trap that used to send property-edit users home.
+  it("carries the office so a cross-office link resolves against the right tenant", () => {
+    expect(taskNotificationLink(TASK, "office-2")).toBe(`/tasks/${TASK}?officeId=office-2`);
+  });
+
+  it("encodes both the id and the office rather than pasting them in raw", () => {
     expect(taskNotificationLink("a/b?c")).toBe("/tasks/a%2Fb%3Fc");
+    expect(taskNotificationLink(TASK, "a&b=c")).toBe(`/tasks/${TASK}?officeId=a%26b%3Dc`);
+  });
+
+  it("omits the param when the office is unknown, so a single-office link is unchanged", () => {
+    expect(taskNotificationLink(TASK, null)).toBe(`/tasks/${TASK}`);
+    expect(taskNotificationLink(TASK, undefined)).toBe(`/tasks/${TASK}`);
   });
 
   it("falls back to the list only when there is no task id at all", () => {
@@ -81,9 +112,24 @@ describe("task.assigned", () => {
       "task_assigned",
       "New task assigned: Send the roof photos",
       "Send the roof photos",
-      `/tasks/${TASK}`,
+      // Office-qualified: see the taskNotificationLink cases above.
+      `/tasks/${TASK}?officeId=office-1`,
     ]);
     expect(params[4]).not.toBe("/tasks");
+  });
+
+  // Same defect, and it PREDATES this feature — the handler was moved here verbatim from
+  // jobs/index.ts, where it resolved the recipient's home office and ignored the event's officeId.
+  // Both paths now share one resolver, so neither can drift back on its own.
+  it("writes the assignment notification to the EVENT's office, not the assignee's home office", async () => {
+    mockOffices({ "office-1": "dallas", "office-2": "atlanta" }, "office-1");
+
+    await handleTaskAssignedEvent(
+      { taskId: TASK, assignedTo: ASSIGNEE, title: "Send the roof photos" },
+      "office-2"
+    );
+
+    expect(insertCall()![0]).toContain("office_atlanta.notifications");
   });
 
   it("does nothing when there is no assignee", async () => {
@@ -115,7 +161,7 @@ describe("task.replied", () => {
     expect(params[1]).toBe("task_replied");
     expect(params[2]).toBe("Derek Barr replied to: Send the roof photos");
     expect(params[3]).toBe("Photos are uploaded.");
-    expect(params[4]).toBe(`/tasks/${TASK}`);
+    expect(params[4]).toBe(`/tasks/${TASK}?officeId=office-1`);
   });
 
   it("pushes over PG NOTIFY so the SSE manager can pick it up", async () => {
@@ -155,6 +201,62 @@ describe("task.replied", () => {
     mockOffice("dallas");
     await handleTaskRepliedEvent({ taskId: TASK, taskTitle: "t" }, "office-1");
     expect(insertCall()).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // THE TENANT THE ROW LANDS IN.
+  //
+  // `public.users` is GLOBAL while `notifications` and `tasks` are PER-OFFICE, so "the recipient's
+  // home office" and "the office this task lives in" are two different questions that happen to have
+  // the same answer in a single-office deployment. Resolving the schema from public.users.office_id
+  // answers the wrong one: the row lands outside the tenant where notification reads happen and where
+  // the linked task actually is, so the recipient never sees it — and a row is written into a schema
+  // it does not belong to.
+  //
+  // The event carries the right answer. queue.ts:711 passes job.office_id into every handler, the
+  // enqueuer sets it from the writer's ACTIVE office, and task.completed (task-completed.ts:79-88)
+  // already resolves this way. These two handlers were the outliers.
+  // ---------------------------------------------------------------------------------------------
+
+  it("writes the reply notification to the EVENT's office, not the recipient's home office", async () => {
+    // The recipient lives in office-1; the task and the reply are in office-2.
+    mockOffices({ "office-1": "dallas", "office-2": "atlanta" }, "office-1");
+
+    await handleTaskRepliedEvent(
+      { taskId: TASK, taskTitle: "t", assignerId: ASSIGNER, replyBody: "hi" },
+      "office-2"
+    );
+
+    const [sql] = insertCall()!;
+    expect(sql).toContain("office_atlanta.notifications");
+    expect(sql).not.toContain("office_dallas");
+  });
+
+  it("does not consult public.users at all when the event names its office", async () => {
+    mockOffices({ "office-1": "dallas", "office-2": "atlanta" }, "office-1");
+
+    await handleTaskRepliedEvent(
+      { taskId: TASK, taskTitle: "t", assignerId: ASSIGNER, replyBody: "hi" },
+      "office-2"
+    );
+
+    // A home-office lookup that still runs is a fallback waiting to be preferred again by accident.
+    expect(
+      queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("FROM public.users"))
+    ).toBe(false);
+  });
+
+  // The fallback stays, but strictly as a fallback: a domain_event row enqueued before office_id was
+  // populated still has to deliver somewhere sane rather than silently dropping.
+  it("falls back to the recipient's home office ONLY when the event names none", async () => {
+    mockOffices({ "office-1": "dallas", "office-2": "atlanta" }, "office-1");
+
+    await handleTaskRepliedEvent(
+      { taskId: TASK, taskTitle: "t", assignerId: ASSIGNER, replyBody: "hi" },
+      null
+    );
+
+    expect(insertCall()![0]).toContain("office_dallas.notifications");
   });
 
   it("does nothing when the office is inactive or unresolvable", async () => {

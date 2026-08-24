@@ -223,6 +223,23 @@ describe("the reply notification outbox", () => {
     const jobs = await replyJobs();
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ taskId: TASK, assignerId: ASSIGNER, replyBody: "On my way" });
+
+    // The office is NOT on the payload — job_queue.office_id is the single persisted authority for
+    // which tenant this event belongs to, and a second copy could disagree with it.
+    expect(jobs[0]).not.toHaveProperty("officeId");
+    const row = await pg.query<{ office_id: string }>(
+      `SELECT office_id FROM job_queue WHERE payload->>'eventName' = 'task.replied'`
+    );
+    expect(row.rows[0]?.office_id).toBe(OFFICE);
+  });
+
+  // The route hands this straight to the reply email, whose deep link 404s for a recipient sitting in
+  // a different office without it. In-process rather than persisted, hence asserted on the return.
+  it("returns the office on the notification so the email's deep link can carry it", async () => {
+    const result = await postTaskComment(
+      tdb, TASK, { body: "On my way", ...POST }, "rep", ASSIGNEE
+    );
+    expect(result.notify?.officeId).toBe(OFFICE);
   });
 
   it("enqueues NOTHING for a self-reply — the assigner talking to themselves", async () => {

@@ -21,6 +21,8 @@ type TaskAssignmentEmailInput = {
     displayName: string;
     email: string;
   };
+  /** The office the task lives in. See taskUrl — the deep link is wrong without it. */
+  officeId?: string | null;
 };
 
 type LinkedProject = {
@@ -63,8 +65,20 @@ function frontendBaseUrl() {
   return (process.env.FRONTEND_URL?.trim() || "https://trockcrm.com").replace(/\/+$/, "");
 }
 
-function taskUrl(taskId: string) {
-  return `${frontendBaseUrl()}/tasks/${encodeURIComponent(taskId)}`;
+/**
+ * Deep link to a task.
+ *
+ * ⚠️ IT MUST CARRY ?officeId WHEN THE OFFICE IS KNOWN. Office context in the CRM is URL-DRIVEN:
+ * client/src/lib/api.ts reads `?officeId` off window.location and injects it as the `x-office-id`
+ * header, and with no param the server resolves the tenant from the READER's own active office. The
+ * recipient of a task email is not necessarily sitting in the office the task lives in, so a bare
+ * `/tasks/<id>` runs `GET /tasks/:id` against the wrong schema and returns 404 "Task not found" — the
+ * same standing trap that sent property-edit users home. Appended only when known, so a single-office
+ * link is byte-identical to what it has always been.
+ */
+function taskUrl(taskId: string, officeId?: string | null) {
+  const url = `${frontendBaseUrl()}/tasks/${encodeURIComponent(taskId)}`;
+  return officeId ? `${url}?officeId=${encodeURIComponent(officeId)}` : url;
 }
 
 function escapeHtml(value: string) {
@@ -224,8 +238,10 @@ export function buildTaskAssignmentEmail(input: {
   assignee: AssigneeEmailRecipient;
   assignerName: string;
   project?: ProjectResolution;
+  /** Same cross-office reason as the reply email — see taskUrl. */
+  officeId?: string | null;
 }) {
-  const link = taskUrl(input.task.id);
+  const link = taskUrl(input.task.id, input.officeId);
   const due = formatDueDate(input.task.dueDate);
   const project = formatLinkedProjectLabel(input.project ?? { kind: "none" });
   const assigneeFirstName = firstNameFor(input.assignee);
@@ -282,6 +298,8 @@ export type TaskReplyEmailInput = {
   authorName: string | null;
   replyBody: string;
   repliedAt: string;
+  /** The office the task lives in. See taskUrl for why the link is wrong without it. */
+  officeId?: string | null;
 };
 
 export type PreparedTaskReplyEmail = {
@@ -293,8 +311,9 @@ export type PreparedTaskReplyEmail = {
 
 /** The one-click close CTA. No token auth — it deep-links to the task with the complete action
  *  focused, so the assigner still authenticates as themselves before anything is written. */
-function taskCompleteUrl(taskId: string) {
-  return `${taskUrl(taskId)}?complete=1`;
+function taskCompleteUrl(taskId: string, officeId?: string | null) {
+  const url = taskUrl(taskId, officeId);
+  return `${url}${url.includes("?") ? "&" : "?"}complete=1`;
 }
 
 /** HTML-escape first, THEN turn newlines into <br> — the reverse order would emit unescaped markup. */
@@ -317,8 +336,8 @@ function formatRepliedAt(repliedAt: string) {
  * nothing else makes the assigner open the CRM to read one sentence.
  */
 export function buildTaskReplyEmail(input: TaskReplyEmailInput) {
-  const link = taskUrl(input.task.id);
-  const completeLink = taskCompleteUrl(input.task.id);
+  const link = taskUrl(input.task.id, input.officeId);
+  const completeLink = taskCompleteUrl(input.task.id, input.officeId);
   const assignerFirstName = firstNameFor(input.assigner);
   // A display name is nullable on public.users, and "  replied to: X" reads as a bug.
   const replier = input.authorName?.trim() || "The assignee";
@@ -375,6 +394,7 @@ export async function prepareTaskReplyEmail(
     authorName: string | null;
     replyBody: string;
     repliedAt: string;
+    officeId?: string | null;
   }
 ): Promise<PreparedTaskReplyEmail | null> {
   // Savepointed for the same reason the assignment reads are: this runs inside the OPEN comment
@@ -409,6 +429,7 @@ export async function prepareTaskReplyEmail(
     authorName: input.authorName,
     replyBody: input.replyBody,
     repliedAt: input.repliedAt,
+    officeId: input.officeId,
   });
 
   return {
@@ -440,6 +461,7 @@ export async function prepareTaskAssignmentEmail(
     assignee,
     assignerName: input.assigner.displayName,
     project,
+    officeId: input.officeId,
   });
 
   return {

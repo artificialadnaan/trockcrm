@@ -108,6 +108,9 @@ async function prepareTaskAssignmentEmailBestEffort(
         displayName: req.user!.displayName,
         email: req.user!.email,
       },
+      // Pre-existing gap, fixed here because it is one argument in a helper this PR already owns: the
+      // assignment email's deep link had the same cross-office defect as the reply email's.
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
     });
   } catch (err) {
     // Preparing the email is best-effort — EXCEPT when the failure means the task transaction can
@@ -140,6 +143,9 @@ async function prepareTaskReplyEmailBestEffort(
       authorName: notify.authorName,
       replyBody: notify.replyBody,
       repliedAt: notify.repliedAt,
+      // The office the comment was written into — the link 404s for a recipient sitting in a
+      // different office without it. See notifications.ts taskUrl.
+      officeId: notify.officeId,
     });
   } catch (err) {
     // Same rule as the assignment email: best-effort EXCEPT when the failure means the comment's
