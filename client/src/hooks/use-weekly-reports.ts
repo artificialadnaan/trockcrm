@@ -129,6 +129,12 @@ export interface WeeklyReportProject {
   cadenceStartDate: string;
   cadenceEndDate: string | null;
   status: WeeklyReportProjectStatus;
+  /**
+   * False once "Stop reporting" has removed the setup — a different question from `status`, which is
+   * active/paused/completed. Only the `includeInactive` list can return a false; every other read
+   * filters the column, so it is permanently true for them.
+   */
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
   summary?: WeeklyReportProjectSummary | null;
@@ -243,19 +249,41 @@ export function useWeeklyReportDashboard(options: { asOf?: string } = {}) {
   return { data, rows: data?.rows ?? [], loading, error, refetch };
 }
 
-export function useWeeklyReportProjects(filters: { status?: string; search?: string } = {}) {
+export function useWeeklyReportProjects(
+  filters: {
+    status?: string;
+    search?: string;
+    /**
+     * Include setups that have been STOPPED. Off everywhere but History's opt-in toggle: these are
+     * finished jobs, and the reports under them stay readable and deletable by design — which is the
+     * only reason to ask for them.
+     */
+    includeInactive?: boolean;
+    /**
+     * Whether to fetch at all. Same idiom as `useWeeklyReportEligibleDeals`: History mounts this hook
+     * unconditionally for the stopped list and only pays for it once somebody ticks the box.
+     */
+    enabled?: boolean;
+  } = {},
+) {
   const [projects, setProjects] = useState<WeeklyReportProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const { status, search } = filters;
+  const { status, search, includeInactive, enabled = true } = filters;
   const refetch = useCallback(async () => {
+    if (!enabled) {
+      setProjects([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       if (status) params.set("status", status);
       if (search) params.set("search", search);
+      if (includeInactive) params.set("includeInactive", "true");
       const query = params.toString() ? `?${params.toString()}` : "";
       const response = await api<{ projects: WeeklyReportProject[] }>(`/weekly-reports/projects${query}`);
       setProjects(response.projects ?? []);
@@ -264,7 +292,7 @@ export function useWeeklyReportProjects(filters: { status?: string; search?: str
     } finally {
       setLoading(false);
     }
-  }, [status, search]);
+  }, [status, search, includeInactive, enabled]);
 
   useEffect(() => {
     void refetch();

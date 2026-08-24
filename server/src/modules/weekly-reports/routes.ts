@@ -180,6 +180,9 @@ router.get("/projects", async (req, res, next) => {
       listWeeklyReportProjects(req.tenantClient!, {
         status: readQueryString(req.query.status),
         search: readQueryString(req.query.search),
+        // Opt-in, so the Projects tab and every picker keep showing live work only. History asks for it
+        // to reach the reports under a stopped setup, which stay readable and deletable by design.
+        includeInactive: readQueryString(req.query.includeInactive) === "true",
       }),
       listWeeklyReportProjectSummaries(req.tenantClient!, asOf),
     ]);
@@ -460,9 +463,11 @@ router.delete("/reports/:id", requireRole("admin", "director"), async (req, res,
       actorUserId: actor.id,
       entityType: "weekly_report",
       entityId: deleted.id,
-      // Trimmed to what the service validated, and bounded like the dismissal reason: this is free text
-      // from a dialog and the column is unbounded jsonb.
-      reason: reason.trim().slice(0, 500),
+      // Trimmed to what the service validated, and NOT truncated. The length ceiling is enforced in the
+      // service as a 400, because this sentence is the whole explanation of why a report is gone and
+      // `audit_log` is the only place it is kept — cutting it here would answer 204 while discarding the
+      // half that mattered.
+      reason: reason.trim(),
       ...requestAuditContext(req),
     });
     await req.commitTransaction!();

@@ -4,8 +4,15 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
-import { updateWeeklyReportContent, type WeeklyReportDetail } from "@/hooks/use-weekly-reports";
+import {
+  WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS,
+  WEEKLY_REPORT_SECTION_MAX_CHARS,
+} from "@trock-crm/shared/types";
+import {
+  updateWeeklyReportContent,
+  type WeeklyReportContentPatch,
+  type WeeklyReportDetail,
+} from "@/hooks/use-weekly-reports";
 
 /**
  * Edit a week's contents from the CRM.
@@ -36,24 +43,44 @@ export function WeeklyReportEditDialog({
   // string either way, and keeping the draft as typed is what lets "" mean "cleared" rather than 0 —
   // "nobody has said yet" and "zero percent complete" are different claims about a job, and both
   // renderers print them differently.
-  const [form, setForm] = useState({
+  const initial = {
     workCompleted: report.workCompleted ?? "",
     nextWeekLookAhead: report.nextWeekLookAhead ?? "",
     issuesConcerns: report.issuesConcerns ?? "",
     completionPercent: report.completionPercent == null ? "" : String(report.completionPercent),
     weatherDelayDays: report.weatherDelayDays == null ? "" : String(report.weatherDelayDays),
-  });
+  };
+  const [form, setForm] = useState(initial);
   const [saving, setSaving] = useState(false);
 
   const handleChange = (field: keyof typeof form, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
   };
 
+  /**
+   * Did the user actually touch this field, measured against what the dialog OPENED with.
+   *
+   * The snapshot behind this form comes from the History list and is as old as the tab. Sending every
+   * field back means an untouched one carries that snapshot's value over whatever has happened since: a
+   * superintendent edits the report from the phone, a director with this dialog open presses Save, and
+   * the phone's work is silently replaced across every field the director never looked at. Nothing
+   * refuses it — `updateWeeklyReportContent`'s concurrency predicate is on `status`, and the status did
+   * not change — and nobody is told.
+   *
+   * The endpoint leaves an OMITTED key alone (see its `has(patch, …)` checks), so sending only what
+   * changed is the whole fix, and it needs nothing from the server. The alternative, an `updated_at`
+   * precondition, would refuse the director's save outright; that is a bigger change on both sides and
+   * a worse outcome for the common case, where the two people edited different fields.
+   */
+  const changed = (field: keyof typeof form) => form[field] !== initial[field];
+
   const handleSubmit = async () => {
     const workCompleted = form.workCompleted.trim();
-    if (!workCompleted) {
-      // Not merely a 400 later: the send gate re-checks this section at EVERY forward transition, so a
-      // report saved without it cannot be submitted, approved or sent.
+    // Judged only when they TOUCHED it. A section that was already empty is not this save's doing, and
+    // refusing here would block a director from fixing the percentage on a draft the superintendent has
+    // not written up yet. Blanking it deliberately is refused: the send gate re-checks this section at
+    // every forward transition, so a report saved without it cannot be submitted, approved or sent.
+    if (changed("workCompleted") && !workCompleted) {
       toast.error("Work completed can't be empty — it's what the report is for");
       return;
     }
@@ -88,20 +115,28 @@ export function WeeklyReportEditDialog({
         toast.error("Weather delays must be a whole number of days");
         return;
       }
+      // THE CEILING TOO, and named. The server refuses anything past this; without it here the user got
+      // a request failure reported as "must be a whole number of days" — a rule they had not broken.
+      if (parsed > WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS) {
+        toast.error(`Weather delays are capped at ${WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS} days`);
+        return;
+      }
       weatherDelayDays = parsed;
     }
 
+    // ONLY WHAT MOVED. An omitted key means "leave it alone" to the endpoint; a present one means
+    // "make it this". Blank is ABSENT rather than empty for the three sections — the same rule both
+    // renderers apply and the server's own normaliser — so clearing one sends null, not "".
+    const patch: WeeklyReportContentPatch = {};
+    if (changed("workCompleted")) patch.workCompleted = workCompleted;
+    if (changed("nextWeekLookAhead")) patch.nextWeekLookAhead = form.nextWeekLookAhead.trim() || null;
+    if (changed("issuesConcerns")) patch.issuesConcerns = form.issuesConcerns.trim() || null;
+    if (changed("completionPercent")) patch.completionPercent = completionPercent;
+    if (changed("weatherDelayDays")) patch.weatherDelayDays = weatherDelayDays;
+
     setSaving(true);
     try {
-      const updated = await updateWeeklyReportContent(report.id, {
-        workCompleted,
-        // Blank is ABSENT, not empty — the same rule both renderers apply and the server's own
-        // normaliser. Sending "" would store a section that prints as a heading with nothing under it.
-        nextWeekLookAhead: form.nextWeekLookAhead.trim() || null,
-        issuesConcerns: form.issuesConcerns.trim() || null,
-        completionPercent,
-        weatherDelayDays,
-      });
+      const updated = await updateWeeklyReportContent(report.id, patch);
       toast.success("Report updated");
       onSaved(updated);
       onClose();
@@ -173,6 +208,7 @@ export function WeeklyReportEditDialog({
                 aria-label="Weather delay days"
                 type="number"
                 min={0}
+                max={WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS}
                 step="1"
                 value={form.weatherDelayDays}
                 onChange={(event) => handleChange("weatherDelayDays", event.target.value)}

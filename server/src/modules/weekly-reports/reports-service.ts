@@ -1,5 +1,7 @@
 import {
+  WEEKLY_REPORT_DELETE_REASON_MAX_CHARS,
   WEEKLY_REPORT_MAX_PHOTOS,
+  WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS,
   WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
   WEEKLY_REPORT_SECTION_MAX_CHARS,
   canTransitionWeeklyReport,
@@ -821,8 +823,14 @@ function normalizePercent(value: unknown): number | null {
 function normalizeDelayDays(value: unknown): number | null {
   if (value == null || value === "") return null;
   const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 3650) {
+  if (!Number.isInteger(parsed) || parsed < 0) {
     throw new AppError(400, "weatherDelayDays must be a whole number of days");
+  }
+  // THE CEILING, from the shared constant rather than a literal — the form now enforces the same number,
+  // and a limit written twice is a limit that drifts. Its own message, because "must be a whole number"
+  // described a rule a caller sending 4000 had not broken.
+  if (parsed > WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS) {
+    throw new AppError(400, `weatherDelayDays is capped at ${WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS} days`);
   }
   return parsed;
 }
@@ -898,16 +906,13 @@ export async function deleteWeeklyReport(
   // — excluded from the board — and v2 inactive, also excluded. The week reappears as never filed, the
   // reminder job emails the superintendent, the PM and leadership about a week the client has already
   // received twice, and History offers no action on either row. There is no way back out of that state.
-  const superseded = await client.query(
-    `SELECT 1 FROM weekly_reports WHERE superseded_by_id = $1::uuid AND is_active LIMIT 1`,
-    [id],
-  );
-  if (superseded.rows[0]) {
-    throw new AppError(
-      409,
-      "This report replaced an earlier version of the same week. Deleting it would leave that week " +
-        "reading as never filed — delete the earlier version instead, or leave both in place.",
-    );
+  //
+  // ASKED TWICE, AND THE SECOND TIME IS THE ONE THAT BINDS. This read is a plain SELECT and cannot hold
+  // its answer until the write; the same condition rides on the UPDATE below, so a supersede committing
+  // in between refuses there instead. This one exists to say WHY, in a sentence somebody can act on —
+  // the write can only report that something changed.
+  if (await supersedesLivePredecessor(client, id)) {
+    throw new AppError(409, SUPERSEDES_LIVE_PREDECESSOR_MESSAGE);
   }
 
   const weekOf = toIsoDate(reportRow.week_of)!;
@@ -926,23 +931,62 @@ export async function deleteWeeklyReport(
   if (reason.length === 0) {
     throw new AppError(400, "A reason is required to delete a weekly report");
   }
+  // REFUSED, NOT TRIMMED TO FIT. `audit_log` is the only place this sentence is kept — `weekly_reports`
+  // carries no reason column — so silently cutting it discards forensic record while answering 204, and
+  // the person who wrote the explanation is told it was saved. Shared with the dialog's counter so the
+  // two describe the same rule.
+  if (reason.length > WEEKLY_REPORT_DELETE_REASON_MAX_CHARS) {
+    throw new AppError(
+      400,
+      `A deletion reason is limited to ${WEEKLY_REPORT_DELETE_REASON_MAX_CHARS} characters`,
+    );
+  }
 
   // CONDITIONED ON THE STATUS THE CHECKS ABOVE RAN AGAINST, exactly as the content and transition writes
   // are. Without it this is check-then-act: the sent-report confirmation is read from a status fetched in
   // an earlier statement, so a send committing in that window lets an unconfirmed delete land on a report
   // the client has since been emailed — the one thing the confirmation exists to stop.
+  //
+  // AND ON THE SUPERSEDE, re-tested here rather than trusted from the SELECT above. A correction send
+  // stamps `superseded_by_id` on its predecessor, and that write can commit between the precheck and
+  // this statement; a delete landing in that window strands the week exactly as an unchecked delete
+  // would. Expressed as NOT EXISTS on the write instead of FOR UPDATE on the predecessor because the row
+  // to lock is not this one and may not exist yet — there is nothing to take a lock on until the send
+  // creates the reference, so only a condition evaluated AT the write can see it.
   const result = await client.query(
     `UPDATE weekly_reports SET is_active = false, updated_at = now()
       WHERE id = $1::uuid AND is_active AND status = $2
+        AND NOT EXISTS (
+          SELECT 1 FROM weekly_reports predecessor
+           WHERE predecessor.superseded_by_id = $1::uuid AND predecessor.is_active
+        )
       RETURNING id, status, week_of`,
     [id, reportRow.status],
   );
   const deleted = result.rows[0];
   if (!deleted) {
+    // WHICH condition refused it. Both answer 409 and they want different sentences: one says reload,
+    // the other says delete the other version. Costs a query on the failure path only.
+    if (await supersedesLivePredecessor(client, id)) {
+      throw new AppError(409, SUPERSEDES_LIVE_PREDECESSOR_MESSAGE);
+    }
     throw new AppError(409, "This report changed while you were working on it — reload and try again");
   }
 
   return { id: deleted.id, status: deleted.status, weekOf: toIsoDate(deleted.week_of)! };
+}
+
+const SUPERSEDES_LIVE_PREDECESSOR_MESSAGE =
+  "This report replaced an earlier version of the same week. Deleting it would leave that week " +
+  "reading as never filed — delete the earlier version instead, or leave both in place.";
+
+/** Is there a LIVE report this one replaced? Deleting it would strand that week — see the caller. */
+async function supersedesLivePredecessor(client: QueryExecutor, id: string): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1 FROM weekly_reports WHERE superseded_by_id = $1::uuid AND is_active LIMIT 1`,
+    [id],
+  );
+  return Boolean(result.rows[0]);
 }
 
 export interface WeeklyReportPhotoSelection {

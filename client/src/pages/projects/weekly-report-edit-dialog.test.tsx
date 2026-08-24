@@ -108,23 +108,41 @@ describe("the weekly report edit dialog", () => {
     expect((field("Weather delay days") as HTMLInputElement).value).toBe("2");
   });
 
-  it("submits all five fields the endpoint accepts, numbers as numbers", async () => {
-    // The two numeric controls hand back STRINGS. `completion_percent` is numeric(5,2) and
-    // `weather_delay_days` an integer, and the server's normalisers do coerce — but sending "42" also
-    // sends "" for a cleared field, which is a different thing from null on a column where "nobody has
-    // said yet" and "zero" are separate claims about the job.
+  it("submits ONLY the fields the user changed, so an untouched one cannot overwrite anyone", async () => {
+    // THE STALE-SAVE BUG. This dialog opens on a snapshot from the History list and used to PATCH all
+    // five values back. A superintendent editing the same report from the phone while a director has
+    // this open meant the director's save silently restored the pre-edit text across every field they
+    // had not touched — and the server's concurrency predicate checks `status`, not content, so nothing
+    // refused it and nobody was told. An omitted key is left alone by the endpoint; that is the fix.
+    //
+    // The two numeric controls hand back STRINGS, so a changed one is still converted: `completion_percent`
+    // is numeric(5,2) and `weather_delay_days` an integer.
     render();
-    type("Work completed", "Framing complete");
     type("Issues / concerns", "Waiting on the permit");
     type("Completion percent", "55.5");
     await save();
 
     expect(mocks.updateWeeklyReportContent).toHaveBeenCalledWith("r1", {
-      workCompleted: "Framing complete",
-      nextWeekLookAhead: "Drywall",
       issuesConcerns: "Waiting on the permit",
       completionPercent: 55.5,
-      weatherDelayDays: 2,
+    });
+  });
+
+  it("sends nothing at all when nothing was touched", async () => {
+    // Not an empty PATCH of five unchanged values — no keys. The endpoint treats an absent key as "leave
+    // alone", so this is the difference between a no-op and a five-field overwrite that happens to match.
+    render();
+    await save();
+    expect(mocks.updateWeeklyReportContent).toHaveBeenCalledWith("r1", {});
+  });
+
+  it("still sends work completed when it IS the thing that changed", async () => {
+    // The control for the test above: dirty-tracking must not mean the section can never be written.
+    render();
+    type("Work completed", "Framing complete");
+    await save();
+    expect(mocks.updateWeeklyReportContent).toHaveBeenCalledWith("r1", {
+      workCompleted: "Framing complete",
     });
   });
 
@@ -168,6 +186,27 @@ describe("the weekly report edit dialog", () => {
 
     expect(mocks.updateWeeklyReportContent).not.toHaveBeenCalled();
     expect(mocks.toastError).toHaveBeenCalledWith(expect.stringMatching(/whole number/i));
+  });
+
+  it("refuses a weather delay past the server's ceiling, and says THAT rather than 'whole number'", async () => {
+    // The server refuses anything over 3650 — ten years, i.e. a typo. The form had only the `>= 0` half,
+    // so a larger value was accepted here, refused by the API, and reported back as "must be a whole
+    // number of days": a message describing a rule the user had not broken, about a value they had no
+    // way to see was wrong.
+    render();
+    type("Weather delay days", "4000");
+    await save();
+
+    expect(mocks.updateWeeklyReportContent).not.toHaveBeenCalled();
+    expect(mocks.toastError).toHaveBeenCalledWith(expect.stringMatching(/3650/));
+    expect(mocks.toastError).not.toHaveBeenCalledWith(expect.stringMatching(/whole number/i));
+  });
+
+  it("accepts the ceiling itself — the bound is inclusive, as the server's is", async () => {
+    render();
+    type("Weather delay days", "3650");
+    await save();
+    expect(mocks.updateWeeklyReportContent).toHaveBeenCalledWith("r1", { weatherDelayDays: 3650 });
   });
 
   it("hands the saved report back and closes, so the row behind it stops being stale", async () => {

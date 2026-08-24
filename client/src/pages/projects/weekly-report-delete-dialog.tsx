@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { WEEKLY_REPORT_DELETE_REASON_MAX_CHARS } from "@trock-crm/shared/types";
 import { deleteWeeklyReport, type WeeklyReportDetail } from "@/hooks/use-weekly-reports";
 
 /**
@@ -30,6 +31,7 @@ export function WeeklyReportDeleteDialog({
   const [deleting, setDeleting] = useState(false);
 
   const isSent = report.status === "sent";
+  const remaining = WEEKLY_REPORT_DELETE_REASON_MAX_CHARS - reason.length;
   // NON-EMPTY, matching the server's 400 and the house idiom — the deal archive, this module's own
   // dismiss route. Inventing a longer minimum here would put this disabled state and the server's answer
   // into disagreement about the same click.
@@ -95,10 +97,26 @@ export function WeeklyReportDeleteDialog({
                 size measures 2.56:1 against WCAG's 4.5, and lib/muted-text-contrast.test.ts fails the
                 build when a NEW file adds one. The existing 400s are a measured backlog, not a pattern
                 to match. */}
-            <p className="mb-1 text-[11px] font-bold uppercase tracking-wider text-slate-500">Reason</p>
+            <div className="mb-1 flex items-baseline justify-between">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Reason</p>
+              {/* SHOWN ONLY NEAR THE LIMIT. A counter on every reason turns "duplicate" into a form with
+                  a budget; it exists for the person writing a paragraph. `audit_log` is the only place
+                  this sentence is kept, so running out of room silently is what the server used to do
+                  and what this now prevents. */}
+              {remaining <= REASON_COUNTER_FROM && (
+                <span
+                  className={`text-[11px] font-semibold tabular-nums ${
+                    remaining === 0 ? "text-brand-red" : "text-slate-500"
+                  }`}
+                >
+                  {remaining} left
+                </span>
+              )}
+            </div>
             <Textarea
               aria-label="Reason"
               rows={3}
+              maxLength={WEEKLY_REPORT_DELETE_REASON_MAX_CHARS}
               placeholder="Why is this report being deleted?"
               value={reason}
               onChange={(event) => setReason(event.target.value)}
@@ -139,6 +157,9 @@ export function WeeklyReportDeleteDialog({
     </Dialog>
   );
 }
+
+/** How much room is left before the counter appears. Roughly a sentence and a half. */
+const REASON_COUNTER_FROM = 80;
 
 /** " on Aug 13", or nothing at all — a sent report with no stamp predates the column. */
 function sentOn(sentAt: string | null): string {

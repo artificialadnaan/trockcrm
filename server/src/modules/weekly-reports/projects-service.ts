@@ -50,6 +50,8 @@ export interface WeeklyReportProject {
   cadenceStartDate: string;
   cadenceEndDate: string | null;
   status: WeeklyReportProjectStatus;
+  /** False once "Stop reporting" has soft-deleted the setup. See the mapper for why it is not `status`. */
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -113,6 +115,13 @@ export function mapWeeklyReportProject(row: Record<string, any>): WeeklyReportPr
     cadenceStartDate: toIsoDate(row.cadence_start_date)!,
     cadenceEndDate: toIsoDate(row.cadence_end_date),
     status: row.status,
+    // Whether REPORTING IS SET UP AT ALL, which is a different question from `status`.
+    //
+    // `status` is active/paused/completed — the state of live reporting. `is_active` is whether the setup
+    // exists: "Stop reporting" soft-deletes the row and there is no restore path. Only listWeeklyReportProjects
+    // with `includeInactive` can return a false here; every other read filters the column, so it is
+    // permanently true for them.
+    isActive: row.is_active !== false,
     createdAt: toIsoTimestamp(row.created_at),
     updatedAt: toIsoTimestamp(row.updated_at),
   };
@@ -273,10 +282,15 @@ export function normalizeWeeklyReportProjectInput(input: WeeklyReportProjectInpu
 
 export async function listWeeklyReportProjects(
   client: QueryExecutor,
-  filters: { status?: string | null; search?: string | null } = {},
+  filters: { status?: string | null; search?: string | null; includeInactive?: boolean } = {},
 ): Promise<WeeklyReportProject[]> {
   const params: unknown[] = [];
-  const where: string[] = ["wrp.is_active"];
+  // OPT-IN, never the default. This list is the office's live reporting work — the Projects tab, the
+  // pickers, the History selector — and a stopped setup belongs in none of them by default. But the
+  // reports UNDER a stopped setup remain readable and deletable by design (a stopped setup is where
+  // leftover test data comes to rest), and History reaches those reports only through this list, so
+  // without a way to ask for them that capability had no route into the UI at all.
+  const where: string[] = filters.includeInactive ? [] : ["wrp.is_active"];
 
   if (filters.status && (WEEKLY_REPORT_PROJECT_STATUSES as readonly string[]).includes(filters.status)) {
     params.push(filters.status);
@@ -293,7 +307,9 @@ export async function listWeeklyReportProjects(
   }
 
   const result = await client.query(
-    `${PROJECT_SELECT} WHERE ${where.join(" AND ")}
+    // `where` can be EMPTY now — includeInactive with no status or search filter — and an unguarded
+    // `WHERE ` with nothing after it is a syntax error, not an empty predicate.
+    `${PROJECT_SELECT} ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
      ORDER BY COALESCE(wrp.property_display_name, d.name) ASC`,
     params,
   );

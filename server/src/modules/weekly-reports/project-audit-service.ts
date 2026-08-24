@@ -320,17 +320,25 @@ function markOutstanding(
 
   for (const report of reports) {
     if (receiptConfirmed(report.deliveryStatus)) bump(lastConfirmed, report.weekOf, report.version);
-    // `supersededById != null` CANNOT change the answer for any state the product can reach, and it is
-    // kept anyway — deliberately, not by oversight. A live row that failed is already `undelivered` and
-    // outstanding on its own account, so a failed row that is neither live-and-flagged nor superseded
-    // does not occur through the ordinary paths. What it defends is the row that got there another way:
-    // the hand-written UPDATE (prod fixes are applied by hand on this project), and now the DELETE —
-    // both leave a failure that would otherwise flag its week twice, on the orphan and the live send.
+    // CARRY A FAILURE ONTO ITS WEEK WHEN THE ROW ITSELF NO LONGER REPORTS IT — superseded, or removed.
     //
-    // The two maps deliberately still read REMOVED rows. Deleting a report does not un-bounce it, and
-    // the week's live version is owed to the client either way; excluding them here would let somebody
-    // clear a week's red border by removing the evidence rather than by fixing the send.
-    if (report.supersededById != null && weeklyReportDeliveryFailed(report.deliveryStatus)) {
+    // The condition is not "did anything fail", it is "did a failure happen that nothing else is
+    // flagging". A live, un-superseded failure is already `undelivered` and outstanding on its own
+    // account, so bumping it here would flag its week twice — on the orphan and on the live send both.
+    //
+    // `|| !report.isActive` IS THE HALF THAT WAS MISSING, and its absence produced the exact outcome the
+    // rest of this comment says it exists to prevent. `sendWeeklyReport` stamps `superseded_by_id` only
+    // onto rows that are still `is_active`, so a bounced report DELETED before its replacement is sent is
+    // never stamped: `supersededById` stays null, the bump never happened, and the deleted row's own
+    // `outstanding` is suppressed below because a removed report is nobody's job. A week whose only
+    // delivery verdict on record was a bounce then reported nothing outstanding at all — which is
+    // "clear the red border by removing the evidence", available to anyone with a delete button.
+    //
+    // Deleting a report does not un-bounce it. The week's live version is still owed to the client.
+    if (
+      (report.supersededById != null || !report.isActive) &&
+      weeklyReportDeliveryFailed(report.deliveryStatus)
+    ) {
       bump(lastFailed, report.weekOf, report.version);
     }
   }

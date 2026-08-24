@@ -25,12 +25,18 @@ import {
   userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
-import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import {
+  WEEKLY_REPORT_DELETE_REASON_MAX_CHARS,
+  WON_DEAL_STAGE_SLUGS,
+} from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { AppError, errorHandler } from "../../../src/middleware/error-handler.js";
 import { weeklyReportRoutes } from "../../../src/modules/weekly-reports/routes.js";
-import { createWeeklyReportProject } from "../../../src/modules/weekly-reports/projects-service.js";
+import {
+  createWeeklyReportProject,
+  listWeeklyReportProjects,
+} from "../../../src/modules/weekly-reports/projects-service.js";
 import {
   WEEKLY_REPORT_WEEK_EXISTS_CODE,
   createWeeklyReportDraft,
@@ -119,6 +125,25 @@ function racingDelete(reportId: string, trigger: string) {
         ]);
       }
       return db.query(text, params);
+    },
+  } as typeof db;
+}
+
+/**
+ * A `db` that commits ARBITRARY sql mid-call, immediately before the statement matching `trigger`.
+ *
+ * The general form of the two above. Used for the supersede race, where what another transaction commits
+ * is two writes on two different rows rather than one status change.
+ */
+function racingSql(trigger: string, sql: string, params: unknown[] = []) {
+  let fired = false;
+  return {
+    query: async (text: string, args?: unknown[]) => {
+      if (!fired && text.includes(trigger)) {
+        fired = true;
+        await pg.query(sql, params as any[]);
+      }
+      return db.query(text, args);
     },
   } as typeof db;
 }
@@ -334,6 +359,32 @@ describe("deleting a weekly report", () => {
     ).resolves.toMatchObject({ id: reportId });
   });
 
+  it("refuses a reason too long to store rather than recording half of it", async () => {
+    // `audit_log` is the ONLY place the explanation lives — `weekly_reports` has no reason column — so a
+    // reason silently cut to length is a forensic record that loses the half explaining the removal,
+    // while the user is shown a success toast. Refused, so the dialog's counter and this 400 describe the
+    // same rule.
+    const project = await seedProject();
+    const reportId = await seedDraft(project.id);
+
+    await expectAppError(
+      deleteWeeklyReport(db, reportId, ADMIN_ACTOR, {
+        reason: "x".repeat(WEEKLY_REPORT_DELETE_REASON_MAX_CHARS + 1),
+      }),
+      400,
+      /limited to 500 characters/i,
+    );
+    expect(await isActive(reportId)).toBe(true);
+
+    // The boundary is inclusive — and it is measured on the TRIMMED reason, so trailing whitespace
+    // cannot push an acceptable sentence over the edge.
+    await expect(
+      deleteWeeklyReport(db, reportId, ADMIN_ACTOR, {
+        reason: `  ${"x".repeat(WEEKLY_REPORT_DELETE_REASON_MAX_CHARS)}  `,
+      }),
+    ).resolves.toMatchObject({ id: reportId });
+  });
+
   it("refuses a second delete with a 404 rather than reporting success twice", async () => {
     const project = await seedProject();
     const reportId = await seedDraft(project.id);
@@ -421,6 +472,78 @@ describe("deleting a weekly report", () => {
     ).resolves.toMatchObject({ id: v1 });
   });
 
+  describe("when the supersede lands between the check and the write", () => {
+    /** v1 sent and not yet superseded; v2 drafted over it and approved, but not yet sent. */
+    async function pendingCorrection() {
+      const project = await seedProject();
+      const v1 = await seedDraft(project.id);
+      await setStatus(v1, "sent");
+      const v2 = await seedVersion(project.id, 2);
+      await pg.query(`UPDATE office_dallas.weekly_reports SET status = 'approved' WHERE id = $1::uuid`, [
+        v2,
+      ]);
+      return { project, v1, v2 };
+    }
+
+    it("refuses — the precheck is a plain SELECT and cannot hold the answer to the write", async () => {
+      // THE RACE: the precheck sees nothing pointing at v2 (v1 is not superseded yet), and the correction
+      // send commits before the UPDATE lands. Without the condition ON the write, the delete deactivates
+      // a correction that has just superseded v1 — leaving v1 excluded as superseded and v2 excluded as
+      // inactive, so the week vanishes from the board and walks straight back into the reminder job. That
+      // is the exact outcome the precheck exists to prevent, reintroduced through the gap between the two
+      // statements.
+      //
+      // The supersede stamp ALONE, without v2's status moving. Today `sendWeeklyReport` writes both in
+      // one transaction, so this interleaving arrives from a hand-applied prod fix rather than from the
+      // send path — but the guard must not depend on a second file committing two facts together, which
+      // is what the sibling test below is here to show.
+      const { v1, v2 } = await pendingCorrection();
+
+      await expectAppError(
+        deleteWeeklyReport(
+          racingSql(
+            "UPDATE weekly_reports SET is_active = false",
+            `UPDATE office_dallas.weekly_reports SET superseded_by_id = $2::uuid WHERE id = $1::uuid`,
+            [v1, v2],
+          ),
+          v2,
+          ADMIN_ACTOR,
+          { reason: "Correction was a mistake" },
+        ),
+        409,
+        /replaced an earlier version/i,
+      );
+      expect(await isActive(v2)).toBe(true);
+    });
+
+    it("refuses the whole send committing in that window too — both writes, as production makes them", async () => {
+      // The interleaving the send path can actually produce: `superseded_by_id` on v1 and `status = sent`
+      // on v2 commit together. This was already refused before the write carried the supersede condition,
+      // but by the STATUS predicate rather than by the guard that expresses the intent — a correct answer
+      // for a reason this file does not state, resting on two facts in send-service.ts sharing a
+      // transaction. Pinned so that if they ever stop, this fails here rather than in the field.
+      const { v1, v2 } = await pendingCorrection();
+
+      await expectAppError(
+        deleteWeeklyReport(
+          racingSql(
+            "UPDATE weekly_reports SET is_active = false",
+            `UPDATE office_dallas.weekly_reports
+                SET superseded_by_id = CASE WHEN id = $1::uuid THEN $2::uuid ELSE superseded_by_id END,
+                    status = CASE WHEN id = $2::uuid THEN 'sent' ELSE status END
+              WHERE id IN ($1::uuid, $2::uuid)`,
+            [v1, v2],
+          ),
+          v2,
+          ADMIN_ACTOR,
+          { reason: "Correction was a mistake" },
+        ),
+        409,
+      );
+      expect(await isActive(v2)).toBe(true);
+    });
+  });
+
   it("refuses when the report is sent out from under it mid-call", async () => {
     // The permission check reads a status; the UPDATE writes against one. Between the two another request
     // can commit. Without the status predicate on the UPDATE the sent-report confirmation is bypassable:
@@ -462,6 +585,32 @@ describe("deleting a weekly report", () => {
       409,
       /changed while you were working on it/i,
     );
+  });
+
+  it("can still be REACHED after the setup is stopped, or the delete above has no way in", async () => {
+    // The other half of the archived-project case, and without it the service capability is unreachable.
+    // History's project selector is fed by `listWeeklyReportProjects`, which filters `wrp.is_active`, so
+    // a stopped setup leaves the list and takes every one of its reports with it — and a stopped setup is
+    // exactly where leftover test data comes to rest. Opt-in, because the ordinary list is live work.
+    const project = await seedProject();
+    await seedDraft(project.id);
+    await pg.query(`UPDATE office_dallas.weekly_report_projects SET is_active = false WHERE id = $1::uuid`, [
+      project.id,
+    ]);
+
+    expect(await listWeeklyReportProjects(db, {})).toHaveLength(0);
+    const withStopped = await listWeeklyReportProjects(db, { includeInactive: true });
+    expect(withStopped.map((p) => p.id)).toEqual([project.id]);
+    // FLAGGED, not merely present. The selector has to be able to mark these apart from live work, and a
+    // caller that cannot tell them apart would show a stopped job as though reporting were still running.
+    expect(withStopped[0]!.isActive).toBe(false);
+  });
+
+  it("leaves a live setup reading as live when stopped ones are included — the control", async () => {
+    const project = await seedProject();
+    const both = await listWeeklyReportProjects(db, { includeInactive: true });
+    expect(both.map((p) => p.id)).toEqual([project.id]);
+    expect(both[0]!.isActive).toBe(true);
   });
 
   it("deletes a report whose reporting setup has been stopped", async () => {

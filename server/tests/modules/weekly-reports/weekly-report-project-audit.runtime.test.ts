@@ -402,6 +402,67 @@ describe("the per-project audit trail", () => {
   });
 
   /**
+   * A version refiled AFTER the failed one was removed, which is a chain with no `superseded_by_id` in it.
+   *
+   * `sendWeeklyReport`'s supersede UPDATE carries `AND is_active`, so a v1 that was deleted first is never
+   * stamped — the replacement goes out with nothing pointing anywhere. Every other fixture in this block
+   * chains, which is why this state had no coverage.
+   */
+  async function seedRefiledAfterRemoval(removed: { deliveryStatus: string | null }) {
+    await seedFullySentReport({ send_delivery_status: removed.deliveryStatus, is_active: false });
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_reports
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, version, status,
+          created_at, sent_by, sent_at, send_delivered_at, send_request)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-08-13'::date, 2, 'sent',
+               '2026-08-15T09:00:00Z'::timestamptz, $5::uuid, '2026-08-15T10:00:00Z'::timestamptz,
+               '2026-08-15T10:00:30Z'::timestamptz, $6::jsonb)`,
+      [U("66662"), U("77772"), PROJECT, DEAL, PM, JSON.stringify({ to: ["jay@mackre.com"] })],
+    );
+    return U("66662");
+  }
+
+  it("keeps a week flagged when the version that BOUNCED was deleted before its replacement existed", async () => {
+    // DELETING THE EVIDENCE MUST NOT CLEAR THE WARNING, and this is the case where it did.
+    //
+    // A bounced report removed before any replacement exists has `superseded_by_id` null — nothing ever
+    // stamped it — so the failure was never carried onto the week, and the row's own flag is suppressed
+    // because a removed report is nobody's job. The refiled v2 is merely provider-accepted, which is not
+    // evidence of receipt and deliberately does not flag on its own. Net result: a week whose only
+    // delivery verdict on record is a bounce reported nothing outstanding at all.
+    const v2 = await seedRefiledAfterRemoval({ deliveryStatus: "bounced" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const replacement = audit.reports.find((r) => r.id === v2)!;
+    // Not undelivered on its own account — the provider took it and has said nothing since, which is the
+    // ordinary pre-verdict state. The week is unresolved because of what came BEFORE it.
+    expect(replacement.undelivered).toBe(false);
+    expect(replacement.outstanding).toBe(true);
+  });
+
+  it("leaves the replacement alone when the removed version had actually been delivered", async () => {
+    // The control that keeps the fix narrow. Removal is not itself a failure: a version the client
+    // demonstrably received, then removed, settles its week exactly as it did while it was live.
+    const v2 = await seedRefiledAfterRemoval({ deliveryStatus: "delivered" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.find((r) => r.id === v2)!.outstanding).toBe(false);
+  });
+
+  it("leaves it alone when the removed version had no verdict either way", async () => {
+    // THE CONTROL THAT ACTUALLY BINDS, and the one the delivered case above cannot be: a delivered row
+    // bumps `lastConfirmed` as well, so it settles the week even if removal were wrongly treated as a
+    // failure. This row is neither — accepted by the provider, nothing said since, then deleted — so it
+    // is the only fixture where "carry removals onto the week" and "carry FAILED removals onto the week"
+    // give different answers. Deleting an ordinary in-flight report must not make its replacement look
+    // like it is chasing a failure that never happened.
+    const v2 = await seedRefiledAfterRemoval({ deliveryStatus: null });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.find((r) => r.id === v2)!.outstanding).toBe(false);
+  });
+
+  /**
    * The control that keeps the fix narrow. Without the requirement that a PREVIOUS version FAILED, this
    * is the case that turns every report on the platform red for the minutes between the provider taking
    * it and the webhook coming back — which is precisely why `undelivered` does not flag it either.

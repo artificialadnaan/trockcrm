@@ -23,6 +23,8 @@ vi.mock("@/hooks/use-weekly-reports", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { error: mocks.toastError, success: mocks.toastSuccess } }));
 
+import { WEEKLY_REPORT_DELETE_REASON_MAX_CHARS } from "@trock-crm/shared/types";
+
 import { WeeklyReportDeleteDialog } from "./weekly-report-delete-dialog";
 
 function report(overrides: Record<string, unknown> = {}) {
@@ -112,6 +114,26 @@ describe("deleting a draft", () => {
     expect(mocks.deleteWeeklyReport).toHaveBeenCalledWith("r1", {
       reason: "Test data from the runbook",
     });
+  });
+
+  it("caps the reason at what the audit log will actually store, and shows the remaining room", async () => {
+    // `audit_log` is the ONLY place this sentence is kept, and it used to be trimmed to 500 server-side
+    // behind a success toast — so the half of the explanation that mattered was discarded while the user
+    // was told it had been saved. The server now refuses; this stops them writing past it in the first
+    // place, and the counter is what makes the limit visible before they hit it.
+    render();
+    expect(field("Reason").getAttribute("maxLength")).toBe(String(WEEKLY_REPORT_DELETE_REASON_MAX_CHARS));
+
+    type("Reason", "x".repeat(460));
+    expect(document.body.textContent).toContain("40 left");
+  });
+
+  it("keeps quiet about the count until the user is near the limit", () => {
+    // A character counter on every reason turns a two-word explanation into a form with a budget. It is
+    // there for the person writing a paragraph, not the one writing "duplicate".
+    render();
+    type("Reason", "Test data");
+    expect(document.body.textContent).not.toMatch(/left/i);
   });
 
   it("reports back and closes on success", async () => {

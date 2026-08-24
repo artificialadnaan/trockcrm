@@ -25,6 +25,7 @@ import {
   fetchWeeklyReportDetail,
   retryWeeklyReportSend,
   useWeeklyReportHistory,
+  useWeeklyReportProjects,
   type WeeklyReportDetail,
   type WeeklyReportHistoryEntry,
   type WeeklyReportProject,
@@ -88,10 +89,32 @@ export function WeeklyReportHistoryPanel({
 }) {
   const [projectId, setProjectId] = useState<string>("");
 
+  /**
+   * REPORTS UNDER A STOPPED SETUP, which this selector could not otherwise reach.
+   *
+   * "Stop reporting" soft-deletes the setup row, and `listWeeklyReportProjects` filters `wrp.is_active`
+   * — so the setup leaves the `projects` prop and takes every report under it with it. Those reports
+   * stay readable and deletable on purpose (the delete deliberately opts out of the project's
+   * `is_active` filter, because a stopped setup is exactly where leftover test data comes to rest), and
+   * without this there was no way to select one. Opt-in, and not fetched until it is asked for: the tab
+   * is live work by default.
+   */
+  const [showStopped, setShowStopped] = useState(false);
+  const { projects: withStopped } = useWeeklyReportProjects({
+    includeInactive: true,
+    enabled: showStopped,
+  });
+  const selectable = showStopped ? withStopped : projects;
+
   // Default to the first project once the list arrives, so the tab isn't an empty prompt on open.
+  //
+  // AND FALL BACK when the selected one leaves the list — which is what unticking "include stopped
+  // setups" does to a stopped project. A `<select>` bound to a value none of its options carry renders
+  // blank, and the table under it empties, with nothing on screen saying why.
   useEffect(() => {
-    if (!projectId && projects.length > 0) setProjectId(projects[0]!.id);
-  }, [projects, projectId]);
+    if (selectable.length === 0) return;
+    if (!projectId || !selectable.some((p) => p.id === projectId)) setProjectId(selectable[0]!.id);
+  }, [selectable, projectId]);
 
   const { reports, loading, error, refetch } = useWeeklyReportHistory(projectId || null);
   const [detail, setDetail] = useState<WeeklyReportDetail | null>(null);
@@ -112,7 +135,10 @@ export function WeeklyReportHistoryPanel({
     void refetch();
   }, [refreshSignal, refetch]);
 
-  const selected = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
+  const selected = useMemo(
+    () => selectable.find((p) => p.id === projectId) ?? null,
+    [selectable, projectId],
+  );
 
   // The highest live version per week. "Send correction" is offered on the newest version of a week and
   // nowhere else: a report is only marked superseded when its replacement is SENT, so a PM who drafts a
@@ -160,15 +186,28 @@ export function WeeklyReportHistoryPanel({
           aria-label="Project"
           className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[13px] font-semibold text-slate-700"
         >
-          {projects.map((project) => (
+          {selectable.map((project) => (
             <option key={project.id} value={project.id}>
               {project.propertyDisplayName ?? project.dealName ?? "Untitled project"}
+              {/* MARKED, not merely listed. A stopped job shown identically to a live one reads as
+                  though reporting were still running on it. */}
+              {project.isActive === false ? " · stopped" : ""}
             </option>
           ))}
         </select>
         {selected?.clientName && (
-          <span className="text-[12.5px] font-semibold text-slate-400">for {selected.clientName}</span>
+          <span className="text-[12.5px] font-semibold text-slate-500">for {selected.clientName}</span>
         )}
+        <label className="ml-auto flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-500">
+          <input
+            type="checkbox"
+            aria-label="Include stopped setups"
+            checked={showStopped}
+            onChange={(event) => setShowStopped(event.target.checked)}
+            className="h-3.5 w-3.5 accent-brand-red"
+          />
+          Include stopped setups
+        </label>
       </div>
 
       {loading ? (

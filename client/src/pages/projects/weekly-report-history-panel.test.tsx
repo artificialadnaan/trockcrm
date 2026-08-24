@@ -12,6 +12,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   reports: [] as any[],
+  stoppedProjects: [] as any[],
+  /** WHICH project's history was actually requested — the observable consequence of the selection. */
+  historyFor: [] as (string | null)[],
   refetch: vi.fn(),
   fetchWeeklyReportDetail: vi.fn(),
   createWeeklyReportCorrection: vi.fn(),
@@ -21,11 +24,17 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
-  useWeeklyReportHistory: () => ({
-    reports: mocks.reports,
+  useWeeklyReportHistory: (projectId: string | null) => {
+    mocks.historyFor.push(projectId);
+    return { reports: mocks.reports, loading: false, error: null, refetch: mocks.refetch };
+  },
+  // The opt-in feed of setups that have been STOPPED. Live setups reach the panel as a prop; these do
+  // not, because `listWeeklyReportProjects` filters them out of every ordinary list.
+  useWeeklyReportProjects: (filters: any) => ({
+    projects: filters?.enabled ? mocks.stoppedProjects : [],
     loading: false,
     error: null,
-    refetch: mocks.refetch,
+    refetch: vi.fn(),
   }),
   fetchWeeklyReportDetail: mocks.fetchWeeklyReportDetail,
   createWeeklyReportCorrection: mocks.createWeeklyReportCorrection,
@@ -107,6 +116,8 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   mocks.reports = [];
+  mocks.stoppedProjects = [];
+  mocks.historyFor = [];
   mocks.refetch.mockReset();
   mocks.createWeeklyReportCorrection.mockReset();
   mocks.retryWeeklyReportSend.mockReset();
@@ -643,5 +654,73 @@ describe("the row's overflow menu", () => {
     });
     const textarea = document.querySelector<HTMLTextAreaElement>('[aria-label="Work completed"]');
     expect(textarea?.value).toBe("Framing on level 3");
+  });
+});
+
+describe("reports under a setup that has been stopped", () => {
+  // WHERE LEFTOVER TEST DATA ACTUALLY SITS, and until now the one place the delete could not reach.
+  //
+  // "Stop reporting" soft-deletes the setup, `listWeeklyReportProjects` filters `wrp.is_active`, and this
+  // selector is fed by that list — so the setup left the dropdown and took every report under it with it.
+  // The service supports deleting those reports (it deliberately opts out of the project's `is_active`
+  // filter for exactly this reason); there was simply no way to select one.
+  const STOPPED = {
+    id: "p2",
+    propertyDisplayName: "1900 Pearl — finished",
+    dealName: "1900 Pearl",
+    isActive: false,
+  } as any;
+
+  function toggle(): HTMLInputElement | undefined {
+    return document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]') ?? undefined;
+  }
+  function optionLabels(): string[] {
+    return Array.from(container.querySelectorAll("option")).map((o) => o.textContent?.trim() ?? "");
+  }
+
+  it("keeps them out of the selector by default — the tab is live work", () => {
+    mocks.stoppedProjects = [PROJECT, STOPPED];
+    render();
+    expect(optionLabels()).toEqual(["4123 Cedar Springs"]);
+  });
+
+  it("brings them in when asked, and says which ones are stopped", async () => {
+    mocks.stoppedProjects = [PROJECT, STOPPED];
+    render();
+    await act(async () => {
+      toggle()!.click();
+    });
+
+    const labels = optionLabels();
+    expect(labels).toContain("4123 Cedar Springs");
+    // Marked, not merely present. A stopped job listed identically to a live one reads as though
+    // reporting were still running on it.
+    expect(labels.some((label) => /1900 Pearl — finished/.test(label) && /stopped/i.test(label))).toBe(true);
+  });
+
+  it("falls back to a live setup when the stopped one is hidden again", async () => {
+    // Unticking with a stopped project selected would otherwise leave the selector bound to an id that is
+    // no longer among its options — which renders as a blank dropdown and an empty table, with nothing
+    // saying why.
+    mocks.stoppedProjects = [PROJECT, STOPPED];
+    render();
+    await act(async () => {
+      toggle()!.click();
+    });
+    const select = container.querySelector("select")!;
+    await act(async () => {
+      select.value = "p2";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(mocks.historyFor[mocks.historyFor.length - 1]).toBe("p2");
+
+    await act(async () => {
+      toggle()!.click();
+    });
+    // Asserted on WHICH HISTORY IS FETCHED, not on `select.value`. A `<select>` bound to a value none of
+    // its options carry reports "" in the DOM regardless of what the component thinks is selected, so
+    // reading the control back cannot tell "fell back to the live project" from "left pointing at a
+    // project that is no longer listed" — which is the whole difference this test exists for.
+    expect(mocks.historyFor[mocks.historyFor.length - 1]).toBe("p1");
   });
 });
