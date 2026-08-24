@@ -27,6 +27,10 @@ import {
   TASK_SOURCE_INDEX_MIGRATION,
   runTaskSourceIndexMigration,
 } from "./task-source-index.js";
+import {
+  TASK_SOURCE_BACKFILL_MIGRATION,
+  runTaskSourceBackfill,
+} from "./task-source-backfill.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -92,6 +96,19 @@ async function runMigrations(): Promise<void> {
         await runActivitiesPerformedByUserIndexMigration(client);
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
+      } else if (file === TASK_SOURCE_BACKFILL_MIGRATION) {
+        // The one case where the step runs AFTER the file rather than before it: 0233 adds the column,
+        // and the backfill cannot classify a column that does not exist yet.
+        //
+        // The backfill is not in the SQL because it has to disable set_tasks_updated_at and audit_tasks
+        // around itself, and `ALTER TABLE ... DISABLE TRIGGER` takes a lock that conflicts with task
+        // writes. A migration file is ONE transaction, so a DO block doing that per office would hold
+        // the first office's lock until the last office finished — task writes blocking across every
+        // tenant, on deploy. The step below takes one transaction PER OFFICE and commits each before
+        // moving on. See task-source-backfill.ts for the invariant this protects.
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
+        await runTaskSourceBackfill(client);
       } else if (file === TASK_SOURCE_INDEX_MIGRATION) {
         // Same reason again: `tasks` is written by the rules engine, the email queue, two crons, deal
         // reassignment and every person using the New Task form, so a plain CREATE INDEX inside the

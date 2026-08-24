@@ -227,6 +227,31 @@ describe("the index migration's own guards", () => {
     expect(await indexOffices()).toEqual(["office_dallas"]);
   });
 
+  // STRUCTURAL, and labelled as such: PGlite cannot observe lock contention, so nothing here claims to
+  // prove "this does not block". What is checkable is that every CREATE INDEX in the file sits behind a
+  // catalog test. `CREATE INDEX IF NOT EXISTS` is NOT free on an index that already exists — Postgres
+  // opens the table with a write-conflicting SHARE lock BEFORE evaluating IF NOT EXISTS — so inside
+  // this file's single transaction an unguarded "no-op" would lock every tenant's tasks until the file
+  // finished.
+  it("guards every CREATE INDEX behind a catalog check (structural)", () => {
+    // Comments are stripped first: the header explains this reasoning in prose and would otherwise be
+    // counted as if it were executable SQL.
+    const sql = migrationSql(INDEX_MIGRATION)
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+
+    const creates = sql.match(/CREATE\s+INDEX/gi) ?? [];
+    expect(creates.length, "expected the loop's build and the provisioner block's").toBe(2);
+
+    // Each CREATE INDEX must have a pg_class existence test before it, not be reached directly.
+    const guards = sql.match(/FROM\s+pg_class/gi) ?? [];
+    expect(guards.length).toBe(creates.length);
+    for (const segment of sql.split(/CREATE\s+INDEX/i).slice(0, -1)) {
+      expect(segment, "a CREATE INDEX with no catalog guard before it").toMatch(/pg_class/i);
+    }
+  });
+
   // The provisioner takes indexOf on the FIRST occurrence of the marker, so a marker named in a prose
   // comment above the real block would truncate what a new office receives.
   it("has exactly one TENANT_SCHEMA block, replayable on its own", async () => {

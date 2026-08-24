@@ -4,7 +4,8 @@
 --   git fetch origin --prune
 --   git log --all --diff-filter=AM --name-only --format= -- 'migrations/022*' 'migrations/023*'
 -- Highest across ALL remote heads at authoring time: 0231 (0231_weekly_report_views.sql). 0232 is taken
--- by an in-flight branch that has not merged yet, so 0233 is the first free number.
+-- by an in-flight branch that has not merged yet, so 0233 is the first free number. The index this
+-- column needs is 0237 — see that file for why it is not here.
 --
 -- WHY A COLUMN AND NOT A QUERY. The tasks list is drowning in machine-generated work and people want to
 -- filter it, which needs a reliable "who made this" discriminator. Every column already on the table
@@ -15,8 +16,9 @@
 --                           REAL human on created_by for a task no human asked for.
 --   * `origin_rule`       — closest to honest, and it is what this backfill leans on, but reassignment
 --                           tasks carry a NULL origin_rule while being just as machine-made.
--- So the answer has to be recorded at write time. This migration adds the column and classifies the
--- history; the write sites that set it explicitly land next.
+-- So the answer has to be recorded at write time. This migration adds the column; the classification of
+-- existing rows is a runner step (see the invariant below), and the write sites that set it explicitly
+-- land next.
 --
 -- DEFAULT 'automated', DELIBERATELY. New rows all get an explicit value from application code, so the
 -- default only governs rows nothing else identifies. Automated is both the overwhelming majority and the
@@ -30,35 +32,39 @@
 -- once every write site is confirmed deployed, so a NEW write site that forgets the column fails loudly
 -- rather than silently filing its rows as automated.
 --
--- ⚠️ THE TRIGGERS ARE DISABLED AROUND THE BACKFILL, AND THAT IS THE MOST IMPORTANT LINE IN THIS FILE.
--- `tasks` carries set_tasks_updated_at (0001:858 -> set_updated_at at 0001:368), which sets
--- NEW.updated_at = NOW() on every UPDATE, unconditionally. The contacts list reads MAX(tasks.updated_at)
--- straight through as a contact's "Last touch" (contacts/service.ts buildContactLastTouchAtSql), and the
--- "Untouched 30d+" card, its ?card=untouched drill and the aggregate count are ALL derived from that one
--- expression. Letting the trigger fire here would stamp every contact that has ever had a task with this
--- migration's timestamp: the sort would collapse, the card would read zero, and because the card, the
--- drill and the aggregate move together nothing would look inconsistent enough for anyone to notice.
--- The original values are not recoverable. audit_tasks is disabled for the same window because it fires
--- ~30 dynamic EXECUTEs per row and would otherwise write an audit entry per task, in every office, for a
--- column no person edited.
+-- ⚠️ THE INVARIANT, AND IT APPLIES TO EVERY FUTURE MIGRATION THAT TOUCHES THIS TABLE:
+--   NOTHING THAT TAKES A LOCK ON `tasks` MAY RUN INSIDE A MIGRATION FILE'S SINGLE TRANSACTION
+--   ACROSS EVERY OFFICE.
+-- runner.ts sends each .sql file as ONE client.query(sql), so a DO block looping every office_% schema
+-- holds every lock it takes until the LAST office finishes. Per-tenant transactions are not
+-- expressible inside a migration file at all — you cannot fix that by rearranging the SQL. `tasks` is
+-- written by the rules engine, the email queue, two crons, deal reassignment and every person using the
+-- New Task form, so a lock held across tenants means task writes progressively blocking in every
+-- office, on deploy, potentially past the app's 30/45s timeouts.
 --
--- Both UPDATEs are also guarded on the value actually changing, so a row that is already classified
--- correctly is never rewritten at all.
+-- This file therefore contains ONLY the additive part: ADD COLUMN (metadata-only in PG11+, so its brief
+-- ACCESS EXCLUSIVE cannot be avoided and costs microseconds) and the CHECK. The two things that would
+-- hold real locks live in runner steps that take one transaction PER OFFICE and release it before
+-- moving on:
+--   * the classification backfill, which must disable set_tasks_updated_at and audit_tasks around
+--     itself   -> server/src/migrations/task-source-backfill.ts
+--   * the index, which must be built CONCURRENTLY                -> 0237 + task-source-index.ts
 --
--- THE INDEX IS NOT IN THIS FILE, AND THAT IS THE POINT. The tabs need an
--- (assigned_to, source, status, due_date) index; 0237 builds it instead -- see
--- migrations/0237_tasks_assigned_source_status_index.sql and server/src/migrations/task-source-index.ts.
---
--- The runner builds that index CONCURRENTLY in a pre-step so API boot never holds a write-blocking lock
--- on `tasks` across every office at once. A pre-step can only build on a column that already EXISTS, so
--- while the column and the index lived in ONE migration the pre-step found no `source` column on the
--- FIRST deploy, skipped every schema, and a plain CREATE INDEX here did the build instead: inside the
--- single transaction this file is sent as, across all offices, during boot. It worked on the second
--- deploy, which is exactly why it would not have been caught. Adding the column and building the index
--- are two phases, and keeping them in two migrations is what makes that ordering true rather than
--- hoped for.
+-- WHY THE BACKFILL SUSPENDS THOSE TRIGGERS AT ALL (the reason it cannot simply run here). `tasks`
+-- carries set_tasks_updated_at (0001:858 -> set_updated_at at 0001:368), which sets
+-- NEW.updated_at = NOW() on every UPDATE, unconditionally. The contacts list reads
+-- MAX(tasks.updated_at) straight through as a contact's "Last touch" (contacts/service.ts
+-- buildContactLastTouchAtSql), and the "Untouched 30d+" card, its ?card=untouched drill and the
+-- aggregate count are ALL derived from that one expression. A backfill that let the trigger fire would
+-- stamp every contact that has ever had a task with this migration's timestamp: the sort would
+-- collapse, the card would read zero, and because the card, the drill and the aggregate move together
+-- nothing would look inconsistent enough for anyone to notice. The original values are not
+-- recoverable. audit_tasks is suspended for the same window because it fires ~30 dynamic EXECUTEs per
+-- row and would otherwise write an audit entry per task, in every office, for a column no person
+-- edited.
 
--- Existing tenants: add the column and classify the history in every office_* schema.
+-- Existing tenants: add the column in every office_* schema. The classification backfill that
+-- follows it is a runner step, not part of this file — see the invariant above.
 DO $tenant$
 DECLARE
   schema_name text;
@@ -99,55 +105,6 @@ BEGIN
       );
     END IF;
 
-    -- See the header: this wrapper is what keeps the contacts "Last touch" column and the "Untouched
-    -- 30d+" card intact.
-    --
-    -- UNCONDITIONAL ON PURPOSE — not wrapped in an "if the trigger exists" test. If a tenant schema
-    -- somehow lacks these triggers, the right outcome is this migration aborting loudly on deploy, which
-    -- is visible and fully recoverable (nothing has been written yet). The alternative — skip the
-    -- disable, carry on, and backfill with set_tasks_updated_at live — is the irreversible one. Given the
-    -- choice between failing loudly and corrupting a metric silently, fail loudly.
-    EXECUTE format('ALTER TABLE %1$I.tasks DISABLE TRIGGER set_tasks_updated_at', schema_name);
-    EXECUTE format('ALTER TABLE %1$I.tasks DISABLE TRIGGER audit_tasks', schema_name);
-
-    EXECUTE format(
-      $sql$
-        -- A task with no originating rule but a person recorded against it is a person's task. This is
-        -- the only statement that reclassifies at scale; every automated shape in production carries a
-        -- non-null origin_rule (rules engine, email queue, AI-disconnect cron, revision routing), so
-        -- they are all excluded here and keep the 'automated' default without being rewritten.
-        UPDATE %1$I.tasks SET source = 'manual'
-         WHERE origin_rule IS NULL
-           AND created_by IS NOT NULL
-           AND source = 'automated'
-           -- ...except reassignment tasks (assignment-tasks/service.ts), which this would otherwise
-           -- sweep up: they record the person who reassigned the deal, so they look hand-typed on every
-           -- column. They are machine-written and are exactly the volume people are complaining about.
-           -- Excluded HERE rather than corrected in a second pass so the backfill converges in one go —
-           -- setting them to 'manual' and then putting them back would rewrite every reassignment row
-           -- twice to arrive where it started, which is the row-churn the whole file is careful to
-           -- avoid. Two markers identify them TOGETHER: the fixed title AND the assignedAt key the
-           -- snapshot always carries. The title alone would misfile a person's task worded the same way,
-           -- and COALESCE keeps a NULL snapshot (never written by that path) on the human side.
-           AND NOT (
-             title IN ('New Deal Assignment', 'New Lead Assignment')
-             AND COALESCE(entity_snapshot ? 'assignedAt', false)
-           );
-
-        -- Repairs a reassignment task some earlier run left on 'manual' — a partially-applied backfill,
-        -- or a hand replay against a restored dump taken mid-flight. A converged schema matches nothing
-        -- here, which is the point: it is a repair, not part of the classification.
-        UPDATE %1$I.tasks SET source = 'automated'
-         WHERE origin_rule IS NULL
-           AND title IN ('New Deal Assignment', 'New Lead Assignment')
-           AND entity_snapshot ? 'assignedAt'
-           AND source <> 'automated';
-      $sql$,
-      schema_name
-    );
-
-    EXECUTE format('ALTER TABLE %1$I.tasks ENABLE TRIGGER audit_tasks', schema_name);
-    EXECUTE format('ALTER TABLE %1$I.tasks ENABLE TRIGGER set_tasks_updated_at', schema_name);
   END LOOP;
 END $tenant$;
 
