@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import type {
   MarketingExpenseApproverDecision,
   MarketingExpenseRequestDetail,
@@ -41,6 +42,11 @@ export function useMyMarketingExpenseRequests() {
   const [requests, setRequests] = useState<MarketingExpenseRequestSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // `api()` reads ?officeId from the URL at REQUEST time and turns it into the x-office-id header, which is
+  // what selects the schema. Switching office keeps this route mounted, so without the scope in the
+  // dependency list the page keeps showing the previous office's rows while every action fired from them
+  // goes to the new tenant. The approver email links here WITH an ?officeId, so this is the ordinary path.
+  const officeScopeId = useOfficeScopeId();
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -55,7 +61,9 @@ export function useMyMarketingExpenseRequests() {
     } finally {
       setLoading(false);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- officeScopeId is not read in the body; it is
+    // read by api() from the URL. It is in the list to make the office switch RE-RUN this.
+  }, [officeScopeId]);
 
   useEffect(() => {
     void refetch();
@@ -69,6 +77,8 @@ export function useMarketingExpenseQueue(status: MarketingExpenseQueueStatus) {
   const [requests, setRequests] = useState<MarketingExpenseRequestSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Same reason as above: the tenant scope lives in the URL, not in this closure.
+  const officeScopeId = useOfficeScopeId();
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -83,7 +93,8 @@ export function useMarketingExpenseQueue(status: MarketingExpenseQueueStatus) {
     } finally {
       setLoading(false);
     }
-  }, [status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above: officeScopeId drives the re-read.
+  }, [status, officeScopeId]);
 
   useEffect(() => {
     void refetch();

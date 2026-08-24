@@ -330,6 +330,29 @@ describe("buildMarketingExpenseDecisionEmail", () => {
     expect(email.text).toContain("Over budget for Q4");
   });
 
+  it("does NOT say 'approved' in the SUBJECT when a later step is still outstanding", () => {
+    // Submitters act on subject lines. At step 1 of 2, "was approved" reads as authorization to spend.
+    const email = buildMarketingExpenseDecisionEmail({
+      requestId: REQUEST_ID,
+      snapshot: { ...SNAPSHOT, decision: "approved", requestStatus: "pending" },
+      officeId: null,
+      frontendUrl: "https://trockcrm.com",
+    });
+    expect(email.subject).not.toMatch(/was approved/i);
+    expect(email.subject.toLowerCase()).toContain("still");
+    expect(email.subject).toContain("MER-0007");
+  });
+
+  it("still says 'approved' plainly once the request is actually approved", () => {
+    const email = buildMarketingExpenseDecisionEmail({
+      requestId: REQUEST_ID,
+      snapshot: { ...SNAPSHOT, decision: "approved", requestStatus: "approved" },
+      officeId: null,
+      frontendUrl: "https://trockcrm.com",
+    });
+    expect(email.subject).toMatch(/was approved/i);
+  });
+
   it("says the request is still moving when an earlier step approved but the parent is still pending", () => {
     const email = buildMarketingExpenseDecisionEmail({
       requestId: REQUEST_ID,

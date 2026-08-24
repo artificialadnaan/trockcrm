@@ -140,6 +140,15 @@ describe("the list", () => {
     }
   });
 
+  it("shows the deadline on the day it was set, not the day before", async () => {
+    // neededBy is a Postgres `date` ("2026-10-01"). Rendering it through `new Date(...)` makes it midnight
+    // UTC, which `toLocaleDateString()` shows as 30 September in Dallas — a deadline a day early.
+    mocks.useMyMarketingExpenseRequests.mockReturnValue(state({ requests: [summary()] }));
+    await renderPage();
+    const expected = new Date(2026, 9, 1).toLocaleDateString();
+    expect(container.querySelector('[data-testid="mer-row-req-1"]')!.textContent).toContain(expected);
+  });
+
   it("shows the DENIAL REASON, which is the only part of a denial that helps", async () => {
     mocks.useMyMarketingExpenseRequests.mockReturnValue(
       state({

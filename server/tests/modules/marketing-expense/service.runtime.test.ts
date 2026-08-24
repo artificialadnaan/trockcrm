@@ -392,6 +392,44 @@ describe("draft -> submit ordering", () => {
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
+  it("REFUSES a submit of a $0.00 request — the form says so and the server must agree", async () => {
+    // The React form blocks a zero total, which makes the client the ONLY validation: any direct API
+    // caller, or a second client, could push an empty request through approval.
+    const draft = await createDraft({
+      costAdvertising: "",
+      costRegistration: "",
+      costTravel: "",
+      costLodging: "",
+      costMeals: "",
+      costMaterials: "",
+      costOther1: "",
+      costOther2: "",
+    });
+    expect(draft.totalRequested).toBe("0.00");
+    await expect(
+      submitMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA,
+        officeId: OFFICE_ID,
+        userId: SUBMITTER,
+        requestId: draft.id,
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("leaves a $0.00 row as a DRAFT so it can be corrected rather than lost", async () => {
+    const draft = await createDraft({
+      costAdvertising: "", costRegistration: "", costTravel: "", costLodging: "",
+      costMeals: "", costMaterials: "", costOther1: "", costOther2: "",
+    });
+    await submitMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+    }).catch(() => undefined);
+    const row = await pg.query<{ status: string }>(
+      `SELECT status FROM ${SCHEMA}.marketing_expense_requests WHERE id = '${draft.id}'`,
+    );
+    expect(row.rows[0]?.status).toBe("draft");
+  });
+
   it("REFUSES the submit when the approver group resolves to nobody, instead of mailing into the void", async () => {
     await pg.exec(`DELETE FROM public.notification_recipient_assignments`);
     const draft = await createDraft();

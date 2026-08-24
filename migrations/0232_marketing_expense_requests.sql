@@ -175,7 +175,12 @@ BEGIN
             CHECK (cost_advertising >= 0 AND cost_registration >= 0 AND cost_travel >= 0
                    AND cost_lodging >= 0 AND cost_meals >= 0 AND cost_materials >= 0
                    AND cost_other_1 >= 0 AND cost_other_2 >= 0),
-          CONSTRAINT marketing_expense_requests_total_check CHECK (total_requested >= 0)
+          CONSTRAINT marketing_expense_requests_total_check CHECK (total_requested >= 0),
+          -- A DRAFT may be incomplete; anything the approver can see may not be $0.00. The
+          -- service refuses that submit with a 400 naming the problem — this is the backstop
+          -- for a caller that never goes through it.
+          CONSTRAINT marketing_expense_requests_nonzero_check
+            CHECK (status = 'draft' OR total_requested > 0)
         );
 
         CREATE INDEX IF NOT EXISTS marketing_expense_requests_submitter_idx
@@ -316,7 +321,10 @@ CREATE TABLE IF NOT EXISTS office_dallas.marketing_expense_requests (
     CHECK (cost_advertising >= 0 AND cost_registration >= 0 AND cost_travel >= 0
            AND cost_lodging >= 0 AND cost_meals >= 0 AND cost_materials >= 0
            AND cost_other_1 >= 0 AND cost_other_2 >= 0),
-  CONSTRAINT marketing_expense_requests_total_check CHECK (total_requested >= 0)
+  CONSTRAINT marketing_expense_requests_total_check CHECK (total_requested >= 0),
+  -- A DRAFT may be incomplete; anything the approver can see may not be $0.00.
+  CONSTRAINT marketing_expense_requests_nonzero_check
+    CHECK (status = 'draft' OR total_requested > 0)
 );
 
 CREATE INDEX IF NOT EXISTS marketing_expense_requests_submitter_idx

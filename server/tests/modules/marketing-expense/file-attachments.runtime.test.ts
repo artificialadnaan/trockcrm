@@ -121,7 +121,7 @@ describe("assertMarketingExpenseAttachmentAccess", () => {
   it("lets the submitter attach to their own draft", async () => {
     const request = await draft();
     await expect(
-      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, { id: SUBMITTER, role: "rep" }),
+      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, SUBMITTER),
     ).resolves.toBeUndefined();
   });
 
@@ -134,21 +134,21 @@ describe("assertMarketingExpenseAttachmentAccess", () => {
       requestId: request.id,
     });
     await expect(
-      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, { id: SUBMITTER, role: "rep" }),
+      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, SUBMITTER),
     ).resolves.toBeUndefined();
   });
 
   it("refuses another rep attaching to somebody else's request", async () => {
     const request = await draft();
     await expect(
-      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, { id: OTHER_REP, role: "rep" }),
+      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, OTHER_REP),
     ).rejects.toMatchObject({ statusCode: 403 });
   });
 
   it("refuses an APPROVER too — a supporting document is the requester's to file", async () => {
     const request = await draft();
     await expect(
-      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, { id: APPROVER, role: "director" }),
+      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, APPROVER),
     ).rejects.toMatchObject({ statusCode: 403 });
   });
 
@@ -169,13 +169,13 @@ describe("assertMarketingExpenseAttachmentAccess", () => {
       reason: null,
     });
     await expect(
-      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, { id: SUBMITTER, role: "rep" }),
+      assertMarketingExpenseAttachmentAccess(tenantDb, request.id, SUBMITTER),
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it("404s an id that does not exist", async () => {
     await expect(
-      assertMarketingExpenseAttachmentAccess(tenantDb, U("dead"), { id: SUBMITTER, role: "rep" }),
+      assertMarketingExpenseAttachmentAccess(tenantDb, U("dead"), SUBMITTER),
     ).rejects.toBeInstanceOf(AppError);
   });
 });

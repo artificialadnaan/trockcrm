@@ -32,7 +32,10 @@ import {
 import { getDealById } from "../deals/service.js";
 import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
-import { assertMarketingExpenseAttachmentAccess } from "../marketing-expense/service.js";
+import {
+  assertMarketingExpenseAttachmentAccess,
+  assertMarketingExpenseRequestReadAccess,
+} from "../marketing-expense/service.js";
 import {
   getPhotoFeed,
   getNewPhotoCount,
@@ -158,7 +161,18 @@ async function assertLeadFileAccess(req: express.Request, leadId: string) {
  * this file has no business knowing what an expense request status means.
  */
 async function assertMarketingExpenseFileAccess(req: express.Request, requestId: string) {
-  await assertMarketingExpenseAttachmentAccess(req.tenantDb!, requestId, {
+  await assertMarketingExpenseAttachmentAccess(req.tenantDb!, requestId, req.user!.id);
+}
+
+/**
+ * READING an expense-request attachment. Gated on the parent request, at read time.
+ *
+ * A different rule from `assertMarketingExpenseFileAccess` on purpose: writing evidence is submitter-only
+ * and closes once a decision lands, but reading is submitter-or-approver and stays open — the approver has
+ * to be able to look at what they approved.
+ */
+async function assertMarketingExpenseFileReadAccess(req: express.Request, requestId: string) {
+  await assertMarketingExpenseRequestReadAccess(req.tenantDb!, requestId, {
     id: req.user!.id,
     role: req.user!.role,
   });
@@ -406,6 +420,8 @@ router.patch("/:id/address", async (req, res, next) => {
       await assertDealFileAccess(req, existing.dealId);
     } else if (existing.leadId) {
       await assertLeadFileAccess(req, existing.leadId);
+    } else if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
     } else if (req.user.role === "rep" && existing.uploadedBy !== req.user.id) {
       throw new AppError(403, "You can only modify files you uploaded");
     }
@@ -847,6 +863,8 @@ router.get("/:id", async (req, res, next) => {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
+    } else if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     }
 
     await req.commitTransaction!();
@@ -867,6 +885,8 @@ router.get("/:id/download", async (req, res, next) => {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
+    } else if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     }
 
     const logDownload = shouldLogFileDownloadEvent(req.query);
@@ -919,15 +939,20 @@ router.get("/:id/audit-log", async (req, res, next) => {
   try {
     const file = await getFileByIdIncludingDeleted(req.tenantDb!, req.params.id);
     if (!file) throw new AppError(404, "File not found");
-    if (!isPhotoRecord(file)) throw new AppError(400, "Audit history is only available for photos.");
 
+    // Authorize BEFORE answering "is this a photo". The 400 below is a fact about a file the caller may
+    // have no right to know exists, and the ordering was only ever incidental.
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
+    } else if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     } else if (req.user!.role === "rep" && file.uploadedBy !== req.user!.id) {
       throw new AppError(403, "You can only view files you uploaded");
     }
+
+    if (!isPhotoRecord(file)) throw new AppError(400, "Audit history is only available for photos.");
 
     const events = await getPhotoAuditEvents(req.tenantDb!, file.id);
     await req.commitTransaction!();
@@ -947,6 +972,8 @@ router.get("/:id/versions", async (req, res, next) => {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
+    } else if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     }
 
     const versions = await getFileVersions(req.tenantDb!, req.params.id);
@@ -971,6 +998,8 @@ router.patch("/:id", async (req, res, next) => {
       await assertDealFileAccess(req, existing.dealId);
     } else if (existing.leadId) {
       await assertLeadFileAccess(req, existing.leadId);
+    } else if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
     } else if (req.user!.role === "rep" && existing.uploadedBy !== req.user!.id) {
       // Fix 8: Non-deal files (e.g. contact files) — reps can only modify files they uploaded
       throw new AppError(403, "You can only modify files you uploaded");

@@ -288,12 +288,24 @@ export async function submitMarketingExpenseRequest(
 ): Promise<MarketingExpenseRequestDetail> {
   const { tenantSchema, officeId, userId, requestId } = args;
 
-  const request = await loadRow(tenantDb, requestId);
+  // lockRow, not loadRow: submit writes the parent and then inserts an approval row, so it takes the same
+  // two tables as decide and withdraw and has to take them in the same order — parent first.
+  const request = await lockRow(tenantDb, requestId);
   if (request.submittedBy !== userId) {
     throw new AppError(403, "You can only submit your own expense request.");
   }
   if (request.status !== "draft") {
     throw new AppError(409, "This request has already been submitted.");
+  }
+  // A $0.00 request is a form somebody abandoned halfway, not an expense. The React form already refuses
+  // it, which is exactly the problem: that made the client the ONLY validation, so any direct API caller
+  // could put an empty request in front of the approver. Checked at SUBMIT rather than at create, because a
+  // draft is a work in progress and the gate that matters is the one into the approver's queue.
+  if (Number(request.totalRequested) <= 0) {
+    throw new AppError(
+      400,
+      "Enter at least one estimated cost — a request for $0.00 cannot be submitted.",
+    );
   }
 
   // Resolve the approver BEFORE the write. An empty group is not a warning to log past: the whole point of
@@ -368,7 +380,7 @@ export async function decideMarketingExpenseRequest(
     throw new AppError(400, "A reason is required when denying a request.");
   }
 
-  const request = await loadRow(tenantDb, requestId);
+  const request = await lockRow(tenantDb, requestId);
   if (request.status !== "pending") {
     throw new AppError(409, "This request is no longer awaiting a decision.");
   }
@@ -400,11 +412,26 @@ export async function decideMarketingExpenseRequest(
     nextStatus = "approved";
   }
 
-  if (nextStatus !== "pending") {
-    await tenantDb
-      .update(marketingExpenseRequests)
-      .set({ status: nextStatus, updatedAt: now })
-      .where(eq(marketingExpenseRequests.id, requestId));
+  // Write the parent status CONDITIONED on the status this decision was authorised against.
+  //
+  // `loadRow` above observed `pending`, but that was a READ, and a read cannot exclude a write that commits
+  // after it. Between it and here the submitter can withdraw — and an id-only UPDATE would then overwrite a
+  // successfully committed `withdrawn` with `approved`, and go on to email them a decision on a request
+  // they had already pulled. Zero rows means the precondition no longer holds, and the correct answer is
+  // the same 409 the approval row gives: somebody else got here first.
+  //
+  // Run unconditionally, including on the not-yet-final multi-step path where `nextStatus` is still
+  // `pending`. That case writes nothing new, but it still has to VERIFY the request is the thing it was
+  // authorised against before the decision email goes out.
+  const [finalized] = await tenantDb
+    .update(marketingExpenseRequests)
+    .set({ status: nextStatus, updatedAt: now })
+    .where(
+      and(eq(marketingExpenseRequests.id, requestId), eq(marketingExpenseRequests.status, "pending")),
+    )
+    .returning({ id: marketingExpenseRequests.id });
+  if (!finalized) {
+    throw new AppError(409, "This request is no longer awaiting a decision.");
   }
 
   const detail = await loadDetail(tenantDb, requestId);
@@ -430,7 +457,7 @@ export async function withdrawMarketingExpenseRequest(
   tenantDb: TenantDb,
   args: { requestId: string; userId: string },
 ): Promise<MarketingExpenseRequestDetail> {
-  const request = await loadRow(tenantDb, args.requestId);
+  const request = await lockRow(tenantDb, args.requestId);
   if (request.submittedBy !== args.userId) {
     throw new AppError(403, "You can only withdraw your own expense request.");
   }
@@ -481,11 +508,35 @@ export async function getMarketingExpenseRequest(
   tenantDb: TenantDb,
   args: { requestId: string; user: ActingUser },
 ): Promise<MarketingExpenseRequestDetail> {
-  const request = await loadRow(tenantDb, args.requestId);
-  if (request.submittedBy !== args.user.id && !isApprover(args.user)) {
+  await assertMarketingExpenseRequestReadAccess(tenantDb, args.requestId, args.user);
+  return loadDetail(tenantDb, args.requestId);
+}
+
+/**
+ * May this user SEE this request — and therefore anything filed against it?
+ *
+ * Submitter or approver, and it does NOT close on a decision: an approver has to be able to re-open the
+ * evidence they approved, and the submitter keeps their own record.
+ *
+ * Extracted because `files` needs it. That module authorizes per association — deal files through the deal
+ * check, lead files through the lead check — and an expense-request attachment matched no branch, so it
+ * fell through to "office-shared" and any same-office CRM user holding the UUID could pull a presigned
+ * download URL for a request this very function would refuse them. An attachment here is a quote, a
+ * contract, or pricing.
+ *
+ * Deliberately NOT the same rule as `assertMarketingExpenseAttachmentAccess`. That one is submitter-only
+ * and closes on decision, because it governs WRITING evidence. Wiring it into the read paths would lock
+ * approvers out of the documents they are being asked to approve.
+ */
+export async function assertMarketingExpenseRequestReadAccess(
+  tenantDb: TenantDb,
+  requestId: string,
+  user: ActingUser,
+): Promise<void> {
+  const request = await loadRow(tenantDb, requestId);
+  if (request.submittedBy !== user.id && !isApprover(user)) {
     throw new AppError(403, "You do not have access to this expense request.");
   }
-  return loadDetail(tenantDb, args.requestId);
 }
 
 /**
@@ -508,15 +559,24 @@ export function isApprover(user: ActingUser): boolean {
  * Not the approver: a supporting document is part of the case being made, and an approver quietly adding
  * one to somebody's request changes what the record says was submitted. Not after a decision either — the
  * attachments are the evidence the approver saw, and appending to them afterwards makes the trail a lie.
- * Called from the files upload route, which has no idea about any of that.
+ *
+ * CALLED TWICE, ON PURPOSE — once when the upload grant is issued and again inside `confirmUpload`, on the
+ * association that is about to be persisted. Once was not enough: an upload is two round trips with an
+ * arbitrarily long gap, so a grant taken against a draft could be confirmed after the request had been
+ * approved, denied or withdrawn, and the evidence would land on a decided request. The second call re-reads
+ * the request ROW; nothing carried in the grant is trusted, because the grant is exactly the thing that
+ * went stale.
+ *
+ * Takes a user ID, not a role-bearing user: this rule has no approver branch and never had one, and a
+ * `role` parameter it does not read invites a caller to believe otherwise.
  */
 export async function assertMarketingExpenseAttachmentAccess(
   tenantDb: TenantDb,
   requestId: string,
-  user: ActingUser,
+  userId: string,
 ): Promise<void> {
   const request = await loadRow(tenantDb, requestId);
-  if (request.submittedBy !== user.id) {
+  if (request.submittedBy !== userId) {
     throw new AppError(403, "You can only attach files to your own expense request.");
   }
   if (request.status !== "draft" && request.status !== "pending") {
@@ -537,6 +597,35 @@ async function loadRow(tenantDb: TenantDb, requestId: string) {
     .from(marketingExpenseRequests)
     .where(eq(marketingExpenseRequests.id, requestId))
     .limit(1);
+  if (!row) throw new AppError(404, "Expense request not found.");
+  return row;
+}
+
+/**
+ * Read the request AND take its row lock, for the two flows that go on to write both tables.
+ *
+ * ONE LOCK ORDER, PARENT FIRST. Deciding used to lock the approval row (its first UPDATE) and reach the
+ * parent second; withdrawing locks the parent first and the approval rows second. Two request-scoped
+ * transactions taking the same two rows in opposite orders is a deadlock cycle, and the loser dies with a
+ * Postgres error instead of the 409 this module works to produce. Locking the parent up front in BOTH puts
+ * them in the same order, so one simply waits.
+ *
+ * It also sharpens the conflict: `FOR UPDATE` re-reads the newest committed row once the lock is granted,
+ * so the waiter observes `withdrawn` and refuses at the status check rather than at the guarded write.
+ */
+async function lockRow(tenantDb: TenantDb, requestId: string) {
+  const [row] = await tenantDb
+    .select({
+      id: marketingExpenseRequests.id,
+      status: marketingExpenseRequests.status,
+      submittedBy: marketingExpenseRequests.submittedBy,
+      stepsRequired: marketingExpenseRequests.stepsRequired,
+      totalRequested: marketingExpenseRequests.totalRequested,
+    })
+    .from(marketingExpenseRequests)
+    .where(eq(marketingExpenseRequests.id, requestId))
+    .limit(1)
+    .for("update");
   if (!row) throw new AppError(404, "Expense request not found.");
   return row;
 }

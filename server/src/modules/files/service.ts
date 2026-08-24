@@ -48,6 +48,7 @@ import {
   markScorecardEditEvidenceUploadConfirmed,
   type ScorecardEditUploadScope,
 } from "../field/scorecard-evidence-upload.js";
+import { assertMarketingExpenseAttachmentAccess } from "../marketing-expense/service.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -805,6 +806,18 @@ export async function confirmUpload(
     throw new AppError(400, "Invalid or expired upload token");
   }
   // Do NOT delete yet — verify and insert first so client can retry on failure
+
+  // RE-ASSERT the expense-request lifecycle on the association about to be persisted.
+  //
+  // The grant route already checked this, and that is not sufficient: an upload is two round trips with an
+  // arbitrarily long gap between them, so a token minted while the request was a draft can arrive here
+  // after it has been submitted, approved, denied or withdrawn — filing new evidence on a decided request
+  // and making the audit trail claim it was there when the approver looked. The check re-reads the request
+  // ROW rather than trusting `pending`, because `pending` is precisely the thing that has gone stale. It is
+  // also not a narrow window: pendingUploads is a process-local Map with no invalidation on status change.
+  if (pending.marketingExpenseRequestId) {
+    await assertMarketingExpenseAttachmentAccess(tenantDb, pending.marketingExpenseRequestId, userId);
+  }
 
   // ── Verify the R2 object before persisting metadata ──────────────
   if (isR2Configured()) {

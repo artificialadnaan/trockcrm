@@ -281,13 +281,19 @@ export function buildMarketingExpenseDecisionEmail(input: BuildInput) {
   const approved = snapshot.decision === "approved";
   const amount = formatMoney(snapshot.totalRequested);
   const verdict = approved ? "approved" : "denied";
-  const subject = `Marketing expense request ${snapshot.requestNumber} was ${verdict}`;
   const statusUrl = withOffice(`${baseUrl(input)}/marketing-expense-requests`, input.officeId);
   const accent = approved ? GREEN : RED;
 
   // An approval that does NOT finalise the parent still has a step outstanding. Saying "approved" and
   // stopping there would read as "you may spend the money".
   const stillOutstanding = approved && snapshot.requestStatus === "pending";
+
+  // The SUBJECT has to carry that too, not just the body. People act on subject lines without opening the
+  // mail, and "was approved" at step 1 of 2 is an instruction to go and spend money that nobody has
+  // authorised yet. Inert today at one step; `steps_required` exists so that day arrives without a rebuild.
+  const subject = stillOutstanding
+    ? `Marketing expense request ${snapshot.requestNumber} — one approval done, still awaiting final approval`
+    : `Marketing expense request ${snapshot.requestNumber} was ${verdict}`;
   const closing = stillOutstanding
     ? "One approval step is done and the request is still moving — it is not finally approved yet."
     : approved

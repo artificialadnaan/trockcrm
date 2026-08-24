@@ -18,6 +18,7 @@ import {
   withdrawMarketingExpenseRequest,
 } from "@/hooks/use-marketing-expense-requests";
 import {
+  formatDateOnly,
   formatMoney,
   type MarketingExpenseRequestSummary,
   type MarketingExpenseStatus,
@@ -61,11 +62,12 @@ function statusMeta(status: MarketingExpenseStatus): StatusMeta {
   }
 }
 
-function formatDate(value: string | null): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleDateString();
-}
+/**
+ * `neededBy` is a DATE-ONLY column, and `new Date("2026-10-01")` is midnight UTC — which
+ * `toLocaleDateString()` renders as 30 September in Dallas. A deadline shown a day early is worse than no
+ * deadline, so date-only values go through the shared helper that never builds an instant from them.
+ */
+const formatDate = formatDateOnly;
 
 function StatTile({
   icon: Icon,

@@ -233,6 +233,77 @@ describe("the submit sequence", () => {
     );
   });
 
+  async function attach(...names: string[]) {
+    const input = container.querySelector<HTMLInputElement>('[data-testid="mer-attachments"]')!;
+    const files = names.map((name) => new File(["x"], name, { type: "application/pdf" }));
+    Object.defineProperty(input, "files", { value: files, configurable: true });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    return files;
+  }
+
+  it("does NOT submit when an attachment upload fails", async () => {
+    mocks.uploadFile.mockRejectedValueOnce(new Error("network died"));
+    await renderPage();
+    await fillValid();
+    await attach("quote.pdf");
+    await submit();
+
+    // The submitter would otherwise believe their quote is attached while the approver sees a request with
+    // nothing behind it.
+    expect(mocks.submitMarketingExpenseRequest).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("names the file that failed, so the error is actionable", async () => {
+    mocks.uploadFile.mockRejectedValueOnce(new Error("network died"));
+    await renderPage();
+    await fillValid();
+    await attach("quote.pdf");
+    await submit();
+    expect(errorText()).toContain("quote.pdf");
+  });
+
+  it("stops at the FAILED file — it does not skip past it to the rest", async () => {
+    mocks.uploadFile.mockRejectedValueOnce(new Error("network died"));
+    await renderPage();
+    await fillValid();
+    await attach("quote.pdf", "agenda.pdf");
+    await submit();
+    expect(mocks.uploadFile).toHaveBeenCalledTimes(1);
+    expect(mocks.submitMarketingExpenseRequest).not.toHaveBeenCalled();
+  });
+
+  it("RESUMES the outstanding uploads on retry, without re-uploading what already landed", async () => {
+    mocks.uploadFile
+      .mockResolvedValueOnce({ id: "file-1" })
+      .mockRejectedValueOnce(new Error("network died"));
+    await renderPage();
+    await fillValid();
+    const [first, second] = await attach("quote.pdf", "agenda.pdf");
+    await submit();
+    expect(mocks.uploadFile).toHaveBeenCalledTimes(2);
+    expect(mocks.submitMarketingExpenseRequest).not.toHaveBeenCalled();
+
+    await submit();
+    // Three calls total: the two first-attempt ones plus a retry of ONLY the file that failed.
+    expect(mocks.uploadFile).toHaveBeenCalledTimes(3);
+    expect(mocks.uploadFile.mock.calls[2]?.[0]).toMatchObject({ file: second });
+    expect(mocks.uploadFile.mock.calls.filter((call) => call[0].file === first)).toHaveLength(1);
+    expect(mocks.submitMarketingExpenseRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not create a second draft while retrying the uploads", async () => {
+    mocks.uploadFile.mockRejectedValueOnce(new Error("network died"));
+    await renderPage();
+    await fillValid();
+    await attach("quote.pdf");
+    await submit();
+    await submit();
+    expect(mocks.createMarketingExpenseRequest).toHaveBeenCalledTimes(1);
+  });
+
   it("sends the money values as STRINGS, so nothing is rounded on the way out", async () => {
     await renderPage();
     await fillValid();

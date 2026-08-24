@@ -165,6 +165,23 @@ export function sumMoneyForDisplay(values: ReadonlyArray<unknown>): string {
   return `${sign}${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, "0")}`;
 }
 
+/**
+ * Render a DATE-ONLY value (`needed_by`, a Postgres `date`) as a local calendar date.
+ *
+ * `new Date("2026-10-01")` is midnight UTC, so `toLocaleDateString()` in Dallas renders 30 September — an
+ * expense deadline shown a day early, which is worse than showing none. Building the date from its parts
+ * makes it midnight LOCAL instead, so the day that comes out is the day that went in, in every zone.
+ *
+ * Only for date-only columns. A real timestamptz (`submitted_at`) SHOULD go through the zone-aware path.
+ */
+export function formatDateOnly(value: string | null | undefined): string {
+  if (typeof value !== "string") return "—";
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
+  if (!match) return "—";
+  const [, year, month, day] = match;
+  return new Date(Number(year), Number(month) - 1, Number(day)).toLocaleDateString();
+}
+
 /** Render a numeric(14,2) string as `$1,234.56` for an email body or a table cell. */
 export function formatMoney(value: string | number | null | undefined): string {
   const parsed = parseMoneyInput(value ?? "0");

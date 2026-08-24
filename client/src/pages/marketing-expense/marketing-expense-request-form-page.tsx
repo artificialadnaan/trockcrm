@@ -110,6 +110,9 @@ export function MarketingExpenseRequestFormPage() {
   const [error, setError] = useState<string | null>(null);
   // Survives a failed submit so the retry reuses the draft instead of minting a second request number.
   const draftIdRef = useRef<string | null>(null);
+  // The attachments that have NOT yet landed. A file is removed only once its upload has succeeded, so a
+  // retry resumes at the one that failed instead of skipping it.
+  const outstandingFilesRef = useRef<File[]>([]);
 
   const handleChange = <K extends keyof MarketingExpenseRequestPayload>(
     field: K,
@@ -160,14 +163,27 @@ export function MarketingExpenseRequestFormPage() {
       if (!draftIdRef.current) {
         const draft = await createMarketingExpenseRequest(form);
         draftIdRef.current = draft.id;
+        outstandingFilesRef.current = [...attachments];
+      }
 
-        for (const file of attachments) {
-          await uploadFile({
-            file,
-            category: "proposal",
-            marketingExpenseRequestId: draft.id,
-          });
+      // Runs on EVERY attempt, retries included, and drains a queue rather than iterating `attachments`.
+      //
+      // The version that looped inside the `if` above had a hole: a failed upload still left `draftIdRef`
+      // populated, so the next press skipped this block entirely and submitted — silently omitting the file
+      // that failed and every file after it. The submitter would see a success and believe their quote was
+      // attached; the approver would get a request with nothing behind it. Shifting only on success means a
+      // retry picks up exactly where it stopped, and submit is unreachable while anything is outstanding.
+      while (outstandingFilesRef.current.length > 0) {
+        const file = outstandingFilesRef.current[0]!;
+        try {
+          await uploadFile({ file, category: "proposal", marketingExpenseRequestId: draftIdRef.current });
+        } catch (uploadError) {
+          const reason = uploadError instanceof Error ? uploadError.message : "upload failed";
+          throw new Error(
+            `Could not upload "${file.name}": ${reason}. Your request has NOT been submitted — press Submit again to retry.`,
+          );
         }
+        outstandingFilesRef.current = outstandingFilesRef.current.slice(1);
       }
 
       const submitted = await submitMarketingExpenseRequest(draftIdRef.current);

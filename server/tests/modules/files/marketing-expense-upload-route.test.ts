@@ -6,6 +6,7 @@
 // files/routes.ts killed nothing.)
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "../../../src/middleware/error-handler.js";
 
 const currentUser = {
   id: "user-1",
@@ -66,10 +67,12 @@ describe("POST /api/files/upload-url with a marketing expense request", () => {
       .send({ ...BODY, marketingExpenseRequestId: "req-1" });
 
     expect(response.status).toBe(200);
+    // The SESSION user's id. The guard takes an id rather than a role-bearing user: it has no approver
+    // branch, and a `role` it never reads would invite a caller to think otherwise.
     expect(assertMarketingExpenseAttachmentAccess).toHaveBeenCalledWith(
       expect.anything(),
       "req-1",
-      expect.objectContaining({ id: "user-1", role: "rep" }),
+      "user-1",
     );
     expect(
       assertMarketingExpenseAttachmentAccess.mock.invocationCallOrder[0],
@@ -78,16 +81,13 @@ describe("POST /api/files/upload-url with a marketing expense request", () => {
 
   it("does not presign at all when the guard refuses", async () => {
     assertMarketingExpenseAttachmentAccess.mockRejectedValue(
-      Object.assign(new Error("You can only attach files to your own expense request."), {
-        statusCode: 403,
-        name: "AppError",
-      }),
+      new AppError(403, "You can only attach files to your own expense request."),
     );
     const response = await request(createApp())
       .post("/api/files/upload-url")
       .send({ ...BODY, marketingExpenseRequestId: "someone-elses" });
 
-    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBe(403);
     expect(requestUploadUrl).not.toHaveBeenCalled();
   });
 

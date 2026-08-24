@@ -258,8 +258,27 @@ describe("0232 marketing expense requests — constraints", () => {
         request_number: `'MER-9003'`,
         status: `'pending'`,
         submitted_at: "NOW()",
+        // Non-zero: a request the approver can see may not be $0.00 (nonzero_check below).
+        total_requested: `100`,
       }),
     ).resolves.toBeDefined();
+  });
+
+  it("lets a DRAFT sit at $0.00 while it is still being filled in", async () => {
+    await expect(
+      insertRequest("office_dallas", { request_number: `'MER-9011'`, total_requested: `0` }),
+    ).resolves.toBeDefined();
+  });
+
+  it("refuses a PENDING row at $0.00 — nothing reaches an approver asking for nothing", async () => {
+    await expect(
+      insertRequest("office_dallas", {
+        request_number: `'MER-9012'`,
+        status: `'pending'`,
+        submitted_at: "NOW()",
+        total_requested: `0`,
+      }),
+    ).rejects.toThrow();
   });
 
   it("rejects a negative cost line", async () => {

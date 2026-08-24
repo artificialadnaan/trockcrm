@@ -1,25 +1,42 @@
 import { useState } from "react";
-import { CheckCircle, Inbox, Loader2, Megaphone, XCircle } from "lucide-react";
+import { CheckCircle, ChevronDown, ChevronRight, Inbox, Loader2, Megaphone, Paperclip, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { isApiError } from "@/lib/api";
 import {
   decideMarketingExpenseRequest,
+  getMarketingExpenseRequest,
   useMarketingExpenseQueue,
   type MarketingExpenseQueueStatus,
 } from "@/hooks/use-marketing-expense-requests";
-import { formatMoney, type MarketingExpenseRequestSummary } from "@trock-crm/shared/types";
+import {
+  MARKETING_EXPENSE_ATTACHMENT_KIND_LABELS,
+  MARKETING_EXPENSE_COST_FIELDS,
+  MARKETING_EXPENSE_COST_LABELS,
+  MARKETING_EXPENSE_PAYMENT_METHOD_LABELS,
+  formatDateOnly,
+  formatMoney,
+  type MarketingExpenseAttachmentKind,
+  type MarketingExpenseCostField,
+  type MarketingExpensePaymentMethod,
+  type MarketingExpenseRequestDetail,
+  type MarketingExpenseRequestSummary,
+} from "@trock-crm/shared/types";
 
 /**
  * The approver queue.
  *
- * Modelled on pages/admin/lead-due-diligence-queue-page.tsx: a tab bar with a count on the ACTIVE tab, an
- * inline deny-with-reason textarea with a client-side minimum, and 409-already-decided handling that toasts
- * and refetches rather than showing an error — two approvers opening the same email and both clicking is
- * the normal case here, not an edge case.
+ * A DECISION REQUIRES READING THE REQUEST. Approve and Deny do not exist on a summary row — the approver
+ * opens the request first, and only then can decide. This form's entire purpose is "what is this for and
+ * what does TRC get back"; deciding from a row is deciding on a number attached to a name, and the two
+ * fields that justify the spend are the two the row cannot show.
  *
- * The count sits on the active tab only because that is the only status this page has loaded. A number on
- * an inactive tab would be either stale or invented.
+ * DENIAL REASONS ARE PER ROW. One page-level string meant a reason typed for request A stayed in the box
+ * when the approver opened request B, and B could be denied with A's explanation attached — recorded on the
+ * request and emailed to its submitter. The reason is keyed to the request it was typed for.
+ *
+ * 409-already-decided toasts and refetches rather than erroring: two approvers opening the same email and
+ * both clicking is the normal case here, not an edge case.
  */
 
 const MINIMUM_DENIAL_REASON = 10;
@@ -31,31 +48,178 @@ const STATUS_TABS: Array<{ value: MarketingExpenseQueueStatus; label: string; em
   { value: "withdrawn", label: "Withdrawn", empty: "No withdrawn expense requests." },
 ];
 
-function formatDate(value: string | null): string {
+/** A real timestamptz — the zone-aware path is correct here. */
+function formatInstant(value: string | null): string {
   if (!value) return "Not specified";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "Not specified" : date.toLocaleDateString();
 }
 
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 whitespace-pre-wrap text-slate-800">{value}</dd>
+    </div>
+  );
+}
+
+function RequestDetail({ detail }: { detail: MarketingExpenseRequestDetail }) {
+  const costRows = MARKETING_EXPENSE_COST_FIELDS.map((field) => {
+    const custom =
+      field === "costOther1"
+        ? detail.costOther1Label
+        : field === "costOther2"
+          ? detail.costOther2Label
+          : null;
+    return {
+      field,
+      label: custom?.trim() || MARKETING_EXPENSE_COST_LABELS[field as MarketingExpenseCostField],
+      amount: detail[field as MarketingExpenseCostField],
+    };
+  }).filter((row) => Number(row.amount) > 0);
+
+  return (
+    <div data-testid={`mer-detail-${detail.id}`} className="mt-4 space-y-5 border-t pt-4">
+      <dl className="grid gap-4 text-sm md:grid-cols-2">
+        <DetailRow label="Requested by" value={detail.requestedByName} />
+        <DetailRow label="Department" value={detail.department || "Not specified"} />
+        <DetailRow label="Location & dates" value={detail.locationDates || "Not specified"} />
+        <DetailRow label="Needed by" value={formatDateOnly(detail.neededBy)} />
+      </dl>
+
+      <div className="space-y-3 text-sm">
+        <DetailRow label="What is the request for?" value={detail.purpose} />
+        <DetailRow label="What will TRC receive in return?" value={detail.expectedReturn} />
+      </div>
+
+      <div>
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Estimated cost
+        </p>
+        <table className="w-full text-sm">
+          <tbody>
+            {costRows.length === 0 ? (
+              <tr>
+                <td className="py-1 text-muted-foreground">No individual cost lines</td>
+              </tr>
+            ) : (
+              costRows.map((row) => (
+                <tr key={row.field} className="border-b last:border-b-0">
+                  <td className="py-1.5 text-slate-700">{row.label}</td>
+                  <td className="py-1.5 text-right tabular-nums text-slate-800">
+                    {formatMoney(row.amount)}
+                  </td>
+                </tr>
+              ))
+            )}
+            <tr className="border-t-2">
+              <td className="py-1.5 font-semibold text-slate-900">Total requested</td>
+              <td className="py-1.5 text-right font-semibold tabular-nums text-slate-900">
+                {formatMoney(detail.totalRequested)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <dl className="grid gap-4 text-sm md:grid-cols-2">
+        <DetailRow label="Budget / job code" value={detail.budgetJobCode || "Not specified"} />
+        <DetailRow
+          label="Payment method"
+          value={
+            detail.paymentMethod
+              ? MARKETING_EXPENSE_PAYMENT_METHOD_LABELS[
+                  detail.paymentMethod as MarketingExpensePaymentMethod
+                ]
+              : "Not specified"
+          }
+        />
+        <DetailRow label="Travel required" value={detail.travelRequired ? "Yes" : "No"} />
+        <DetailRow label="Attendees" value={detail.attendees || "Not specified"} />
+        <DetailRow label="Business meetings" value={detail.businessMeetings || "Not specified"} />
+        <DetailRow
+          label="Declared attachments"
+          value={
+            detail.attachmentKinds.length > 0
+              ? detail.attachmentKinds
+                  .map(
+                    (kind) =>
+                      MARKETING_EXPENSE_ATTACHMENT_KIND_LABELS[kind as MarketingExpenseAttachmentKind],
+                  )
+                  .join(", ")
+              : "None declared"
+          }
+        />
+      </dl>
+
+      <div>
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Supporting documents
+        </p>
+        {detail.attachments.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No supporting documents were attached.</p>
+        ) : (
+          <ul className="space-y-1">
+            {detail.attachments.map((attachment) => (
+              <li key={attachment.id} className="flex items-center gap-2 text-sm text-slate-700">
+                <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{attachment.displayName}</span>
+                <span className="text-xs text-muted-foreground">
+                  {Math.max(1, Math.round(attachment.fileSizeBytes / 1024))} KB
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function MarketingExpenseQueuePage() {
   const [status, setStatus] = useState<MarketingExpenseQueueStatus>("pending");
   const { requests, loading, error, refetch } = useMarketingExpenseQueue(status);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<MarketingExpenseRequestDetail | null>(null);
+  const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const [denyingId, setDenyingId] = useState<string | null>(null);
-  const [reason, setReason] = useState("");
+  // Keyed by request id: a reason typed for one request must never be submitted against another.
+  const [reasons, setReasons] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const activeTab = STATUS_TABS.find((tab) => tab.value === status) ?? STATUS_TABS[0]!;
 
-  function clearDenial() {
+  function closeAll() {
+    setOpenId(null);
+    setDetail(null);
     setDenyingId(null);
-    setReason("");
+  }
+
+  async function toggleReview(request: MarketingExpenseRequestSummary) {
+    if (openId === request.id) {
+      closeAll();
+      return;
+    }
+    setOpenId(request.id);
+    setDetail(null);
+    setDenyingId(null);
+    setLoadingDetailId(request.id);
+    try {
+      setDetail(await getMarketingExpenseRequest(request.id));
+    } catch (err) {
+      // The decision stays unavailable: `detail` is still null, so no Approve/Deny renders.
+      toast.error(err instanceof Error ? err.message : "Could not load the request.");
+    } finally {
+      setLoadingDetailId(null);
+    }
   }
 
   /** True when the failure means "somebody else got here first", which is a refetch and not an error. */
   function handleFailure(err: unknown): boolean {
     if (isApiError(err) && err.status === 409) {
       toast.warning("This request was already decided. Refreshing...");
-      clearDenial();
+      closeAll();
       void refetch();
       return true;
     }
@@ -68,6 +232,7 @@ export function MarketingExpenseQueuePage() {
     try {
       await decideMarketingExpenseRequest(request.id, "approved");
       toast.success(`${request.requestNumber} approved`);
+      closeAll();
       await refetch();
     } catch (err) {
       handleFailure(err);
@@ -77,17 +242,19 @@ export function MarketingExpenseQueuePage() {
   }
 
   async function deny(request: MarketingExpenseRequestSummary) {
+    const reason = (reasons[request.id] ?? "").trim();
     // The server requires a reason too. Checking here as well is what turns "400 Bad Request" into a
     // sentence next to the box the approver is already typing in.
-    if (reason.trim().length < MINIMUM_DENIAL_REASON) {
+    if (reason.length < MINIMUM_DENIAL_REASON) {
       toast.error(`Denial reason must be at least ${MINIMUM_DENIAL_REASON} characters`);
       return;
     }
     setBusyId(request.id);
     try {
-      await decideMarketingExpenseRequest(request.id, "denied", reason.trim());
+      await decideMarketingExpenseRequest(request.id, "denied", reason);
       toast.success(`${request.requestNumber} denied`);
-      clearDenial();
+      setReasons((current) => ({ ...current, [request.id]: "" }));
+      closeAll();
       await refetch();
     } catch (err) {
       handleFailure(err);
@@ -106,7 +273,7 @@ export function MarketingExpenseQueuePage() {
           <h1 className="text-2xl font-bold">Marketing Expense Requests</h1>
         </div>
         <p className="text-sm text-muted-foreground">
-          Approve or deny marketing &amp; advertising spend before it is committed.
+          Open a request to read what it is for, then approve or deny it.
         </p>
       </div>
 
@@ -123,7 +290,7 @@ export function MarketingExpenseQueuePage() {
             }`}
             onClick={() => {
               setStatus(tab.value);
-              clearDenial();
+              closeAll();
             }}
           >
             {tab.label}
@@ -150,23 +317,72 @@ export function MarketingExpenseQueuePage() {
         </div>
       ) : (
         <div className="space-y-4">
-          {requests.map((request) => (
-            <section
-              key={request.id}
-              data-testid={`mer-queue-row-${request.id}`}
-              className="border bg-background p-4"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-lg font-semibold">
-                    {request.requestNumber} — {request.vendorEvent}
-                  </h2>
-                  <p className="text-sm text-muted-foreground">
-                    {request.submittedByName ?? "Unknown"} · {formatMoney(request.totalRequested)}
-                  </p>
+          {requests.map((request) => {
+            const isOpen = openId === request.id;
+            const loadedDetail = isOpen && detail?.id === request.id ? detail : null;
+            const canDecide = status === "pending" && Boolean(loadedDetail);
+            return (
+              <section
+                key={request.id}
+                data-testid={`mer-queue-row-${request.id}`}
+                className="border bg-background p-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-lg font-semibold">
+                      {request.requestNumber} — {request.vendorEvent}
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      {request.submittedByName ?? "Unknown"} · {formatMoney(request.totalRequested)} ·
+                      needed by {formatDateOnly(request.neededBy)}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    data-testid={`mer-review-${request.id}`}
+                    disabled={loadingDetailId === request.id}
+                    onClick={() => void toggleReview(request)}
+                  >
+                    {isOpen ? (
+                      <ChevronDown className="mr-2 h-4 w-4" />
+                    ) : (
+                      <ChevronRight className="mr-2 h-4 w-4" />
+                    )}
+                    {loadingDetailId === request.id
+                      ? "Opening…"
+                      : isOpen
+                        ? "Close"
+                        : status === "pending"
+                          ? "Review request"
+                          : "View request"}
+                  </Button>
                 </div>
-                {status === "pending" ? (
-                  <div className="flex gap-2">
+
+                <dl className="mt-3 grid gap-3 text-sm md:grid-cols-3">
+                  <div>
+                    <dt className="font-medium">Total requested</dt>
+                    <dd>{formatMoney(request.totalRequested)}</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium">Submitted</dt>
+                    <dd>{formatInstant(request.submittedAt)}</dd>
+                  </div>
+                  {request.latestDecision ? (
+                    <div>
+                      <dt className="font-medium">Decision</dt>
+                      <dd>
+                        {request.latestDecision === "approved" ? "Approved" : "Denied"}
+                        {request.latestDecidedByName ? ` by ${request.latestDecidedByName}` : ""}
+                        {request.latestDecisionReason ? ` — ${request.latestDecisionReason}` : ""}
+                      </dd>
+                    </div>
+                  ) : null}
+                </dl>
+
+                {loadedDetail ? <RequestDetail detail={loadedDetail} /> : null}
+
+                {canDecide ? (
+                  <div className="mt-4 flex gap-2 border-t pt-4">
                     <Button
                       data-testid={`mer-approve-${request.id}`}
                       disabled={busyId === request.id}
@@ -186,62 +402,39 @@ export function MarketingExpenseQueuePage() {
                     </Button>
                   </div>
                 ) : null}
-              </div>
 
-              <dl className="mt-4 grid gap-3 text-sm md:grid-cols-2">
-                <div>
-                  <dt className="font-medium">Total requested</dt>
-                  <dd>{formatMoney(request.totalRequested)}</dd>
-                </div>
-                <div>
-                  <dt className="font-medium">Needed by</dt>
-                  <dd>{formatDate(request.neededBy)}</dd>
-                </div>
-                <div>
-                  <dt className="font-medium">Submitted</dt>
-                  <dd>{formatDate(request.submittedAt)}</dd>
-                </div>
-                {request.latestDecision ? (
-                  <div>
-                    <dt className="font-medium">Decision</dt>
-                    <dd>
-                      {request.latestDecision === "approved" ? "Approved" : "Denied"}
-                      {request.latestDecidedByName ? ` by ${request.latestDecidedByName}` : ""}
-                      {request.latestDecisionReason ? ` — ${request.latestDecisionReason}` : ""}
-                    </dd>
+                {canDecide && denyingId === request.id ? (
+                  <div className="mt-4 space-y-2">
+                    <label className="text-sm font-medium" htmlFor={`mer-deny-reason-${request.id}`}>
+                      Denial reason
+                    </label>
+                    <textarea
+                      id={`mer-deny-reason-${request.id}`}
+                      data-testid="mer-deny-reason"
+                      className="min-h-24 w-full border bg-background p-2 text-sm"
+                      value={reasons[request.id] ?? ""}
+                      onChange={(event) =>
+                        setReasons((current) => ({ ...current, [request.id]: event.target.value }))
+                      }
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        variant="destructive"
+                        data-testid={`mer-confirm-deny-${request.id}`}
+                        disabled={busyId === request.id}
+                        onClick={() => void deny(request)}
+                      >
+                        Confirm deny
+                      </Button>
+                      <Button variant="outline" onClick={() => setDenyingId(null)}>
+                        Cancel
+                      </Button>
+                    </div>
                   </div>
                 ) : null}
-              </dl>
-
-              {status === "pending" && denyingId === request.id ? (
-                <div className="mt-4 space-y-2">
-                  <label className="text-sm font-medium" htmlFor={`mer-deny-reason-${request.id}`}>
-                    Denial reason
-                  </label>
-                  <textarea
-                    id={`mer-deny-reason-${request.id}`}
-                    data-testid="mer-deny-reason"
-                    className="min-h-24 w-full border bg-background p-2 text-sm"
-                    value={reason}
-                    onChange={(event) => setReason(event.target.value)}
-                  />
-                  <div className="flex gap-2">
-                    <Button
-                      variant="destructive"
-                      data-testid={`mer-confirm-deny-${request.id}`}
-                      disabled={busyId === request.id}
-                      onClick={() => void deny(request)}
-                    >
-                      Confirm deny
-                    </Button>
-                    <Button variant="outline" onClick={clearDenial}>
-                      Cancel
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
-            </section>
-          ))}
+              </section>
+            );
+          })}
         </div>
       )}
     </div>

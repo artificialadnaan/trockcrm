@@ -5,6 +5,7 @@ import {
   isMarketingExpenseAttachmentKind,
   parseMoneyInput,
   sumMoneyForDisplay,
+  formatDateOnly,
 } from "./marketing-expense.js";
 
 describe("parseMoneyInput", () => {
@@ -91,5 +92,37 @@ describe("enum guards", () => {
   it("accepts only documented attachment kinds", () => {
     expect(isMarketingExpenseAttachmentKind("quote_proposal")).toBe(true);
     expect(isMarketingExpenseAttachmentKind("receipts")).toBe(false);
+  });
+});
+
+describe("formatDateOnly", () => {
+  // `needed_by` is a Postgres `date`, which arrives as "YYYY-MM-DD". `new Date("2026-10-01")` parses that
+  // as midnight UTC, so `toLocaleDateString()` in any US zone renders SEPTEMBER 30 — a deadline shown a day
+  // early. This repo has shipped that bug before; the fix is to never build an instant from a date-only
+  // value in the first place.
+  it("renders the calendar day it was given, in every negative-offset zone", () => {
+    const original = process.env.TZ;
+    for (const zone of ["America/Chicago", "America/Los_Angeles", "UTC", "Pacific/Auckland"]) {
+      process.env.TZ = zone;
+      expect(formatDateOnly("2026-10-01")).toContain("2026");
+      expect(formatDateOnly("2026-10-01")).toContain("10");
+      expect(formatDateOnly("2026-10-01")).not.toContain("9/30");
+    }
+    process.env.TZ = original;
+  });
+
+  it("keeps the first of the month on the first of the month", () => {
+    expect(formatDateOnly("2026-01-01")).toBe(new Date(2026, 0, 1).toLocaleDateString());
+  });
+
+  it("tolerates a full ISO timestamp by taking its date part", () => {
+    expect(formatDateOnly("2026-10-01T00:00:00.000Z")).toBe(new Date(2026, 9, 1).toLocaleDateString());
+  });
+
+  it("renders an em dash for nothing at all", () => {
+    expect(formatDateOnly(null)).toBe("—");
+    expect(formatDateOnly(undefined)).toBe("—");
+    expect(formatDateOnly("")).toBe("—");
+    expect(formatDateOnly("not a date")).toBe("—");
   });
 });
