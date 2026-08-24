@@ -87,7 +87,7 @@ const BASELINE: Record<string, number> = {
   "components/layout/detail-page-shell.tsx": 1,
   "components/layout/sidebar.tsx": 1,
   "components/leads/lead-kanban-board.tsx": 1,
-  "components/pipeline/pipeline-board-column.tsx": 1,
+  "components/pipeline/pipeline-board-column.tsx": 2,
   "components/pipeline/pipeline-record-card.tsx": 3,
   "components/reports/data-mining-section.tsx": 6,
   "components/reports/forecast-variance-section.tsx": 10,
@@ -163,10 +163,20 @@ const PALETTE: Record<string, [number, number, number]> = {
   "slate-950": [2, 6, 23],
 };
 
-/** The px size a class string states, or null when it states none (and therefore inherits one). */
+/**
+ * The px size a class string states, or null when it states none (and therefore inherits one).
+ *
+ * `rem` AND `em` COUNT, not just `px`. `text-[0.76rem]` is an established convention here —
+ * pipeline-board-column.tsx uses it, with a `text-slate-400` label nested inside inheriting that size —
+ * and a px-only parser resolved neither the element nor its child, so both fell out of the ratchet. Both
+ * units are 16px at the browser default; nothing in this app changes the root font size.
+ */
 function statedSizePx(classes: string): number | null {
-  const arbitrary = /(?:^|\s)text-\[(\d+(?:\.\d+)?)px\]/.exec(classes);
-  if (arbitrary) return Number(arbitrary[1]);
+  const arbitrary = /(?:^|\s)text-\[(\d+(?:\.\d+)?)(px|rem|em)\]/.exec(classes);
+  if (arbitrary) {
+    const value = Number(arbitrary[1]);
+    return arbitrary[2] === "px" ? value : value * 16;
+  }
   for (const [token, size] of Object.entries(TEXT_SIZE_PX)) {
     if (new RegExp(`(?:^|\\s)${token}(?![\\w-])`).test(classes)) return size;
   }
@@ -332,6 +342,12 @@ function contrast(fg: [number, number, number], bg: [number, number, number]): n
  *     whatever is behind it, so the pair is not decidable here.
  *
  * What survives is a pair genuinely applied to one element, which is the only kind worth asserting on.
+ *
+ * WHAT IT CANNOT SEE: gradients. `bg-gradient-to-br ${accent.grad} to-white` has no single background
+ * colour, so a caption over the coloured end of one is outside this check entirely — which is exactly how
+ * a slate-500 caption on `from-violet-50` (4.34:1) survived an earlier round of this PR and had to be
+ * found by review instead. Resolving a gradient means knowing where the text sits within it, which is a
+ * rendered-layout question, not a static one. Stated rather than silently unhandled.
  */
 function statedPairs(file: string): { bg: string; fg: string; ratio: number; line: number }[] {
   const out: { bg: string; fg: string; ratio: number; line: number }[] = [];

@@ -207,7 +207,7 @@ export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
           >
             <span className={`absolute inset-x-0 top-0 h-1 ${accent.bar}`} />
             <div className="flex items-center justify-between gap-2">
-              <div className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">{d.label} {periodLabel}</div>
+              <div className="text-[11px] font-semibold uppercase tracking-widest text-slate-600">{d.label} {periodLabel}</div>
               <div className="flex items-center gap-1.5">
                 {showWow && <DeltaChip delta={d.deltaCountWoW} />}
                 {!d.deferred && <ArrowUpRight className="h-4 w-4 text-slate-300 transition-colors group-hover:text-slate-500" />}
@@ -219,7 +219,7 @@ export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
             <div className="mt-1 text-sm font-medium tabular-nums text-slate-600">
               {d.deferred ? "deferred" : usd(d.value?.amount ?? 0)}
             </div>
-            <div className="mt-0.5 text-[10px] text-slate-500">{d.deferred ? "Awaiting finance source" : basisLabel(d)}</div>
+            <div className="mt-0.5 text-[10px] text-slate-600">{d.deferred ? "Awaiting finance source" : basisLabel(d)}</div>
             {d.sparkline.length > 0 && (
               <div className="mt-3">
                 <Sparkline values={d.sparkline} spikeIndex={spikeIndex} barClass={accent.bar} highlightLast />
