@@ -14,46 +14,110 @@
 
 export const APP_NAME = "T Rock CRM";
 
-/** Route → page name. Keys are the sidebar's `to` values; every internal one must appear here. */
+/**
+ * Route → page name, for every STATIC route rendered inside `AppShell`.
+ *
+ * Keyed off `App.tsx`'s route table rather than the sidebar. The first version of this map used the
+ * sidebar's links, which covers what people click but not what the router serves: `/search`,
+ * `/sales-review`, `/dashboard/contracts-signed` and `/pipeline/hygiene` had no title at all, and every
+ * `/reports/...` page inherited a shared "Reports" — twenty-odd distinct tabs reading identically, which
+ * is the defect this whole change exists to remove.
+ *
+ * Parameterised routes (`/companies/:id`) are deliberately absent: they inherit their section by prefix.
+ * A record's own name in the tab needs each page to publish it and is a later refinement.
+ */
 export const ROUTE_TITLES: Record<string, string> = {
   "/": "Dashboard",
+  "/dashboard": "Dashboard",
+  "/dashboard/contracts-signed": "Contracts Signed",
+
   "/deals": "Deals Dashboard",
+  "/deals/board": "Deals Board",
+  "/deals/new": "New Deal",
+  "/deals/pending-rfp": "Pending RFP",
+  "/deals/service-opportunity/new": "New Service Opportunity",
+
   "/leads": "Leads",
+  "/leads/board": "Leads Board",
+  "/leads/new": "New Lead",
+
   "/properties": "Properties",
   "/contacts": "Contacts",
+  "/contacts/new": "New Contact",
   "/companies": "Companies",
+  "/companies/new": "New Company",
+
   "/email": "Email",
   "/tasks": "Tasks",
   "/files": "Files",
   "/photos/feed": "Feed",
-  "/reports": "Reports",
+  "/search": "Search",
+  "/sales-review": "Sales Review",
   "/commissions": "Commissions",
+
+  "/pipeline": "Pipeline",
+  "/pipeline/hygiene": "Pipeline Hygiene",
+  "/pipeline/my-cleanup": "My Cleanup",
+
   "/projects": "Projects",
   "/projects/qc-reports": "QC Reports",
   "/projects/weekly-reports": "Weekly Reports",
   "/projects/field-team": "Field Team",
-  "/deals/pending-rfp": "Pending RFP",
+
   "/director": "Director",
   "/director/commissions": "Team Commissions",
-  "/admin/sales-process-disconnects": "Process Disconnects",
-  "/admin/interventions": "Interventions",
-  "/admin/intervention-analytics": "Intervention Analytics",
-  "/admin/lead-due-diligence-queue": "Lead DD Queue",
-  "/admin/merge-queue": "Merge Queue",
-  "/admin/directory-merge-queue": "Directory Merge Queue",
-  "/admin/notification-recipients": "Notification Recipients",
+
+  // Every report is its own page. Leaving them to inherit "Reports" was the defect Codex caught on the
+  // first version of this map: twenty-odd distinct report tabs, all named the same, which is the exact
+  // problem this change exists to fix.
+  "/reports": "Reports",
+  "/reports/at-risk": "At-Risk Deals",
+  "/reports/region": "Region Report",
+  "/reports/rep-pack": "Rep Pack",
+  "/reports/monday-showcase": "Monday Showcase",
+  "/reports/forecast-confidence": "Forecast Confidence",
+  "/reports/analytics/customer-concentration": "Customer Concentration",
+  "/reports/analytics/executive-trends": "Executive Trends",
+  "/reports/analytics/market-mix": "Market Mix",
+  "/reports/operations/estimator-pipeline": "Estimator Pipeline",
+  "/reports/operations/portfolio-load": "Portfolio Load",
+  "/reports/operations/project-readiness": "Project Readiness",
+  "/reports/operations/workflow-bottlenecks": "Workflow Bottlenecks",
+  "/reports/performance/canvassing-activity": "Canvassing Activity",
+  "/reports/performance/daily-activity-log": "Daily Activity Log",
+  "/reports/performance/director-scorecard": "Director Scorecard",
+  "/reports/performance/forecast-accuracy": "Forecast Accuracy",
+  "/reports/performance/platform-usage": "Platform Usage",
+  "/reports/performance/rep-activity": "Rep Activity",
+  "/reports/sales/closed-won-revenue": "Closed-Won Revenue",
+  "/reports/sales/lead-conversion": "Lead Conversion",
+  "/reports/sales/pipeline-velocity": "Pipeline Velocity",
+
   "/admin/ai-actions": "AI Actions",
   "/admin/ai-ops": "AI Ops",
-  "/admin/offices": "Offices",
-  "/admin/users": "Users",
-  "/admin/field-users": "Field Users",
-  "/admin/pipeline": "Pipeline Config",
-  "/admin/commissions": "Global Commissions",
-  "/admin/procore": "Procore Sync",
-  "/admin/data-scrub": "Data Scrub",
   "/admin/audit": "Audit Log",
+  "/admin/commissions": "Global Commissions",
+  "/admin/companycam": "CompanyCam",
   "/admin/cross-office-reports": "Cross-Office Reports",
+  "/admin/data-scrub": "Data Scrub",
+  "/admin/directory-merge-queue": "Directory Merge Queue",
+  "/admin/field-users": "Field Users",
+  "/admin/intervention-analytics": "Intervention Analytics",
+  "/admin/interventions": "Interventions",
+  "/admin/lead-due-diligence-queue": "Lead DD Queue",
+  "/admin/merge-queue": "Merge Queue",
   "/admin/migration": "Migration",
+  "/admin/migration/contacts": "Migration · Contacts",
+  "/admin/migration/deals": "Migration · Deals",
+  "/admin/migration/review": "Migration · Review",
+  "/admin/notification-recipients": "Notification Recipients",
+  "/admin/offices": "Offices",
+  "/admin/photo-audit": "Photo Audit",
+  "/admin/pipeline": "Pipeline Config",
+  "/admin/procore": "Procore Sync",
+  "/admin/sales-process-disconnects": "Process Disconnects",
+  "/admin/users": "Users",
+
   "/help/user-guide": "User Guide",
   "/help/admin-guide": "Admin Guide",
 };
