@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 // `text-slate-400` ON A LIGHT BACKGROUND IS 2.5:1. AA WANTS 4.5.
@@ -73,13 +74,22 @@ function isNormalSizeText(classes: string): boolean {
   return !large;
 }
 
-/** An icon, not text. Sized targets fall under SC 1.4.11 at 3:1 and are not this file's business. */
-const ICON = /\bh-\d(?:\.\d)?\s+w-\d(?:\.\d)?\b|\bsize-\d\b/;
+// NO ICON HEURISTIC ANY MORE, and its absence is the point. Reading per LINE meant an icon's `h-3 w-3`
+// sat beside a label's classes and had to be guessed apart — badly, as it turned out, since excluding the
+// whole line discarded the label too. Scoped to the ATTRIBUTE, an icon's classes are simply not in the
+// label's attribute, so the distinction is structural rather than a regex someone has to maintain. Icons
+// fall under SC 1.4.11 at 3:1 and remain out of scope: one with no text-size class is skipped by
+// `isNormalSizeText` on its own merits.
 
 /**
  * Per-FILE counts at the time the measured failures were fixed.
  *
- * REGENERATED after the per-class-string correction below. Judging per LINE had counted 5 sites that are
+ * REGENERATED for the per-ATTRIBUTE scanner. Each widening of the scanner has raised this number, and
+ * every rise was debt the previous version could not see rather than debt newly added: 137 when it read
+ * per line, 166 once `text-sm`/`text-base` and template literals were included, 173 once composed
+ * `cn(...)` arguments were read as one element's classes. The earlier note follows.
+ *
+ * Formerly: regenerated after the per-class-string correction below. Judging per LINE had counted 5 sites that are
  * not sites at all — a class string carrying `text-slate-400` without a small size, on a line where some
  * other element supplied one. A baseline 5 too high is 5 real regressions the ratchet would absorb in
  * silence, which is the same slack the aggregate-count version was rejected for.
@@ -101,8 +111,9 @@ const BASELINE: Record<string, number> = {
   "components/__harness__/list-detail-harness.tsx": 5,
   "components/__harness__/mobile-ui-harness.tsx": 1,
   "components/auth/auth-entry-screen.tsx": 3,
-  "components/deals/deals-list-section.tsx": 1,
-  "components/deals/pipeline-progress.tsx": 1,
+  "components/deals/deals-list-section.tsx": 3,
+  "components/deals/decorated-kanban-card.tsx": 1,
+  "components/deals/pipeline-progress.tsx": 2,
   "components/director/rep-commission-drilldown.tsx": 6,
   "components/email/email-compose-dialog.tsx": 1,
   "components/layout/detail-page-shell.tsx": 1,
@@ -128,7 +139,7 @@ const BASELINE: Record<string, number> = {
   "pages/files/files-page.tsx": 1,
   "pages/leads/lead-list-page.tsx": 1,
   "pages/projects/projects-page.tsx": 1,
-  "pages/projects/weekly-report-history-panel.tsx": 9,
+  "pages/projects/weekly-report-history-panel.tsx": 10,
   "pages/projects/weekly-report-project-dialog.tsx": 1,
   "pages/projects/weekly-report-send-dialog.tsx": 7,
   "pages/projects/weekly-report-settings-dialog.tsx": 1,
@@ -139,6 +150,7 @@ const BASELINE: Record<string, number> = {
   "pages/reports/field-team-page.tsx": 2,
   "pages/reports/forecast-confidence-page.tsx": 4,
   "pages/reports/monday-showcase/evidence-drawer.tsx": 1,
+  "pages/reports/performance-report-ui.tsx": 1,
   "pages/reports/platform-usage-page.tsx": 5,
   "pages/reports/platform-usage-rep-detail-page.tsx": 2,
   "pages/reports/qc-reports-page.tsx": 5,
@@ -156,6 +168,7 @@ const BASELINE: Record<string, number> = {
   "preview/leads-preview.tsx": 2,
   "preview/properties-preview.tsx": 1,
   "preview/rep-dashboard-preview.tsx": 3,
+  "preview/tasks-preview.tsx": 1,
 };
 
 
@@ -175,12 +188,57 @@ const PALETTE: Record<string, [number, number, number]> = {
   "slate-950": [2, 6, 23],
 };
 
-/** Class strings written either way: "…" and `…`. Interpolations are left in; they carry no classes. */
-function classStrings(line: string): [string, string][] {
-  return [
-    ...[...line.matchAll(/"([^"]*)"/g)].map((m) => [m[0], m[1]!] as [string, string]),
-    ...[...line.matchAll(/`([^`]*)`/g)].map((m) => [m[0], m[1]!] as [string, string]),
-  ];
+/**
+ * Every `className` expression in a file, flattened to the classes it can apply to ONE element.
+ *
+ * PER ATTRIBUTE, VIA THE PARSER — which is where this should have started. Judging line by line, then
+ * quoted-string by quoted-string, produced four separate findings in a row, each a different way for a
+ * real site to fall between the cracks:
+ *
+ *   cn("min-w-0 truncate text-[10px] …",            ← the size lives in argument one
+ *      isFallback ? "text-slate-400" : "text-brand-red")   ← the colour in argument two
+ *
+ * No individual string carries both, so a per-string scan omitted the site entirely — and it is an
+ * existing convention here, not a corner case. Multi-line attributes had the same problem for the same
+ * reason: the unit of styling is the ATTRIBUTE, so that is the unit to read.
+ *
+ * Conditional branches are UNIONED on purpose. `isFallback ? "text-slate-400" : "text-brand-red"` really
+ * can render as slate-400, so the pessimistic reading is the correct one for "could this be low
+ * contrast". It is also why an icon's classes no longer need a heuristic: they live in the icon's own
+ * attribute and never join this one.
+ */
+function classNameAttributes(file: string): { classes: string; line: number; conditional: boolean }[] {
+  const text = fs.readFileSync(file, "utf8");
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const out: { classes: string; line: number; conditional: boolean }[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isJsxAttribute(node) && node.name.getText() === "className" && node.initializer) {
+      const parts: string[] = [];
+      const gather = (n: ts.Node): void => {
+        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) parts.push(n.text);
+        else if (ts.isTemplateExpression(n)) {
+          parts.push(n.head.text);
+          for (const span of n.templateSpans) parts.push(span.literal.text);
+        }
+        n.forEachChild(gather);
+      };
+      gather(node.initializer);
+      if (parts.length > 0) {
+        const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+        let conditional = false;
+        const seek = (n: ts.Node): void => {
+          if (ts.isConditionalExpression(n) || ts.isBinaryExpression(n)) conditional = true;
+          n.forEachChild(seek);
+        };
+        seek(node.initializer!);
+        out.push({ classes: parts.join(" "), line: line + 1, conditional });
+      }
+    }
+    node.forEachChild(visit);
+  };
+  visit(source);
+  return out;
 }
 
 function relativeLuminance([r, g, b]: [number, number, number]): number {
@@ -209,45 +267,31 @@ function contrast(fg: [number, number, number], bg: [number, number, number]): n
  *
  * What survives is a pair genuinely applied to one element, which is the only kind worth asserting on.
  */
-function statedPairs(source: string): { bg: string; fg: string; ratio: number; line: number }[] {
+function statedPairs(file: string): { bg: string; fg: string; ratio: number; line: number }[] {
   const out: { bg: string; fg: string; ratio: number; line: number }[] = [];
-  source.split("\n").forEach((line, index) => {
-    for (const [, classes] of classStrings(line)) {
-      if (classes.includes("?")) continue;
-      if (!isNormalSizeText(classes)) continue;
-      const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(classes);
-      const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(classes);
-      if (!bg || !fg) continue;
-      const bgColor = PALETTE[bg[1]!];
-      const fgColor = PALETTE[fg[1]!];
-      if (!bgColor || !fgColor) continue;
-      out.push({
-        bg: bg[1]!,
-        fg: fg[1]!,
-        ratio: Math.round(contrast(fgColor, bgColor) * 100) / 100,
-        line: index + 1,
-      });
-    }
-  });
+  for (const attribute of classNameAttributes(file)) {
+    // A CONDITIONAL ATTRIBUTE IS NOT A STATED PAIR. Unioning branches is right for "could this render low
+    // contrast" (the ratchet's question) and wrong for "these two are applied together" (this one's) —
+    // `${dark ? "bg-white/20 text-white" : …}` reported white-on-white at 1.0:1 seven times when this
+    // scanner conflated the two questions.
+    if (attribute.conditional) continue;
+    if (!isNormalSizeText(attribute.classes)) continue;
+    const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(attribute.classes);
+    const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(attribute.classes);
+    if (!bg || !fg) continue;
+    const bgColor = PALETTE[bg[1]!];
+    const fgColor = PALETTE[fg[1]!];
+    if (!bgColor || !fgColor) continue;
+    out.push({
+      bg: bg[1]!,
+      fg: fg[1]!,
+      ratio: Math.round(contrast(fgColor, bgColor) * 100) / 100,
+      line: attribute.line,
+    });
+  }
   return out;
 }
 
-/**
- * Every `text-slate-400` applied to SMALL TEXT, judged per class string rather than per line.
- *
- * PER ELEMENT, and that is the correction. The first version excluded any LINE containing icon sizing —
- * so this, which is ordinary JSX, vanished from the guard entirely:
- *
- *   <span className="text-xs text-slate-400"><Check className="h-3 w-3" /> Done</span>
- *
- * The label is a real low-contrast site; the `h-3 w-3` belongs to the icon beside it. A line-wide
- * exclusion threw both away, so a new low-contrast label could be introduced on any line that happens to
- * contain an inline icon and bypass BOTH ratchet assertions. Inline icon-and-label markup is everywhere in
- * this codebase, so that is not a narrow escape hatch.
- *
- * Each quoted class string is now judged on its own: it counts when IT carries both the colour and a small
- * size, and is skipped only when IT is the icon.
- */
 function smallSlate400Sites(): string[] {
   const found: string[] = [];
   const walk = (dir: string): void => {
@@ -258,21 +302,12 @@ function smallSlate400Sites(): string[] {
         walk(full);
         continue;
       }
-      if (!/\.tsx?$/.test(entry.name) || entry.name.includes(".test.")) continue;
-      fs.readFileSync(full, "utf8")
-        .split("\n")
-        .forEach((line, index) => {
-          if (!line.includes("text-slate-400")) return;
-          // BACKTICKS TOO. `className={`text-[11px] text-slate-400 ${extra}`}` is an existing convention
-          // here, and a quoted-string-only matcher never saw the outer class list — so those sites were
-          // absent from the baseline AND unreachable by the ratchet.
-          for (const [, classes] of classStrings(line)) {
-            if (!classes.includes("text-slate-400")) continue;
-            if (!isNormalSizeText(classes)) continue;
-            if (ICON.test(classes)) continue;
-            found.push(`${path.relative(CLIENT_SRC, full)}:${index + 1}`);
-          }
-        });
+      if (!entry.name.endsWith(".tsx") || entry.name.includes(".test.")) continue;
+      for (const attribute of classNameAttributes(full)) {
+        if (!attribute.classes.includes("text-slate-400")) continue;
+        if (!isNormalSizeText(attribute.classes)) continue;
+        found.push(`${path.relative(CLIENT_SRC, full)}:${attribute.line}`);
+      }
     }
   };
   walk(CLIENT_SRC);
@@ -336,8 +371,7 @@ describe("muted text does not get quieter", () => {
 
     const failures: string[] = [];
     for (const file of audited) {
-      const source = fs.readFileSync(path.join(CLIENT_SRC, file), "utf8");
-      for (const pair of statedPairs(source)) {
+      for (const pair of statedPairs(path.join(CLIENT_SRC, file))) {
         if (pair.ratio < 4.5) {
           failures.push(`${file}:${pair.line} text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`);
         }
@@ -350,10 +384,8 @@ describe("muted text does not get quieter", () => {
   it("still finds pairs to judge in those files — an empty scan would assert nothing", () => {
     // The scanner skips ternaries and opacity-modified tokens, both for good reason. Skip too much and
     // the assertion above passes over a file it never actually read.
-    const source = fs.readFileSync(
-      path.join(CLIENT_SRC, "pages/reports/region-report-page.tsx"),
-      "utf8",
-    );
-    expect(statedPairs(source).length).toBeGreaterThanOrEqual(3);
+    expect(
+      statedPairs(path.join(CLIENT_SRC, "pages/reports/region-report-page.tsx")).length,
+    ).toBeGreaterThanOrEqual(3);
   });
 });
