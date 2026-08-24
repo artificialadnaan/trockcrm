@@ -85,6 +85,24 @@ export interface WeeklyReportAuditReport {
   /** True when the CRM has no evidence the client received this. Drives the one summary chip. */
   undelivered: boolean;
   /**
+   * FALSE when somebody removed this version. The row is still here — see this service's header — and
+   * that is exactly why the flag has to travel with it: without it a removed week rendered identically
+   * to a filed one, on the single page built to be quoted back to a client.
+   */
+  isActive: boolean;
+  /**
+   * WHO removed it, WHEN and WHY, off the soft-delete audit row.
+   *
+   * `weekly_reports` carries no deleted_by/deleted_at/reason columns and the delete feature deliberately
+   * shipped without a migration, so `audit_log` is not merely a convenient source — it is the only one.
+   * All three are null on a live report, and all three can be null on a removed one: a row deleted by
+   * hand in psql leaves `isActive: false` with nothing to explain it, and saying so is more honest than
+   * inventing an actor.
+   */
+  deletedAt: string | null;
+  deletedByName: string | null;
+  deletedReason: string | null;
+  /**
    * True when this row is a delivery problem somebody still has to act on.
    *
    * DERIVED HERE ON PURPOSE. The summary count, the card's chip and the card's border are three
@@ -304,10 +322,14 @@ function markOutstanding(
     if (receiptConfirmed(report.deliveryStatus)) bump(lastConfirmed, report.weekOf, report.version);
     // `supersededById != null` CANNOT change the answer for any state the product can reach, and it is
     // kept anyway — deliberately, not by oversight. A live row that failed is already `undelivered` and
-    // outstanding on its own account, and nothing soft-deletes an individual report (only the project),
-    // so a failed row that is neither live-and-flagged nor superseded does not occur. What it defends
-    // is the hand-written UPDATE: prod fixes are applied by hand on this project, and without it a
-    // failure orphaned that way would flag its week twice, on the orphan and on the live send both.
+    // outstanding on its own account, so a failed row that is neither live-and-flagged nor superseded
+    // does not occur through the ordinary paths. What it defends is the row that got there another way:
+    // the hand-written UPDATE (prod fixes are applied by hand on this project), and now the DELETE —
+    // both leave a failure that would otherwise flag its week twice, on the orphan and the live send.
+    //
+    // The two maps deliberately still read REMOVED rows. Deleting a report does not un-bounce it, and
+    // the week's live version is owed to the client either way; excluding them here would let somebody
+    // clear a week's red border by removing the evidence rather than by fixing the send.
     if (report.supersededById != null && weeklyReportDeliveryFailed(report.deliveryStatus)) {
       bump(lastFailed, report.weekOf, report.version);
     }
@@ -315,7 +337,13 @@ function markOutstanding(
 
   return reports.map((report) => ({
     ...report,
+    // A REMOVED ROW IS NOBODY'S JOB. `outstanding` means "a delivery problem somebody still has to act
+    // on", and there is no action available on a report that has been deleted — History offers none and
+    // the board does not show it. It went on driving the summary count, the chip and the card's border
+    // because this was computed from status and delivery columns alone, back when nothing could
+    // soft-delete an individual report. Something can now.
     outstanding:
+      report.isActive &&
       report.supersededById == null &&
       (report.undelivered ||
         (report.status === "sent" &&
@@ -328,7 +356,9 @@ function markOutstanding(
  * @throws 404 when the project does not exist or has been soft-deleted.
  *
  * Reports are read WITHOUT an `is_active` filter on purpose: a soft-deleted version is part of what
- * happened, and an audit trail that quietly omits the rows somebody removed is not one.
+ * happened, and an audit trail that quietly omits the rows somebody removed is not one. That promise was
+ * only ever half kept — the rows came back and nothing in the payload said which of them had been
+ * removed, which is the same omission one level down. `isActive` and the three `deleted*` fields close it.
  */
 export async function getWeeklyReportProjectAudit(
   client: QueryExecutor,
@@ -337,8 +367,16 @@ export async function getWeeklyReportProjectAudit(
   const project = await getWeeklyReportProject(client, projectId);
   if (!project) throw new AppError(404, "Weekly report project not found");
 
+  // THE DELETION COMES OFF `audit_log`, LATERALLY.
+  //
+  // `weekly_reports` has no deleted_by, deleted_at or reason column — the delete feature shipped without
+  // a migration precisely because `is_active` already existed — so the soft-delete audit row the route
+  // writes is the only record of who removed a week and why. A LATERAL with LIMIT 1 rather than a plain
+  // join: `audit_log` accumulates every action on every record, and a report deleted, restored by hand
+  // and deleted again would otherwise multiply this query's rows and silently duplicate the week.
+  // Newest wins, because the current state is what the page is describing.
   const reports = await client.query(
-    `SELECT wr.id, wr.week_of, wr.version, wr.status, wr.superseded_by_id,
+    `SELECT wr.id, wr.week_of, wr.version, wr.status, wr.superseded_by_id, wr.is_active,
             wr.authored_at, wr.submitted_at, wr.reviewed_at, wr.sent_at,
             wr.send_request, wr.send_attempts, wr.send_error, wr.send_last_attempt_at,
             wr.send_delivered_at, wr.send_delivery_status, wr.send_delivery_status_at,
@@ -347,13 +385,26 @@ export async function getWeeklyReportProjectAudit(
             submitter.display_name AS submitted_by_name,
             reviewer.display_name  AS reviewed_by_name,
             sender.display_name    AS sent_by_name,
-            successor.created_at   AS superseded_at
+            successor.created_at   AS superseded_at,
+            deletion.deleted_at, deletion.deleted_by_name, deletion.deleted_reason
        FROM weekly_reports wr
        LEFT JOIN public.users author    ON author.id    = wr.authored_by
        LEFT JOIN public.users submitter ON submitter.id = wr.submitted_by
        LEFT JOIN public.users reviewer  ON reviewer.id  = wr.reviewed_by
        LEFT JOIN public.users sender    ON sender.id    = wr.sent_by
        LEFT JOIN weekly_reports successor ON successor.id = wr.superseded_by_id
+       LEFT JOIN LATERAL (
+            SELECT al.created_at          AS deleted_at,
+                   deleter.display_name   AS deleted_by_name,
+                   al.full_row ->> 'reason' AS deleted_reason
+              FROM audit_log al
+              LEFT JOIN public.users deleter ON deleter.id = al.changed_by
+             WHERE al.table_name = 'weekly_report'
+               AND al.record_id = wr.id
+               AND al.action = 'soft_delete'
+             ORDER BY al.created_at DESC
+             LIMIT 1
+       ) deletion ON NOT wr.is_active
       WHERE wr.weekly_report_project_id = $1::uuid
       ORDER BY wr.week_of DESC, wr.version DESC`,
     [projectId],
@@ -599,6 +650,10 @@ export async function getWeeklyReportProjectAudit(
         version: Number(row.version),
         status: row.status,
         supersededById: row.superseded_by_id ?? null,
+        isActive: row.is_active !== false,
+        deletedAt: toIso(row.deleted_at),
+        deletedByName: row.deleted_by_name ?? null,
+        deletedReason: row.deleted_reason ?? null,
         recipients: recipientsOf(row.send_request),
         deliveryStatus: row.send_delivery_status ?? null,
         sentAt: toIso(row.sent_at),

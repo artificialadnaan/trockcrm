@@ -305,6 +305,15 @@ function ReportCard({
             Superseded
           </span>
         )}
+        {/* A REMOVED VERSION IS STILL SHOWN — the rows are read without an `is_active` filter on purpose,
+            because a removal is part of what happened. This pill is the other half of that promise: for
+            as long as it was missing, a deleted week rendered identically to a filed one on the one page
+            in this app built to be quoted back to a client. */}
+        {!report.isActive && (
+          <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-px text-[11px] font-semibold text-slate-600">
+            Removed
+          </span>
+        )}
         {failing && (
           <span className="rounded border border-brand-red/30 bg-brand-red/5 px-1.5 py-px text-[11px] font-semibold text-brand-red">
             {report.deliveryStatus ?? "Not delivered"}
@@ -318,6 +327,20 @@ function ReportCard({
           </span>
         )}
       </header>
+
+      {/* WHO removed it and WHY, off the soft-delete audit row — not from the report, which carries no
+          such columns. Rendered as its own line rather than as a timeline event because the timeline is
+          built from the report's own stamps and this fact is not one of them; and rendered even when the
+          attribution is missing, because a row deleted by hand in psql leaves nothing behind and "removed
+          by nobody we can name" is still worth more to a reader than silence. */}
+      {!report.isActive && (
+        <p className="mt-2 text-[11.5px] text-slate-600">
+          <span className="font-semibold">Removed</span>
+          {report.deletedByName && <span> by {report.deletedByName}</span>}
+          {report.deletedAt && <span className="text-slate-500"> · {fmtStamp(report.deletedAt)}</span>}
+          {report.deletedReason && <span className="text-slate-500"> — {report.deletedReason}</span>}
+        </p>
+      )}
 
       <ViewLog report={report} trackingSince={trackingSince} />
 

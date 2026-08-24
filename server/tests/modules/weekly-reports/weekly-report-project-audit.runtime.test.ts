@@ -11,7 +11,15 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import {
+  auditLog,
+  deals,
+  fieldResponders,
+  files,
+  offices,
+  userOfficeAccess,
+  users,
+} from "@trock-crm/shared/schema";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -35,7 +43,9 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
+  // `audit_log` is where a deletion's WHO, WHEN and WHY live — `weekly_reports` carries no such columns
+  // and this feature needed no migration. The audit page joins it, so the suite needs it.
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files, auditLog]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
 
   await pg.exec(migrationSql("0222_weekly_reports"));
@@ -77,6 +87,7 @@ beforeEach(async () => {
     DELETE FROM office_dallas.weekly_report_pauses;
     DELETE FROM office_dallas.weekly_reports;
     DELETE FROM office_dallas.weekly_report_projects;
+    DELETE FROM office_dallas.audit_log;
     DELETE FROM public.weekly_report_views;
   `);
   await pg.query(
@@ -515,10 +526,55 @@ describe("the per-project audit trail", () => {
     });
   });
 
-  it("includes a soft-deleted report, because an audit trail that hides removals is not one", async () => {
+  it("says a report was REMOVED, and by whom, rather than rendering it as a live one", async () => {
+    // Including the row was never the hard part — the query has no `is_active` filter, on purpose. The
+    // gap was that nothing in the payload said which rows those were, so a removed week rendered
+    // identically to a filed one on the single page built to be quoted back to a client. The WHO, WHEN
+    // and WHY come off `audit_log`: `weekly_reports` has no deleted_by/deleted_at columns and this
+    // feature deliberately shipped without a migration.
     await seedFullySentReport({ is_active: false });
+    await pg.query(
+      `INSERT INTO office_dallas.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ('weekly_report', $1::uuid, 'soft_delete', $2::uuid, $3::jsonb, '2026-08-20T09:00:00Z'::timestamptz)`,
+      [REPORT, DIRECTOR, JSON.stringify({ reason: "Duplicate of the corrected version" })],
+    );
+
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
     expect(audit.reports).toHaveLength(1);
+    expect(audit.reports[0]).toMatchObject({
+      isActive: false,
+      deletedAt: "2026-08-20T09:00:00.000Z",
+      deletedByName: "Takashi",
+      deletedReason: "Duplicate of the corrected version",
+    });
+  });
+
+  it("reports a live row as live, so `isActive` is not simply always false", async () => {
+    // The control. Without it the assertion above passes for a payload that hardcodes the deletion.
+    await seedFullySentReport();
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]).toMatchObject({
+      isActive: true,
+      deletedAt: null,
+      deletedByName: null,
+      deletedReason: null,
+    });
+  });
+
+  it("stops calling a removed report outstanding — it is nobody's job any more", async () => {
+    // A `sent` report with no delivery evidence is outstanding forever, and deleting it does not change
+    // that: the flag is computed from status and delivery columns alone, so a removed week went on
+    // driving the summary count, the chip and the card's red border with an action nobody can take.
+    await seedFullySentReport({ send_delivered_at: null, is_active: false });
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.undelivered).toBe(true);
+    expect(audit.reports[0]!.outstanding).toBe(false);
+  });
+
+  it("still calls the SAME row outstanding while it is live, so the exclusion is not blanket", async () => {
+    await seedFullySentReport({ send_delivered_at: null });
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.outstanding).toBe(true);
   });
 
   it("never returns the stored send request, which carries the RAW share token", async () => {

@@ -49,6 +49,10 @@ function report(overrides: Record<string, unknown> = {}) {
     deliveryStatus: null,
     undelivered: false,
     outstanding: false,
+    isActive: true,
+    deletedAt: null,
+    deletedByName: null,
+    deletedReason: null,
     sentAt: "2026-08-13T17:00:00.000Z",
     sendDeliveredAt: "2026-08-13T17:00:30.000Z",
     viewSessions: [],
@@ -483,4 +487,39 @@ describe("the open log", () => {
     expect(document.body.textContent).not.toContain("Nobody has opened the link yet");
   });
 
+});
+
+describe("a report somebody removed", () => {
+  // The rows are read WITHOUT an `is_active` filter on purpose — a removal is part of what happened and
+  // an audit trail that omits it is not one. That was only half the promise: the row came back and
+  // nothing on it said it had been removed, so a deleted week rendered identically to a filed one, on
+  // the single page in this app built to be quoted back to a client.
+  it("says so on the card, and names who removed it and why", () => {
+    render({
+      reports: [
+        report({
+          isActive: false,
+          deletedAt: "2026-08-20T09:00:00.000Z",
+          deletedByName: "Takashi",
+          deletedReason: "Duplicate of the corrected version",
+        }),
+      ],
+    });
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Removed");
+    expect(text).toContain("Takashi");
+    expect(text).toContain("Duplicate of the corrected version");
+  });
+
+  it("says nothing of the sort about a live one — the control", () => {
+    render({ reports: [report()] });
+    expect(document.body.textContent).not.toContain("Removed");
+  });
+
+  it("still says it was removed when nobody recorded who or why", () => {
+    // A row deleted by hand in psql leaves no audit entry. Saying "removed" with no attribution is more
+    // honest than rendering it as live, and far more honest than inventing an actor.
+    render({ reports: [report({ isActive: false })] });
+    expect(document.body.textContent).toContain("Removed");
+  });
 });

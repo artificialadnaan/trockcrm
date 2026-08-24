@@ -73,6 +73,16 @@ function report(overrides: Record<string, unknown> = {}) {
     sendDeliveryDetail: null,
     sendError: null,
     sendAttempts: 0,
+    // The SERVER's answer to "what may this reader do with this row". The default here is a rep's — the
+    // broadest audience this tab has — so a row that acquires an edit or delete control has to say so
+    // explicitly, rather than inheriting one from the fixture.
+    permissions: {
+      canEdit: false,
+      canSubmit: false,
+      canApprove: false,
+      canReturnToDraft: false,
+      canDelete: false,
+    },
     ...overrides,
   };
 }
@@ -530,5 +540,108 @@ describe("the detail sheet", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("could not be loaded");
     expect(text).toContain("Weekly report not found");
+  });
+});
+
+describe("the row's overflow menu", () => {
+  // GATED ON THE SERVER'S FLAGS, never on a role the browser reads for itself. `canEdit` depends on the
+  // report's status and the project's two assignment slots as well as the role — a sent report is closed
+  // to everyone, an approved one only to the PM — so a client-side re-derivation would eventually offer a
+  // control the API refuses, which the user meets as a 403 on a button that looked live.
+  function trigger(): HTMLButtonElement | undefined {
+    return Array.from(document.querySelectorAll("button")).find((element) =>
+      element.getAttribute("aria-label")?.startsWith("More actions"),
+    ) as HTMLButtonElement | undefined;
+  }
+
+  it("is not rendered at all for a reader who may do neither", () => {
+    // An overflow button that opens onto nothing reads as a broken control, and for a rep — who can open
+    // this whole tab and act on none of it — that would be every row on the page.
+    mocks.reports = [report()];
+    render();
+    expect(trigger()).toBeUndefined();
+  });
+
+  it("appears once the server says this reader may edit", () => {
+    mocks.reports = [report({ permissions: { canEdit: true, canDelete: false } })];
+    render();
+    expect(trigger()).toBeDefined();
+  });
+
+  it("appears once the server says this reader may delete", () => {
+    mocks.reports = [report({ permissions: { canEdit: false, canDelete: true } })];
+    render();
+    expect(trigger()).toBeDefined();
+  });
+
+  async function menuLabels(): Promise<(string | undefined)[]> {
+    await act(async () => {
+      trigger()!.click();
+    });
+    return Array.from(document.querySelectorAll('[role="menuitem"]')).map((element) =>
+      element.textContent?.trim(),
+    );
+  }
+
+  // THE MENU'S EXISTENCE AND EACH ITEM'S ARE SEPARATE GATES, and only these two assert the second. The
+  // reader who may do neither gets no menu at all, so an item that ignored its own flag would pass every
+  // other test in this block — and hand a rep-shaped reader a control the API refuses.
+  it("offers Edit alone when that is all the server allowed", async () => {
+    mocks.reports = [report({ status: "draft", permissions: { canEdit: true, canDelete: false } })];
+    render();
+    const labels = await menuLabels();
+    expect(labels).toContain("Edit report");
+    expect(labels).not.toContain("Delete report");
+  });
+
+  it("offers Delete alone when that is all the server allowed", async () => {
+    // The ordinary case for a sent report: leadership may remove it and nobody may edit it.
+    mocks.reports = [report({ permissions: { canEdit: false, canDelete: true } })];
+    render();
+    const labels = await menuLabels();
+    expect(labels).toContain("Delete report");
+    expect(labels).not.toContain("Edit report");
+  });
+
+  it("offers Delete report, and opens the reason dialog rather than deleting on the click", async () => {
+    // A row-destructive action that fires on the menu click is a one-click irreversible delete. The
+    // dialog is what makes the reason mandatory — and the reason is the whole difference between a
+    // removal somebody can account for and a row that quietly stopped existing.
+    mocks.reports = [report({ status: "draft", permissions: { canEdit: false, canDelete: true } })];
+    render();
+    await act(async () => {
+      trigger()!.click();
+    });
+
+    const item = Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+      (element) => element.textContent?.trim() === "Delete report",
+    ) as HTMLElement | undefined;
+    expect(item).toBeDefined();
+
+    await act(async () => {
+      item!.click();
+    });
+    expect(document.body.textContent).toContain("There is no undo");
+  });
+
+  it("offers Edit report, and opens the form on what the row already says", async () => {
+    mocks.reports = [
+      report({ status: "draft", workCompleted: "Framing on level 3", permissions: { canEdit: true, canDelete: false } }),
+    ];
+    render();
+    await act(async () => {
+      trigger()!.click();
+    });
+
+    const item = Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+      (element) => element.textContent?.trim() === "Edit report",
+    ) as HTMLElement | undefined;
+    expect(item).toBeDefined();
+
+    await act(async () => {
+      item!.click();
+    });
+    const textarea = document.querySelector<HTMLTextAreaElement>('[aria-label="Work completed"]');
+    expect(textarea?.value).toBe("Framing on level 3");
   });
 });

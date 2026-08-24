@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CalendarClock, Loader2 } from "lucide-react";
+import { AlertTriangle, CalendarClock, Loader2, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   weeklyReportRetryDuplicateRiskPrompt,
@@ -20,8 +26,11 @@ import {
   retryWeeklyReportSend,
   useWeeklyReportHistory,
   type WeeklyReportDetail,
+  type WeeklyReportHistoryEntry,
   type WeeklyReportProject,
 } from "@/hooks/use-weekly-reports";
+import { WeeklyReportDeleteDialog } from "./weekly-report-delete-dialog";
+import { WeeklyReportEditDialog } from "./weekly-report-edit-dialog";
 
 const STATUS_BADGE: Record<string, string> = {
   draft: "border-amber-200 bg-amber-50 text-amber-700",
@@ -88,6 +97,10 @@ export function WeeklyReportHistoryPanel({
   const [detail, setDetail] = useState<WeeklyReportDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // ONE dialog for the whole table, holding the row it was opened from — not a dialog per row. Fifty-two
+  // weeks of a job is fifty-two mounted forms otherwise, each with its own state.
+  const [editing, setEditing] = useState<WeeklyReportHistoryEntry | null>(null);
+  const [deleting, setDeleting] = useState<WeeklyReportHistoryEntry | null>(null);
 
   // Re-run the history request when the page refreshes, but NOT on mount — the hook already loads on
   // mount and on every project change, so an unguarded effect would fire a second, identical request
@@ -277,6 +290,17 @@ export function WeeklyReportHistoryPanel({
                             }}
                           />
                         )}
+                      {/* EDIT AND DELETE GO IN THE OVERFLOW, not beside the four above. A row that can
+                          be sent, retried and corrected already carries four controls; six inline
+                          buttons is a wall, and the destructive one has no business being the easiest
+                          thing on the row to hit. This is the house row-destructive idiom — see
+                          file-row.tsx, where Delete is a red DropdownMenuItem and not an inline
+                          button. */}
+                      <RowActions
+                        report={report}
+                        onEdit={() => setEditing(report)}
+                        onDelete={() => setDeleting(report)}
+                      />
                     </div>
                   </td>
                 </tr>
@@ -353,7 +377,90 @@ export function WeeklyReportHistoryPanel({
           ) : null}
         </SheetContent>
       </Sheet>
+
+      {editing && (
+        <WeeklyReportEditDialog
+          report={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            void refetch();
+            // The board reads the same rows: a completion percentage or a cleared work-completed section
+            // changes what This Week says about the project, not only what History shows.
+            onChanged();
+          }}
+        />
+      )}
+      {deleting && (
+        <WeeklyReportDeleteDialog
+          report={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => {
+            void refetch();
+            onChanged();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * The row's overflow menu: Edit, then Delete last and red.
+ *
+ * GATED ON THE SERVER'S ANSWER, never on a role read from the session. `canEdit` consults the report's
+ * status and the project's two assignment slots as well as the role — a sent report is closed to
+ * everyone, an approved one only to the PM — and the CRM re-deriving any of that is how a button that
+ * 403s reaches a user.
+ *
+ * Renders NOTHING when neither is offered, rather than an empty menu. An overflow button that opens onto
+ * nothing reads as a broken control, and for a rep — who can open this whole tab and act on none of it —
+ * that would be every row.
+ */
+function RowActions({
+  report,
+  onEdit,
+  onDelete,
+}: {
+  report: WeeklyReportHistoryEntry;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  // Optional-chained because the envelope arrives from the API: a browser that loaded before the deploy
+  // that added it would otherwise throw here and blank the entire History tab, which is a far worse
+  // outcome than a row that briefly offers no actions.
+  const canEdit = report.permissions?.canEdit === true;
+  const canDelete = report.permissions?.canDelete === true;
+  if (!canEdit && !canDelete) return null;
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label={`More actions for the week of ${fmtWeek(report.weekOf)}`}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end">
+        {canEdit && (
+          <DropdownMenuItem onClick={onEdit}>
+            <Pencil className="mr-2 h-4 w-4" />
+            Edit report
+          </DropdownMenuItem>
+        )}
+        {canDelete && (
+          <DropdownMenuItem onClick={onDelete} className="text-red-600">
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete report
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

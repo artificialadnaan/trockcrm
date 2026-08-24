@@ -860,6 +860,11 @@ describe("who may open a report by id", () => {
       canSubmit: true,
       canApprove: false,
       canReturnToDraft: false,
+      // FALSE FOR THE WHOLE FIELD SURFACE. Delete is admin/director only and both actors here are
+      // `construction`, which is what the assigned PM and superintendent actually are — so the phone
+      // reads `canDelete: false` on every report it will ever be shown, and there is no delete route on
+      // /api/field to reach even if it did not.
+      canDelete: false,
     });
 
     await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
@@ -869,6 +874,7 @@ describe("who may open a report by id", () => {
       canSubmit: false,
       canApprove: true,
       canReturnToDraft: true,
+      canDelete: false,
     });
   });
 
