@@ -471,6 +471,7 @@ describe("DealListPage", () => {
       ],
     });
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -748,6 +749,7 @@ describe("DealListPage", () => {
 
   it("excludes terminal-stage cards from the Active Pipeline value and count", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -815,6 +817,7 @@ describe("DealListPage", () => {
 
   it("uses backend column aggregates for Active Pipeline instead of truncated card arrays", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -876,6 +879,7 @@ describe("DealListPage", () => {
 
   it("renders the Won KPI from the canonical Won column and ignores duplicated terminal-stage aggregates", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -954,6 +958,7 @@ describe("DealListPage", () => {
 
   it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1007,6 +1012,7 @@ describe("DealListPage", () => {
 
   it("preserves empty canonical columns so stage parity remains visible", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1809,6 +1815,7 @@ describe("DealListPage", () => {
 
   it("renders the Won KPI from the canonical backend column when the request preserves the page period", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1846,6 +1853,7 @@ describe("DealListPage", () => {
 
   it("does not use aggregate-only terminal response shape for Won KPI rendering", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1889,6 +1897,7 @@ describe("DealListPage", () => {
     const sharedCount = 294;
     const sharedTotal = 21690316.66;
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1933,6 +1942,7 @@ describe("DealListPage", () => {
 
   it("passes the same effective won date range into the board request and drilldown list", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2304,6 +2314,7 @@ describe("DealListPage", () => {
   // ALL at-risk deals show regardless of updated_at; only the non-at-risk deal is excluded (by predicate).
   it("shows ALL at-risk stale deals regardless of ?period (current-state view); excludes non-at-risk", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2380,6 +2391,7 @@ describe("DealListPage", () => {
 
   it("uses engine at-risk results for the KPI count and drilldown population", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2471,6 +2483,7 @@ describe("DealListPage", () => {
   function mockRouteMixedAtRiskBoard() {
     const atRisk = () => makeAtRiskResult();
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2801,6 +2814,7 @@ describe("DealListPage", () => {
 
   it("excludes on-hold cards from at-risk drilldown column fallback totals", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2873,6 +2887,7 @@ describe("DealListPage", () => {
 
   it("sends the board search to the SERVER rather than filtering the cards it already holds", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -2895,6 +2910,7 @@ describe("DealListPage", () => {
 
   it("does not re-issue the board query on every keystroke", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -2936,6 +2952,7 @@ describe("DealListPage", () => {
     // filter looked at, so re-adding that filter would drop it while the header still counted it. The
     // header figures are likewise the server's, and deliberately not derivable from the two cards.
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
       board: {
         columns: [
           {
@@ -2985,6 +3002,7 @@ describe("DealListPage", () => {
 
   it("carries the board search into the stage drill-down, so 'view all N' opens exactly those N", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
       board: {
         columns: [
           {
@@ -3030,6 +3048,7 @@ describe("DealListPage", () => {
 
   it("seeds the search box from ?search so an inherited term is visible, not an invisible filter", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3053,6 +3072,7 @@ describe("DealListPage", () => {
 
   it("carries the active search into the KPI drill-down destinations", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3082,6 +3102,7 @@ describe("DealListPage", () => {
     // the `fb_` prefix. The bare param alone narrows the board and the KPI cards while the list beneath
     // stays wide with an empty search control — the board/list divergence, one layer down.
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3121,8 +3142,9 @@ describe("DealListPage", () => {
     });
   }
 
-  it("clearing the box drops BOTH URL copies, so a reload cannot restore the filter", async () => {
+  it("clearing the box drops ?search, so a reload cannot restore the filter", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3141,21 +3163,23 @@ describe("DealListPage", () => {
 
       await typeAndSettle(view, "");
 
-      const url = lastSearch(view.searches);
-      expect(url).not.toContain("search=bellemont");
-      expect(url).not.toContain("fb_search=bellemont");
-      // Only the search copies go — the rest of the view survives.
-      expect(url).toContain("filter=active_pipeline");
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBeNull();
+      // fb_search belongs to the LIST's FilterBar. The page seeds it into an outbound link and never
+      // touches it again — clearing the page box must not reach into the list's own filter.
+      expect(params.get("fb_search")).toBe("bellemont");
+      expect(params.get("filter")).toBe("active_pipeline");
     } finally {
       await view.cleanup();
     }
   });
 
-  it("editing the box rewrites the list's fb_search too, so the list cannot widen under a narrowed number", async () => {
-    // The failure this guards: deleting fb_search (or leaving the OLD term there) while the board and KPI
-    // query the NEW one — DealsListSection reads its own namespace, so the list would show every row
-    // beneath a search-narrowed count.
+  it("editing the box updates ?search and leaves the list's fb_search alone", async () => {
+    // ONE WRITER PER PARAM. An earlier cut had the page mirror fb_search too, which meant the page
+    // restored the term the list had just edited — and deleted it outright whenever the page box was
+    // empty, breaking the list's own search control on every drill-down.
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3172,14 +3196,15 @@ describe("DealListPage", () => {
 
       const params = new URLSearchParams(lastSearch(view.searches));
       expect(params.get("search")).toBe("victoria");
-      expect(params.get("fb_search")).toBe("victoria");
+      expect(params.get("fb_search")).toBe("bellemont");
     } finally {
       await view.cleanup();
     }
   });
 
-  it("mirrors a fresh search into the URL even when the page was opened without one", async () => {
+  it("mirrors a fresh search into ?search even when the page was opened without one", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3193,7 +3218,77 @@ describe("DealListPage", () => {
 
       const params = new URLSearchParams(lastSearch(view.searches));
       expect(params.get("search")).toBe("bellemont");
-      expect(params.get("fb_search")).toBe("bellemont");
+      // The page does not invent an fb_search for the list; only an outbound drill-down LINK carries it.
+      expect(params.get("fb_search")).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("builds drill-down links from the term the VISIBLE board was fetched with, not the pending one", async () => {
+    // The distinction only exists while a search request is in flight: useDealBoard keeps the previous
+    // response on screen, so the KPI cards still show the OLD cohort's numbers. A link built from the
+    // term being typed would send a user who clicked a displayed count to a different population.
+    //
+    // The two values must DIFFER here or this proves nothing — an earlier version of this test typed the
+    // same term it mocked as applied, so swapping appliedSearch for debouncedSearch in the source
+    // changed nothing and the guard could not fire.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "bellemont", // the board ON SCREEN
+      loading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "victoria"); // still in flight — not yet applied
+
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        const params = new URL(href, "https://x.test").searchParams;
+        expect(params.get("search")).toBe("bellemont");
+        expect(params.get("search")).not.toBe("victoria");
+      }
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("never overwrites an fb_search the LIST owns, at any page-box state", async () => {
+    // The regression this locks down: the mirror effect keyed on searchParams re-ran whenever the list
+    // edited its own param and wrote the page term back over it — or deleted it when the page box was
+    // empty, erasing an fb_search-only bookmark on mount.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "",
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&filter=active_pipeline&fb_search=roofing",
+      "director"
+    );
+
+    try {
+      // Page box empty, list term present: the page must leave it completely alone.
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+      expect(new URLSearchParams(lastSearch(view.searches)).get("fb_search")).toBe("roofing");
+
+      // And still alone once the page box has its own, different term.
+      await typeAndSettle(view, "bellemont");
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBe("bellemont");
+      expect(params.get("fb_search")).toBe("roofing");
     } finally {
       await view.cleanup();
     }
@@ -3201,6 +3296,7 @@ describe("DealListPage", () => {
 
   it("does not attach a stale search to a stage drill-down opened with the box cleared", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -3240,6 +3336,7 @@ describe("DealListPage", () => {
 
   it("orders SLA drilldown rows by engine effective age instead of raw stage-entered date", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -3293,6 +3390,7 @@ describe("DealListPage", () => {
 
   it("shows explicit stage and project-owner fields in the SLA drilldown list", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -3406,6 +3504,7 @@ describe("DealListPage", () => {
         ],
         terminalStages: [],
       },
+      appliedSearch: "",
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -3426,6 +3525,7 @@ describe("DealListPage", () => {
 
   it("renders refreshed at-risk rows after the uncapped board fetch completes", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -3484,6 +3584,7 @@ describe("DealListPage", () => {
 
   it("shows a selected-range empty state for empty terminal columns when a board date is active", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3507,6 +3608,7 @@ describe("DealListPage", () => {
      */
     function boardWithAtRisk(atRiskByStageSlug: Record<string, { service: number; nonService: number }>) {
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [
             {
@@ -3581,6 +3683,7 @@ describe("DealListPage", () => {
      */
     function boardWith(column: Record<string, unknown>, extra: Record<string, unknown> = {}) {
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [{ stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" }, ...column }],
           terminalStages: [],
@@ -3638,6 +3741,7 @@ describe("DealListPage", () => {
         ],
       });
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [
             {
@@ -3697,6 +3801,7 @@ describe("DealListPage", () => {
       // The stage page filters by Opportunity stage ids and does NOT exclude the pending bucket, so the
       // link must name the UNADJUSTED stage total even though this column's own cards/total exclude it.
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [
             {
@@ -3729,6 +3834,7 @@ describe("DealListPage", () => {
 
     it("puts NO number on the Pending RFP link — its target is the office-wide cross-rep queue", () => {
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [
             {
@@ -3774,6 +3880,7 @@ describe("DealListPage", () => {
      */
     function boardWithoutSummary() {
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [
             {
@@ -3814,6 +3921,7 @@ describe("DealListPage", () => {
 
     it("does NOT widen when the server DOES send a summary", async () => {
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [
             {
@@ -3843,6 +3951,7 @@ describe("DealListPage", () => {
 
     it("hides the truncation notice when the row total is UNKNOWN rather than inventing one", () => {
       mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
         board: {
           columns: [
             {

@@ -1193,6 +1193,16 @@ export function useDealBoard(
 ) {
   const { enabled = true, search } = options;
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
+  /**
+   * The search term the board currently IN STATE was fetched with — not the one being typed.
+   *
+   * A drill-down destination must describe the population the user can see. `search` changes the moment
+   * the debounce settles, but the pipeline request behind it can take seconds, and this hook deliberately
+   * keeps the previous response on screen meanwhile (no blanking). During that window the KPI cards show
+   * the OLD cohort's numbers while a destination built from the new term would open a different one — so
+   * clicking a displayed count lands somewhere it does not describe. Callers build links from this.
+   */
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Latest-wins guard (mirrors useDeals): a stale response from a superseded request must never overwrite
@@ -1247,18 +1257,27 @@ export function useDealBoard(
     // together, so the caller must NOT re-filter the returned cards: the server matches more fields than
     // any client haystack does (scope title, description, address, contact and company names), and a
     // second pass would drop rows the header count still counts.
-    if (search && search.trim().length > 0) {
-      params.set("search", search.trim());
+    const requestedSearch = search?.trim() ?? "";
+    if (requestedSearch.length > 0) {
+      params.set("search", requestedSearch);
     }
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
-        if (requestId === boardRequestIdRef.current) setBoard(normalized);
+        // Latest-wins, and the term is recorded with the response it belongs to — so a caller building
+        // drill-down links can never describe a cohort the user is not looking at yet.
+        if (requestId === boardRequestIdRef.current) {
+          setBoard(normalized);
+          setAppliedSearch(requestedSearch);
+        }
         return normalized;
       })
       .catch((err: unknown) => {
         if (requestId === boardRequestIdRef.current) {
           setBoard(null);
+          // No board, no cohort to describe — clear the term with it so a stale one cannot outlive the
+          // response it belonged to.
+          setAppliedSearch("");
           setError(err instanceof Error ? err.message : "Failed to load deal board");
         }
         throw err;
@@ -1287,7 +1306,7 @@ export function useDealBoard(
     void refetch().catch(() => undefined);
   }, [refetch]);
 
-  return { board, loading, error, refetch };
+  return { board, appliedSearch, loading, error, refetch };
 }
 
 export function useDealStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" | "watched" | "on_hold" }) {

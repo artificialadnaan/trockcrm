@@ -1423,7 +1423,7 @@ function DealListPageContent({
   // linked here passed to atRiskFilterForRouteBucket, so the board, the drill-down list, and that card's
   // number are all narrowed by one route predicate. "all" on every non-route view (incl. plain at_risk).
   const atRiskRouteBucket = atRiskRouteBucketForFilter(dashboardView.filter);
-  const { board, loading, error } = useDealBoard(
+  const { board, appliedSearch, loading, error } = useDealBoard(
     scope,
     true,
     terminalDateFilters,
@@ -1728,32 +1728,27 @@ function DealListPageContent({
    * actually narrowed the board — see hasEffectiveDealSearch on the server, which is the same rule.
    */
   /**
-   * The settled term is MIRRORED into the URL — both the bare param and the list's `fb_` copy.
+   * The settled term is mirrored into `search` — and into NOTHING ELSE.
    *
-   * The box is seeded from `?search` once (the useState above) but the term then lives in component
-   * state, so the URL needs writing back or the two drift apart in three ways, all of which shipped in
-   * an earlier cut of this PR:
-   *   - clear the box and `search=foo` survives, so a reload restores a filter the user just cleared;
-   *   - edit the box and the list's `fb_search` still holds the OLD term (or, if merely deleted, none at
-   *     all) while the board and KPI query the new one — the list widens to every row under a narrowed
-   *     number, which is the board/list divergence this page exists to avoid;
-   *   - a drill-down link built mid-edit carries a term the page is no longer showing.
+   * ONE WRITER PER PARAM. `fb_search` belongs to the list's FilterBar (useFilterState owns it); `search`
+   * belongs to this page. An earlier cut of this PR had the page write both, and three review rounds
+   * found three different failures from that single mistake — the page restoring the term the list had
+   * just edited, deleting the list's term whenever the page box was empty, and erasing an `fb_search`-only
+   * bookmark on mount. None of those were fixable by tuning this effect, because the defect was two
+   * owners of one value, not the timing of the write. The list's term now travels only in an OUTBOUND
+   * drill-down LINK (see drilldownQueryParams), which is a navigation, not a competing write.
+   *
+   * Mirroring `search` at all is what keeps the box and the URL honest: without it, clearing the box
+   * leaves `search=foo` behind and a reload silently restores a filter the user just cleared.
    *
    * Keyed on `debouncedSearch`, so this writes ONCE per settled term rather than per keystroke, and
    * `replace` so typing never grows the history stack. `search` is in BOARD_KEY_IGNORED_PARAMS, so the
    * write cannot re-key the board and duplicate the request its own state change already triggers.
-   *
-   * The list's own FilterBar control still owns `fb_search` independently — editing it narrows the list
-   * alone, exactly as it did before this PR. This mirror only guarantees the two agree whenever the
-   * PAGE-level box is what changed.
    */
   useEffect(() => {
     const term = debouncedSearch.trim();
-    const fbKey = `${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`;
     const hasTerm = term.length >= 2;
-    const inSync = hasTerm
-      ? searchParams.get("search") === term && searchParams.get(fbKey) === term
-      : !searchParams.has("search") && !searchParams.has(fbKey);
+    const inSync = hasTerm ? searchParams.get("search") === term : !searchParams.has("search");
     // Decided BEFORE the call, and the call skipped entirely when nothing needs writing. Returning the
     // same object from inside the updater is not enough: setSearchParams still performs a replace
     // navigation, and on mount that raced the saved-view hydration and the stale-param strippers — which
@@ -1762,13 +1757,8 @@ function DealListPageContent({
     setSearchParams(
       (current) => {
         const next = new URLSearchParams(current);
-        if (hasTerm) {
-          next.set("search", term);
-          next.set(fbKey, term);
-        } else {
-          next.delete("search");
-          next.delete(fbKey);
-        }
+        if (hasTerm) next.set("search", term);
+        else next.delete("search");
         return next;
       },
       { replace: true }
@@ -1776,7 +1766,11 @@ function DealListPageContent({
   }, [debouncedSearch, searchParams, setSearchParams]);
   const drilldownQueryParams = useMemo(() => {
     const params = new URLSearchParams(searchParams);
-    const term = debouncedSearch.trim();
+    // `appliedSearch` — the term the board ON SCREEN was fetched with — not the one being typed. The
+    // pipeline request takes seconds and useDealBoard keeps the previous response visible meanwhile, so
+    // a link built from the pending term would send a user who clicked a displayed count to a different
+    // population. Destinations track the data, not the input.
+    const term = appliedSearch.trim();
     if (term.length >= 2) {
       params.set("search", term);
       // AND the list's own namespace. A KPI drill-down mounts DealsListSection with the drill-down
@@ -1791,7 +1785,7 @@ function DealListPageContent({
       params.delete(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`);
     }
     return params;
-  }, [debouncedSearch, searchParams]);
+  }, [appliedSearch, searchParams]);
   // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
   // must land on that same cohort — not the full active pipeline (which would show a larger, different set
   // than the number on the card). Everywhere else it drills into the full active pipeline.

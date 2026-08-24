@@ -561,6 +561,63 @@ describe("useDealBoard — the enabled gate", () => {
     vi.unstubAllGlobals();
   });
 
+  it("reports the term the RESOLVED board was fetched with, so callers can build links from it", async () => {
+    // Callers build drill-down destinations from this. It must describe the response in state, never the
+    // request in flight — otherwise a link opens a cohort different from the numbers being displayed.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = "bellemont victoria";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(latestGatedResult?.appliedSearch).toBe("bellemont victoria");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    hookBoardSearch = undefined;
+    vi.unstubAllGlobals();
+  });
+
+  it("reports an EMPTY applied term for an unsearched board", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = undefined;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(latestGatedResult?.appliedSearch).toBe("");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("omits the search parameter entirely when the box is empty or whitespace", async () => {
     const apiMock = vi.mocked(api);
     apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
