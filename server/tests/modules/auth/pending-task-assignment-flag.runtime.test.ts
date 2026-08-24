@@ -166,14 +166,25 @@ describe("userHasPendingTaskAssignments", () => {
     expect(await userHasPendingTaskAssignments({ userId: BOB, officeId: OFFICE_ID })).toBe(true);
   });
 
-  it("is FALSE, not an exception, for an office schema that has not been provisioned yet", async () => {
+  // ASSERTED VIA THE GUARD, NOT VIA THE CATCH. Removing the to_regclass check leaves this returning
+  // false anyway — the query 42P01s and the outer try/catch answers false — so a bare `toBe(false)`
+  // here is green with the guard deleted and proves nothing. What separates them is the error path:
+  // the guard returns quietly, the catch logs. This runs on EVERY page boot for every user in an
+  // office provisioned before the table existed, so the difference is a log line per request forever.
+  it("SKIPS an unprovisioned office schema quietly, without falling through to the error path", async () => {
     await pg.query(`INSERT INTO public.offices (id, slug) VALUES ($1, 'tulsa')`, [
       "0f1ce000-0000-0000-0000-000000000002",
     ]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    expect(
-      await userHasPendingTaskAssignments({ userId: ALICE, officeId: "0f1ce000-0000-0000-0000-000000000002" })
-    ).toBe(false);
+    try {
+      expect(
+        await userHasPendingTaskAssignments({ userId: ALICE, officeId: "0f1ce000-0000-0000-0000-000000000002" })
+      ).toBe(false);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("is FALSE, not an exception, for an office id that does not exist", async () => {

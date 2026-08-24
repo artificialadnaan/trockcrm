@@ -101,10 +101,15 @@ export function TaskAssignmentModal() {
     if (!hasPending || fetchedRef.current) return;
     fetchedRef.current = true;
 
-    let cancelled = false;
+    // NO `cancelled` FLAG, and its absence is deliberate. Pairing one with a ref latch is actively
+    // WRONG under StrictMode, which is how the app runs in development: the first mount takes the
+    // latch and starts the fetch, the immediate unmount sets cancelled, the remount returns early
+    // because the latch is already taken, and the in-flight response is then thrown away by a flag
+    // belonging to a mount that no longer exists. The modal never opens at all. React 18+ does not
+    // warn about setting state after unmount, and this component lives for the whole session anyway,
+    // so there is nothing left for the flag to protect. The latch alone is the guarantee.
     void fetchPendingAssignmentTasks()
       .then((result) => {
-        if (cancelled) return;
         // An empty list with the flag set is a real state, not an error: the flag and the list are two
         // queries against a moving table, and a task completed between them lands here. Opening an
         // empty modal is worse than not opening at all.
@@ -120,10 +125,6 @@ export function TaskAssignmentModal() {
       .catch(() => {
         // Silent. A modal nobody asked for is not worth a toast when it fails to appear.
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, [hasPending]);
 
   const handleOpenChange = useCallback(
@@ -162,17 +163,15 @@ export function TaskAssignmentModal() {
         // half of the contract. aria-modal is set explicitly on top of it because assistive tech
         // support for the two mechanisms is not identical and this dialog interrupts people.
         aria-modal="true"
-        // Not the first tabbable element: nobody asked for this dialog, and landing somebody on an
-        // action button invites a reflex press. Focus goes to the dialog itself, which is what a
-        // screen reader announces along with the heading it is labelled by.
+        // Not the first tabbable element, which is Base UI's default: nobody asked for this dialog,
+        // and landing somebody on an action button invites a reflex press. Focus goes to the dialog
+        // itself, which is what a screen reader announces along with the heading it is labelled by.
         //
-        // CALLBACKS, NOT THE REFS THEMSELVES. Passing `popupRef` directly makes Base UI read
-        // `.current` at open time, which races the ref being attached to the very element it points
-        // at — sometimes null, in which case Base UI moves focus nowhere and the user is left
-        // outside an "interrupting" dialog with the page behind it aria-hidden. A callback is
-        // evaluated when focus is actually moved, by which point the ref is populated.
-        initialFocus={() => popupRef.current}
-        finalFocus={() => previouslyFocusedRef.current}
+        // finalFocus is named explicitly because the default restores focus to the TRIGGER, and this
+        // dialog has none — it opens because the server said so. previouslyFocusedRef is captured
+        // just before the dialog mounts, so whatever the person was doing gets focus back.
+        initialFocus={popupRef}
+        finalFocus={previouslyFocusedRef}
         className="sm:max-w-lg"
       >
         <DialogHeader>

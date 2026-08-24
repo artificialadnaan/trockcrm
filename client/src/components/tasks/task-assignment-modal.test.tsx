@@ -9,7 +9,7 @@
 // then the backdrop separately gives three racing POSTs and then needs a StrictMode guard to paper over
 // the races it just created. Base UI funnels every close through `onOpenChange`, so that is the single
 // place it happens — and "closed exactly once" is asserted for each path rather than assumed.
-import { act } from "react";
+import { StrictMode, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -202,7 +202,31 @@ describe("TaskAssignmentModal — when it appears", () => {
     expect(dialog()!.textContent).not.toContain("more");
   });
 
-  it("fetches once, not once per render", async () => {
+  // UNDER StrictMode, which is how the app actually runs (main.tsx wraps <App/> in it) and the only
+  // thing that can exercise the latch. A plain re-render proves nothing: `hasPending` does not change,
+  // so the effect's dependency list already stops it, and the test stays green with the latch deleted.
+  // StrictMode deliberately mounts, unmounts and remounts every effect — without the ref, that is two
+  // fetches per boot and, worse, a dialog that can re-open after the user has dismissed it.
+  it("fetches once per boot even under StrictMode's double-invoke", async () => {
+    setPending([task()]);
+    authMock.mockReturnValue({ user: { id: "u1", hasPendingTaskAssignments: true } });
+
+    await act(async () => {
+      root?.render(
+        <StrictMode>
+          <MemoryRouter>
+            <TaskAssignmentModal />
+          </MemoryRouter>
+        </StrictMode>
+      );
+    });
+    await settle();
+
+    expect(dialog()).not.toBeNull();
+    expect(apiMock.mock.calls.filter(([p]) => p === "/tasks/pending-acknowledgement")).toHaveLength(1);
+  });
+
+  it("does not refetch on a re-render", async () => {
     setPending([task()]);
     await render(true);
 
@@ -256,16 +280,25 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
     expect(acknowledgeCalls()).toHaveLength(1);
   });
 
-  // The POST is idempotent server-side via ON CONFLICT DO NOTHING, so a second one is harmless rather
-  // than wrong — but three racing POSTs per dismissal is what the single-funnel design exists to avoid,
-  // and only a count can tell whether the funnel is really single.
-  it("posts exactly one acknowledgement even if close fires more than once", async () => {
+  // TWO DISMISSALS IN ONE TICK, which is the only shape that can actually exercise the latch. Clicking
+  // Close twice in sequence proves nothing: the first click unmounts the dialog, so the second finds no
+  // button and the test is green with the latch deleted. Both close paths have to fire before React
+  // re-renders — the footer button (a plain onClick) and the header X (a Base UI DialogClose) — which
+  // is exactly what a double-click, or Escape landing on the same frame as a backdrop click, produces.
+  it("posts exactly one acknowledgement when two close paths fire in the same tick", async () => {
     setPending([task({ id: "t1" })]);
     await render(true);
 
-    const close = buttonLabelled("Close");
-    await click(close);
-    await click(close);
+    const footerClose = buttonLabelled("Close");
+    const headerClose = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-slot="dialog-close"]'))[0];
+    expect(footerClose, "footer Close").toBeDefined();
+    expect(headerClose, "header X").toBeDefined();
+
+    await act(async () => {
+      footerClose?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      headerClose?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await settle();
 
     expect(acknowledgeCalls()).toHaveLength(1);
   });
