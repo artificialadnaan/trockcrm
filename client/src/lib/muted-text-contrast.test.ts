@@ -193,6 +193,20 @@ function statedSizePx(classes: string): number | null {
  *
  * WCAG's "large text" is 24px, or 18.66px when bold. `font-semibold` is 600 and does NOT count; only
  * 700+ does.
+ *
+ * AN UNKNOWN SIZE IS SKIPPED, AND THAT IS A MEASURED HOLE, NOT A NEUTRAL DEFAULT. An element that states
+ * no size and has no sized ancestor in its own file renders at the browser default of 16px, which is
+ * normal text — so skipping it excludes real sites rather than undecidable ones. Counting `null` as 16px
+ * instead raises **34 files by +81 sites**, plus files with no baseline entry at all.
+ *
+ * Left out of THIS change deliberately, and the distinction is what makes that defensible: the hole limits
+ * how much FUTURE debt the ratchet covers, it does not let any site fixed here revert undetected. Both of
+ * those are pinned by their own mutation-proved assertions. Widening it is a baseline regeneration across
+ * a third of the tree and belongs in its own change.
+ *
+ * Written down because the lesson of this file is that an exclusion is a coverage hole with a
+ * justification attached, and the justification does not shrink the hole. See `moduleConstants` for the
+ * round where an undocumented one hid a reverted fix.
  */
 function isNormalSize(px: number | null, classes: string): boolean {
   if (px === null) return false;
