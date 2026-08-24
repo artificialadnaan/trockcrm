@@ -167,15 +167,6 @@ export function WeeklyReportHistoryPanel({
     }
   };
 
-  if (projects.length === 0) {
-    return (
-      <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
-        <CalendarClock className="h-4 w-4 text-slate-400" />
-        Add a weekly report project first — history appears here once reports start going out.
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
@@ -210,7 +201,19 @@ export function WeeklyReportHistoryPanel({
         </label>
       </div>
 
-      {loading ? (
+      {selectable.length === 0 ? (
+        // BELOW THE SELECTOR, not instead of it. This used to be an early return, so an office that had
+        // stopped ALL of its setups saw "add a project first" and no way to disagree — the one state
+        // where "include stopped setups" is the only route to anything is the state where the control
+        // was not rendered. The message now depends on which list is empty, because "you have none" and
+        // "you have none that are still running" are different things to be told.
+        <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
+          <CalendarClock className="h-4 w-4 text-slate-500" />
+          {showStopped
+            ? "No weekly report setups at all — add one and history appears here once reports start going out."
+            : "No live weekly report setups. Tick “include stopped setups” to reach reports from finished jobs."}
+        </div>
+      ) : loading ? (
         <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
           <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> Loading history…
         </div>
@@ -273,7 +276,13 @@ export function WeeklyReportHistoryPanel({
                       >
                         View
                       </button>
-                      {report.status === "approved" && (
+                      {/* NOTHING THAT GOES THROUGH THE SEND PATH, once the setup is stopped.
+                          `loadSendTarget` resolves the project with `wrp.is_active` and throws 404
+                          "Weekly report project not found", so Send, Retry and Send correction all fail
+                          for one reason — which is why the server sends one fact rather than three
+                          near-identical booleans. Delete is the deliberate exception and stays below;
+                          reaching it is the whole point of showing stopped setups here at all. */}
+                      {!report.reportingStopped && report.status === "approved" && (
                         <Button size="sm" onClick={() => onSend(report.id)}>
                           Send
                         </Button>
@@ -294,7 +303,10 @@ export function WeeklyReportHistoryPanel({
                           that row by construction; History was the one surface that offered the action.
                           The server and the worker each refuse it independently — this only stops the CRM
                           inviting it. */}
-                      {report.status === "sent" && !report.sendDeliveredAt && !report.supersededById && (
+                      {!report.reportingStopped &&
+                        report.status === "sent" &&
+                        !report.sendDeliveredAt &&
+                        !report.supersededById && (
                         <RetryButton
                           reportId={report.id}
                           sentAt={report.sentAt}
@@ -305,7 +317,8 @@ export function WeeklyReportHistoryPanel({
                       {/* Only on the LIVE, NEWEST version. A report already superseded by a correction has
                           nothing left to correct — the fix is on the version that replaced it — and an
                           older version with a newer one already drafted has the same problem. */}
-                      {report.status === "sent" &&
+                      {!report.reportingStopped &&
+                        report.status === "sent" &&
                         !report.supersededById &&
                         report.version >= (latestVersionByWeek.get(report.weekOf) ?? report.version) && (
                           <CorrectionButton

@@ -210,6 +210,17 @@ export interface WeeklyReportPermissions {
 /** A History row — the report, plus the capability envelope the list endpoint attaches to each one. */
 export interface WeeklyReportHistoryEntry extends WeeklyReportDetail {
   permissions: WeeklyReportPermissions;
+  /**
+   * The SETUP behind this report has been stopped, so everything that goes through the send path —
+   * Send, Retry send, Send correction — answers 404 "Weekly report project not found".
+   *
+   * A fact rather than a permission, which is why it is here and not in `permissions`: it is the same
+   * for every reader of the row. One field rather than one per action because there is one cause —
+   * `loadSendTarget` filters `wrp.is_active` — and the extra conditions each action carries (an
+   * `approved` status, an undelivered send, being the newest version) are product rules that stay in
+   * the panel. Delete is the deliberate exception and keeps working.
+   */
+  reportingStopped: boolean;
 }
 
 function errorMessage(error: unknown, fallback: string): string {

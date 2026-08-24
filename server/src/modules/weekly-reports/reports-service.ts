@@ -196,7 +196,8 @@ const REPORT_SELECT = `
          reviewer.display_name  AS reviewed_by_name,
          sender.display_name    AS sent_by_name,
          wrp.trock_super_user_id AS project_trock_super_user_id,
-         wrp.trock_pm_user_id    AS project_trock_pm_user_id
+         wrp.trock_pm_user_id    AS project_trock_pm_user_id,
+         wrp.is_active           AS project_is_active
     FROM weekly_reports wr
     LEFT JOIN public.users author    ON author.id    = wr.authored_by
     LEFT JOIN public.users submitter ON submitter.id = wr.submitted_by
@@ -474,14 +475,20 @@ export async function getWeeklyReportForActor(
   };
 }
 
-/** The one place the four — now five — capability answers are assembled, for every surface. */
+/** The one place the five capability answers are assembled, for every surface. */
 function permissionsFor(
   projectRow: Record<string, any>,
   reportRow: Record<string, any>,
   actor: WeeklyReportActor,
 ): WeeklyReportPermissions {
   return {
-    canEdit: canEditWeeklyReport(projectRow, reportRow, actor),
+    // AND THE SETUP HAS TO STILL EXIST. `updateWeeklyReportContent` resolves the project through
+    // `getWeeklyReportProjectRow`, which filters `is_active`, so an edit under a stopped setup answers
+    // 404 "Weekly report project not found". The permissions join in REPORT_SELECT is a LEFT JOIN with
+    // no such filter — it has to be, or a stopped setup's rows would lose their assignment data
+    // entirely — so without this clause the payload advertised `canEdit: true` on a report whose PATCH
+    // could only fail. Delete is deliberately the exception and keeps working; see deleteWeeklyReport.
+    canEdit: projectRow.is_active !== false && canEditWeeklyReport(projectRow, reportRow, actor),
     canSubmit: canTransitionAs(projectRow, reportRow, "pending_review", actor),
     canApprove: canTransitionAs(projectRow, reportRow, "approved", actor),
     canReturnToDraft: canTransitionAs(projectRow, reportRow, "draft", actor),
@@ -1459,6 +1466,22 @@ export async function buildWeeklyReportSnapshot(
  */
 export interface WeeklyReportListEntry extends WeeklyReportDetail {
   permissions: WeeklyReportPermissions;
+  /**
+   * The SETUP behind this report has been stopped — "Stop reporting" soft-deleted it.
+   *
+   * A FACT, not a permission, and that is why it sits here rather than in the envelope beside
+   * `canEdit`: every member of that envelope answers "may THIS ACTOR do X", and this one is the same
+   * for everybody who can see the row.
+   *
+   * It is ONE field rather than one per action because there is one cause, not three. Send, retry and
+   * correction all resolve the project through `loadSendTarget`, which filters `wrp.is_active` and
+   * throws 404 "Weekly report project not found" — so a UI that offers them here is offering three
+   * buttons that fail for the same reason. What each of those actions ADDITIONALLY requires (an
+   * `approved` status, an undelivered send, being the newest version) is genuine product logic that
+   * already lives and is tested in the History panel; folding it in here would move working rules
+   * server-side for no gain.
+   */
+  reportingStopped: boolean;
 }
 
 export async function listWeeklyReports(
@@ -1503,9 +1526,11 @@ export async function listWeeklyReports(
       {
         trock_super_user_id: row.project_trock_super_user_id,
         trock_pm_user_id: row.project_trock_pm_user_id,
+        is_active: row.project_is_active,
       },
       row,
       actor,
     ),
+    reportingStopped: row.project_is_active === false,
   }));
 }

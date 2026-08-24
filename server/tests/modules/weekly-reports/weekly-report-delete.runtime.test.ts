@@ -43,6 +43,7 @@ import {
   deleteWeeklyReport,
   getWeeklyReportDetail,
   listWeeklyReports,
+  updateWeeklyReportContent,
 } from "../../../src/modules/weekly-reports/reports-service.js";
 import { getWeeklyReportDashboard } from "../../../src/modules/weekly-reports/dashboard-service.js";
 
@@ -853,6 +854,66 @@ describe("what the history list says this actor may do", () => {
     expect(asPm!.permissions.canApprove).toBe(true);
     expect(asRep!.permissions.canEdit).toBe(false);
     expect(asRep!.permissions.canApprove).toBe(false);
+  });
+
+  describe("under a setup that has been stopped", () => {
+    async function stoppedProjectWithDraft() {
+      const project = await seedProject();
+      const reportId = await seedDraft(project.id);
+      await pg.query(
+        `UPDATE office_dallas.weekly_report_projects SET is_active = false WHERE id = $1::uuid`,
+        [project.id],
+      );
+      return { project, reportId };
+    }
+
+    it("really does refuse the content PATCH, which is why the flags below exist", async () => {
+      // ASSERTED, NOT ASSUMED. `updateWeeklyReportContent` loads the project through
+      // `getWeeklyReportProjectRow`, which filters `is_active` — so an edit here answers 404 "Weekly
+      // report project not found". Everything below is the payload telling the truth about THIS; if the
+      // server ever stops refusing, this test fails first and the flags become the lie instead.
+      const { reportId } = await stoppedProjectWithDraft();
+
+      await expectAppError(
+        updateWeeklyReportContent(db, reportId, { issuesConcerns: "anything" }, ADMIN_ACTOR),
+        404,
+        /project not found/i,
+      );
+    });
+
+    it("reports canEdit as false, rather than offering an edit the server will refuse", async () => {
+      // It used to say true: the permissions join in REPORT_SELECT is a LEFT JOIN with no `is_active`
+      // filter, so the predicate saw a perfectly ordinary project row and answered on the assignment
+      // alone. The row then offered Edit, and the PATCH behind it 404'd.
+      const { project, reportId } = await stoppedProjectWithDraft();
+      expect(reportId).toBeTruthy();
+
+      const [row] = await listWeeklyReports(db, { projectId: project.id }, ADMIN_ACTOR);
+      expect(row!.permissions.canEdit).toBe(false);
+      // DELETE SURVIVES, and it is the only write that does — `deleteWeeklyReport` opts out of the
+      // project's `is_active` filter on purpose, because a stopped setup is where leftover test data
+      // comes to rest.
+      expect(row!.permissions.canDelete).toBe(true);
+    });
+
+    it("says the reporting is stopped, so the send actions can be suppressed as a group", async () => {
+      // ONE FACT, ONE CAUSE. Send, retry and correction all resolve the project through
+      // `loadSendTarget`, which filters `wrp.is_active` and 404s — they do not fail for three reasons,
+      // they fail for one, and the payload names that one rather than three near-duplicate booleans.
+      const { project } = await stoppedProjectWithDraft();
+
+      const [row] = await listWeeklyReports(db, { projectId: project.id }, ADMIN_ACTOR);
+      expect(row!.reportingStopped).toBe(true);
+    });
+
+    it("says nothing of the sort while the setup is live — the control", async () => {
+      const project = await seedProject();
+      await seedDraft(project.id);
+
+      const [row] = await listWeeklyReports(db, { projectId: project.id }, ADMIN_ACTOR);
+      expect(row!.reportingStopped).toBe(false);
+      expect(row!.permissions.canEdit).toBe(true);
+    });
   });
 
   it("closes edit on a sent report for everyone, leadership included", async () => {
