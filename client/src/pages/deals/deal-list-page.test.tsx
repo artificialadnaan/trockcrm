@@ -404,6 +404,18 @@ describe("boardRelevantParamKey (the board sync ignores list-namespace params, C
     );
   });
 
+  it("yields the SAME key when only ?search changes — the board reads the term from state, not the URL", () => {
+    // The page MIRRORS the settled term into the URL so drill-downs inherit it and a reload survives.
+    // Counting it here would re-key the board on that write and fire a second /deals/pipeline request
+    // alongside the one the debounced state change already triggers — the duplicate #1074 removed.
+    expect(boardRelevantParamKey("scope=all&search=bellemont")).toBe(
+      boardRelevantParamKey("scope=all")
+    );
+    expect(boardRelevantParamKey("scope=all&search=a")).toBe(
+      boardRelevantParamKey("scope=all&search=b")
+    );
+  });
+
   it("yields a DIFFERENT key when a board param changes (the board must re-sync)", () => {
     expect(boardRelevantParamKey("scope=all&period=qtd")).not.toBe(
       boardRelevantParamKey("scope=all&period=mtd")
@@ -3095,9 +3107,21 @@ describe("DealListPage", () => {
     }
   });
 
-  it("drops the inherited ?search from the URL once the user edits the box", async () => {
-    // The URL copy is an inbound SEED, not two-way state. Left in place it resurrects a cleared filter on
-    // the next reload — the board would widen while the URL still said search=bellemont.
+  /** Type into the page-level box and let the debounce settle, on a location-tracking harness. */
+  async function typeAndSettle(view: { container: HTMLElement }, term: string) {
+    const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      valueSetter?.call(input, term);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+  }
+
+  it("clearing the box drops BOTH URL copies, so a reload cannot restore the filter", async () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: { columns: [], terminalStages: [] },
       loading: false,
@@ -3111,20 +3135,65 @@ describe("DealListPage", () => {
     );
 
     try {
-      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
-      expect(input?.value).toBe("bellemont");
+      expect(
+        view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]')?.value
+      ).toBe("bellemont");
 
-      await act(async () => {
-        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-        valueSetter?.call(input, "");
-        input!.dispatchEvent(new Event("input", { bubbles: true }));
-      });
+      await typeAndSettle(view, "");
 
       const url = lastSearch(view.searches);
       expect(url).not.toContain("search=bellemont");
       expect(url).not.toContain("fb_search=bellemont");
-      // The rest of the view survives — only the search copy is dropped.
+      // Only the search copies go — the rest of the view survives.
       expect(url).toContain("filter=active_pipeline");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("editing the box rewrites the list's fb_search too, so the list cannot widen under a narrowed number", async () => {
+    // The failure this guards: deleting fb_search (or leaving the OLD term there) while the board and KPI
+    // query the NEW one — DealsListSection reads its own namespace, so the list would show every row
+    // beneath a search-narrowed count.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&filter=active_pipeline&search=bellemont&fb_search=bellemont",
+      "director"
+    );
+
+    try {
+      await typeAndSettle(view, "victoria");
+
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBe("victoria");
+      expect(params.get("fb_search")).toBe("victoria");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("mirrors a fresh search into the URL even when the page was opened without one", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+    try {
+      await typeAndSettle(view, "bellemont");
+
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBe("bellemont");
+      expect(params.get("fb_search")).toBe("bellemont");
     } finally {
       await view.cleanup();
     }

@@ -245,6 +245,16 @@ export function formatDateInput(date: Date) {
 const LIST_PARAM_PREFIXES = ["dl_", "fb_"] as const;
 
 /**
+ * Board params the key deliberately IGNORES.
+ *
+ * `search` is written to the URL by this page (so a drill-down inherits it and a reload survives), but
+ * the board does NOT read it from there — it reads the debounced component state, which is already a
+ * dependency of the board request. Counting it here would re-key the board on the very write that its
+ * own state change is about to refetch for, i.e. the duplicate /deals/pipeline request #1074 removed.
+ */
+const BOARD_KEY_IGNORED_PARAMS = ["search"] as const;
+
+/**
  * A canonical key over only the BOARD-relevant URL params (scope/period/assignedRepId/terminal/estimate).
  * The kanban + KPI cards read these; the under-kanban lists own the dl_* (base) and fb_* (drill-down)
  * namespaces. The board sync effect keys on this so a list-only filter edit (either namespace) does NOT
@@ -255,6 +265,9 @@ export function boardRelevantParamKey(search: string): string {
   const params = new URLSearchParams(search);
   for (const key of [...params.keys()]) {
     if (LIST_PARAM_PREFIXES.some((prefix) => key.startsWith(prefix))) params.delete(key);
+    if (BOARD_KEY_IGNORED_PARAMS.includes(key as (typeof BOARD_KEY_IGNORED_PARAMS)[number])) {
+      params.delete(key);
+    }
   }
   params.sort();
   return params.toString();
@@ -1715,36 +1728,52 @@ function DealListPageContent({
    * actually narrowed the board — see hasEffectiveDealSearch on the server, which is the same rule.
    */
   /**
-   * Typing hands ownership of the term back to component state, and drops the inbound URL copy.
+   * The settled term is MIRRORED into the URL — both the bare param and the list's `fb_` copy.
    *
-   * `search` is SEEDED from the URL once, not two-way bound (see the useState above — writing it on every
-   * keystroke would churn boardRelevantParamKey and re-fire the board sync). Left alone, that one-way
-   * seed strands a stale param: arrive at `?filter=won&search=foo`, clear the box, and the board widens
-   * while `search=foo` sits in the URL — so a reload, or a back-then-forward, silently restores a filter
-   * the user explicitly cleared. Dropping the param on the first edit makes the URL copy purely inbound:
-   * it seeds the box, then gets out of the way.
+   * The box is seeded from `?search` once (the useState above) but the term then lives in component
+   * state, so the URL needs writing back or the two drift apart in three ways, all of which shipped in
+   * an earlier cut of this PR:
+   *   - clear the box and `search=foo` survives, so a reload restores a filter the user just cleared;
+   *   - edit the box and the list's `fb_search` still holds the OLD term (or, if merely deleted, none at
+   *     all) while the board and KPI query the new one — the list widens to every row under a narrowed
+   *     number, which is the board/list divergence this page exists to avoid;
+   *   - a drill-down link built mid-edit carries a term the page is no longer showing.
    *
-   * `replace`, not push, so this never adds a history entry mid-typing. `fb_search` goes with it — the
-   * list's namespaced copy is written from the same term and must not outlive it either.
+   * Keyed on `debouncedSearch`, so this writes ONCE per settled term rather than per keystroke, and
+   * `replace` so typing never grows the history stack. `search` is in BOARD_KEY_IGNORED_PARAMS, so the
+   * write cannot re-key the board and duplicate the request its own state change already triggers.
+   *
+   * The list's own FilterBar control still owns `fb_search` independently — editing it narrows the list
+   * alone, exactly as it did before this PR. This mirror only guarantees the two agree whenever the
+   * PAGE-level box is what changed.
    */
-  const handleSearchChange = useCallback(
-    (value: string) => {
-      setSearch(value);
-      setSearchParams(
-        (current) => {
-          if (!current.has("search") && !current.has(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`)) {
-            return current;
-          }
-          const next = new URLSearchParams(current);
+  useEffect(() => {
+    const term = debouncedSearch.trim();
+    const fbKey = `${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`;
+    const hasTerm = term.length >= 2;
+    const inSync = hasTerm
+      ? searchParams.get("search") === term && searchParams.get(fbKey) === term
+      : !searchParams.has("search") && !searchParams.has(fbKey);
+    // Decided BEFORE the call, and the call skipped entirely when nothing needs writing. Returning the
+    // same object from inside the updater is not enough: setSearchParams still performs a replace
+    // navigation, and on mount that raced the saved-view hydration and the stale-param strippers — which
+    // read searchParams, rewrite it, and were silently reverted by this effect's no-op replace.
+    if (inSync) return;
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (hasTerm) {
+          next.set("search", term);
+          next.set(fbKey, term);
+        } else {
           next.delete("search");
-          next.delete(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`);
-          return next;
-        },
-        { replace: true }
-      );
-    },
-    [setSearchParams]
-  );
+          next.delete(fbKey);
+        }
+        return next;
+      },
+      { replace: true }
+    );
+  }, [debouncedSearch, searchParams, setSearchParams]);
   const drilldownQueryParams = useMemo(() => {
     const params = new URLSearchParams(searchParams);
     const term = debouncedSearch.trim();
@@ -2177,7 +2206,7 @@ function DealListPageContent({
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <Input
             value={search}
-            onChange={(event) => handleSearchChange(event.target.value)}
+            onChange={(event) => setSearch(event.target.value)}
             placeholder="Search deals"
             className="pl-9"
           />
