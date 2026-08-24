@@ -420,12 +420,16 @@ describe("TaskAssignmentModal — it says what is actually true", () => {
     expect(groups[1]!.textContent).toContain("Old urgent thing");
   });
 
-  it("renders no empty group heading when everything is new", async () => {
+  // A "New" label above the only list on screen labels nothing — the dialog title has already said it.
+  // Group headings earn their space only when there is a second group to tell them apart from.
+  it("renders no group heading at all when everything is new", async () => {
     setPending([task({ id: "n1" })]);
 
     await render(true);
 
-    expect(document.querySelectorAll("[data-assignment-group]")).toHaveLength(1);
+    const groups = Array.from(document.querySelectorAll<HTMLElement>("[data-assignment-group]"));
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.querySelector("h3")).toBeNull();
     expect(dialog()!.textContent).not.toContain("Still outstanding");
   });
 
