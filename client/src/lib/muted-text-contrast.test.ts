@@ -215,13 +215,13 @@ function isNormalSize(px: number | null, classes: string): boolean {
  */
 function classNameAttributes(
   file: string,
-): { classes: string; line: number; conditional: boolean; sizePx: number | null; weightClasses: string }[] {
+): { classes: string; line: number; initializer: ts.Node; sizePx: number | null; weightClasses: string }[] {
   const text = fs.readFileSync(file, "utf8");
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const out: {
     classes: string;
     line: number;
-    conditional: boolean;
+    initializer: ts.Node;
     sizePx: number | null;
     weightClasses: string;
   }[] = [];
@@ -290,12 +290,6 @@ function classNameAttributes(
       gather(node.initializer);
       if (parts.length > 0) {
         const { line } = source.getLineAndCharacterOfPosition(node.getStart());
-        let conditional = false;
-        const seek = (n: ts.Node): void => {
-          if (ts.isConditionalExpression(n) || ts.isBinaryExpression(n)) conditional = true;
-          n.forEachChild(seek);
-        };
-        seek(node.initializer!);
         const classes = parts.join(" ");
         const own = statedSizePx(classes);
         const inherited = own === null ? effectiveSize(node) : null;
@@ -305,7 +299,7 @@ function classNameAttributes(
         out.push({
           classes,
           line: line + 1,
-          conditional,
+          initializer: node.initializer!,
           sizePx: own ?? inherited?.px ?? null,
           weightClasses: inherited?.weightClasses || classes,
         });
@@ -315,6 +309,90 @@ function classNameAttributes(
   };
   visit(source);
   return out;
+}
+
+/**
+ * A ceiling on the branch combinations one attribute can expand to. Exceeding it THROWS rather than
+ * truncating: a silently-shortened variant list is a pair that stops being checked, which is the same
+ * class of hole this whole enumerator exists to close. The audited files top out at 4.
+ */
+const MAX_VARIANTS = 64;
+
+/**
+ * The distinct class strings ONE element can actually render, enumerated branch by branch.
+ *
+ * WHY NOT JUST SKIP CONDITIONALS, which is what this did until Codex pointed at the consequence: the
+ * badge whose contrast this PR fixed is written as
+ *
+ *   className={`… text-[9px] ${snapshot ? "bg-slate-100 text-slate-600" : "bg-indigo-50 text-indigo-600"}`}
+ *
+ * so reverting it to the 4.34:1 `text-slate-500` left the guard green — the attribute was conditional, the
+ * pair check discarded it whole, and the ratchet only ever watches `text-slate-400`. The guard could not
+ * fire on the very element it was written for. Verified by making that edit and watching 5/5 pass.
+ *
+ * Enumerating instead of skipping ALSO removes the false positive the skip was introduced for. A branch is
+ * evaluated against itself, so `${dark ? "bg-white/20 text-white" : …}` no longer reports white-on-white at
+ * 1.0:1 — the two tokens never appear in the same variant, and `bg-white/20` is opacity-modified and
+ * dropped on its own merits. Union for a ternary (one branch OR the other), product for concatenation and
+ * for `cn(...)` arguments (all of them apply at once), and `""` for anything unresolvable — an identifier
+ * such as `accent.grad` contributes no literal, exactly as the flattened read did.
+ */
+function classVariants(node: ts.Node): string[] {
+  const cap = (values: string[]): string[] => {
+    if (values.length > MAX_VARIANTS) {
+      throw new Error(`className expands to ${values.length} branch combinations, over the ${MAX_VARIANTS} cap`);
+    }
+    return values;
+  };
+  const union = (left: string[], right: string[]): string[] => cap([...left, ...right]);
+  const product = (left: string[], right: string[]): string[] =>
+    cap(left.flatMap((a) => right.map((b) => `${a} ${b}`)));
+
+  if (ts.isJsxExpression(node)) return node.expression ? classVariants(node.expression) : [""];
+  if (ts.isParenthesizedExpression(node)) return classVariants(node.expression);
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+  if (ts.isTemplateExpression(node)) {
+    let acc = [node.head.text];
+    for (const span of node.templateSpans) {
+      acc = product(product(acc, classVariants(span.expression)), [span.literal.text]);
+    }
+    return acc;
+  }
+  if (ts.isConditionalExpression(node)) {
+    return union(classVariants(node.whenTrue), classVariants(node.whenFalse));
+  }
+  if (ts.isBinaryExpression(node)) {
+    const op = node.operatorToken.kind;
+    // `cond && "…"` renders the classes or nothing at all — both are real states.
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) return union([""], classVariants(node.right));
+    if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) {
+      return union(classVariants(node.left), classVariants(node.right));
+    }
+    if (op === ts.SyntaxKind.PlusToken) return product(classVariants(node.left), classVariants(node.right));
+    return [""];
+  }
+  // `cn(a, b, c)` / `clsx([...])` — every argument lands on the same element, so they multiply.
+  if (ts.isCallExpression(node)) {
+    let acc = [""];
+    for (const argument of node.arguments) acc = product(acc, classVariants(argument));
+    return acc;
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    let acc = [""];
+    for (const element of node.elements) acc = product(acc, classVariants(element));
+    return acc;
+  }
+  // clsx's object form: `{ "text-slate-400": muted }` — each key applies independently or not at all.
+  if (ts.isObjectLiteralExpression(node)) {
+    let acc = [""];
+    for (const property of node.properties) {
+      if (!ts.isPropertyAssignment(property)) continue;
+      const name = property.name;
+      if (ts.isStringLiteral(name) || ts.isIdentifier(name)) acc = product(acc, ["", name.text]);
+    }
+    return acc;
+  }
+  return [""];
 }
 
 function relativeLuminance([r, g, b]: [number, number, number]): number {
@@ -332,16 +410,17 @@ function contrast(fg: [number, number, number], bg: [number, number, number]): n
 }
 
 /**
- * Foreground/background pairs stated together in one class string, with their measured contrast.
+ * Foreground/background pairs stated together on one RENDERED element, with their measured contrast.
  *
- * TWO EXCLUSIONS, both learned from false positives this scanner produced on its first run:
- *   * class strings containing a TERNARY are skipped. `${dark ? "bg-white/20 text-white" : "…"}` yielded a
- *     "text-white on bg-white at 1.0:1" report seven times over — the tokens are real but they belong to
- *     opposite branches, and nothing static can attribute them.
- *   * tokens carrying an OPACITY modifier (`bg-white/70`) are skipped. The rendered colour depends on
- *     whatever is behind it, so the pair is not decidable here.
+ * Per BRANCH, via `classVariants` — a conditional attribute is expanded into the states it can render and
+ * each is judged on its own. It used to be skipped whole, which left the guard unable to fire on the badge
+ * it was written for; see `classVariants` for the mutation that proved it.
  *
- * What survives is a pair genuinely applied to one element, which is the only kind worth asserting on.
+ * ONE EXCLUSION REMAINS: tokens carrying an OPACITY modifier (`bg-white/70`) are skipped, because the
+ * rendered colour depends on whatever is behind them and the pair is not decidable here.
+ *
+ * What survives is a pair genuinely applied to one element in one state, which is the only kind worth
+ * asserting on.
  *
  * WHAT IT CANNOT SEE: gradients. `bg-gradient-to-br ${accent.grad} to-white` has no single background
  * colour, so a caption over the coloured end of one is outside this check entirely — which is exactly how
@@ -352,24 +431,24 @@ function contrast(fg: [number, number, number], bg: [number, number, number]): n
 function statedPairs(file: string): { bg: string; fg: string; ratio: number; line: number }[] {
   const out: { bg: string; fg: string; ratio: number; line: number }[] = [];
   for (const attribute of classNameAttributes(file)) {
-    // A CONDITIONAL ATTRIBUTE IS NOT A STATED PAIR. Unioning branches is right for "could this render low
-    // contrast" (the ratchet's question) and wrong for "these two are applied together" (this one's) —
-    // `${dark ? "bg-white/20 text-white" : …}` reported white-on-white at 1.0:1 seven times when this
-    // scanner conflated the two questions.
-    if (attribute.conditional) continue;
-    if (!isNormalSize(attribute.sizePx, attribute.weightClasses)) continue;
-    const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(attribute.classes);
-    const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(attribute.classes);
-    if (!bg || !fg) continue;
-    const bgColor = PALETTE[bg[1]!];
-    const fgColor = PALETTE[fg[1]!];
-    if (!bgColor || !fgColor) continue;
-    out.push({
-      bg: bg[1]!,
-      fg: fg[1]!,
-      ratio: Math.round(contrast(fgColor, bgColor) * 100) / 100,
-      line: attribute.line,
-    });
+    for (const variant of classVariants(attribute.initializer)) {
+      // The size can be stated in a branch of its own, so resolve it per variant and fall back to the
+      // attribute's own-or-inherited size when this branch states none.
+      const sizePx = statedSizePx(variant) ?? attribute.sizePx;
+      if (!isNormalSize(sizePx, attribute.weightClasses)) continue;
+      const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(variant);
+      const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(variant);
+      if (!bg || !fg) continue;
+      const bgColor = PALETTE[bg[1]!];
+      const fgColor = PALETTE[fg[1]!];
+      if (!bgColor || !fgColor) continue;
+      out.push({
+        bg: bg[1]!,
+        fg: fg[1]!,
+        ratio: Math.round(contrast(fgColor, bgColor) * 100) / 100,
+        line: attribute.line,
+      });
+    }
   }
   return out;
 }
@@ -464,10 +543,27 @@ describe("muted text does not get quieter", () => {
   });
 
   it("still finds pairs to judge in those files — an empty scan would assert nothing", () => {
-    // The scanner skips ternaries and opacity-modified tokens, both for good reason. Skip too much and
-    // the assertion above passes over a file it never actually read.
+    // The scanner still skips opacity-modified tokens, for good reason. Skip too much and the assertion
+    // above passes over a file it never actually read.
+    //
+    // RAISED 3 → 4 when conditional attributes stopped being discarded. The fourth is ScopeBadge, whose
+    // contrast this PR fixed and which the guard had never once looked at.
     expect(
       statedPairs(path.join(CLIENT_SRC, "pages/reports/region-report-page.tsx")).length,
-    ).toBeGreaterThanOrEqual(3);
+    ).toBeGreaterThanOrEqual(4);
+  });
+
+  it("judges each branch of a conditional separately, rather than against the other branch", () => {
+    // The false positive that motivated the old blanket skip, kept as a test so the enumerator cannot
+    // regress into it: two branches of one ternary must never be paired with each other. `bg-white/20` is
+    // opacity-modified and unresolvable; `text-white` belongs to the same branch, and the `bg-slate-800`
+    // of the other branch is the only real background here.
+    const fixture = path.join(CLIENT_SRC, "lib/__fixtures__/conditional-classnames.tsx");
+    const pairs = statedPairs(fixture);
+
+    expect(pairs.map((pair) => `text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`)).toEqual([
+      "text-white on bg-slate-800 → 14.63:1",
+      "text-slate-500 on bg-slate-100 → 4.34:1",
+    ]);
   });
 });
