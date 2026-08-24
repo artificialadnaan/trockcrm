@@ -72,6 +72,9 @@ describe("bidDueReportWeekOf", () => {
 // ---------------------------------------------------------------------------------------------------
 
 const SCHEMA = "office_dfw";
+// Wed 2026-08-26 17:00 CDT, and the Thursday catch-up tick that stands in for it when it is missed.
+const WEDNESDAY_1700_CDT = new Date(Date.UTC(2026, 7, 26, 22, 0));
+const THURSDAY_1700_CDT = new Date(Date.UTC(2026, 7, 27, 22, 0));
 const OFFICE_ID = "11111111-1111-1111-1111-111111111111";
 const ESTIMATING_STAGE_ID = "22222222-2222-2222-2222-222222222222";
 
@@ -89,6 +92,9 @@ interface StubOptions {
   receipts?: Record<string, unknown>[];
   toRecipients?: { email: string }[];
   ccRecipients?: { email: string }[];
+  offices?: { id: string; slug: string; name: string }[];
+  /** Tenant schemas whose row query blows up, for the one-broken-office-must-not-cost-the-rest case. */
+  failSchemas?: string[];
 }
 
 /**
@@ -107,7 +113,13 @@ function stubQuery(options: StubOptions = {}) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     calls.push({ sql, params });
     if (sql.includes("FROM public.offices")) {
-      return { rows: [{ id: OFFICE_ID, slug: "dfw", name: "DFW" }], rowCount: 1 };
+      const rows = options.offices ?? [{ id: OFFICE_ID, slug: "dfw", name: "DFW" }];
+      return { rows, rowCount: rows.length };
+    }
+    for (const schema of options.failSchemas ?? []) {
+      if (sql.includes(`${schema}.deals`)) {
+        throw new Error(`relation "${schema}.deals" does not exist`);
+      }
     }
     if (sql.includes("INSERT INTO public.bid_due_date_report_receipts")) {
       return { rows: [], rowCount: 1 };
@@ -136,7 +148,7 @@ function stubQuery(options: StubOptions = {}) {
   return { query, calls };
 }
 
-function deps(options: StubOptions & { sendEmail?: ReturnType<typeof vi.fn> } = {}) {
+function deps(options: StubOptions & { sendEmail?: ReturnType<typeof vi.fn>; now?: Date } = {}) {
   const { query, calls } = stubQuery(options);
   const sendEmail = options.sendEmail ?? vi.fn(async () => delivered());
   const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -153,7 +165,7 @@ function deps(options: StubOptions & { sendEmail?: ReturnType<typeof vi.fn> } = 
       logger,
       acquireLock: vi.fn(async () => release),
       env: { NODE_ENV: "test", FRONTEND_URL: "https://trockcrm.com" } as NodeJS.ProcessEnv,
-      now: new Date(Date.UTC(2026, 7, 26, 22, 0)), // Wed 2026-08-26 17:00 CDT
+      now: options.now ?? WEDNESDAY_1700_CDT,
     },
   };
 }
@@ -320,13 +332,122 @@ describe("runBidDueDateReport exactly-once", () => {
 });
 
 // ---------------------------------------------------------------------------------------------------
+// The catch-up tick must be INDISTINGUISHABLE from the run it replaces
+// ---------------------------------------------------------------------------------------------------
+
+describe("Wednesday run vs Thursday catch-up", () => {
+  // A row whose SECTION depends on the anchor: 2026-09-02 is weekOf+7 (NEXT 30 DAYS from Wednesday) but
+  // Thursday+6 (THIS WEEK if the body is computed from the run date). And ROW, at 2026-09-04, changes its
+  // relative-days text by one day. Between them, any anchor slip shows up in both html and text.
+  const NEXT_WEEK_ROW = {
+    id: "d2",
+    name: "Next Wednesday Bid",
+    deal_number: "DFW-1-99",
+    project_number: "24-199",
+    bid_due_on: "2026-09-02",
+    value: "500000",
+    rep_name: "Sidney Gibson",
+  };
+
+  async function emailFrom(now: Date) {
+    const h = deps({ rows: [ROW, NEXT_WEEK_ROW], now });
+    await runBidDueDateReport(h.deps);
+    const [, subject, html, options] = h.sendEmail.mock.calls[0];
+    return { subject, html, text: options.text, idempotencyKey: options.idempotencyKey, calls: h.calls };
+  }
+
+  it("produces a BYTE-IDENTICAL email — the catch-up is the missed run, delivered late", async () => {
+    // The receipt and the subject anchor on Wednesday. If any part of the BODY anchors on the run date
+    // instead, the same deal files under NEXT 30 DAYS on Wednesday and THIS WEEK on Thursday, and two
+    // emails claiming the same week disagree about it. One anchor per email, or none of it is true.
+    const wednesday = await emailFrom(WEDNESDAY_1700_CDT);
+    const thursday = await emailFrom(THURSDAY_1700_CDT);
+    expect(thursday.subject).toBe(wednesday.subject);
+    expect(thursday.text).toBe(wednesday.text);
+    expect(thursday.html).toBe(wednesday.html);
+    expect(thursday.idempotencyKey).toBe(wednesday.idempotencyKey);
+  });
+
+  it("queries the SAME window on both ticks — the anchor reaches the SQL, not just the rendering", async () => {
+    const wednesday = await emailFrom(WEDNESDAY_1700_CDT);
+    const thursday = await emailFrom(THURSDAY_1700_CDT);
+    const windowParams = (calls: { sql: string; params?: unknown[] }[]) =>
+      calls.find((call) => call.sql.includes("AS bid_due_on"))?.params;
+    expect(windowParams(wednesday.calls)?.[0]).toBe("2026-08-26");
+    expect(windowParams(thursday.calls)?.[0]).toBe("2026-08-26");
+  });
+
+  it("files the weekOf+7 deal under NEXT 30 DAYS on BOTH ticks, never THIS WEEK", async () => {
+    for (const now of [WEDNESDAY_1700_CDT, THURSDAY_1700_CDT]) {
+      const email = await emailFrom(now);
+      const thisWeek = email.text.split("THIS WEEK")[1] ?? "";
+      expect(thisWeek).not.toContain("Next Wednesday Bid");
+      expect(email.text).toContain("NEXT 30 DAYS");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// One broken office must not cost every other office its week
+// ---------------------------------------------------------------------------------------------------
+
+describe("runBidDueDateReport per-office isolation", () => {
+  const THREE_OFFICES = [
+    { id: "office-a", slug: "aaa", name: "A" },
+    { id: "office-b", slug: "bbb", name: "B" },
+    { id: "office-c", slug: "ccc", name: "C" },
+  ];
+
+  it("keeps going when one office throws, and still sends to the others", async () => {
+    // The offices are read in slug order, so a broken FIRST office is the worst case: without a per-office
+    // guard it aborts the loop and every office behind it misses the week. And because the Thursday
+    // catch-up walks the same list in the same order, it fails at the same place — the catch-up cannot
+    // rescue anyone standing behind a persistently broken office.
+    const h = deps({ rows: [ROW], offices: THREE_OFFICES, failSchemas: ["office_aaa"] });
+    await expect(runBidDueDateReport(h.deps)).rejects.toThrow();
+    expect(h.sendEmail).toHaveBeenCalledTimes(2);
+    expect(h.logger.error).toHaveBeenCalled();
+  });
+
+  it("reports a NON-ZERO failure signal rather than logging like a clean run", async () => {
+    // A partial run that resolves successfully is how this stays broken: the cron's catch block never
+    // fires, nothing is alerted, and the summary in the logs reads the same as a week that fully worked.
+    const h = deps({ rows: [ROW], offices: THREE_OFFICES, failSchemas: ["office_bbb"] });
+    await expect(runBidDueDateReport(h.deps)).rejects.toThrow(/1 of 3/);
+  });
+
+  it("RELEASES the advisory lock on the partial path", async () => {
+    // Already established for the empty-recipients throw: a stranded session lock makes every later tick —
+    // the Thursday catch-up and next week's run — a silent no-op, turning a transient tenant error into a
+    // permanently dead job.
+    const h = deps({ rows: [ROW], offices: THREE_OFFICES, failSchemas: ["office_bbb"] });
+    await expect(runBidDueDateReport(h.deps)).rejects.toThrow();
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts the offices that succeeded and the ones that did not", async () => {
+    const h = deps({ rows: [ROW], offices: THREE_OFFICES });
+    const summary = await runBidDueDateReport(h.deps);
+    expect(summary).toMatchObject({ offices: 3, sent: 3, failed: 0 });
+  });
+
+  it("does not let a broken office write a receipt for the week it failed", async () => {
+    const h = deps({ rows: [ROW], offices: THREE_OFFICES, failSchemas: ["office_aaa"] });
+    await expect(runBidDueDateReport(h.deps)).rejects.toThrow();
+    const receipted = h.calls
+      .filter((call) => call.sql.includes("INSERT INTO public.bid_due_date_report_receipts"))
+      .map((call) => call.params?.[0]);
+    expect(receipted).toEqual(["office_bbb", "office_ccc"]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
 // The rendered email
 // ---------------------------------------------------------------------------------------------------
 
 describe("buildBidDueDateReportEmail", () => {
   const base = {
     weekOf: "2026-08-26",
-    todayCt: "2026-08-26",
     sections: [
       {
         key: "overdue" as const,
@@ -364,10 +485,73 @@ describe("buildBidDueDateReportEmail", () => {
     overdueLookbackDays: 90,
   };
 
-  it("names the week in the subject and counts the population in the preheader", () => {
+  it("names the week in the subject", () => {
+    expect(buildBidDueDateReportEmail(base).subject).toBe("Bid due dates — week of Aug 26");
+  });
+
+  // The preheader is the one line a phone shows before the body, so a false summary there is the most
+  // expensive sentence in the email.
+  it("does NOT describe an overdue bid as due in the next 30 days", () => {
+    const overdueOnly = { ...base, sections: [base.sections[0]] };
+    const email = buildBidDueDateReportEmail(overdueOnly);
+    expect(email.html).not.toMatch(/1 project in estimating with bid dates in the next 30 days/);
+    expect(email.html).toMatch(/1 overdue/);
+  });
+
+  it("counts overdue and upcoming SEPARATELY when the report has both", () => {
     const email = buildBidDueDateReportEmail(base);
-    expect(email.subject).toBe("Bid due dates — week of Aug 26");
-    expect(email.html).toContain("2 projects");
+    expect(email.html).toMatch(/1 overdue/);
+    expect(email.html).toMatch(/1 due in the next 30 days/);
+  });
+
+  it("says there is nothing upcoming when everything in the report is overdue", () => {
+    const email = buildBidDueDateReportEmail({ ...base, sections: [base.sections[0]] });
+    expect(email.html).toMatch(/nothing due in the next 30 days/);
+  });
+
+  it("keeps the plain 'next 30 days' sentence when nothing is overdue", () => {
+    const email = buildBidDueDateReportEmail({ ...base, sections: [base.sections[1]] });
+    expect(email.html).toMatch(/1 project in estimating with bid dates in the next 30 days/);
+    expect(email.html).not.toMatch(/overdue/);
+  });
+
+  // The reconciliation rule: the preheader, the section headings and the footer are three statements about
+  // one population and must not be able to disagree. The footer's NULL count already derives from the
+  // report's own predicates; these numbers derive from the sections themselves.
+  it("PREHEADER NUMBERS RECONCILE WITH THE SECTION COUNTS, for every shape", () => {
+    const shapes = [
+      base.sections,
+      [base.sections[0]],
+      [base.sections[1]],
+      [
+        { ...base.sections[0], rows: [...base.sections[0].rows, ...base.sections[0].rows] },
+        base.sections[1],
+      ],
+    ];
+    for (const sections of shapes) {
+      const email = buildBidDueDateReportEmail({ ...base, sections });
+      const overdue = sections.find((section) => section.key === "overdue")?.rows.length ?? 0;
+      const upcoming = sections
+        .filter((section) => section.key !== "overdue")
+        .reduce((sum, section) => sum + section.rows.length, 0);
+      // Every number the preheader states must be one the sections can account for: the overdue count,
+      // the upcoming count, or their sum. A number outside that set is a claim the body cannot support.
+      const accountedFor = [overdue, upcoming, overdue + upcoming];
+      const stated = (email.html.match(/(\d+) (?:overdue|due in the next|projects? in estimating)/g) ?? [])
+        .map((match) => Number(match.split(" ")[0]));
+      expect(stated.length).toBeGreaterThan(0);
+      for (const value of stated) expect(accountedFor).toContain(value);
+      // ...and when both windows have rows, the preheader must state BOTH rather than one total that
+      // silently folds overdue bids into a "next 30 days" sentence.
+      if (overdue > 0 && upcoming > 0) {
+        expect(stated).toContain(overdue);
+        expect(stated).toContain(upcoming);
+      }
+      // ...and each section still prints its own count in its heading.
+      for (const section of sections) {
+        expect(email.html).toContain(`${section.label} (${section.rows.length})`);
+      }
+    }
   });
 
   it("renders one row per deal with date, relative days, name, number, value and rep", () => {

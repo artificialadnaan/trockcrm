@@ -123,9 +123,13 @@ export interface BidDueDateReportDeps {
 }
 
 export interface BidDueDateReportSummary {
+  /** Offices considered — every active office row, including any that then failed. */
   offices: number;
   sent: number;
+  /** Already had a receipt for this week — the Thursday catch-up's normal outcome. */
   skipped: number;
+  /** Offices that threw. Non-zero makes the whole run fail; see the end of runBidDueDateReport. */
+  failed: number;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -235,7 +239,15 @@ export async function findBidDueDateReportRows(
   query: PgQuery,
   input: {
     tenantSchema: string;
-    todayCt: string;
+    /**
+     * THE ONE ANCHOR — the Wednesday this report is FOR, never the day the process happens to be running.
+     *
+     * On the Thursday catch-up these differ by a day, and every boundary derived from the run date would
+     * then shift: the window would slide, and a deal due the following Wednesday would file under NEXT 30
+     * DAYS on the normal run and THIS WEEK on the catch-up, with both emails headed the same week. The
+     * catch-up has to be indistinguishable from the run it replaces, in content as well as identity.
+     */
+    weekOf: string;
     horizonDays?: number;
     overdueLookbackDays?: number;
   }
@@ -268,7 +280,7 @@ export async function findBidDueDateReportRows(
         AND ${BID_DUE_ON_SQL} >= $1::date - $2::int
         AND ${BID_DUE_ON_SQL} <= $1::date + $3::int
       ORDER BY ${BID_DUE_ON_SQL} ASC, d.name ASC`,
-    [input.todayCt, lookback, horizon]
+    [input.weekOf, lookback, horizon]
   );
 
   return result.rows.map((row) => ({
@@ -332,16 +344,16 @@ const SECTION_LABELS: Record<BidDueDateReportSectionKey, string> = {
  */
 export function sectionBidDueDateReportRows(
   rows: readonly BidDueDateReportRow[],
-  todayCt: string
+  weekOf: string
 ): BidDueDateReportSection[] {
-  const endOfWeek = addDays(todayCt, 6);
+  const endOfWeek = addDays(weekOf, 6);
   const buckets: Record<BidDueDateReportSectionKey, BidDueDateReportRow[]> = {
     overdue: [],
     this_week: [],
     next_30: [],
   };
   for (const row of rows) {
-    if (row.bidDueOn < todayCt) buckets.overdue.push(row);
+    if (row.bidDueOn < weekOf) buckets.overdue.push(row);
     else if (row.bidDueOn <= endOfWeek) buckets.this_week.push(row);
     else buckets.next_30.push(row);
   }
@@ -401,8 +413,8 @@ function formatShortDate(isoDate: string): string {
   return `${MONTHS[Number(month) - 1]} ${Number(day)}`;
 }
 
-function formatRelativeDays(bidDueOn: string, todayCt: string): string {
-  const delta = daysBetween(todayCt, bidDueOn);
+function formatRelativeDays(bidDueOn: string, weekOf: string): string {
+  const delta = daysBetween(weekOf, bidDueOn);
   if (delta === 0) return "today";
   if (delta === 1) return "tomorrow";
   if (delta === -1) return "yesterday";
@@ -422,10 +434,10 @@ function formatRepName(repName: string | null): string {
   return `${parts[0]![0]}. ${parts.slice(1).join(" ")}`;
 }
 
-function rowCells(row: BidDueDateReportRow, todayCt: string): string[] {
+function rowCells(row: BidDueDateReportRow, weekOf: string): string[] {
   return [
     formatShortDate(row.bidDueOn),
-    formatRelativeDays(row.bidDueOn, todayCt),
+    formatRelativeDays(row.bidDueOn, weekOf),
     row.name,
     row.projectNumber ?? row.dealNumber ?? "—",
     formatMoney(row.value),
@@ -438,10 +450,10 @@ function rowCells(row: BidDueDateReportRow, todayCt: string): string[] {
  * table and is the wrong primitive for a ranked list. Same typography, same rule colour, so the two still
  * read as one product.
  */
-function renderSectionHtml(section: BidDueDateReportSection, todayCt: string): string {
+function renderSectionHtml(section: BidDueDateReportSection, weekOf: string): string {
   const rows = section.rows
     .map((row) => {
-      const cells = rowCells(row, todayCt);
+      const cells = rowCells(row, weekOf);
       const [date, relative, name, number, value, rep] = cells;
       return `
                 <tr>
@@ -461,8 +473,13 @@ function renderSectionHtml(section: BidDueDateReportSection, todayCt: string): s
 }
 
 export interface BidDueDateReportEmailInput {
+  /**
+   * The Wednesday this report is for, and the ONLY date it is rendered against. There used to be a second
+   * `todayCt` field beside this one, which is exactly how the catch-up tick came to render a body computed
+   * from Thursday under a subject and a receipt keyed to Wednesday. Two anchors in one email is not a bug
+   * you fix once; it is a shape that keeps producing the bug, so the shape is gone.
+   */
   weekOf: string;
-  todayCt: string;
   sections: readonly BidDueDateReportSection[];
   missingBidDateCount: number;
   ctaUrl: string;
@@ -471,15 +488,39 @@ export interface BidDueDateReportEmailInput {
 
 export function buildBidDueDateReportEmail(input: BidDueDateReportEmailInput) {
   const lookback = input.overdueLookbackDays ?? BID_DUE_REPORT_OVERDUE_LOOKBACK_DAYS;
-  const total = input.sections.reduce((sum, section) => sum + section.rows.length, 0);
   const subject = `Bid due dates — week of ${formatShortDate(input.weekOf)}`;
+
+  // THE PREHEADER IS DERIVED FROM THE SECTIONS, never counted separately.
+  //
+  // It used to state one total against a "next 30 days" sentence, and that total INCLUDED the overdue
+  // section — so a report whose only row was a bid due yesterday read "1 project in estimating with bid
+  // dates in the next 30 days". False, in the one line a phone shows before the body opens.
+  //
+  // The report spans two windows (90 days of overdue lookback, 30 days upcoming) and the honest summary
+  // names both. Taking the numbers from `sections` rather than re-counting is what makes the preheader,
+  // the section headings and the footer three views of one population instead of three chances to
+  // disagree — the same rule the footer's NULL count already follows.
+  const overdueCount = input.sections
+    .filter((section) => section.key === "overdue")
+    .reduce((sum, section) => sum + section.rows.length, 0);
+  const upcomingCount = input.sections
+    .filter((section) => section.key !== "overdue")
+    .reduce((sum, section) => sum + section.rows.length, 0);
+  const upcomingPhrase = `in the next ${BID_DUE_REPORT_HORIZON_DAYS} days`;
+  const projects = (count: number) => `${count} ${count === 1 ? "project" : "projects"}`;
 
   // AN EMPTY REPORT STILL SENDS, and says it is empty. A silent week is indistinguishable from a broken
   // job, and this one runs 52 times a year in front of one person who would have no other way to tell.
-  const preheader =
-    total === 0
-      ? `No estimating deals have a bid due date in the next ${BID_DUE_REPORT_HORIZON_DAYS} days.`
-      : `${total} ${total === 1 ? "project" : "projects"} in estimating with bid dates in the next ${BID_DUE_REPORT_HORIZON_DAYS} days.`;
+  let preheader: string;
+  if (overdueCount === 0 && upcomingCount === 0) {
+    preheader = `No estimating deals have a bid due date ${upcomingPhrase} or overdue in the last ${lookback}.`;
+  } else if (overdueCount === 0) {
+    preheader = `${projects(upcomingCount)} in estimating with bid dates ${upcomingPhrase}.`;
+  } else if (upcomingCount === 0) {
+    preheader = `${overdueCount} overdue ${overdueCount === 1 ? "bid" : "bids"} in estimating, and nothing due ${upcomingPhrase}.`;
+  } else {
+    preheader = `${projects(overdueCount + upcomingCount)} in estimating: ${overdueCount} overdue, ${upcomingCount} due ${upcomingPhrase}.`;
+  }
 
   const footerLines: string[] = [`Overdue covers the last ${lookback} days.`];
   if (input.missingBidDateCount > 0) {
@@ -489,7 +530,7 @@ export function buildBidDueDateReportEmail(input: BidDueDateReportEmailInput) {
   }
 
   const bodyHtml =
-    input.sections.map((section) => renderSectionHtml(section, input.todayCt)).join("") +
+    input.sections.map((section) => renderSectionHtml(section, input.weekOf)).join("") +
     footerLines
       .map(
         (line) => `
@@ -509,7 +550,7 @@ export function buildBidDueDateReportEmail(input: BidDueDateReportEmailInput) {
   for (const section of input.sections) {
     textLines.push(`${section.label} (${section.rows.length})`);
     for (const row of section.rows) {
-      textLines.push(`  ${rowCells(row, input.todayCt).join("  ·  ")}`);
+      textLines.push(`  ${rowCells(row, input.weekOf).join("  ·  ")}`);
     }
     textLines.push("");
   }
@@ -546,7 +587,7 @@ export async function runBidDueDateReport(
   const now = deps.now ?? new Date();
   const todayCt = ctDateOf(now);
   const weekOf = bidDueReportWeekOf(todayCt);
-  const summary: BidDueDateReportSummary = { offices: 0, sent: 0, skipped: 0 };
+  const summary: BidDueDateReportSummary = { offices: 0, sent: 0, skipped: 0, failed: 0 };
 
   const acquireLock = deps.acquireLock ?? (() => acquirePgAdvisoryLock(BID_DUE_REPORT_LOCK_KEY));
   const releaseLock = await acquireLock();
@@ -587,32 +628,56 @@ export async function runBidDueDateReport(
       `SELECT id, slug, name FROM public.offices WHERE is_active = true ORDER BY slug`
     );
     for (const office of offices.rows) {
+      // Counted BEFORE the slug guard and before the try, so `offices` means "considered" rather than
+      // "reached the send" — otherwise the failure message below has to reconstruct the denominator from
+      // two counters that do not add up.
+      summary.offices += 1;
       const slug = String(office.slug ?? "");
       const tenantSchema = `office_${slug}`;
       if (!isSafeTenantSchema(tenantSchema)) {
         logger.error(`${LOG} Invalid office slug "${office.slug}" - skipping`);
+        summary.failed += 1;
         continue;
       }
-      summary.offices += 1;
-      await sendOfficeReport({
-        query,
-        sendEmail: deps.sendEmail ?? sendSystemEmailWithMetadata,
-        logger,
-        summary,
-        tenantSchema,
-        officeId: (office.id as string | null) ?? null,
-        recipients,
-        ccRecipients,
-        todayCt,
-        weekOf,
-        frontendUrl: resolveFrontendUrl(env),
-      });
+      try {
+        await sendOfficeReport({
+          query,
+          sendEmail: deps.sendEmail ?? sendSystemEmailWithMetadata,
+          logger,
+          summary,
+          tenantSchema,
+          officeId: (office.id as string | null) ?? null,
+          recipients,
+          ccRecipients,
+          weekOf,
+          frontendUrl: resolveFrontendUrl(env),
+        });
+      } catch (err) {
+        // ONE BROKEN OFFICE MUST NOT COST THE OTHERS THEIR WEEK. Unguarded, any tenant-query or provider
+        // error thrown here aborts the loop, so every office BEHIND this one in slug order misses the
+        // report entirely — and the Thursday catch-up walks the same list in the same order, so a
+        // persistently broken first office fails at exactly the same point and rescues nobody. The office
+        // that failed wrote no receipt (the write is the last thing sendOfficeReport does, and only on a
+        // delivered outcome), so the catch-up genuinely retries it.
+        logger.error(`${LOG} Office report failed`, { tenantSchema, weekOf, err });
+        summary.failed += 1;
+      }
     }
   } finally {
+    // Released on EVERY path out of the try, including the throw below. A stranded session advisory lock
+    // makes every later tick a silent no-op — the catch-up and next week alike — which is how a transient
+    // tenant error becomes a permanently dead job.
     await releaseLock().catch(() => undefined);
   }
 
   logger.log(`${LOG} Run complete`, summary);
+  if (summary.failed > 0) {
+    // A NON-ZERO FAILURE SIGNAL, not a quiet partial success. Every office got its attempt — that is what
+    // the per-office catch above bought — but a run that resolves normally after dropping an office logs
+    // identically to a week that fully worked, and the cron's catch block never fires. Throwing here is
+    // the only thing that distinguishes them.
+    throw new Error(`${LOG} ${summary.failed} of ${summary.offices} offices failed`);
+  }
   return summary;
 }
 
@@ -625,7 +690,6 @@ async function sendOfficeReport(input: {
   officeId: string | null;
   recipients: string[];
   ccRecipients: string[];
-  todayCt: string;
   weekOf: string;
   frontendUrl: string;
 }): Promise<void> {
@@ -649,13 +713,12 @@ async function sendOfficeReport(input: {
     return;
   }
 
-  const rows = await findBidDueDateReportRows(query, { tenantSchema, todayCt: input.todayCt });
+  const rows = await findBidDueDateReportRows(query, { tenantSchema, weekOf });
   const missingBidDateCount = await countEstimatingDealsMissingBidDueDate(query, { tenantSchema });
-  const sections = sectionBidDueDateReportRows(rows, input.todayCt);
+  const sections = sectionBidDueDateReportRows(rows, weekOf);
 
   const email = buildBidDueDateReportEmail({
     weekOf,
-    todayCt: input.todayCt,
     sections,
     missingBidDateCount,
     ctaUrl: await resolveEstimatingCtaUrl(query, input.frontendUrl, input.officeId),

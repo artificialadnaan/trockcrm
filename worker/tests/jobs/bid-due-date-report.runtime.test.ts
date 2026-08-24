@@ -38,8 +38,11 @@ const ESTIMATING_TERMINAL = U("a5"); // an 'estimating' row flipped is_terminal 
 const REP_HELMS = U("b1");
 const REP_GIBSON = U("b2");
 
-// A fixed CT anchor, so every seeded date is stated relative to something a reader can check by hand.
+// The Wednesday every seeded date is stated relative to — and the ONE anchor the report renders against,
+// on the normal tick and on the Thursday catch-up alike.
 const TODAY = "2026-08-26";
+// What the run date would be on the catch-up tick. Nothing in the report may be computed from it.
+const THURSDAY = "2026-08-27";
 
 let pg: PGlite;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -152,7 +155,7 @@ afterAll(async () => {
 const names = (rows: { name: string }[]) => rows.map((row) => row.name);
 
 async function reportRows() {
-  return findBidDueDateReportRows(query, { tenantSchema: SCHEMA, todayCt: TODAY });
+  return findBidDueDateReportRows(query, { tenantSchema: SCHEMA, weekOf: TODAY });
 }
 
 describe("findBidDueDateReportRows — population", () => {
@@ -283,6 +286,32 @@ describe("sectionBidDueDateReportRows", () => {
     expect(names(sections[1].rows)).toContain("Week Edge");
     expect(names(sections[1].rows)).not.toContain("Just After Week");
     expect(names(sections[2].rows)).toContain("Just After Week");
+  });
+
+  it("is GENUINELY anchor-sensitive — which is what makes the catch-up identity test mean something", async () => {
+    // If sectioning did not move with its anchor, "Wednesday and Thursday agree" would be vacuously true
+    // and would keep passing with the anchor wired to the run date. It moves: shifted a day forward,
+    // 'Just After Week' (weekOf+7, i.e. Thursday+6) crosses into THIS WEEK and the deal due ON weekOf
+    // becomes overdue. That is precisely the divergence the catch-up must not be able to produce.
+    const rows = await reportRows();
+    const onWednesday = sectionBidDueDateReportRows(rows, TODAY);
+    const onThursday = sectionBidDueDateReportRows(rows, THURSDAY);
+    expect(names(onThursday[1].rows)).toContain("Just After Week");
+    expect(names(onWednesday[1].rows)).not.toContain("Just After Week");
+    expect(names(onThursday[0].rows)).toContain("Due Today");
+    expect(names(onWednesday[0].rows)).not.toContain("Due Today");
+  });
+
+  it("the window itself is anchor-sensitive, so the SQL bound must take weekOf too", async () => {
+    // Same argument one layer down: 'Just Past Horizon' is weekOf+31, outside the 30-day window on the
+    // normal tick and inside it if the query anchors on Thursday. A catch-up that returned an extra row
+    // would produce a different email from the run it replaces before any sectioning happened.
+    const shifted = await findBidDueDateReportRows(query, {
+      tenantSchema: SCHEMA,
+      weekOf: THURSDAY,
+    });
+    expect(names(shifted)).toContain("Just Past Horizon");
+    expect(names(await reportRows())).not.toContain("Just Past Horizon");
   });
 
   it("drops a section that has no rows rather than printing an empty heading", async () => {
