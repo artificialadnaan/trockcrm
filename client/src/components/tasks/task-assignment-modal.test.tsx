@@ -26,7 +26,7 @@ vi.mock("react-router-dom", async () => {
 const authMock = vi.fn();
 vi.mock("@/lib/auth", () => ({ useAuth: () => authMock() }));
 
-import { TaskAssignmentModal } from "./task-assignment-modal";
+import { TaskAssignmentModal, MAX_FETCH_ATTEMPTS as MAX_ATTEMPTS } from "./task-assignment-modal";
 
 type PendingTask = {
   id: string;
@@ -454,7 +454,7 @@ describe("TaskAssignmentModal — it says what is actually true", () => {
  * one a synchronous mock can never produce.
  */
 function deferredFetches() {
-  const waiting = new Map<string, (value: unknown) => void>();
+  const waiting = new Map<string, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>();
   const issued: string[] = [];
 
   apiMock.mockImplementation((path: string, options?: { headers?: Record<string, string> }) => {
@@ -462,17 +462,24 @@ function deferredFetches() {
     if (path !== "/tasks/pending-acknowledgement") throw new Error(`unexpected api call: ${path}`);
     const office = options?.headers?.["x-office-id"] ?? "(none)";
     issued.push(office);
-    return new Promise((resolve) => waiting.set(office, resolve));
+    return new Promise((resolve, reject) => waiting.set(office, { resolve, reject }));
   });
 
   return {
     /** How many times a fetch has been ISSUED for this office — not how many are outstanding. */
     issuedFor: (office: string) => issued.filter((entry) => entry === office).length,
     async resolveFor(office: string, tasks: PendingTask[]) {
-      const resolve = waiting.get(office);
-      if (!resolve) throw new Error(`no outstanding fetch for ${office}`);
+      const settleFns = waiting.get(office);
+      if (!settleFns) throw new Error(`no outstanding fetch for ${office}`);
       waiting.delete(office);
-      resolve({ tasks, total: tasks.length, newTotal: tasks.filter((t) => t.isNew).length });
+      settleFns.resolve({ tasks, total: tasks.length, newTotal: tasks.filter((t) => t.isNew).length });
+      await settle();
+    },
+    async rejectFor(office: string) {
+      const settleFns = waiting.get(office);
+      if (!settleFns) throw new Error(`no outstanding fetch for ${office}`);
+      waiting.delete(office);
+      settleFns.reject(new Error("network is down"));
       await settle();
     },
   };
@@ -547,6 +554,74 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
     await fetches.resolveFor("office-a", [task({ id: "a2", title: "Fresh Dallas work" })]);
     expect(dialog()!.textContent).toContain("Fresh Dallas work");
     expect(dialog()!.textContent).not.toContain("Dallas roof walk");
+  });
+});
+
+describe("TaskAssignmentModal — a failed fetch is not an answer", () => {
+  // ROUND THREE OF THE SAME DEFECT, and the reason the lifecycle is a state machine now rather than a
+  // pile of refs. "Not started", "in flight", "failed" and "succeeded" are four outcomes; a boolean
+  // latch can hold two. Every round added another ref to express the case the last one could not, and
+  // the refs then disagreed with each other — which is exactly how the StrictMode defect happened, a
+  // cancelled flag and a latch cancelling out. The state machine knows whether it has an ANSWER, so
+  // "failed" is simply not "loaded" and the effect's own condition allows the retry. No latch.
+
+  it("retries once on its own after a failure — a failed request is not an answer", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    expect(fetches.issuedFor("office-a")).toBe(1);
+
+    await fetches.rejectFor("office-a");
+
+    // No trigger from the user, no office change: the failure itself leaves the machine without an
+    // answer, so it asks again. Under a latch this stays at 1 forever.
+    expect(fetches.issuedFor("office-a")).toBe(2);
+  });
+
+  it("stops after the retry instead of hammering a server that is already unhappy", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    await fetches.rejectFor("office-a");
+    await fetches.rejectFor("office-a");
+
+    expect(fetches.issuedFor("office-a")).toBe(MAX_ATTEMPTS);
+  });
+
+  it("still lets an office change ask again after both attempts failed", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    await fetches.rejectFor("office-a");
+    await fetches.rejectFor("office-a");
+
+    await changeOfficeTo("office-b");
+    await changeOfficeTo("office-a");
+
+    // A fresh office resets the attempt count — the failure was about a moment, not about the office.
+    expect(fetches.issuedFor("office-a")).toBe(MAX_ATTEMPTS + 1);
+  });
+
+  // An empty modal and a broken request must never look the same. Rendering "nothing assigned to you"
+  // off the back of a failure is a reassuring lie, and the person it reassures is the one who was
+  // supposed to be told about the work.
+  it("renders nothing at all on failure, never an empty assignment list", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+
+    await fetches.rejectFor("office-a");
+    await fetches.rejectFor("office-a");
+
+    expect(dialog(), "a failed check must not present itself as an answer").toBeNull();
+    expect(document.body.textContent).not.toMatch(/no (new )?tasks/i);
+    expect(document.body.textContent).not.toContain("Still on your plate");
+  });
+
+  it("recovers completely — the automatic retry shows the assignments", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+
+    await fetches.rejectFor("office-a");
+    await fetches.resolveFor("office-a", [task({ id: "a1", title: "Dallas roof walk" })]);
+
+    expect(dialog()!.textContent).toContain("Dallas roof walk");
   });
 });
 

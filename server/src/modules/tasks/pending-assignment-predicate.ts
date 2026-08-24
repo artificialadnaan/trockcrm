@@ -83,6 +83,11 @@ function assertSchemaName(schema: string | undefined) {
  * column the modal groups by, and the ORDER BY that keeps unseen work ahead of repeats. If the flag the
  * UI labels a row with could ever disagree with the predicate that selected it, the modal would file a
  * row under "New" that it was only returning as a reminder.
+ *
+ * AN ACK ANSWERS ONE ASSIGNMENT, NOT A TASK FOREVER. The row is keyed (task, user) and so cannot say
+ * WHICH assignment it answered; `acknowledged_at >= assigned_at` supplies the missing half. Without it,
+ * a task taken away from somebody and later handed back is still covered by the acknowledgement they
+ * gave the first time, and they are never told about the second handoff.
  */
 export function buildUnseenAssignmentSql({
   userId,
@@ -99,7 +104,9 @@ export function buildUnseenAssignmentSql({
   );
   return sql`NOT EXISTS (
     SELECT 1 FROM ${ackTable} a
-     WHERE a.task_id = ${tasks.id} AND a.user_id = ${userId}
+     WHERE a.task_id = ${tasks.id}
+       AND a.user_id = ${userId}
+       AND a.acknowledged_at >= ${tasks.assignedAt}
   )`;
 }
 
@@ -123,20 +130,21 @@ export function buildPendingAssignmentPredicate({
    *   source         C4. created_by is NULL on every rules-engine and AI-disconnect task, and those are
    *                  the bulk of the volume — without this the modal is mostly machine output under a
    *                  blank "assigned by", and "who assigned it" is why the feature exists.
-   *   created_by     somebody ELSE put this on your list. The New Task form defaults assignedTo to the
-   *                  creator, so without this a person who types their own task is greeted at their
-   *                  next login by a dialog informing them of it — the clearest possible way to teach
-   *                  someone the modal is not worth reading.
+   *   created_by     somebody ELSE put this on your list — OR you wrote it and it came back to you.
+   *                  The New Task form defaults assignedTo to the creator, so without the first test a
+   *                  person who types their own task is greeted at their next login by a dialog
+   *                  informing them of it. But the first test alone then suppresses the opposite case:
+   *                  Alice writes a task, gives it to Bob, Bob gives it back, and created_by once
+   *                  again equals assigned_to even though she has just been handed something. The
+   *                  `assigned_at > created_at` arm separates them — a task that never changed hands
+   *                  still carries the assigned_at it was created with.
    *
-   *                  A NULL created_by is excluded by this same clause, with no separate IS NOT NULL
-   *                  test: `NULL <> anything` is NULL, not true, so the row simply does not match.
-   *                  That is the outcome we want — a task with no recorded creator has nobody to
-   *                  attribute it to, which is the one thing the modal exists to say — and it is
-   *                  covered by its own test. An explicit IS NOT NULL was written here first and
-   *                  removed once mutation testing showed it could not change any outcome; the
-   *                  sibling branch's `assignerId !== null && !== userId` needs its null test because
-   *                  in JavaScript `null !== userId` is TRUE, which is the opposite default. Same
-   *                  intent, and the shape does not transfer between the two languages.
+   *                  IS NOT NULL is load-bearing here and is tested. Without it a row with no recorded
+   *                  creator is rescued by the second arm whenever it has ever been reassigned, and it
+   *                  has nobody to attribute the task to — which is the one thing the modal exists to
+   *                  say. (It was briefly removed when the clause was a bare `<>`, where three-valued
+   *                  logic already excluded NULL and mutation testing proved it dead. Adding the OR
+   *                  brought it back to life.)
    *   is_test_data   mirrors excludeTestTasks() on the list projections. A demo task greeting somebody
    *                  at login is the worst possible place for one. COALESCE because the auth demo seed
    *                  used to omit the column from its INSERT entirely.
@@ -154,7 +162,11 @@ export function buildPendingAssignmentPredicate({
   return sql`
     ${tasks.assignedTo} = ${userId}
     AND ${tasks.source} = 'manual'
-    AND ${tasks.createdBy} <> ${tasks.assignedTo}
+    AND ${tasks.createdBy} IS NOT NULL
+    AND (
+      ${tasks.createdBy} <> ${tasks.assignedTo}
+      OR ${tasks.assignedAt} > ${tasks.createdAt}
+    )
     AND COALESCE(${tasks.isTestData}, false) = false
     AND (
       (

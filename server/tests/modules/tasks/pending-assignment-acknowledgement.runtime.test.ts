@@ -80,6 +80,23 @@ async function seed(rows: SeedTask[]) {
   }
 }
 
+/** Move a task to a new assignee the way the PATCH flow does — stamping when it changed hands. */
+async function reassign(taskId: string, toUserId: string) {
+  // TIME PASSES BEFORE A HANDOFF. In production hours separate an acknowledgement from the
+  // reassignment that supersedes it; PGlite performs both in the same millisecond, which would make
+  // `acknowledged_at >= assigned_at` ambiguous in exactly the comparison these tests are about. Ageing
+  // the existing acknowledgements rather than post-dating the assignment keeps assigned_at on the real
+  // clock, so a genuine re-acknowledgement afterwards is still able to be later than it.
+  await pg.exec(
+    `UPDATE public.task_assignment_acknowledgements
+        SET acknowledged_at = acknowledged_at - interval '1 hour'`
+  );
+  await pg.query(`UPDATE public.tasks SET assigned_to = $2, assigned_at = now() WHERE id = $1`, [
+    taskId,
+    toUserId,
+  ]);
+}
+
 async function ackRowCount(taskId: string, userId: string) {
   const result = await pg.query<{ n: number }>(
     `SELECT COUNT(*)::int AS n FROM task_assignment_acknowledgements WHERE task_id = $1 AND user_id = $2`,
@@ -241,6 +258,88 @@ describe("getPendingAssignmentTasks — what the login modal shows", () => {
     const result = await getPendingAssignmentTasks(tdb, ALICE);
 
     expect(result.tasks).toEqual([]);
+  });
+});
+
+describe("an acknowledgement answers ONE assignment, not a task forever", () => {
+  // Acknowledgement is keyed (task, user), which cannot express WHICH assignment was acknowledged. Two
+  // review findings are the same gap seen from opposite ends:
+  //
+  //   handed BACK to a prior assignee — their old ack row still stands, so they are never told about a
+  //   handoff that happened after it.
+  //
+  //   handed back to the CREATOR — created_by now equals assigned_to, so the self-created filter reads
+  //   "I made this for myself" when the truth is "somebody returned the thing I wrote".
+  //
+  // Both are answered by the same fact: an assignment has a MOMENT. `tasks.assigned_at` records when
+  // the task last changed hands, an ack is only good for the assignment it was made against
+  // (acknowledged_at >= assigned_at), and a task that has never changed hands still has
+  // assigned_at = created_at, which is what tells self-creation apart from a return.
+
+  it("tells a prior assignee again when the task is handed BACK to them", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+
+    // Away to Bob, then back to Alice — a new handoff, later than her acknowledgement.
+    await reassign(uid("1"), BOB);
+    await reassign(uid("1"), ALICE);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+    expect(result.tasks.map((t) => t.id)).toEqual([uid("1")]);
+    expect(result.tasks[0]?.isNew, "a re-handoff is a NEW assignment, not a repeat").toBe(true);
+  });
+
+  it("tells the CREATOR when their own task is handed back to them", async () => {
+    // Alice writes it and gives it to Bob. created_by = ALICE throughout.
+    await seed([{ id: uid("1"), assignedTo: BOB, createdBy: ALICE, priority: "normal" }]);
+    await reassign(uid("1"), ALICE);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    // created_by = assigned_to = ALICE here, exactly like a self-written task. What separates them is
+    // that this one changed hands after it was created.
+    expect(result.tasks.map((t) => t.id)).toEqual([uid("1")]);
+    expect(result.tasks[0]?.isNew).toBe(true);
+  });
+
+  it("still says nothing about a task somebody genuinely wrote for themselves", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: ALICE, priority: "urgent" }]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  it("does not re-tell somebody about an assignment they already acknowledged", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+
+    // No reassignment: the ack still answers the assignment it was made against.
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  it("re-acknowledging after a hand-back settles it again", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+    await reassign(uid("1"), BOB);
+    await reassign(uid("1"), ALICE);
+
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+
+    // The row is unique on (task, user), so the second acknowledgement UPDATES the timestamp rather
+    // than inserting a second row — otherwise ON CONFLICT DO NOTHING would leave the stale ack in
+    // place and the modal would repeat forever.
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+    expect(await ackRowCount(uid("1"), ALICE)).toBe(1);
+  });
+
+  it("does not resurrect an assignment for somebody it was taken AWAY from", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+    await reassign(uid("1"), BOB);
+
+    // Alice no longer holds it, so it is not hers to be told about; Bob has never seen it.
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+    expect((await getPendingAssignmentTasks(tdb, BOB)).tasks.map((t) => t.id)).toEqual([uid("1")]);
   });
 });
 

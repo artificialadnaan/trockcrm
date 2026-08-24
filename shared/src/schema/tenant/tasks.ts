@@ -87,8 +87,19 @@ export const tasks = pgTable(
      *     lastAssignedBy   WHO last handed it over.
      * Written at the same sites as `assignedAt` so the pair cannot disagree about whether an
      * assignment happened.
-     */
+    */
     lastAssignedBy: uuid("last_assigned_by"),
+
+    /**
+     * When this task last CHANGED HANDS — set at creation and re-stamped whenever `assigned_to` moves.
+     *
+     * It exists because acknowledgement is keyed (task, user) and therefore cannot say WHICH assignment
+     * was acknowledged. Without a moment to compare against, a task handed back to a prior assignee is
+     * silently covered by the acknowledgement they gave the first time, and a task handed back to its
+     * own author is indistinguishable from one they wrote for themselves. An ack counts only when it is
+     * at least as recent as the assignment it is supposed to answer. Migration 0239.
+     */
+    assignedAt: timestamp("assigned_at", { withTimezone: true }).defaultNow().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

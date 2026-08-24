@@ -91,17 +91,59 @@ function AssignmentGroup({
   );
 }
 
-/** What the modal is currently holding, and the tenant it was read from. The two travel together. */
-type PendingBatch = {
-  /**
-   * The office the ids below belong to. Task ids are only meaningful inside one tenant schema, so this
-   * is carried on the batch rather than re-read at acknowledge time — see handleOpenChange.
-   */
-  officeId: string;
+/**
+ * THE WHOLE LIFECYCLE, IN ONE PIECE OF STATE.
+ *
+ * Three review rounds each fixed one symptom of the same mistake and exposed the next: the modal never
+ * refetched when the office changed, then a late response from an abandoned office overwrote the
+ * current one, then a failed request left the office latched so nothing ever retried. That is not three
+ * bugs. It is one boolean being asked to hold four outcomes — NOT STARTED, IN FLIGHT, FAILED and
+ * SUCCEEDED — and every round added another ref to express the case the previous one could not, until
+ * the refs disagreed with each other. That is precisely how the StrictMode defect earlier in this
+ * branch happened: a `cancelled` flag and a latch that cancelled out exactly.
+ *
+ * So the four outcomes are named. Every property the reviews asked for then falls out of the shape
+ * instead of needing its own guard:
+ *
+ *   an office change      → `office` no longer matches, so the effect asks again
+ *   a superseded response → fails the request-id check and writes nothing at all
+ *   a failed request      → `error` is not `loaded`, so it is not an answer and a retry is allowed
+ *   an error must not     → only `loaded` renders. A failure cannot reach the empty-state path,
+ *   look like "none"        because it never becomes a state that renders.
+ *
+ * There is no latch. The machine already knows whether it has an answer.
+ */
+type FetchStatus = "idle" | "loading" | "loaded" | "error";
+
+type FetchState = {
+  /** The tenant this state describes. null only in `idle`. */
+  office: string | null;
+  status: FetchStatus;
+  /** Attempts made for THIS office. Bounds the retry so a persistent failure cannot become a loop. */
+  attempts: number;
   tasks: PendingAssignmentTask[];
   total: number;
   newTotal: number;
 };
+
+const IDLE_FETCH_STATE: FetchState = {
+  office: null,
+  status: "idle",
+  attempts: 0,
+  tasks: [],
+  total: 0,
+  newTotal: 0,
+};
+
+/**
+ * One automatic retry, then stop.
+ *
+ * A failed request must not end the feature for the session — a single blip at login would otherwise
+ * cost somebody the entire modal. But "error is not loaded, so try again" with no bound is a hot loop
+ * against a server that is already unhappy, and the effect re-runs on every state write. Two attempts
+ * is the smallest number that recovers from a transient failure without becoming one.
+ */
+export const MAX_FETCH_ATTEMPTS = 2;
 
 /**
  * The new-assignment popup: what landed on you while you were away.
@@ -118,7 +160,7 @@ type PendingBatch = {
  * ACKNOWLEDGEMENT HAPPENS IN EXACTLY ONE PLACE — `onOpenChange(false)`. Base UI funnels the close
  * button, the footer buttons, Escape and the backdrop through it, so wiring each of those separately
  * would produce several racing POSTs and then need a guard to undo the races. The one guard that does
- * exist here is a latch against re-posting for the same batch; the server's ON CONFLICT DO NOTHING is
+ * exist here is a latch against re-posting the same result; the server's ON CONFLICT DO NOTHING is
  * the actual idempotency guarantee.
  */
 export function TaskAssignmentModal() {
@@ -126,24 +168,22 @@ export function TaskAssignmentModal() {
   const navigate = useNavigate();
   const officeScopeId = useOfficeScopeId();
   const scopedHref = useOfficeScopedHref();
-  const [batch, setBatch] = useState<PendingBatch | null>(null);
+  const [fetchState, setFetchState] = useState<FetchState>(IDLE_FETCH_STATE);
   const [open, setOpen] = useState(false);
 
-  // KEYED BY OFFICE, not a boolean. Office scope is URL-driven (?officeId -> x-office-id -> search
-  // path) and an authorized cross-office user changes it by navigating, with no remount and no
-  // refreshUser — so a one-shot latch means the modal is fetched for the boot tenant and never again.
-  // Holding the office it fetched for makes "have we asked yet" a question about a tenant instead of
-  // about the component, which is what it always was.
-  //
-  // Still a REF, and still compared before it is written, because that is what survives the StrictMode
-  // mount/unmount/mount cycle: the first mount claims the office, the remount sees it already claimed
-  // and does not fetch again.
-  const fetchedOfficeRef = useRef<string | null>(null);
-  // WHICH REQUEST IS THIS THE ANSWER TO? A separate question from the latch's "have I started?", and
-  // the reason it needs its own variable: one counter cannot answer both, and trying to make it do so
-  // is how the two mechanisms end up cancelling each other out. Incremented at issue, compared at
-  // resolution; anything that loses the race is dropped on the floor.
-  const requestGenerationRef = useRef(0);
+  /**
+   * THE ONLY LIFECYCLE REF, and it holds a request IDENTITY rather than a lifecycle state.
+   *
+   * `id` is monotonic and answers "which request is this the answer to?" — a response whose id is no
+   * longer current lost a race and is dropped without touching anything.
+   *
+   * `key` is the (office, attempt) pair the last request was issued for, and it exists for exactly one
+   * reason: StrictMode runs the effect twice before the first run's state write commits, so the second
+   * run reads a stale `fetchState` and would issue a duplicate request. Deduping on the attempt the
+   * request was issued FOR is not a record of "done" — a genuine retry bumps `attempts` and a genuine
+   * office change changes the office, so both produce a new key and both proceed.
+   */
+  const requestRef = useRef<{ id: number; key: string | null }>({ id: 0, key: null });
   const acknowledgedRef = useRef(false);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
@@ -166,62 +206,72 @@ export function TaskAssignmentModal() {
     requestOfficeId !== null &&
     (requestOfficeId === flagOfficeId ? Boolean(user?.hasPendingTaskAssignments) : true);
 
-  useEffect(() => {
-    if (!shouldFetch || requestOfficeId === null) return;
-    if (fetchedOfficeRef.current === requestOfficeId) return;
-    fetchedOfficeRef.current = requestOfficeId;
-    const fetchedForOfficeId = requestOfficeId;
-    const generation = ++requestGenerationRef.current;
+  // Ask again when the answer we hold is not an answer for the office we are looking at: a different
+  // office, nothing fetched yet, or a failure that has not used up its retry. `loading` and `loaded`
+  // both mean "leave it alone" — one has a request in flight, the other has an answer.
+  const needsFetch =
+    shouldFetch &&
+    requestOfficeId !== null &&
+    (fetchState.office !== requestOfficeId ||
+      fetchState.status === "idle" ||
+      (fetchState.status === "error" && fetchState.attempts < MAX_FETCH_ATTEMPTS));
 
-    // NO `cancelled` FLAG, and its absence is deliberate. Pairing one with a claim-before-fetch ref is
-    // actively WRONG under StrictMode, which is how the app runs in development: the first mount
-    // claims the office and starts the fetch, the immediate unmount sets cancelled, the remount
-    // returns early because the office is already claimed, and the in-flight response is then thrown
-    // away by a flag belonging to a mount that no longer exists. The modal never opens at all. React
-    // 18+ does not warn about setting state after unmount, and this component lives for the whole
-    // session anyway, so there is nothing left for the flag to protect.
+  useEffect(() => {
+    if (!needsFetch || requestOfficeId === null) return;
+
+    const office = requestOfficeId;
+    const attempt = (fetchState.office === office ? fetchState.attempts : 0) + 1;
+    const key = `${office}#${attempt}`;
+    if (requestRef.current.key === key) return;
+
+    const id = requestRef.current.id + 1;
+    requestRef.current = { id, key };
+    setFetchState({ office, status: "loading", attempts: attempt, tasks: [], total: 0, newTotal: 0 });
+    // Anything currently on screen belonged to the previous answer. Closed directly rather than through
+    // handleOpenChange, because an office change is not a dismissal and must not acknowledge anything.
+    setOpen(false);
+
+    // BOTH settle paths check the id before writing, and neither writes anything when it loses.
     //
-    // The office change case does not need one either: the response is tagged with the office it was
-    // REQUESTED for, and a batch whose office no longer matches the URL is never rendered and never
-    // acknowledged. A late response for an abandoned office is inert rather than raced.
-    void fetchPendingAssignmentTasks(fetchedForOfficeId)
+    // No `cancelled` cleanup flag: pairing one with a request identity is the mistake that made the
+    // modal never open under StrictMode earlier in this branch, because the flag belonged to a mount
+    // that no longer existed while the identity belonged to the request that was still in flight. The
+    // id is the single authority on whether a response is wanted.
+    fetchPendingAssignmentTasks(office)
       .then((result) => {
-        // SUPERSEDED — a later request has been issued since this one left. Discard it and touch
-        // NOTHING: not the batch, and specifically not the latch.
-        //
-        // Not the batch, because the office-mismatch render guard would hide it and the user would be
-        // left staring at no modal at all while their real assignments sat in a variable nobody reads.
-        //
-        // Not the latch, because the latch belongs to the request that is still in flight. "Tidying
-        // up" by writing the abandoned office back into it is the tempting version of this line and it
-        // is the one that leaves that office permanently unfetchable for the rest of the session.
-        if (generation !== requestGenerationRef.current) return;
-        // An empty list with the flag set is a real state, not an error: the flag and the list are two
-        // queries against a moving table, and a task completed between them lands here. Opening an
-        // empty modal is worse than not opening at all.
-        if (result.tasks.length === 0) return;
-        // Captured BEFORE the dialog mounts so focus can be handed back to it on close. Base UI's
-        // default would restore to the trigger, and this dialog has none — nobody opened it.
+        if (id !== requestRef.current.id) return;
+        // Captured BEFORE the dialog mounts so focus can be handed back on close. Base UI's default
+        // restores to the trigger, and this dialog has none — nobody opened it.
         previouslyFocusedRef.current =
           document.activeElement instanceof HTMLElement ? document.activeElement : null;
         acknowledgedRef.current = false;
-        setBatch({
-          officeId: fetchedForOfficeId,
+        setFetchState({
+          office,
+          status: "loaded",
+          attempts: attempt,
           tasks: result.tasks,
           total: result.total,
           newTotal: result.newTotal,
         });
-        setOpen(true);
+        // An empty list with the flag set is a real state, not an error: the flag and the list are two
+        // queries against a moving table, and a task completed between them lands here. Assigned from
+        // the result rather than only set to true, so an office whose answer is "nothing" closes a
+        // modal the previous office had opened instead of rendering itself empty.
+        setOpen(result.tasks.length > 0);
       })
       .catch(() => {
-        // Silent. A modal nobody asked for is not worth a toast when it fails to appear.
+        if (id !== requestRef.current.id) return;
+        // Recorded as a FAILURE, never as an empty result. Those must not be the same state: only
+        // `loaded` renders, so an error can never reach the modal and reassure somebody that they have
+        // nothing waiting when the truth is that nobody managed to ask.
+        setFetchState({ office, status: "error", attempts: attempt, tasks: [], total: 0, newTotal: 0 });
       });
-  }, [shouldFetch, requestOfficeId]);
+  }, [needsFetch, requestOfficeId, fetchState]);
 
   const handleOpenChange = useCallback(
     (nextOpen: boolean) => {
       setOpen(nextOpen);
-      if (nextOpen || acknowledgedRef.current || batch === null) return;
+      if (nextOpen || acknowledgedRef.current || fetchState.status !== "loaded") return;
       acknowledgedRef.current = true;
 
       // Closing is not "ask me again". The decision was once-per-task, with repeats reserved for
@@ -229,13 +279,13 @@ export function TaskAssignmentModal() {
       // dismissal path that quietly skipped this would produce a modal that reappears for no visible
       // reason. Not awaited: the dialog closes on the click, not on the round trip.
       //
-      // Posted against `batch.officeId` — the office the ids were READ from — never the office in the
+      // Posted against `fetchState.office` — the office the ids were READ from — never the office in the
       // URL at this instant. Task ids exist in exactly one schema; sent to another, the server's
       // ownership re-derivation matches nothing, writes nothing, and still answers 204. Nothing
       // surfaces anywhere and the modal simply returns at the next login.
       //
       // DEFENCE IN DEPTH, and worth being honest that it is: the render guard below already refuses
-      // to show a batch whose office no longer matches the URL, and handleOpenChange is only
+      // to render a result whose office no longer matches the URL, and handleOpenChange is only
       // reachable from a rendered dialog — so at every point this line can execute, the two values
       // are provably equal. Mutating it to `requestOfficeId` does not fail a test, and no test here
       // pretends otherwise. It stays because "post where you read" is the invariant this code is
@@ -243,14 +293,14 @@ export function TaskAssignmentModal() {
       // ever relaxed. The alternative is correctness that depends entirely on a condition twenty
       // lines away.
       void acknowledgeTaskAssignments(
-        batch.tasks.map((task) => task.id),
-        batch.officeId
+        fetchState.tasks.map((task) => task.id),
+        fetchState.office
       ).catch(() => {
         // A failed acknowledgement costs one repeat of this modal. Trapping the user inside a dialog
         // because the network blinked costs considerably more.
       });
     },
-    [batch]
+    [fetchState]
   );
 
   const handleViewAll = useCallback(() => {
@@ -262,13 +312,16 @@ export function TaskAssignmentModal() {
     handleOpenChange(false);
   }, [handleOpenChange, navigate, scopedHref]);
 
-  // A batch belonging to an office the user has since navigated away from is never shown. Derived
+  // A result belonging to an office the user has since navigated away from is never shown. Derived
   // rather than cleared in an effect, so there is no render in which one tenant's assignments are on
   // screen under another tenant's scope — and, because handleOpenChange is only reachable from a
-  // rendered dialog, no way for a stale batch to be acknowledged either.
-  if (!open || batch === null || batch.officeId !== requestOfficeId) return null;
+  // rendered dialog, no way for a stale result to be acknowledged either.
+  // ONLY `loaded` renders. idle and loading have no answer yet, and `error` must never be dressed up
+  // as "nothing assigned to you" — a reassuring empty state built on a failed request tells the person
+  // the opposite of the truth, on the one screen whose whole job is to tell them something.
+  if (!open || fetchState.status !== "loaded" || fetchState.office !== requestOfficeId) return null;
 
-  const { tasks, total, newTotal } = batch;
+  const { tasks, total, newTotal } = fetchState;
   const remaining = Math.max(total - tasks.length, 0);
 
   // Split for display, never re-derived: `isNew` comes from the same NOT EXISTS the server selected

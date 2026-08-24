@@ -101,7 +101,13 @@ beforeAll(async () => {
       created_by uuid,
       due_date date,
       source varchar(20) NOT NULL DEFAULT 'automated',
-      is_test_data boolean NOT NULL DEFAULT false
+      is_test_data boolean NOT NULL DEFAULT false,
+      -- Both read by the predicate: an ack only counts when it is at least as recent as the assignment
+      -- it answers, and assigned_at = created_at is what separates a self-written task from one handed
+      -- back to its author. Defaulted to a fixed past instant so a later acknowledgement is
+      -- unambiguously newer than the assignment.
+      created_at timestamptz NOT NULL DEFAULT '2020-01-01 00:00:00+00',
+      assigned_at timestamptz NOT NULL DEFAULT '2020-01-01 00:00:00+00'
     );
     CREATE TABLE ${SCHEMA}.task_assignment_acknowledgements (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

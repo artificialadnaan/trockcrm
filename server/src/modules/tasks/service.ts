@@ -1136,6 +1136,16 @@ export async function updateTask(
     }
   }
 
+  // A CHANGE OF HANDS IS AN EVENT, and this is the only place it is recorded. Stamped only when the
+  // assignee actually moves — a title edit is not a reassignment, and re-stamping on every PATCH would
+  // invalidate the new assignee's acknowledgement every time anybody touched the row, which is the
+  // login modal repeating forever. Migration 0239 explains what reads it: an acknowledgement counts
+  // only when it is at least as recent as the assignment it answers, so without this stamp a task
+  // handed back to a prior assignee stays covered by the acknowledgement they gave the first time.
+  if (input.assignedTo !== undefined && input.assignedTo !== existing.assignedTo) {
+    updates.assignedAt = new Date();
+  }
+
   if (Object.keys(updates).length === 0) return existing;
 
   const result = await tenantDb
@@ -1406,8 +1416,15 @@ export async function acknowledgeTaskAssignments(
   await tenantDb
     .insert(taskAssignmentAcknowledgements)
     .values(owned.map((row) => ({ taskId: row.id, userId })))
-    .onConflictDoNothing({
+    // UPDATE the timestamp rather than DO NOTHING. The row is unique on (task, user), so after a task
+    // is taken away and handed back, DO NOTHING would leave the ORIGINAL acknowledgement in place —
+    // older than the new assignment, therefore permanently stale, and the modal would announce the
+    // same handoff on every login with no way for the person to make it stop. Re-acknowledging has to
+    // be able to answer the CURRENT assignment. Still idempotent: one row, and a duplicate POST just
+    // rewrites the same instant.
+    .onConflictDoUpdate({
       target: [taskAssignmentAcknowledgements.taskId, taskAssignmentAcknowledgements.userId],
+      set: { acknowledgedAt: new Date() },
     });
 
   return owned.length;

@@ -26,7 +26,7 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { migrationSql } from "../../helpers/migration-sql.js";
 
 const SCHEMA = "office_dallas";
-const MIGRATION = "0235_task_assignment_acknowledgements";
+const MIGRATIONS = ["0235_task_assignment_acknowledgements", "0239_tasks_assigned_at"] as const;
 
 const uid = (n: string) => `00000000-0000-0000-0000-${n.padStart(12, "0")}`;
 const ALICE = uid("a1");
@@ -57,6 +57,25 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE IF NOT EXISTS public.users (id uuid PRIMARY KEY, display_name varchar(255));
     INSERT INTO public.users (id, display_name) VALUES ('${BOB}', 'Adam Shaw'), ('${ALICE}', 'Alice Rep');
+
+    -- 0001 puts BOTH of these on every tenant tasks table, and 0239 disables them around its backfill
+    -- UNCONDITIONALLY -- deliberately, so a tenant somehow missing them aborts the deploy loudly rather
+    -- than letting the backfill run with set_tasks_updated_at live and silently rewrite every contact's
+    -- "Last touch". A fixture without them would not be modelling production, and the migration would
+    -- fail here for a reason that has nothing to do with what this suite is testing.
+    CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $fn$
+    BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+    $fn$ LANGUAGE plpgsql;
+
+    CREATE OR REPLACE FUNCTION audit_trigger_probe() RETURNS TRIGGER AS $fn$
+    BEGIN RETURN NEW; END;
+    $fn$ LANGUAGE plpgsql;
+
+    CREATE TRIGGER set_tasks_updated_at
+      BEFORE UPDATE ON ${SCHEMA}.tasks FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    CREATE TRIGGER audit_tasks
+      AFTER INSERT OR UPDATE OR DELETE ON ${SCHEMA}.tasks
+      FOR EACH ROW EXECUTE FUNCTION audit_trigger_probe();
   `);
 
   // One PRE-EXISTING task per status, every one of them a genuine assignment from somebody else, and
@@ -71,8 +90,8 @@ beforeAll(async () => {
     );
   }
 
-  // The migration, from disk, exactly as it ships.
-  await pg.exec(migrationSql(MIGRATION));
+  // Both migrations, from disk, in the order the runner applies them.
+  for (const migration of MIGRATIONS) await pg.exec(migrationSql(migration));
 
   await pg.exec(`SET search_path = ${SCHEMA}, public;`);
   tdb = drizzle(pg);
@@ -110,6 +129,21 @@ describe("migration 0235's backfill covers everything the predicate calls new", 
     for (const status of ["pending", "in_progress", "waiting_on", "blocked"]) {
       expect(seededStatuses, `status ${status} must be seeded`).toContain(status);
     }
+  });
+
+  // THE TWO MIGRATIONS HAVE TO AGREE WITH EACH OTHER TOO. 0235 seeds acknowledged_at = now(); 0239
+  // dates assigned_at from created_at. If 0239 had used now() instead, every seeded acknowledgement
+  // would be older than the assignment it was meant to answer, every pre-existing task would count as
+  // a fresh handoff, and the backfill would have caused precisely the flood it exists to prevent.
+  it("leaves every seeded acknowledgement NEWER than the assignment it answers", async () => {
+    const stale = await pg.query<{ title: string }>(
+      `SELECT t.title
+         FROM ${SCHEMA}.tasks t
+         JOIN ${SCHEMA}.task_assignment_acknowledgements a
+           ON a.task_id = t.id AND a.user_id = t.assigned_to
+        WHERE a.acknowledged_at < t.assigned_at`
+    );
+    expect(stale.rows.map((row) => row.title), "0239 post-dated 0235's seed").toEqual([]);
   });
 
   it("still lets a task created AFTER the migration through as new", async () => {
