@@ -189,6 +189,30 @@ describe("mutating an expense-request attachment", () => {
   });
 });
 
+describe("GET /api/files (the list route)", () => {
+  it("IGNORES a caller-supplied marketingExpenseRequestId — the scoped branch is not reachable unauthorized", async () => {
+    // getFiles has a branch that RETURNS expense attachments when scoped to one request. That branch exists
+    // for callers that have already authorized the request; if this route ever passed the query param
+    // straight through, it would become an unauthenticated way into exactly the rows the rest of this file
+    // is about. It does not accept the param today, and this is what says so out loud.
+    currentUser.role = "admin";
+    const listed = vi.fn(async () => ({ files: [], pagination: { page: 1, limit: 50, total: 0, totalPages: 0 } }));
+    const { getFiles } = await import("../../../src/modules/files/service.js");
+    const spy = vi.spyOn({ getFiles }, "getFiles").mockImplementation(listed as never);
+    await request(createApp()).get("/api/files?marketingExpenseRequestId=req-1");
+    spy.mockRestore();
+    // The route builds its own filter object; the param is simply not in it.
+    const routeSource = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("../../../src/modules/files/routes.ts", import.meta.url), "utf8"),
+    );
+    const listBlock = routeSource.slice(
+      routeSource.indexOf('router.get("/", async'),
+      routeSource.indexOf('router.get("/stats"'),
+    );
+    expect(listBlock).not.toContain("marketingExpenseRequestId");
+  });
+});
+
 describe("files with no expense request", () => {
   it("is left entirely alone", async () => {
     getFileById.mockResolvedValueOnce({ ...ATTACHMENT, marketingExpenseRequestId: null } as never);
