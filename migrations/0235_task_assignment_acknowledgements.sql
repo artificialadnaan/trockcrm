@@ -25,9 +25,22 @@
 -- ask. Only assignments created after this deploy pop.
 --
 -- The seed is keyed on `assigned_to`, not `created_by`: the row records who was shown the assignment.
--- It is filtered to status = 'pending' because that is the only status the modal query considers -- a
--- blanket copy of the table would seed rows for completed work and quietly hide the fact that the
--- filter was never written.
+--
+-- ⚠️ THE STATUS FILTER HERE AND THE ONE IN THE ELIGIBILITY PREDICATE ARE ONE DECISION IN TWO LANGUAGES.
+-- The predicate (server/src/modules/tasks/pending-assignment-predicate.ts) treats a task as a FIRST-TIME
+-- assignment in any non-terminal status -- pending, in_progress, waiting_on, blocked -- because a
+-- reassignment does not reset status, so active work handed to a new person arrives as in_progress. If
+-- this seed covered only 'pending', every in-flight task in production would be reclassified as brand
+-- new on the morning of the deploy and they would all pop at once, five per login, which is precisely
+-- the failure this backfill exists to prevent. So the seed is deliberately WIDER than any single branch
+-- of the predicate: everything that is not terminal.
+--
+-- Seeding more than the predicate can reach is inert (an ack row for a completed task is never read);
+-- seeding less is a deploy-day incident. The relationship is asserted by executing both halves against
+-- one database in tests/modules/tasks/backfill-covers-the-predicate.runtime.test.ts rather than by
+-- matching the two WHERE clauses by eye. Terminal rows are still excluded so the filter is a real
+-- filter -- a blanket copy of the table would pass every "nothing pre-existing pops" assertion while
+-- hiding the fact that no filter was ever written.
 --
 -- NO TRIGGER-DISABLE WRAPPER HERE, unlike 0233. That file had to disable set_tasks_updated_at because it
 -- UPDATEd `tasks`, and tasks.updated_at is read straight through as a contact's "Last touch". This
@@ -86,7 +99,7 @@ BEGIN
         INSERT INTO %1$I.task_assignment_acknowledgements (task_id, user_id, acknowledged_at)
         SELECT id, assigned_to, now()
           FROM %1$I.tasks
-         WHERE status = 'pending'
+         WHERE status NOT IN ('completed', 'dismissed')
         ON CONFLICT (task_id, user_id) DO NOTHING;
       $sql$,
       schema_name

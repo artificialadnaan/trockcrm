@@ -139,6 +139,11 @@ export function TaskAssignmentModal() {
   // mount/unmount/mount cycle: the first mount claims the office, the remount sees it already claimed
   // and does not fetch again.
   const fetchedOfficeRef = useRef<string | null>(null);
+  // WHICH REQUEST IS THIS THE ANSWER TO? A separate question from the latch's "have I started?", and
+  // the reason it needs its own variable: one counter cannot answer both, and trying to make it do so
+  // is how the two mechanisms end up cancelling each other out. Incremented at issue, compared at
+  // resolution; anything that loses the race is dropped on the floor.
+  const requestGenerationRef = useRef(0);
   const acknowledgedRef = useRef(false);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
@@ -166,6 +171,7 @@ export function TaskAssignmentModal() {
     if (fetchedOfficeRef.current === requestOfficeId) return;
     fetchedOfficeRef.current = requestOfficeId;
     const fetchedForOfficeId = requestOfficeId;
+    const generation = ++requestGenerationRef.current;
 
     // NO `cancelled` FLAG, and its absence is deliberate. Pairing one with a claim-before-fetch ref is
     // actively WRONG under StrictMode, which is how the app runs in development: the first mount
@@ -180,6 +186,16 @@ export function TaskAssignmentModal() {
     // acknowledged. A late response for an abandoned office is inert rather than raced.
     void fetchPendingAssignmentTasks(fetchedForOfficeId)
       .then((result) => {
+        // SUPERSEDED — a later request has been issued since this one left. Discard it and touch
+        // NOTHING: not the batch, and specifically not the latch.
+        //
+        // Not the batch, because the office-mismatch render guard would hide it and the user would be
+        // left staring at no modal at all while their real assignments sat in a variable nobody reads.
+        //
+        // Not the latch, because the latch belongs to the request that is still in flight. "Tidying
+        // up" by writing the abandoned office back into it is the tempting version of this line and it
+        // is the one that leaves that office permanently unfetchable for the rest of the session.
+        if (generation !== requestGenerationRef.current) return;
         // An empty list with the flag set is a real state, not an error: the flag and the list are two
         // queries against a moving table, and a task completed between them lands here. Opening an
         // empty modal is worse than not opening at all.

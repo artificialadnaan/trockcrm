@@ -70,9 +70,14 @@ async function seedOffices(schemas: readonly string[]) {
 async function seedTasks(schema: string) {
   await pg.exec(`
     INSERT INTO ${schema}.tasks (id, title, status, assigned_to, source) VALUES
-      ('aaaaaaaa-0000-0000-0000-000000000001', 'pending manual',    'pending',   '${ALICE}', 'manual'),
-      ('aaaaaaaa-0000-0000-0000-000000000002', 'pending automated', 'pending',   '${BOB}',   'automated'),
-      ('aaaaaaaa-0000-0000-0000-000000000003', 'already done',      'completed', '${ALICE}', 'manual');
+      ('aaaaaaaa-0000-0000-0000-000000000001', 'pending manual',    'pending',     '${ALICE}', 'manual'),
+      ('aaaaaaaa-0000-0000-0000-000000000002', 'pending automated', 'pending',     '${BOB}',   'automated'),
+      -- Active work, which is what a REASSIGNMENT hands somebody: the predicate treats it as a
+      -- first-time assignment, so the seed has to cover it or every in-flight task in production
+      -- becomes brand new on deploy day.
+      ('aaaaaaaa-0000-0000-0000-000000000004', 'already started',   'in_progress', '${ALICE}', 'manual'),
+      -- Terminal, and the control: it proves the filter is a real filter rather than a blanket copy.
+      ('aaaaaaaa-0000-0000-0000-000000000003', 'already done',      'completed',   '${ALICE}', 'manual');
   `);
 }
 
@@ -157,7 +162,7 @@ describe("migration 0235 — task assignment acknowledgements", () => {
   });
 
   // C3. Without this the modal is a ~40-login nag for anyone with a real backlog.
-  it("seeds an ack row for every PENDING task that already exists, in EVERY office schema", async () => {
+  it("seeds an ack row for every NON-TERMINAL task that already exists, in EVERY office schema", async () => {
     await seedOffices(OFFICES);
     for (const schema of OFFICES) await seedTasks(schema);
     await pg.exec(migrationSql(MIGRATION));
@@ -169,6 +174,8 @@ describe("migration 0235 — task assignment acknowledgements", () => {
       expect(acked.rows.map((r) => r.task_id), schema).toEqual([
         "aaaaaaaa-0000-0000-0000-000000000001",
         "aaaaaaaa-0000-0000-0000-000000000002",
+        // ...and the in_progress one. Absent here, a reassigned active task looks brand new on deploy.
+        "aaaaaaaa-0000-0000-0000-000000000004",
       ]);
       // The ack is recorded against the ASSIGNEE, not the creator -- a later reassignment leaves the
       // new assignee with no row, which is exactly when the modal should fire again.
@@ -205,7 +212,7 @@ describe("migration 0235 — task assignment acknowledgements", () => {
 
     for (const schema of OFFICES) {
       const rows = await pg.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${schema}.${TABLE}`);
-      expect(rows.rows[0]?.n, schema).toBe(2);
+      expect(rows.rows[0]?.n, schema).toBe(3);
     }
   });
 

@@ -28,6 +28,8 @@ const uid = (n: string) => `00000000-0000-0000-0000-${n.padStart(12, "0")}`;
 
 const ALICE = uid("a1");
 const BOB = uid("b1");
+/** A third party, for fixtures where both ALICE and BOB take turns holding the task. */
+const CARLA = uid("c1");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -66,7 +68,11 @@ async function seed(rows: SeedTask[]) {
       priority: row.priority ?? "normal",
       status: (row.status ?? "pending") as never,
       assignedTo: row.assignedTo ?? ALICE,
-      createdBy: row.createdBy === undefined ? BOB : row.createdBy,
+      // Default to SOMEBODY ELSE, because that is what an assignment is. A fixture that quietly made
+      // creator and assignee the same person would be a self-written task, which the predicate now
+      // excludes — every test using the default would be asserting against an empty result.
+      createdBy:
+        row.createdBy === undefined ? ((row.assignedTo ?? ALICE) === BOB ? ALICE : BOB) : row.createdBy,
       dueDate: row.dueDate ?? null,
       source: row.source ?? "manual",
       isTestData: row.isTestData ?? false,
@@ -100,7 +106,8 @@ beforeAll(async () => {
     );
     INSERT INTO public.users (id, display_name) VALUES
       ('${BOB}', 'Adam Shaw'),
-      ('${ALICE}', 'Alice Rep');
+      ('${ALICE}', 'Alice Rep'),
+      ('${CARLA}', 'Carla Diaz');
   `);
   tdb = drizzle(pg);
 });
@@ -234,6 +241,40 @@ describe("getPendingAssignmentTasks — what the login modal shows", () => {
     const result = await getPendingAssignmentTasks(tdb, ALICE);
 
     expect(result.tasks).toEqual([]);
+  });
+});
+
+describe("a task you wrote for yourself is not an assignment", () => {
+  // The New Task form defaults assignedTo to the creator, so most self-written tasks have
+  // created_by = assigned_to. Greeting somebody at their next login to inform them of a task they
+  // typed themselves is the clearest possible way to teach them the dialog is not worth reading.
+  //
+  // Shaped like the sibling branch's reply-notification rule (`assignerId !== null && !== userId`):
+  // the NULL test comes first, so a row with no recorded creator can never match a caller by accident.
+
+  it("does not show a task the person created for themselves", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: ALICE, priority: "urgent" }]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  it("still shows the same task once somebody else hands it over", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: BOB }]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks.map((t) => t.id)).toEqual([uid("1")]);
+  });
+
+  it("does not repeat a self-created urgent task either, acknowledged or not", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: ALICE, priority: "urgent" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  it("does not show a manual task with no recorded creator — there is nobody to attribute it to", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: null }]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
   });
 });
 
@@ -482,7 +523,10 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
   });
 
   it("records the acknowledgement against the CALLER, so a reassignment pops for the new assignee", async () => {
-    await seed([{ id: uid("1"), assignedTo: ALICE, priority: "normal" }]);
+    // Created by a THIRD party, so the row stays a real assignment to whoever currently holds it —
+    // the default creator would become Bob's own id the moment the task moves to him, and the test
+    // would then be asserting against a self-written task rather than a reassignment.
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
     await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
 
     await pg.exec(`UPDATE public.tasks SET assigned_to = '${BOB}' WHERE id = '${uid("1")}'`);

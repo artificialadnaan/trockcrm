@@ -52,18 +52,24 @@ async function seedTask(overrides: {
   priority?: string;
   status?: string;
   assignedTo?: string;
+  createdBy?: string | null;
   dueDate?: string | null;
   source?: string;
   isTestData?: boolean;
 }) {
+  const assignedTo = overrides.assignedTo ?? ALICE;
   await pg.query(
-    `INSERT INTO ${SCHEMA}.tasks (id, title, priority, status, assigned_to, due_date, source, is_test_data)
-     VALUES ($1, 'seeded', $2, $3, $4, $5, $6, $7)`,
+    `INSERT INTO ${SCHEMA}.tasks (id, title, priority, status, assigned_to, created_by, due_date, source, is_test_data)
+     VALUES ($1, 'seeded', $2, $3, $4, $5, $6, $7, $8)`,
     [
       overrides.id,
       overrides.priority ?? "normal",
       overrides.status ?? "pending",
-      overrides.assignedTo ?? ALICE,
+      assignedTo,
+      // Somebody ELSE by default — a task whose creator is its assignee is one the person wrote for
+      // themselves, which the predicate excludes, so a fixture defaulting to NULL or to the assignee
+      // would leave every assertion below testing an empty result.
+      overrides.createdBy === undefined ? (assignedTo === BOB ? ALICE : BOB) : overrides.createdBy,
       overrides.dueDate ?? null,
       overrides.source ?? "manual",
       overrides.isTestData ?? false,

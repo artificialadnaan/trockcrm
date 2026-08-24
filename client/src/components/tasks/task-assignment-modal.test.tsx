@@ -446,6 +446,101 @@ describe("TaskAssignmentModal — it says what is actually true", () => {
   });
 });
 
+/**
+ * Hand control of WHEN each office's fetch resolves to the test.
+ *
+ * Overlapping office-scoped requests are the whole subject here, and they cannot be exercised at all
+ * while every response resolves in issue order — the interleaving that breaks things is precisely the
+ * one a synchronous mock can never produce.
+ */
+function deferredFetches() {
+  const waiting = new Map<string, (value: unknown) => void>();
+  const issued: string[] = [];
+
+  apiMock.mockImplementation((path: string, options?: { headers?: Record<string, string> }) => {
+    if (path === "/tasks/acknowledge") return Promise.resolve(undefined);
+    if (path !== "/tasks/pending-acknowledgement") throw new Error(`unexpected api call: ${path}`);
+    const office = options?.headers?.["x-office-id"] ?? "(none)";
+    issued.push(office);
+    return new Promise((resolve) => waiting.set(office, resolve));
+  });
+
+  return {
+    /** How many times a fetch has been ISSUED for this office — not how many are outstanding. */
+    issuedFor: (office: string) => issued.filter((entry) => entry === office).length,
+    async resolveFor(office: string, tasks: PendingTask[]) {
+      const resolve = waiting.get(office);
+      if (!resolve) throw new Error(`no outstanding fetch for ${office}`);
+      waiting.delete(office);
+      resolve({ tasks, total: tasks.length, newTotal: tasks.filter((t) => t.isNew).length });
+      await settle();
+    },
+  };
+}
+
+describe("TaskAssignmentModal — overlapping fetches", () => {
+  // A LATCH ANSWERS "HAVE I STARTED?"; THIS IS ABOUT "WHICH REQUEST IS THIS THE ANSWER TO?"
+  //
+  // Keying the latch by office fixed "never refetches on an office change" and left request ORDERING
+  // entirely untouched — two different questions, and one variable cannot hold both. When the two
+  // office-scoped requests overlap, the abandoned office's response can land last and overwrite the
+  // current office's batch. The office-mismatch render guard then hides that stale batch, while the
+  // latch already reads as satisfied for the current office, so nothing ever fetches again: the user
+  // sees NOTHING for the rest of the session, in the code that exists to show them something.
+  //
+  // Same underlying error as the StrictMode defect earlier in this branch — two mechanisms each
+  // assuming they own the lifecycle. The fix is a request identity carried across the async boundary,
+  // with a superseded response discarded without touching ANY state, the latch included.
+
+  it("never lets a late response from an abandoned office replace the current one", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    await changeOfficeTo("office-b");
+
+    // B wins the race and is displayed...
+    await fetches.resolveFor("office-b", [task({ id: "b1", title: "Atlanta punch list" })]);
+    expect(dialog()!.textContent).toContain("Atlanta punch list");
+
+    // ...then A, long abandoned, finally answers.
+    await fetches.resolveFor("office-a", [task({ id: "a1", title: "Dallas roof walk" })]);
+
+    expect(dialog(), "the current office's modal must survive a superseded response").not.toBeNull();
+    expect(dialog()!.textContent).toContain("Atlanta punch list");
+    expect(dialog()!.textContent).not.toContain("Dallas roof walk");
+  });
+
+  it("lets a later office change fetch again — a superseded response must not poison the latch", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    await changeOfficeTo("office-b");
+    await fetches.resolveFor("office-b", [task({ id: "b1" })]);
+    await fetches.resolveFor("office-a", [task({ id: "a1" })]);
+    expect(fetches.issuedFor("office-a")).toBe(1);
+
+    await changeOfficeTo("office-a");
+
+    // A losing response that "tidied up" by writing the latch would leave this at 1, and office A
+    // would be permanently unfetchable for the rest of the session.
+    expect(fetches.issuedFor("office-a")).toBe(2);
+  });
+
+  it("shows the winning office's assignments once they arrive, even if the loser answered first", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    await changeOfficeTo("office-b");
+
+    // The abandoned office answers FIRST this time — it must not be rendered, and must not consume
+    // the slot that B's answer is still on its way to fill.
+    await fetches.resolveFor("office-a", [task({ id: "a1", title: "Dallas roof walk" })]);
+    expect(dialog()).toBeNull();
+
+    await fetches.resolveFor("office-b", [task({ id: "b1", title: "Atlanta punch list" })]);
+
+    expect(dialog()).not.toBeNull();
+    expect(dialog()!.textContent).toContain("Atlanta punch list");
+  });
+});
+
 describe("TaskAssignmentModal — office scope", () => {
   // Office scope is URL-DRIVEN, not user state: api() reads ?officeId out of window.location on every
   // call and turns it into x-office-id, which authMiddleware promotes to activeOfficeId and

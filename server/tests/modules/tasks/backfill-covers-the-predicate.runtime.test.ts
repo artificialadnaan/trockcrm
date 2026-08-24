@@ -1,0 +1,131 @@
+// The backfill and the eligibility predicate are ONE decision written in two languages, and this is the
+// test that stops them drifting apart.
+//
+// Migration 0235 seeds the acknowledgement table so that nothing already on somebody's plate is treated
+// as new. The predicate decides what "new" means. If the predicate admits a status the backfill did not
+// seed, then on the morning of the deploy every pre-existing task in that status is suddenly unseen and
+// they all pop at once — five per login, for as many logins as it takes to drain. That is exactly the
+// failure the backfill exists to prevent, reintroduced by widening one half of a pair.
+//
+// It is a live risk rather than a hypothetical: first-time visibility was deliberately widened from
+// `pending` to also cover in_progress / waiting_on / blocked so that a REASSIGNED active task reaches
+// its new assignee. Had the backfill stayed on `WHERE status = 'pending'`, every in-flight task in
+// production would have been reclassified as a brand-new assignment.
+//
+// SO THIS EXECUTES BOTH HALVES AGAINST ONE DATABASE rather than comparing two WHERE clauses by eye.
+// A grep-style test that matched the status lists as text would still pass if the two agreed on
+// statuses and disagreed on anything else — the assignee column, the source filter, a typo in a status
+// name. Seeding one task per status, running the real migration from disk, and then asking the real
+// query what it considers new is the only version that cannot be fooled.
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { tasks } from "@trock-crm/shared/schema";
+import { getPendingAssignmentTasks } from "../../../src/modules/tasks/service.js";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
+import { migrationSql } from "../../helpers/migration-sql.js";
+
+const SCHEMA = "office_dallas";
+const MIGRATION = "0235_task_assignment_acknowledgements";
+
+const uid = (n: string) => `00000000-0000-0000-0000-${n.padStart(12, "0")}`;
+const ALICE = uid("a1");
+const BOB = uid("b1");
+
+/** Every status the schema allows. The point is to seed ALL of them, not a chosen subset. */
+const ALL_STATUSES = [
+  "pending",
+  "scheduled",
+  "in_progress",
+  "waiting_on",
+  "blocked",
+  "completed",
+  "dismissed",
+] as const;
+
+let pg: PGlite;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let tdb: any;
+
+beforeAll(async () => {
+  pg = new PGlite();
+  await pg.exec(`SET TimeZone='UTC';`);
+  await pg.exec(`CREATE SCHEMA IF NOT EXISTS ${SCHEMA};`);
+  // The tenant table comes from the REAL Drizzle definition, in a real office_* schema, so the
+  // migration's own tenant loop finds it exactly as it would in production.
+  await pg.exec(tenantSchemaSql(SCHEMA, [tasks]));
+  await pg.exec(`
+    CREATE TABLE IF NOT EXISTS public.users (id uuid PRIMARY KEY, display_name varchar(255));
+    INSERT INTO public.users (id, display_name) VALUES ('${BOB}', 'Adam Shaw'), ('${ALICE}', 'Alice Rep');
+  `);
+
+  // One PRE-EXISTING task per status, every one of them a genuine assignment from somebody else, and
+  // every one urgent and overdue — the shape most likely to be considered eligible. If any status is
+  // going to slip past the backfill, this is the fixture that catches it.
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  for (const [index, status] of ALL_STATUSES.entries()) {
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.tasks (id, title, type, priority, status, assigned_to, created_by, due_date, source, is_test_data)
+       VALUES ($1, $2, 'manual', 'urgent', $3, $4, $5, $6, 'manual', false)`,
+      [uid(String(index + 1)), `pre-existing ${status}`, status, ALICE, BOB, yesterday]
+    );
+  }
+
+  // The migration, from disk, exactly as it ships.
+  await pg.exec(migrationSql(MIGRATION));
+
+  await pg.exec(`SET search_path = ${SCHEMA}, public;`);
+  tdb = drizzle(pg);
+});
+
+afterAll(async () => {
+  await pg.close();
+});
+
+describe("migration 0235's backfill covers everything the predicate calls new", () => {
+  it("treats NO pre-existing task as a new assignment, in any status", async () => {
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    const wronglyNew = result.tasks.filter((task) => task.isNew).map((task) => task.title);
+    expect(
+      wronglyNew,
+      "a status the predicate admits but the backfill did not seed — these would all pop on deploy"
+    ).toEqual([]);
+    expect(result.newTotal).toBe(0);
+  });
+
+  it("seeded an ack row for every status first-time visibility can reach", async () => {
+    const seeded = await pg.query<{ status: string }>(
+      `SELECT t.status
+         FROM ${SCHEMA}.task_assignment_acknowledgements a
+         JOIN ${SCHEMA}.tasks t ON t.id = a.task_id
+        WHERE a.user_id = $1
+        ORDER BY t.status`,
+      [ALICE]
+    );
+    const seededStatuses = seeded.rows.map((row) => row.status);
+
+    // Asserted as a SUPERSET rather than an exact match: seeding more than the predicate can reach is
+    // harmless (an ack row for a completed task is inert), whereas seeding less is the deploy-day bug.
+    for (const status of ["pending", "in_progress", "waiting_on", "blocked"]) {
+      expect(seededStatuses, `status ${status} must be seeded`).toContain(status);
+    }
+  });
+
+  it("still lets a task created AFTER the migration through as new", async () => {
+    // The backfill has to mean "nothing pre-existing", not "nothing ever". A migration that seeded the
+    // whole table unconditionally would pass every assertion above and ship a modal that never fires.
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.tasks (id, title, type, priority, status, assigned_to, created_by, source, is_test_data)
+       VALUES ($1, 'assigned after the deploy', 'manual', 'normal', 'pending', $2, $3, 'manual', false)`,
+      [uid("99"), ALICE, BOB]
+    );
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    expect(result.tasks.filter((task) => task.isNew).map((task) => task.title)).toEqual([
+      "assigned after the deploy",
+    ]);
+    expect(result.newTotal).toBe(1);
+  });
+});
