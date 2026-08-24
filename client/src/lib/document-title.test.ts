@@ -76,6 +76,22 @@ describe("a page says what it is", () => {
     expect(titleForPath("/deals/pending-rfp")).toBe(`Pending RFP · ${APP_NAME}`);
   });
 
+  it.each([
+    ["/Deals", "Deals Dashboard"],
+    ["/REPORTS/region", "Region Report"],
+    ["/Projects/Weekly-Reports", "Weekly Reports"],
+    ["/companies/ABC-123", "Companies"],
+  ])("titles %s — the router matches case-insensitively, so this must too", (route, name) => {
+    // VERIFIED IN THE BROWSER, not assumed from the docs: https://trockcrm.com/Deals renders the real
+    // Deals Dashboard (its <h1> says so), because React Router's `caseSensitive` defaults to false. A
+    // case-sensitive lookup therefore hands the bare app name to a page that rendered perfectly — and
+    // capitalised paths are exactly what arrives from a bookmark, a pasted link or an email.
+    //
+    // The record segment in the last case must NOT be lowercased into the comparison result; only the
+    // matching is case-insensitive.
+    expect(titleForPath(route)).toBe(`${name} · ${APP_NAME}`);
+  });
+
   it("titles the root route", () => {
     // `/` prefix-matches literally everything, so it is the one entry that must be exact-match only.
     expect(titleForPath("/")).toBe(`Dashboard · ${APP_NAME}`);

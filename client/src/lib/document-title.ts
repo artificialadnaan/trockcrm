@@ -135,19 +135,26 @@ export const ROUTE_TITLES: Record<string, string> = {
  *
  * The prefix must end on a SEGMENT boundary. A plain `startsWith` lets `/deals` claim `/dealsroom`, and
  * `/` claim everything — which is why the root is exact-match only.
+ *
+ * MATCHING IS CASE-INSENSITIVE, because the router is. React Router's `caseSensitive` defaults to false,
+ * so `/Deals` renders the Deals Dashboard — verified in production, its `<h1>` says so. A case-sensitive
+ * lookup would hand the bare app name to a page that rendered perfectly, and capitalised paths are exactly
+ * what arrives from a bookmark, a pasted link or an email client that title-cased a URL.
  */
 export function titleForPath(pathname: string): string {
-  const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  const trimmed = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  const normalized = trimmed.toLowerCase();
   if (normalized === "/") return `${ROUTE_TITLES["/"]} · ${APP_NAME}`;
 
   let best: string | null = null;
   let bestLength = 0;
   for (const [route, name] of Object.entries(ROUTE_TITLES)) {
     if (route === "/") continue;
-    const matches = normalized === route || normalized.startsWith(`${route}/`);
-    if (matches && route.length > bestLength) {
+    const key = route.toLowerCase();
+    const matches = normalized === key || normalized.startsWith(`${key}/`);
+    if (matches && key.length > bestLength) {
       best = name;
-      bestLength = route.length;
+      bestLength = key.length;
     }
   }
   return best ? `${best} · ${APP_NAME}` : APP_NAME;
