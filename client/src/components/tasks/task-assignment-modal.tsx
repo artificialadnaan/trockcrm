@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -63,6 +64,17 @@ function AssignmentRow({ task }: { task: PendingAssignmentTask }) {
   );
 }
 
+/** What the modal is currently holding, and the tenant it was read from. The two travel together. */
+type PendingBatch = {
+  /**
+   * The office the ids below belong to. Task ids are only meaningful inside one tenant schema, so this
+   * is carried on the batch rather than re-read at acknowledge time — see handleOpenChange.
+   */
+  officeId: string;
+  tasks: PendingAssignmentTask[];
+  total: number;
+};
+
 /**
  * The new-assignment popup: what landed on you while you were away.
  *
@@ -84,31 +96,60 @@ function AssignmentRow({ task }: { task: PendingAssignmentTask }) {
 export function TaskAssignmentModal() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<PendingAssignmentTask[]>([]);
-  const [total, setTotal] = useState(0);
+  const officeScopeId = useOfficeScopeId();
+  const [batch, setBatch] = useState<PendingBatch | null>(null);
   const [open, setOpen] = useState(false);
 
-  // Survives the StrictMode mount/unmount/mount cycle, which is the point: an effect that re-fires
-  // would fetch twice and, worse, could re-open a dialog the user has already dismissed.
-  const fetchedRef = useRef(false);
+  // KEYED BY OFFICE, not a boolean. Office scope is URL-driven (?officeId -> x-office-id -> search
+  // path) and an authorized cross-office user changes it by navigating, with no remount and no
+  // refreshUser — so a one-shot latch means the modal is fetched for the boot tenant and never again.
+  // Holding the office it fetched for makes "have we asked yet" a question about a tenant instead of
+  // about the component, which is what it always was.
+  //
+  // Still a REF, and still compared before it is written, because that is what survives the StrictMode
+  // mount/unmount/mount cycle: the first mount claims the office, the remount sees it already claimed
+  // and does not fetch again.
+  const fetchedOfficeRef = useRef<string | null>(null);
   const acknowledgedRef = useRef(false);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
 
-  const hasPending = Boolean(user?.hasPendingTaskAssignments);
+  // The tenant every request from this component will land in. `?officeId` verbatim when present,
+  // otherwise the user's home office — exactly the fallback authMiddleware applies when no header
+  // arrives, resolved here so it can be PINNED on the request instead of left ambient.
+  const requestOfficeId = officeScopeId ?? user?.officeId ?? null;
+
+  // The office the server computed `hasPendingTaskAssignments` under. authMiddleware promotes
+  // x-office-id into activeOfficeId, so a boot on ?officeId=X yields a flag that describes X.
+  const flagOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
+
+  // THE FLAG ONLY SPEAKS FOR ITS OWN OFFICE. Nothing calls refreshUser on an office change, so it
+  // reports the boot office for the rest of the session. Gating every office on it would mean a
+  // cross-office user whose boot office is quiet never sees an assignment anywhere else — the flag
+  // would be answering a question it was never asked. Where it cannot speak, ask the server; the cost
+  // is one indexed LIMIT 5 query per office actually visited.
+  const shouldFetch =
+    requestOfficeId !== null &&
+    (requestOfficeId === flagOfficeId ? Boolean(user?.hasPendingTaskAssignments) : true);
 
   useEffect(() => {
-    if (!hasPending || fetchedRef.current) return;
-    fetchedRef.current = true;
+    if (!shouldFetch || requestOfficeId === null) return;
+    if (fetchedOfficeRef.current === requestOfficeId) return;
+    fetchedOfficeRef.current = requestOfficeId;
+    const fetchedForOfficeId = requestOfficeId;
 
-    // NO `cancelled` FLAG, and its absence is deliberate. Pairing one with a ref latch is actively
-    // WRONG under StrictMode, which is how the app runs in development: the first mount takes the
-    // latch and starts the fetch, the immediate unmount sets cancelled, the remount returns early
-    // because the latch is already taken, and the in-flight response is then thrown away by a flag
-    // belonging to a mount that no longer exists. The modal never opens at all. React 18+ does not
-    // warn about setting state after unmount, and this component lives for the whole session anyway,
-    // so there is nothing left for the flag to protect. The latch alone is the guarantee.
-    void fetchPendingAssignmentTasks()
+    // NO `cancelled` FLAG, and its absence is deliberate. Pairing one with a claim-before-fetch ref is
+    // actively WRONG under StrictMode, which is how the app runs in development: the first mount
+    // claims the office and starts the fetch, the immediate unmount sets cancelled, the remount
+    // returns early because the office is already claimed, and the in-flight response is then thrown
+    // away by a flag belonging to a mount that no longer exists. The modal never opens at all. React
+    // 18+ does not warn about setting state after unmount, and this component lives for the whole
+    // session anyway, so there is nothing left for the flag to protect.
+    //
+    // The office change case does not need one either: the response is tagged with the office it was
+    // REQUESTED for, and a batch whose office no longer matches the URL is never rendered and never
+    // acknowledged. A late response for an abandoned office is inert rather than raced.
+    void fetchPendingAssignmentTasks(fetchedForOfficeId)
       .then((result) => {
         // An empty list with the flag set is a real state, not an error: the flag and the list are two
         // queries against a moving table, and a task completed between them lands here. Opening an
@@ -118,31 +159,39 @@ export function TaskAssignmentModal() {
         // default would restore to the trigger, and this dialog has none — nobody opened it.
         previouslyFocusedRef.current =
           document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        setTasks(result.tasks);
-        setTotal(result.total);
+        acknowledgedRef.current = false;
+        setBatch({ officeId: fetchedForOfficeId, tasks: result.tasks, total: result.total });
         setOpen(true);
       })
       .catch(() => {
         // Silent. A modal nobody asked for is not worth a toast when it fails to appear.
       });
-  }, [hasPending]);
+  }, [shouldFetch, requestOfficeId]);
 
   const handleOpenChange = useCallback(
     (nextOpen: boolean) => {
       setOpen(nextOpen);
-      if (nextOpen || acknowledgedRef.current) return;
+      if (nextOpen || acknowledgedRef.current || batch === null) return;
       acknowledgedRef.current = true;
 
       // Closing is not "ask me again". The decision was once-per-task, with repeats reserved for
       // urgent/high/overdue — and those repeat regardless of how the modal was dismissed, so a
       // dismissal path that quietly skipped this would produce a modal that reappears for no visible
       // reason. Not awaited: the dialog closes on the click, not on the round trip.
-      void acknowledgeTaskAssignments(tasks.map((task) => task.id)).catch(() => {
+      //
+      // Posted against `batch.officeId` — the office the ids were READ from — never the office in the
+      // URL at this instant. Those differ the moment somebody changes office scope, and the ids only
+      // exist in one schema: sent to the other, the server's ownership re-derivation matches nothing,
+      // writes nothing, and still answers 204. Nothing surfaces. The modal simply returns next login.
+      void acknowledgeTaskAssignments(
+        batch.tasks.map((task) => task.id),
+        batch.officeId
+      ).catch(() => {
         // A failed acknowledgement costs one repeat of this modal. Trapping the user inside a dialog
         // because the network blinked costs considerably more.
       });
     },
-    [tasks]
+    [batch]
   );
 
   const handleViewAll = useCallback(() => {
@@ -150,8 +199,13 @@ export function TaskAssignmentModal() {
     handleOpenChange(false);
   }, [handleOpenChange, navigate]);
 
-  if (!open) return null;
+  // A batch belonging to an office the user has since navigated away from is never shown. Derived
+  // rather than cleared in an effect, so there is no render in which one tenant's assignments are on
+  // screen under another tenant's scope — and, because handleOpenChange is only reachable from a
+  // rendered dialog, no way for a stale batch to be acknowledged either.
+  if (!open || batch === null || batch.officeId !== requestOfficeId) return null;
 
+  const { tasks, total } = batch;
   const remaining = Math.max(total - tasks.length, 0);
   const heading = tasks.length === 1 ? "You have a new task" : `You have ${total} new tasks`;
 

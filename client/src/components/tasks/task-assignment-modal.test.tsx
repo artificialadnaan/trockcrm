@@ -11,7 +11,7 @@
 // place it happens — and "closed exactly once" is asserted for each path rather than assumed.
 import { StrictMode, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.fn();
@@ -62,14 +62,62 @@ function acknowledgeCalls() {
 let container: HTMLDivElement;
 let root: Root | null;
 
-async function render(flag: boolean | undefined) {
-  authMock.mockReturnValue({ user: flag === undefined ? null : { id: "u1", hasPendingTaskAssignments: flag } });
+/** The user's HOME office — what x-office-id resolves to when the URL carries no ?officeId. */
+const HOME_OFFICE = "office-home";
+
+/**
+ * Lets a test change ?officeId the way the app does — by navigating inside the SAME router, so the
+ * modal stays mounted. Re-rendering with different `initialEntries` would remount it and destroy the
+ * very state this is meant to exercise.
+ */
+let setSearchParams: ((next: URLSearchParams) => void) | null = null;
+function SearchParamController() {
+  const [, setParams] = useSearchParams();
+  setSearchParams = setParams;
+  return null;
+}
+
+function officeHeaderOf(call: unknown[] | undefined) {
+  const options = call?.[1] as { headers?: Record<string, string> } | undefined;
+  return options?.headers?.["x-office-id"];
+}
+
+function pendingFetches() {
+  return apiMock.mock.calls.filter(([path]) => path === "/tasks/pending-acknowledgement");
+}
+
+async function render(
+  flag: boolean | undefined,
+  { officeId, activeOfficeId }: { officeId?: string | null; activeOfficeId?: string } = {}
+) {
+  authMock.mockReturnValue({
+    user:
+      flag === undefined
+        ? null
+        : {
+            id: "u1",
+            hasPendingTaskAssignments: flag,
+            officeId: HOME_OFFICE,
+            // The office the server computed the flag under. authMiddleware promotes x-office-id into
+            // activeOfficeId, so a boot on ?officeId=X gets a flag that describes X.
+            activeOfficeId: activeOfficeId ?? officeId ?? HOME_OFFICE,
+          },
+  });
+  const entry = officeId ? `/?officeId=${encodeURIComponent(officeId)}` : "/";
   await act(async () => {
     root?.render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
+        <SearchParamController />
         <TaskAssignmentModal />
       </MemoryRouter>
     );
+  });
+  await settle();
+}
+
+async function changeOfficeTo(officeId: string) {
+  await act(async () => {
+    setSearchParams?.(new URLSearchParams({ officeId }));
   });
   await settle();
 }
@@ -182,7 +230,7 @@ describe("TaskAssignmentModal — when it appears", () => {
 
     await render(true);
 
-    expect(apiMock).toHaveBeenCalledWith("/tasks/pending-acknowledgement");
+    expect(pendingFetches()).toHaveLength(1);
     expect(dialog()).toBeNull();
   });
 
@@ -209,12 +257,15 @@ describe("TaskAssignmentModal — when it appears", () => {
   // fetches per boot and, worse, a dialog that can re-open after the user has dismissed it.
   it("fetches once per boot even under StrictMode's double-invoke", async () => {
     setPending([task()]);
-    authMock.mockReturnValue({ user: { id: "u1", hasPendingTaskAssignments: true } });
+    authMock.mockReturnValue({
+      user: { id: "u1", hasPendingTaskAssignments: true, officeId: HOME_OFFICE, activeOfficeId: HOME_OFFICE },
+    });
 
     await act(async () => {
       root?.render(
         <StrictMode>
           <MemoryRouter>
+            <SearchParamController />
             <TaskAssignmentModal />
           </MemoryRouter>
         </StrictMode>
@@ -230,15 +281,11 @@ describe("TaskAssignmentModal — when it appears", () => {
     setPending([task()]);
     await render(true);
 
-    await act(async () => {
-      root?.render(
-        <MemoryRouter>
-          <TaskAssignmentModal />
-        </MemoryRouter>
-      );
-    });
+    // Same tree, re-rendered. A DIFFERENT tree would move the component and remount it, which resets
+    // the latch and makes this pass for the wrong reason.
+    await render(true);
 
-    expect(apiMock.mock.calls.filter(([p]) => p === "/tasks/pending-acknowledgement")).toHaveLength(1);
+    expect(pendingFetches()).toHaveLength(1);
   });
 });
 
@@ -313,6 +360,137 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
     await click(buttonLabelled("Close"));
 
     expect(dialog()).toBeNull();
+  });
+});
+
+describe("TaskAssignmentModal — office scope", () => {
+  // Office scope is URL-DRIVEN, not user state: api() reads ?officeId out of window.location on every
+  // call and turns it into x-office-id, which authMiddleware promotes to activeOfficeId and
+  // tenantMiddleware turns into a search_path. So the tenant a request lands in is decided at CALL
+  // time, and an authorized cross-office user changes it by navigating -- no remount, no refreshUser.
+  //
+  // That makes a one-shot fetch latch wrong in two ways at once. The modal never refetches for the new
+  // tenant, and -- the half that matters -- an acknowledgement posted after the change lands in the NEW
+  // office, where the server's ownership filter finds none of the old office's ids and writes nothing.
+  // The user sees a modal close; the database sees no acknowledgement; the tasks return at the next
+  // login. It degrades to a no-op rather than a cross-tenant write, which is the server-side ownership
+  // re-derivation doing its job, but a no-op the user reads as "I closed it" is still a bug and it is
+  // completely silent.
+
+  it("pins the fetch to the scoped office instead of trusting ambient location state", async () => {
+    setPending([task({ id: "a1" })]);
+
+    await render(true, { officeId: "office-a" });
+
+    expect(officeHeaderOf(pendingFetches()[0])).toBe("office-a");
+  });
+
+  // Explicit even for the home office. api() would otherwise fall back to reading window.location, so
+  // an unpinned request is one navigation away from resolving to a different tenant than the caller
+  // intended -- and hasOfficeHeader() means an explicit header is what stops that fallback.
+  it("pins the fetch to the HOME office when the URL carries no ?officeId", async () => {
+    setPending([task({ id: "h1" })]);
+
+    await render(true);
+
+    expect(officeHeaderOf(pendingFetches()[0])).toBe(HOME_OFFICE);
+  });
+
+  it("refetches when the office scope changes", async () => {
+    setPending([task({ id: "a1" })]);
+    await render(true, { officeId: "office-a" });
+    expect(pendingFetches()).toHaveLength(1);
+
+    await changeOfficeTo("office-b");
+
+    expect(pendingFetches()).toHaveLength(2);
+    expect(officeHeaderOf(pendingFetches()[1])).toBe("office-b");
+  });
+
+  // The auth flag describes the office it was computed under and nothing else -- nothing calls
+  // refreshUser on an office change, so it still reports the boot office forever. Gating every office
+  // on it would mean a cross-office user whose home office is quiet never sees an assignment in any
+  // other office. Where the flag cannot speak, ask the server.
+  it("fetches for a newly selected office even though the boot flag said false", async () => {
+    setPending([task({ id: "b1" })]);
+    await render(false, { officeId: "office-a" });
+    expect(pendingFetches()).toHaveLength(0);
+
+    await changeOfficeTo("office-b");
+
+    expect(pendingFetches()).toHaveLength(1);
+    expect(officeHeaderOf(pendingFetches()[0])).toBe("office-b");
+    expect(dialog()).not.toBeNull();
+  });
+
+  it("does not refetch when the office scope is unchanged", async () => {
+    setPending([task({ id: "a1" })]);
+    await render(true, { officeId: "office-a" });
+
+    await changeOfficeTo("office-a");
+
+    expect(pendingFetches()).toHaveLength(1);
+  });
+
+  it("stops showing one tenant's assignments the moment the scope moves to another", async () => {
+    setPending([task({ id: "a1", title: "Dallas roof walk" })]);
+    await render(true, { officeId: "office-a" });
+    expect(dialog()!.textContent).toContain("Dallas roof walk");
+
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === "/tasks/pending-acknowledgement") return { tasks: [], total: 0 };
+      if (path === "/tasks/acknowledge") return undefined;
+      throw new Error(`unexpected api call: ${path}`);
+    });
+    await changeOfficeTo("office-b");
+
+    expect(dialog()).toBeNull();
+  });
+
+  // THE ONE THE FINDING IS ABOUT. Whatever else happens, no acknowledgement may pair one office's task
+  // ids with another office's header -- that request writes nothing and reports success.
+  it("never posts one tenant's task ids against another tenant", async () => {
+    setPending([task({ id: "a1" }), task({ id: "a2" })]);
+    await render(true, { officeId: "office-a" });
+
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === "/tasks/pending-acknowledgement") return { tasks: [task({ id: "b1" })], total: 1 };
+      if (path === "/tasks/acknowledge") return undefined;
+      throw new Error(`unexpected api call: ${path}`);
+    });
+    await changeOfficeTo("office-b");
+
+    // Office B's own modal is what is on screen now, and closing it acknowledges B's task under B.
+    await click(buttonLabelled("Close"));
+
+    for (const call of acknowledgeCalls()) {
+      const ids = (call[1] as { json: { taskIds: string[] } }).json.taskIds;
+      const office = officeHeaderOf(call);
+      const carriesOfficeAIds = ids.some((id) => id === "a1" || id === "a2");
+      expect(carriesOfficeAIds && office !== "office-a", `${ids.join(",")} posted to ${office}`).toBe(false);
+    }
+    expect(acknowledgeCalls()).toHaveLength(1);
+    expect((acknowledgeCalls()[0]![1] as { json: { taskIds: string[] } }).json.taskIds).toEqual(["b1"]);
+    expect(officeHeaderOf(acknowledgeCalls()[0])).toBe("office-b");
+  });
+
+  it("acknowledges against the office the batch was FETCHED under, not the one in the URL now", async () => {
+    setPending([task({ id: "a1" })]);
+    await render(true, { officeId: "office-a" });
+
+    await click(buttonLabelled("Close"));
+
+    expect(officeHeaderOf(acknowledgeCalls()[0])).toBe("office-a");
+    expect((acknowledgeCalls()[0]![1] as { json: { taskIds: string[] } }).json.taskIds).toEqual(["a1"]);
+  });
+
+  it("acknowledges against the HOME office explicitly when the URL carries no ?officeId", async () => {
+    setPending([task({ id: "h1" })]);
+    await render(true);
+
+    await click(buttonLabelled("Close"));
+
+    expect(officeHeaderOf(acknowledgeCalls()[0])).toBe(HOME_OFFICE);
   });
 });
 
