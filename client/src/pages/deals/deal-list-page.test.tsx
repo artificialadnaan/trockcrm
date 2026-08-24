@@ -3065,6 +3065,71 @@ describe("DealListPage", () => {
     }
   });
 
+  it("gives the KPI destination BOTH the board's search and the list's fb_search", async () => {
+    // The destination mounts DealsListSection with the drill-down FilterBar, whose useFilterState reads
+    // the `fb_` prefix. The bare param alone narrows the board and the KPI cards while the list beneath
+    // stays wide with an empty search control — the board/list divergence, one layer down.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        const params = new URL(href, "https://x.test").searchParams;
+        expect(params.get("search")).toBe("bellemont");
+        expect(params.get("fb_search")).toBe("bellemont");
+      }
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("drops the inherited ?search from the URL once the user edits the box", async () => {
+    // The URL copy is an inbound SEED, not two-way state. Left in place it resurrects a cleared filter on
+    // the next reload — the board would widen while the URL still said search=bellemont.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&filter=active_pipeline&search=bellemont&fb_search=bellemont",
+      "director"
+    );
+
+    try {
+      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      expect(input?.value).toBe("bellemont");
+
+      await act(async () => {
+        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        valueSetter?.call(input, "");
+        input!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const url = lastSearch(view.searches);
+      expect(url).not.toContain("search=bellemont");
+      expect(url).not.toContain("fb_search=bellemont");
+      // The rest of the view survives — only the search copy is dropped.
+      expect(url).toContain("filter=active_pipeline");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it("does not attach a stale search to a stage drill-down opened with the box cleared", async () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {

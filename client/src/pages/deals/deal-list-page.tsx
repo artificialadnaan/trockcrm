@@ -15,7 +15,11 @@ import { useRepRoster } from "@/hooks/use-rep-roster";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { buildCanonicalDealBoardColumns, buildCanonicalDealStageFamilies } from "@/lib/canonical-deal-board";
-import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
+import {
+  isBoardVisibleStage,
+  DEAL_LIST_SORT_OPTIONS,
+  DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+} from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
 import { formatDealDisplayName } from "@/lib/deal-utils";
@@ -665,6 +669,10 @@ export function buildDealsPageKpiDrilldownPath(
         // page, which seeds its search box from ?search on mount, so the term stays visible there rather
         // than filtering invisibly.
         key === "search" ||
+        // ...and the same term in the LIST's namespace. The destination's DealsListSection reads `fb_`
+        // via useFilterState, so forwarding only the bare param narrows the board and the KPI cards while
+        // the list beneath them stays wide with an empty search control.
+        key === `${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search` ||
         // Office context is URL-driven: api() reads ?officeId from window.location.search and sends it as
         // x-office-id. A KPI card that drops it silently returns a cross-office viewer to their ACTIVE
         // office, so the drill-down lists a DIFFERENT office's deals than the card counted. Forward it on
@@ -1706,11 +1714,53 @@ function DealListPageContent({
    * destination has to match what was clicked. Guarded at >= 2 characters because that is the term that
    * actually narrowed the board — see hasEffectiveDealSearch on the server, which is the same rule.
    */
+  /**
+   * Typing hands ownership of the term back to component state, and drops the inbound URL copy.
+   *
+   * `search` is SEEDED from the URL once, not two-way bound (see the useState above — writing it on every
+   * keystroke would churn boardRelevantParamKey and re-fire the board sync). Left alone, that one-way
+   * seed strands a stale param: arrive at `?filter=won&search=foo`, clear the box, and the board widens
+   * while `search=foo` sits in the URL — so a reload, or a back-then-forward, silently restores a filter
+   * the user explicitly cleared. Dropping the param on the first edit makes the URL copy purely inbound:
+   * it seeds the box, then gets out of the way.
+   *
+   * `replace`, not push, so this never adds a history entry mid-typing. `fb_search` goes with it — the
+   * list's namespaced copy is written from the same term and must not outlive it either.
+   */
+  const handleSearchChange = useCallback(
+    (value: string) => {
+      setSearch(value);
+      setSearchParams(
+        (current) => {
+          if (!current.has("search") && !current.has(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`)) {
+            return current;
+          }
+          const next = new URLSearchParams(current);
+          next.delete("search");
+          next.delete(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`);
+          return next;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
   const drilldownQueryParams = useMemo(() => {
     const params = new URLSearchParams(searchParams);
     const term = debouncedSearch.trim();
-    if (term.length >= 2) params.set("search", term);
-    else params.delete("search");
+    if (term.length >= 2) {
+      params.set("search", term);
+      // AND the list's own namespace. A KPI drill-down mounts DealsListSection with the drill-down
+      // FilterBar, whose useFilterState reads the `fb_` prefix — so the bare param narrows the board and
+      // the KPI cards while the list underneath them stays wide, with its own search control empty. That
+      // is the board/list divergence this page works hard to avoid, just re-created one layer down.
+      // Writing both keeps the term VISIBLE in the list's control too, so it stays clearable there.
+      // `fb_` is a LIST_PARAM_PREFIX, stripped from boardRelevantParamKey, so this cannot churn the board.
+      params.set(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`, term);
+    } else {
+      params.delete("search");
+      params.delete(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`);
+    }
     return params;
   }, [debouncedSearch, searchParams]);
   // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
@@ -2127,7 +2177,7 @@ function DealListPageContent({
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <Input
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => handleSearchChange(event.target.value)}
             placeholder="Search deals"
             className="pl-9"
           />
