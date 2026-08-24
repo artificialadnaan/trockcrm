@@ -50,7 +50,7 @@ function AllDeptsBadge({ data, className = "" }: { data: MondayShowcaseData; cla
 }
 
 function CoverageCaption({ ladder }: { ladder: ProjectionLadder }) {
-  return <p className="mt-1 text-[11px] text-slate-400">{ladder.coverageCaption}</p>;
+  return <p className="mt-1 text-[11px] text-slate-500">{ladder.coverageCaption}</p>;
 }
 
 /**
@@ -139,7 +139,7 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                 <span className={`h-2 w-2 rounded-full ${accent.bar}`} />
                 <span className="text-sm font-semibold text-slate-700">{lane.label}</span>
               </div>
-              <span className="text-xs text-slate-400">
+              <span className="text-xs text-slate-500">
                 {laneWord}{" "}
                 {weeklyDrillable ? (
                   <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — ${laneWord}` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
@@ -150,8 +150,8 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                   <span className={`font-semibold ${accent.text} px-0.5 tabular-nums`}>{int(current)}</span>
                 )}{" "}
                 · 8wk avg <span className="tabular-nums">{avg.toFixed(1)}</span>{" "}
-                <span className={delta > 0 ? "text-emerald-600" : delta < 0 ? "text-rose-600" : "text-slate-400"}>({signed(delta)})</span>
-                {lastInProgress && <span className="ml-1 italic text-slate-400">· current week in progress</span>}
+                <span className={delta > 0 ? "text-emerald-600" : delta < 0 ? "text-rose-600" : "text-slate-500"}>({signed(delta)})</span>
+                {lastInProgress && <span className="ml-1 italic text-slate-500">· current week in progress</span>}
               </span>
             </div>
             <div className="flex h-20 items-end gap-1.5">
@@ -165,7 +165,7 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                       className={`w-full rounded-t transition-all ${spike ? "bg-amber-400" : isLast ? `${accent.bar} opacity-50` : accent.bar} ${i === lastIdx ? "ring-2 ring-slate-300 ring-offset-1" : ""}`}
                       style={{ height: `${Math.max(3, (v / max) * 64)}px` }}
                     />
-                    <span className="text-[9px] tabular-nums text-slate-400">{weeks[i]?.weekStart.slice(5)}</span>
+                    <span className="text-[9px] tabular-nums text-slate-500">{weeks[i]?.weekStart.slice(5)}</span>
                   </div>
                 );
               })}
@@ -219,7 +219,7 @@ export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
             <div className="mt-1 text-sm font-medium tabular-nums text-slate-600">
               {d.deferred ? "deferred" : usd(d.value?.amount ?? 0)}
             </div>
-            <div className="mt-0.5 text-[10px] text-slate-400">{d.deferred ? "Awaiting finance source" : basisLabel(d)}</div>
+            <div className="mt-0.5 text-[10px] text-slate-500">{d.deferred ? "Awaiting finance source" : basisLabel(d)}</div>
             {d.sparkline.length > 0 && (
               <div className="mt-3">
                 <Sparkline values={d.sparkline} spikeIndex={spikeIndex} barClass={accent.bar} highlightLast />
@@ -277,7 +277,7 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
   };
   const Th = ({ k, children }: { k: SortKey; children: ReactNode }) => (
     <th
-      className={`cursor-pointer px-3 py-2 text-right transition-colors ${sort === k ? "text-slate-800 underline decoration-2 underline-offset-4" : "text-slate-400 hover:text-slate-600"}`}
+      className={`cursor-pointer px-3 py-2 text-right transition-colors ${sort === k ? "text-slate-800 underline decoration-2 underline-offset-4" : "text-slate-500 hover:text-slate-600"}`}
       onClick={() => setSort(k)}
     >
       {children}
@@ -356,7 +356,7 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
         </tfoot>
       </table>
       </ScrollSyncX>
-      <p className="px-3 py-2 text-xs text-slate-400">Footer totals are the canonical office aggregates — the exact numbers each TOTAL drills into — so the rep rows above need not sum to them when there is unassigned activity. Click a column header to re-rank; click any number for its records.</p>
+      <p className="px-3 py-2 text-xs text-slate-500">Footer totals are the canonical office aggregates — the exact numbers each TOTAL drills into — so the rep rows above need not sum to them when there is unassigned activity. Click a column header to re-rank; click any number for its records.</p>
     </div>
   );
 }
@@ -392,7 +392,7 @@ export function VariantB3LoadLane({ data }: { data: MondayShowcaseData }) {
               stage-specific evidence B1 surfaced (leadStage-scoped) stays reachable on the consolidated B3. */}
           {rep.leadStatus.length > 0 && (
             <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
-              <span className="text-slate-400">by stage:</span>
+              <span className="text-slate-500">by stage:</span>
               {rep.leadStatus.map((ls) => (
                 <DrillNumber
                   key={ls.stageLabel}
@@ -443,7 +443,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
               <div className="rounded-lg border border-slate-300 bg-white p-2 text-center">
                 <div className="flex items-center justify-center gap-1">
                   <span className={`h-1.5 w-1.5 rounded-full ${BAND_BAR[b.band]}`} />
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[b.band]}</span>
+                  <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">{PROJECTION_BAND_LABEL[b.band]}</span>
                 </div>
                 <div className="mt-0.5 text-sm font-black tabular-nums text-slate-900">{usd(b.value)}</div>
                 <div className="mt-1 inline-block rounded bg-slate-200 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-600">
@@ -517,7 +517,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                   <div className="rounded-lg border border-slate-200 p-2 text-center">
                     <div className="flex items-center justify-center gap-1">
                       <span className={`h-1.5 w-1.5 rounded-full ${BAND_BAR[b.band]}`} />
-                      <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[b.band]}</span>
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">{PROJECTION_BAND_LABEL[b.band]}</span>
                     </div>
                     <div className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">{usd(b.value)}</div>
                     <div className="mt-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-500">
@@ -563,7 +563,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                 </div>
               </DrillNumber>
             </div>
-            <p className="mt-2 text-[10px] text-slate-400">{rep.projection.coverageCaption}</p>
+            <p className="mt-2 text-[10px] text-slate-500">{rep.projection.coverageCaption}</p>
           </div>
         );
       })}

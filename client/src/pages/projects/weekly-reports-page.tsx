@@ -39,7 +39,7 @@ const STATE_BADGE: Record<WeeklyReportWeekState, string> = {
   pending_review: "border-blue-200 bg-blue-50 text-blue-700",
   approved: "border-violet-200 bg-violet-50 text-violet-700",
   sent: "border-emerald-200 bg-emerald-50 text-emerald-700",
-  dismissed: "border-slate-200 bg-white text-slate-400",
+  dismissed: "border-slate-200 bg-white text-slate-500",
 };
 
 function fmtWeek(iso: string): string {
@@ -264,7 +264,7 @@ function StatCard(props: { label: string; value: string; meta: string; tone?: "o
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">{props.label}</p>
       <p className={`mt-1 text-[26px] font-black tabular-nums ${toneClass}`}>{props.value}</p>
-      <p className="mt-0.5 text-[11.5px] font-semibold text-slate-400">{props.meta}</p>
+      <p className="mt-0.5 text-[11.5px] font-semibold text-slate-500">{props.meta}</p>
     </div>
   );
 }
@@ -397,14 +397,14 @@ function ThisWeekTable({
                       {row.projectName}
                     </button>
                   </div>
-                  <div className="mt-0.5 text-[11.5px] font-semibold text-slate-400">
+                  <div className="mt-0.5 text-[11.5px] font-semibold text-slate-500">
                     {[row.projectNumber, row.clientName].filter(Boolean).join(" · ") || "—"}
                   </div>
                 </td>
                 <td className="px-3.5 py-3 text-slate-600">
                   {fmtWeek(row.weekOf)}
                   {!row.isCurrentWeek && (
-                    <span className="ml-1.5 text-[10.5px] font-bold uppercase tracking-wide text-slate-400">
+                    <span className="ml-1.5 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
                       backlog
                     </span>
                   )}
@@ -437,7 +437,7 @@ function ThisWeekTable({
                     >
                       <AlertTriangle className="h-3 w-3" /> Send failed
                       {row.sendAttempts > 1 && (
-                        <span className="font-semibold text-slate-400">· {row.sendAttempts} attempts</span>
+                        <span className="font-semibold text-slate-500">· {row.sendAttempts} attempts</span>
                       )}
                     </div>
                   ) : row.sendStalled ? (
@@ -463,7 +463,7 @@ function ThisWeekTable({
                     >
                       <AlertTriangle className="h-3 w-3" /> Send stuck
                       {row.sendAttempts > 0 && (
-                        <span className="font-semibold text-slate-400">
+                        <span className="font-semibold text-slate-500">
                           · {row.sendAttempts} attempt{row.sendAttempts === 1 ? "" : "s"}
                         </span>
                       )}
@@ -472,7 +472,7 @@ function ThisWeekTable({
                     // Undelivered, no error, and recent enough to still be a queued job rather than a
                     // problem. Saying "Sending…" instead of nothing is what stops a PM re-sending on it.
                     row.sendPending && (
-                      <div className="mt-1 text-[11.5px] font-semibold text-slate-400">Sending…</div>
+                      <div className="mt-1 text-[11.5px] font-semibold text-slate-500">Sending…</div>
                     )
                   )}
                 </td>
@@ -681,7 +681,7 @@ function ProjectsTable({
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Search projects, clients or project numbers"
           aria-label="Search weekly report projects"
-          className="w-full bg-transparent text-[13.5px] outline-none placeholder:text-slate-400"
+          className="w-full bg-transparent text-[13.5px] outline-none placeholder:text-slate-500"
         />
       </div>
 
@@ -758,7 +758,7 @@ function ProjectsTable({
                           {project.propertyDisplayName ?? project.dealName ?? "Untitled project"}
                         </button>
                       </div>
-                      <div className="mt-0.5 text-[11.5px] font-semibold text-slate-400">
+                      <div className="mt-0.5 text-[11.5px] font-semibold text-slate-500">
                         {project.projectNumber ?? "—"}
                       </div>
                     </td>
@@ -766,7 +766,7 @@ function ProjectsTable({
                     <td className="px-3.5 py-3 text-slate-600">{WEEKDAY_LABELS[project.cadenceWeekday] ?? "—"}</td>
                     <td className="px-3.5 py-3 text-[12.5px] text-slate-600">
                       <div>PM · {project.trockPmName ?? "Unassigned"}</div>
-                      <div className="text-slate-400">Super · {project.trockSuperName ?? "Unassigned"}</div>
+                      <div className="text-slate-500">Super · {project.trockSuperName ?? "Unassigned"}</div>
                     </td>
                     <td className="px-3.5 py-3 text-right font-bold tabular-nums text-slate-800">
                       {project.summary?.reportsSent ?? 0}
@@ -784,7 +784,7 @@ function ProjectsTable({
                         <>
                           {fmtDateTime(project.summary.lastSentAt)}
                           {project.summary.lastSentWeekOf && (
-                            <span className="ml-1.5 text-[11px] font-semibold text-slate-400">
+                            <span className="ml-1.5 text-[11px] font-semibold text-slate-500">
                               wk {fmtWeek(project.summary.lastSentWeekOf)}
                             </span>
                           )}
@@ -815,7 +815,7 @@ function ProjectsTable({
 function Th({ children, className = "" }: { children?: React.ReactNode; className?: string }) {
   return (
     <th
-      className={`px-3.5 py-2.5 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400 ${className}`}
+      className={`px-3.5 py-2.5 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-500 ${className}`}
     >
       {children}
     </th>

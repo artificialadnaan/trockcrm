@@ -62,7 +62,7 @@ function SummaryCard({
         <ScopeBadge snapshot={snapshot} />
       </div>
       <div className="mt-1 text-2xl font-extrabold tabular-nums text-slate-800">{primary}</div>
-      {sub ? <div className="text-xs tabular-nums text-slate-400">{sub}</div> : null}
+      {sub ? <div className="text-xs tabular-nums text-slate-500">{sub}</div> : null}
     </div>
   );
 }
@@ -101,7 +101,7 @@ function MoverDealChip({
       <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
         {icon}
         {title}
-        <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-400">{basis}</span>
+        <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-500">{basis}</span>
       </div>
       {deal ? (
         <div className="mt-1">
@@ -111,11 +111,11 @@ function MoverDealChip({
             {formatDealDisplayName(deal.name, deal.isChangeOrder)}
           </div>
           <div className="text-xs tabular-nums text-slate-500">
-            {usd(deal.value)} · <span className="text-slate-400">{deal.region}</span>
+            {usd(deal.value)} · <span className="text-slate-500">{deal.region}</span>
           </div>
         </div>
       ) : (
-        <div className="mt-1 text-sm text-slate-400">—</div>
+        <div className="mt-1 text-sm text-slate-500">—</div>
       )}
     </div>
   );
@@ -127,26 +127,26 @@ function MoversStrip({ movers }: { movers: RegionReportData["movers"] }) {
     <section className="space-y-2">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">What changed this week</h2>
-        <span className="text-[11px] text-slate-400">{movers.weekLabel}</span>
-        <span className="text-[10px] italic text-slate-400">always the current week — independent of the period toggle</span>
+        <span className="text-[11px] text-slate-500">{movers.weekLabel}</span>
+        <span className="text-[10px] italic text-slate-500">always the current week — independent of the period toggle</span>
       </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white p-3">
           <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
             {m && m.deltaWon >= 0 ? <TrendingUp className="h-3.5 w-3.5 text-emerald-600" /> : <TrendingDown className="h-3.5 w-3.5 text-red-600" />}
             Biggest region mover
-            <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-400">won Δ</span>
+            <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-500">won Δ</span>
           </div>
           {m ? (
             <div className="mt-1">
               <div className="text-sm font-medium text-slate-800">{m.region}</div>
               <div className={`text-xs font-semibold tabular-nums ${m.deltaWon >= 0 ? "text-emerald-700" : "text-red-700"}`}>
                 {m.deltaWon >= 0 ? "+" : "−"}
-                {usd(Math.abs(m.deltaWon))} <span className="font-normal text-slate-400">vs last week</span>
+                {usd(Math.abs(m.deltaWon))} <span className="font-normal text-slate-500">vs last week</span>
               </div>
             </div>
           ) : (
-            <div className="mt-1 text-sm text-slate-400">—</div>
+            <div className="mt-1 text-sm text-slate-500">—</div>
           )}
         </div>
         <MoverDealChip icon={<Sparkles className="h-3.5 w-3.5 text-indigo-500" />} title="Biggest new deal" basis="open" deal={movers.biggestNewDeal} />
@@ -183,7 +183,7 @@ function RegionCard({ r, onDrill }: { r: RegionRow; onDrill?: DrillFn }) {
         <Metric label="Avg deal" value={r.avgDeal == null ? "—" : usd(r.avgDeal)} />
       </div>
       <div className="mt-3">
-        <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-slate-400">8-week won trend</div>
+        <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">8-week won trend</div>
         <Sparkline values={r.sparkline} barClass={r.isUnassigned ? "bg-amber-400" : "bg-emerald-500"} highlightLast height={32} />
       </div>
       {r.isUnassigned ? (
@@ -196,9 +196,9 @@ function RegionCard({ r, onDrill }: { r: RegionRow; onDrill?: DrillFn }) {
 function Metric({ label, value, sub, onClick }: { label: string; value: string; sub?: string; onClick?: () => void }) {
   const body = (
     <>
-      <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="text-[10px] font-medium uppercase tracking-wide text-slate-500">{label}</div>
       <div className={`font-semibold tabular-nums ${onClick ? "text-sky-700 group-hover:underline" : "text-slate-800"}`}>{value}</div>
-      {sub ? <div className="text-[10px] tabular-nums text-slate-400">{sub}</div> : null}
+      {sub ? <div className="text-[10px] tabular-nums text-slate-500">{sub}</div> : null}
     </>
   );
   if (!onClick) return <div>{body}</div>;
@@ -256,10 +256,10 @@ function ForecastSection({ regions, onDrill }: { regions: RegionRow[]; onDrill?:
                     >
                       <div className="flex items-center justify-center gap-1">
                         <span className={`h-1.5 w-1.5 rounded-full ${BAND_TONE[band]}`} />
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[band]}</span>
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">{PROJECTION_BAND_LABEL[band]}</span>
                       </div>
                       <div className={`mt-0.5 text-sm font-bold tabular-nums ${drillable ? "text-sky-700 group-hover:underline" : "text-slate-800"}`}>{usd(cell.value)}</div>
-                      <div className="text-[10px] tabular-nums text-slate-400">{int(cell.count)} dated</div>
+                      <div className="text-[10px] tabular-nums text-slate-500">{int(cell.count)} dated</div>
                     </button>
                   );
                 })}
@@ -287,7 +287,7 @@ function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill?: Dri
       <div className="flex items-baseline gap-2">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Stage distribution by region</h2>
         <ScopeBadge snapshot />
-        <span className="text-[11px] text-slate-400">colour = $ value · number = deal count</span>
+        <span className="text-[11px] text-slate-500">colour = $ value · number = deal count</span>
       </div>
       <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
         <table
@@ -340,7 +340,7 @@ function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill?: Dri
           </tbody>
         </table>
       </div>
-      <div className="flex items-center gap-2 px-1 text-[10px] text-slate-400">
+      <div className="flex items-center gap-2 px-1 text-[10px] text-slate-500">
         <span>$ value</span>
         <span className="inline-flex h-2.5 w-24 rounded-full" style={{ background: "linear-gradient(to right, rgba(79,70,229,0.06), rgba(79,70,229,0.61))" }} />
         <span>low → high</span>
@@ -356,14 +356,14 @@ function TopRepsSection({ regions, onDrill }: { regions: RegionRow[]; onDrill?: 
       <div className="flex items-baseline gap-2">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Top reps within region</h2>
         <ScopeBadge />
-        <span className="text-[11px] text-slate-400">ranked by won value in the period</span>
+        <span className="text-[11px] text-slate-500">ranked by won value in the period</span>
       </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {regions.map((r) => (
           <div key={r.region} className="rounded-xl border border-slate-200 bg-white p-3.5">
             <div className="mb-2 font-semibold text-slate-800">{r.region}</div>
             {r.topReps.length === 0 ? (
-              <div className="text-xs text-slate-400">No won deals this period.</div>
+              <div className="text-xs text-slate-500">No won deals this period.</div>
             ) : (
               <ol className="space-y-1.5">
                 {r.topReps.map((rep, i) => (
