@@ -1302,18 +1302,21 @@ function DealListPageContent({
   );
 
   /**
-   * Seeded from `?search`, so a drill-down INHERITS the term that produced the number clicked.
+   * The box, seeded from `?search` and kept in agreement with it in BOTH directions.
    *
-   * The KPI cards and the kanban both read a search-narrowed board, and every KPI destination is this
-   * same page. Landing with an empty box would open a materially wider cohort than the figure clicked —
-   * the card/destination divergence this page already avoids for rep, estimator and office.
+   * A drill-down inherits the term that produced the number clicked — every KPI destination is this same
+   * page, and landing with an empty box would open a materially wider cohort than the figure clicked.
    *
-   * Seeded ONCE (lazy initial state), never continuously synced back. Writing the term to the URL on
-   * every keystroke would change boardRelevantParamKey mid-type and re-fire the board sync effect
-   * alongside this component's own debounced refetch — the double-fetch #1074 exists to remove. The box
-   * stays visible and clearable, so an inherited term is never an invisible filter.
+   * `searchUrlTermRef` is what makes two-way agreement possible without a loop: it records the term this
+   * component last put in the URL, so the sync effect below can tell an EXTERNAL change (Back/Forward, a
+   * link, another control) from the echo of its own write. Without that distinction the two effects
+   * fight — and a one-shot initializer alone is worse, because React Router keeps this component mounted
+   * across `/deals` query-only navigations: search "foo", drill down, change it to "bar", press Back, and
+   * the URL returns to "foo" while state stays "bar" and the mirror promptly rewrites the URL to "bar".
+   * Back would simply not work.
    */
   const [search, setSearch] = useState(() => searchParams.get("search") ?? "");
+  const searchUrlTermRef = useRef<string | null>(searchParams.get("search"));
   /**
    * The term the BOARD REQUEST is keyed on. The input stays on the raw `search` state so typing is
    * instant; only this settled value reaches the server, because the pipeline query materializes the
@@ -1747,30 +1750,54 @@ function DealListPageContent({
    */
   useEffect(() => {
     const term = debouncedSearch.trim();
-    const hasTerm = term.length >= 2;
-    const inSync = hasTerm ? searchParams.get("search") === term : !searchParams.has("search");
+    const desired = term.length >= 2 ? term : null;
+    // Gated on the REF, not on searchParams — and deliberately not keyed on searchParams either. Keyed on
+    // the URL, this effect re-ran on every external change and immediately wrote the box's term back over
+    // it, which is what broke Back. It now fires only when the BOX produces something new.
+    if (searchUrlTermRef.current === desired) return;
+    searchUrlTermRef.current = desired;
     // Decided BEFORE the call, and the call skipped entirely when nothing needs writing. Returning the
     // same object from inside the updater is not enough: setSearchParams still performs a replace
     // navigation, and on mount that raced the saved-view hydration and the stale-param strippers — which
     // read searchParams, rewrite it, and were silently reverted by this effect's no-op replace.
-    if (inSync) return;
     setSearchParams(
       (current) => {
         const next = new URLSearchParams(current);
-        if (hasTerm) next.set("search", term);
+        if (desired) next.set("search", desired);
         else next.delete("search");
         return next;
       },
       { replace: true }
     );
-  }, [debouncedSearch, searchParams, setSearchParams]);
+  }, [debouncedSearch, setSearchParams]);
+
+  /**
+   * The other direction: an EXTERNAL `?search` change adopts into the box.
+   *
+   * Back/Forward across `/deals` query-only navigations keeps this component mounted, so without this the
+   * initializer's one-shot seed leaves the box (and the board) on the previous term. Both effects gate on
+   * the same ref, so neither can mistake the other's write for new input and no ping-pong is possible:
+   * this one adopts only what the mirror above did not write.
+   */
+  useEffect(() => {
+    const urlTerm = searchParams.get("search");
+    if (searchUrlTermRef.current === urlTerm) return;
+    searchUrlTermRef.current = urlTerm;
+    setSearch(urlTerm ?? "");
+  }, [searchParams]);
   const drilldownQueryParams = useMemo(() => {
     const params = new URLSearchParams(searchParams);
     // `appliedSearch` — the term the board ON SCREEN was fetched with — not the one being typed. The
     // pipeline request takes seconds and useDealBoard keeps the previous response visible meanwhile, so
     // a link built from the pending term would send a user who clicked a displayed count to a different
     // population. Destinations track the data, not the input.
-    const term = appliedSearch.trim();
+    //
+    // Until a response has been recorded (board === null: first load, or a failed request) there is no
+    // such term, and `appliedSearch` is "" — indistinguishable from "a board with no search". Falling
+    // back to the URL keeps an INHERITED term on the links during that window: the KPI cards render
+    // outside the loading branch, so on `/deals?search=bellemont` they are clickable for the whole
+    // 1.6-2.5s query, and dropping the term there would open a wider cohort than the page is showing.
+    const term = (board === null ? searchParams.get("search") ?? "" : appliedSearch).trim();
     if (term.length >= 2) {
       params.set("search", term);
       // AND the list's own namespace. A KPI drill-down mounts DealsListSection with the drill-down
@@ -1785,7 +1812,7 @@ function DealListPageContent({
       params.delete(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`);
     }
     return params;
-  }, [appliedSearch, searchParams]);
+  }, [appliedSearch, board, searchParams]);
   // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
   // must land on that same cohort — not the full active pipeline (which would show a larger, different set
   // than the number on the card). Everywhere else it drills into the full active pipeline.

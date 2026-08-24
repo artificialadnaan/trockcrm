@@ -23,6 +23,7 @@ beforeAll(async () => {
       rfp_override_state text, rfp_override_decision text, rfp_override_error text,
       rfp_override_note text, rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid,
       rfp_bidboard_attempt_at timestamptz,
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
       -- The fields buildDealSearchCondition matches beyond name/number, so the search tests below
       -- exercise the REAL predicate rather than a name-only stand-in.
       scope_title text, description text, property_address text, property_city text, property_state text,
@@ -93,6 +94,7 @@ describe("getPendingRfpDeals — board text search (Greptile #1102 P1)", () => {
         rfp_override_state text, rfp_override_decision text, rfp_override_error text,
         rfp_override_note text, rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid,
         rfp_bidboard_attempt_at timestamptz,
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
         scope_title text, description text, property_address text, property_city text, property_state text,
         bid_board_customer_name text, company_id uuid, primary_contact_id uuid,
         updated_at timestamptz DEFAULT now()
@@ -144,9 +146,18 @@ describe("getPendingRfpDeals — board text search (Greptile #1102 P1)", () => {
   });
 
   it("ignores a one-character term, matching the board's own >= 2 guard", async () => {
-    const oneChar = await getPendingRfpDeals(searchDb, { search: "b" });
+    // "x" is DISCRIMINATING: it appears only in "Exterior Paint" (d013), so a threshold that wrongly
+    // accepted one character would return exactly that row and this test would fail. An earlier version
+    // used "b", which every fixture matches — applying it changed nothing, so the guard could not fire
+    // and a >= 1 mutation slipped through.
+    const oneChar = await getPendingRfpDeals(searchDb, { search: "x" });
     const unfiltered = await getPendingRfpDeals(searchDb);
     expect(oneChar.map((r) => r.id)).toEqual(unfiltered.map((r) => r.id));
+    expect(unfiltered.length).toBeGreaterThan(1);
+
+    // Sanity: the same term at two characters DOES narrow, proving the fixture can tell them apart.
+    const twoChar = await getPendingRfpDeals(searchDb, { search: "xt" });
+    expect(twoChar.map((r) => r.id)).toEqual(["00000000-0000-0000-0000-00000000d013"]);
   });
 
   it("composes with the estimator filter rather than replacing it", async () => {

@@ -2,7 +2,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { deals, users, pipelineStageConfig } from "@trock-crm/shared/schema";
 import { buildEstimatorCondition } from "./deal-filter-predicates.js";
-import { buildDealSearchCondition } from "../search/unified-search.js";
+import { buildDealSearchCondition, hasEffectiveDealSearch } from "../search/unified-search.js";
 import {
   PENDING_RFP_STATUSES,
   PENDING_RFP_ATTENTION_STATUSES,
@@ -150,9 +150,7 @@ export async function getPendingRfpDeals(
         // buildDealSearchCondition is the shared predicate the board, the deals list and the stage
         // drill-down all use, so this queue resolves the same set they do. >= 2 characters, matching
         // getDealsForPipeline's own guard — a shorter term narrows neither, so neither may narrow here.
-        ...(filters.search && filters.search.trim().length >= 2
-          ? [buildDealSearchCondition(filters.search)]
-          : []),
+        ...(hasEffectiveDealSearch(filters.search) ? [buildDealSearchCondition(filters.search!)] : []),
       ),
     )
     .orderBy(asc(deals.rfpApprovalRequestedAt));

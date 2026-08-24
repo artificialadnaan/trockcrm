@@ -346,8 +346,14 @@ async function renderPageDom(path = "/deals?scope=all", role = "admin") {
 async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admin") {
   const searches: string[] = [];
 
+  // Captured so a test can move the query string underneath the MOUNTED component, which is what
+  // Back/Forward does on this route — React Router keeps the element and only the search changes.
+  let navigateFn: ((to: string) => void) | null = null;
+
   function PageWithLocationProbe() {
     const location = useLocation();
+    const navigate = useNavigate();
+    navigateFn = navigate;
     useEffect(() => {
       searches.push(location.search);
     }, [location.search]);
@@ -382,6 +388,7 @@ async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admi
   return {
     container,
     searches,
+    navigate: (to: string) => navigateFn?.(to),
     cleanup: async () => {
       await act(async () => {
         root?.unmount();
@@ -3254,6 +3261,69 @@ describe("DealListPage", () => {
         const params = new URL(href, "https://x.test").searchParams;
         expect(params.get("search")).toBe("bellemont");
         expect(params.get("search")).not.toBe("victoria");
+      }
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("adopts an EXTERNAL ?search change into the box — Back must actually go back", async () => {
+    // React Router keeps this component mounted across /deals query-only navigations, so a one-shot
+    // initializer leaves the box on the previous term and the mirror effect then writes that stale term
+    // straight back over the URL. Back would appear to do nothing.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "",
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation("/deals?scope=all&search=bellemont", "director");
+
+    try {
+      const input = () =>
+        view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      expect(input()?.value).toBe("bellemont");
+
+      // Simulate history moving the query string underneath the mounted component.
+      await act(async () => {
+        view.navigate("/deals?scope=all&search=victoria");
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+
+      expect(input()?.value).toBe("victoria");
+      // ...and the mirror must NOT have written the stale term back over it.
+      expect(new URLSearchParams(lastSearch(view.searches)).get("search")).toBe("victoria");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("keeps an inherited term on drill-down links before the first board response lands", async () => {
+    // The KPI cards render outside the loading branch, so on /deals?search=bellemont they are clickable
+    // for the whole 1.6-2.5s pipeline query. `appliedSearch` is still "" then — indistinguishable from
+    // "a board with no search" — so without the URL fallback the links would drop the term and open a
+    // wider cohort than the page is showing.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: null,
+      appliedSearch: "",
+      loading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all&search=bellemont", "director");
+
+    try {
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        expect(new URL(href, "https://x.test").searchParams.get("search")).toBe("bellemont");
       }
     } finally {
       await view.cleanup();

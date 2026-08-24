@@ -113,7 +113,7 @@ import {
   dealDisplayDateExpr,
 } from "../shared/deal-date-scope.js";
 import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
-import { buildDealSearchCondition } from "../search/unified-search.js";
+import { buildDealSearchCondition, hasEffectiveDealSearch } from "../search/unified-search.js";
 import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import { getWtdPeriod } from "../../lib/period.js";
 import {
@@ -910,18 +910,6 @@ export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFi
       until: parseIsoDateParam(input.lostUntil),
     },
   };
-}
-
-/**
- * Does this term actually narrow a query?
- *
- * ONE definition, because two call sites depend on agreeing exactly: the board applies the search
- * predicate when this is true, and the Won YTD definition snapshot refuses to publish when it is true.
- * If those two ever disagreed, a term in the gap would narrow the Won column AND still be written to
- * `deals_dashboard.won_ytd` as the all-deals baseline. Mirrors getDeals' own >= 2 guard.
- */
-function hasEffectiveDealSearch(search: string | undefined | null): boolean {
-  return typeof search === "string" && search.trim().length >= 2;
 }
 
 function isGlobalCurrentWonYtdBoardRequest(input: {
