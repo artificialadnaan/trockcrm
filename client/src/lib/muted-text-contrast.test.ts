@@ -42,6 +42,72 @@ const ICON = /\bh-\d(?:\.\d)?\s+w-\d(?:\.\d)?\b|\bsize-\d\b/;
  */
 const KNOWN_REMAINING = 142;
 
+
+/** Tailwind slate scale + white, as RGB. Only the tokens this codebase actually pairs. */
+const PALETTE: Record<string, [number, number, number]> = {
+  white: [255, 255, 255],
+  "slate-50": [248, 250, 252],
+  "slate-100": [241, 245, 249],
+  "slate-200": [226, 232, 240],
+  "slate-300": [203, 213, 225],
+  "slate-400": [148, 163, 184],
+  "slate-500": [100, 116, 139],
+  "slate-600": [71, 85, 105],
+  "slate-700": [51, 65, 85],
+  "slate-800": [30, 41, 59],
+  "slate-900": [15, 23, 42],
+  "slate-950": [2, 6, 23],
+};
+
+function relativeLuminance([r, g, b]: [number, number, number]): number {
+  const channel = (v: number) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+function contrast(fg: [number, number, number], bg: [number, number, number]): number {
+  const a = relativeLuminance(fg);
+  const b = relativeLuminance(bg);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+/**
+ * Foreground/background pairs stated together in one class string, with their measured contrast.
+ *
+ * TWO EXCLUSIONS, both learned from false positives this scanner produced on its first run:
+ *   * class strings containing a TERNARY are skipped. `${dark ? "bg-white/20 text-white" : "…"}` yielded a
+ *     "text-white on bg-white at 1.0:1" report seven times over — the tokens are real but they belong to
+ *     opposite branches, and nothing static can attribute them.
+ *   * tokens carrying an OPACITY modifier (`bg-white/70`) are skipped. The rendered colour depends on
+ *     whatever is behind it, so the pair is not decidable here.
+ *
+ * What survives is a pair genuinely applied to one element, which is the only kind worth asserting on.
+ */
+function statedPairs(source: string): { bg: string; fg: string; ratio: number; line: number }[] {
+  const out: { bg: string; fg: string; ratio: number; line: number }[] = [];
+  source.split("\n").forEach((line, index) => {
+    if (!SMALL_TEXT.test(line)) return;
+    for (const [, classes] of line.matchAll(/"([^"]*)"/g)) {
+      if (classes.includes("?")) continue;
+      const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(classes);
+      const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(classes);
+      if (!bg || !fg) continue;
+      const bgColor = PALETTE[bg[1]!];
+      const fgColor = PALETTE[fg[1]!];
+      if (!bgColor || !fgColor) continue;
+      out.push({
+        bg: bg[1]!,
+        fg: fg[1]!,
+        ratio: Math.round(contrast(fgColor, bgColor) * 100) / 100,
+        line: index + 1,
+      });
+    }
+  });
+  return out;
+}
+
 function smallSlate400Sites(): string[] {
   const found: string[] = [];
   const walk = (dir: string): void => {
@@ -96,17 +162,41 @@ describe("muted text does not get quieter", () => {
     ).toBeGreaterThan(KNOWN_REMAINING - 10);
   });
 
-  it("leaves the audited pages clean, which is what was actually verified", () => {
-    // The three files whose failures were measured in the browser. Everything else is a count; these are a
-    // claim, so they are asserted rather than trusted to the ratchet.
+  it("leaves the audited pages CONTRAST-clean, not merely free of one token", () => {
+    // THE ASSERTION CODEX'S REVIEW FORCED, and it is the difference between checking a fix and checking a
+    // symptom. The first version asserted only that `text-slate-400` was gone from these files — so
+    // swapping it for `text-slate-500` satisfied the guard while the badges on `bg-slate-100` were still
+    // 4.34:1, under the 4.5 they need. The test would have certified them as clean. A guard that reads the
+    // TOKEN instead of the OUTCOME is how a fix gets marked done while the defect is still on screen.
+    //
+    // This computes the actual ratio for every foreground/background pair stated together on small text in
+    // the three files whose failures were measured in a browser.
     const audited = [
       "pages/projects/weekly-reports-page.tsx",
       "pages/reports/monday-showcase/variants.tsx",
       "pages/reports/region-report-page.tsx",
     ];
-    const dirty = smallSlate400Sites().filter((site) =>
-      audited.some((file) => site.startsWith(file)),
+
+    const failures: string[] = [];
+    for (const file of audited) {
+      const source = fs.readFileSync(path.join(CLIENT_SRC, file), "utf8");
+      for (const pair of statedPairs(source)) {
+        if (pair.ratio < 4.5) {
+          failures.push(`${file}:${pair.line} text-${pair.fg} on bg-${pair.bg} → ${pair.ratio}:1`);
+        }
+      }
+    }
+
+    expect(failures, "audited pages still carry small text below the 4.5:1 AA minimum").toEqual([]);
+  });
+
+  it("still finds pairs to judge in those files — an empty scan would assert nothing", () => {
+    // The scanner skips ternaries and opacity-modified tokens, both for good reason. Skip too much and
+    // the assertion above passes over a file it never actually read.
+    const source = fs.readFileSync(
+      path.join(CLIENT_SRC, "pages/reports/region-report-page.tsx"),
+      "utf8",
     );
-    expect(dirty, "these audited files still carry small-text slate-400").toEqual([]);
+    expect(statedPairs(source).length).toBeGreaterThanOrEqual(3);
   });
 });

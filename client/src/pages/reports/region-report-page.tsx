@@ -32,7 +32,7 @@ function ScopeBadge({ snapshot }: { snapshot?: boolean }) {
   return (
     <span
       className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
-        snapshot ? "bg-slate-100 text-slate-500" : "bg-indigo-50 text-indigo-600"
+        snapshot ? "bg-slate-100 text-slate-600" : "bg-indigo-50 text-indigo-600"
       }`}
       title={snapshot ? "A live snapshot — does NOT change with the period toggle" : "Windowed by the selected period"}
     >
@@ -101,7 +101,7 @@ function MoverDealChip({
       <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
         {icon}
         {title}
-        <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-500">{basis}</span>
+        <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-600">{basis}</span>
       </div>
       {deal ? (
         <div className="mt-1">
@@ -135,7 +135,7 @@ function MoversStrip({ movers }: { movers: RegionReportData["movers"] }) {
           <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
             {m && m.deltaWon >= 0 ? <TrendingUp className="h-3.5 w-3.5 text-emerald-600" /> : <TrendingDown className="h-3.5 w-3.5 text-red-600" />}
             Biggest region mover
-            <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-500">won Δ</span>
+            <span className="ml-auto rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-600">won Δ</span>
           </div>
           {m ? (
             <div className="mt-1">
@@ -368,7 +368,7 @@ function TopRepsSection({ regions, onDrill }: { regions: RegionRow[]; onDrill?: 
               <ol className="space-y-1.5">
                 {r.topReps.map((rep, i) => (
                   <li key={rep.repId ?? `unassigned-${i}`} className="flex items-center gap-2 text-sm">
-                    <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-500">
+                    <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-600">
                       {i + 1}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-slate-700">{rep.repName}</span>

@@ -303,7 +303,7 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
           {rows.map((r, i) => (
             <tr key={r.repId ?? "unassigned"} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
               <td className="px-3 py-2.5">
-                <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-500">{i + 1}</span>
+                <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-600">{i + 1}</span>
                 <span className="font-medium text-slate-700">{r.repName}</span>
               </td>
               <td className="px-3 py-2.5 text-right">
@@ -520,7 +520,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                       <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">{PROJECTION_BAND_LABEL[b.band]}</span>
                     </div>
                     <div className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">{usd(b.value)}</div>
-                    <div className="mt-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-500">
+                    <div className="mt-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-600">
                       {int(b.count)} dated
                     </div>
                   </div>
