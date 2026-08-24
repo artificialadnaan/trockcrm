@@ -188,6 +188,14 @@ describe("deal routes scope defaults", () => {
     );
   });
 
+  it("rejects a repeated ?search with a 400 instead of throwing a 500 downstream", async () => {
+    // Express aggregates a repeated key into an array, and the service's `.trim()` on an array throws a
+    // TypeError that surfaces as an opaque 500. readOptionalStringParam answers with a named 400.
+    await expect(
+      invokeRoute("/pipeline", { includeDd: "true", search: ["a", "b"] as unknown as string })
+    ).rejects.toMatchObject({ statusCode: 400, message: "search must be a single value" });
+  });
+
   it("leaves search undefined when the board sends no term", async () => {
     const { req } = await invokeRoute("/pipeline", { includeDd: "true" });
     expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(

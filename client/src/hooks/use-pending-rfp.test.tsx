@@ -79,6 +79,55 @@ describe("usePendingRfp", () => {
     expect(apiMock).toHaveBeenCalledWith("/deals/pending-rfp?estimatorId=est-1");
   });
 
+  it("forwards ?search so the queue matches the search-narrowed count that opened it", async () => {
+    // Same contract as the estimator filter above. The board's text search is ANDed into the same common
+    // conditions, so this column's count is search-narrowed; a queue that dropped the term would list
+    // deals the number never counted (Greptile #1102 P1).
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/deals/pending-rfp?officeId=A&search=bellemont%20victoria"] },
+          createElement(Harness)
+        )
+      );
+    });
+    const url = String(apiMock.mock.calls[0]![0]);
+    expect(new URL(url, "https://x.test").searchParams.get("search")).toBe("bellemont victoria");
+  });
+
+  it("forwards BOTH dimensions when the column was estimator-scoped and searched", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/deals/pending-rfp?estimatorId=est-1&search=bellemont"] },
+          createElement(Harness)
+        )
+      );
+    });
+    const params = new URL(String(apiMock.mock.calls[0]![0]), "https://x.test").searchParams;
+    expect(params.get("estimatorId")).toBe("est-1");
+    expect(params.get("search")).toBe("bellemont");
+  });
+
+  it("omits a one-character ?search, matching the server's >= 2 guard", async () => {
+    // Sending it would ask for a narrowing the board never applied.
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/deals/pending-rfp?search=b"] },
+          createElement(Harness)
+        )
+      );
+    });
+    expect(apiMock).toHaveBeenCalledWith("/deals/pending-rfp");
+  });
+
   it("ignores a stale out-of-order response from an overlapping refetch (latest wins)", async () => {
     // Generic overlapping-refetch guard (same office): three overlapping fetches, only the latest may
     // write state. The A→B office-switch path is covered by the navigation test below.

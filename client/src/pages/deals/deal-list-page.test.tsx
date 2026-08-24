@@ -1629,11 +1629,24 @@ describe("DealListPage", () => {
         wonQueryParams: new URLSearchParams("won_preset=30&won_since=2026-04-01&won_until=2026-04-30"),
       })
     ).toBe("/deals?filter=won&scope=team&period=last_month");
+    // `search` is now FORWARDED, reversing Codex #600 P2 — and the premise it rested on is what changed,
+    // not the principle. #600 dropped the term because nothing on the destination displayed it: the page
+    // hard-coded an empty search box, so an inherited `?search` would have been an INVISIBLE filter, the
+    // very thing that review was about. The page now seeds that box from `?search`, so the term arrives
+    // visible and clearable. It has to arrive at all, because the board's search narrows the column
+    // aggregates and boardSummary these KPI cards read — dropping it opens a wider cohort than the number
+    // clicked. `period` and the rep dimension are unaffected.
     expect(
       buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
         queryParams: new URLSearchParams("assignedRepId=rep-1&period=mtd&search=roof"),
       })
-    ).toBe("/deals?filter=active_pipeline&scope=all&assignedRepId=rep-1&period=mtd"); // rep + period preserved; search dropped (Codex #600 P2)
+    ).toBe("/deals?filter=active_pipeline&scope=all&assignedRepId=rep-1&period=mtd&search=roof");
+    // The allowlist is still an allowlist, not a pass-through.
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("regionId=region-9&dl_page=3"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all");
     expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
       "/deals?filter=at_risk&scope=mine"
     );
@@ -1644,7 +1657,7 @@ describe("DealListPage", () => {
       buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
         queryParams: new URLSearchParams("estimatorId=est-1&search=roof"),
       })
-    ).toBe("/deals?filter=active_pipeline&scope=all&estimatorId=est-1");
+    ).toBe("/deals?filter=active_pipeline&scope=all&estimatorId=est-1&search=roof");
     // Estimator wins when a URL carries both, matching how the page reads them — otherwise a shared
     // drill-down link hands on the owner param the page had suppressed.
     expect(
@@ -2990,10 +3003,63 @@ describe("DealListPage", () => {
         header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       });
 
-      // The column's count is search-narrowed; a destination that ignored the term would list the whole
-      // stage and the affordance's number would not survive the click.
+      // HALF the chain, and only half: this file MOCKS buildDealStageWorkspacePath, so it can prove the
+      // page hands the term over but NOT that the term survives into the URL. That builder applies an
+      // allowlist, and the first cut of this change omitted `search` from it — this test passed against a
+      // no-op. The other half ("forwards the board's search term to the stage drill-down") asserts the
+      // GENERATED PATH against the real builder in pipeline-terminal-filters.test.ts. Neither test is
+      // sufficient alone; do not delete one without moving its assertion.
       const queryParams = mocks.buildDealStageWorkspacePathMock.mock.lastCall?.[0]?.queryParams;
       expect(new URLSearchParams(queryParams).get("search")).toBe("bellemont");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("seeds the search box from ?search so an inherited term is visible, not an invisible filter", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all&filter=active_pipeline&search=bellemont", "director");
+
+    try {
+      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      expect(input?.value).toBe("bellemont");
+      // And it must actually reach the board request, or the box would show a term the board ignored.
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+      expect((mocks.useDealBoardMock.mock.lastCall?.[8] as { search?: string })?.search).toBe("bellemont");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("carries the active search into the KPI drill-down destinations", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      // The KPI cards read search-narrowed aggregates, so their links must hold the same population.
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        expect(new URL(href, "https://x.test").searchParams.get("search")).toBe("bellemont");
+      }
     } finally {
       await view.cleanup();
     }

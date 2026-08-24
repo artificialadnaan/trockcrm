@@ -658,6 +658,13 @@ export function buildDealsPageKpiDrilldownPath(
         // deals" must open a destination holding exactly those; forwarding only assignedRepId widens the
         // drill-down back to every estimator and the destination stops reconciling with the card.
         key === "estimatorId" ||
+        // The board's text search narrows the WHOLE payload — the column aggregates and the boardSummary
+        // these three KPI cards read, not just the kanban cards. So a searched Active Pipeline / Won /
+        // At Risk card displays a matching-subset number, and a destination without the term opens a
+        // materially wider cohort than the figure that was clicked. Every KPI destination is this same
+        // page, which seeds its search box from ?search on mount, so the term stays visible there rather
+        // than filtering invisibly.
+        key === "search" ||
         // Office context is URL-driven: api() reads ?officeId from window.location.search and sends it as
         // x-office-id. A KPI card that drops it silently returns a cross-office viewer to their ACTIVE
         // office, so the drill-down lists a DIFFERENT office's deals than the card counted. Forward it on
@@ -1273,7 +1280,19 @@ function DealListPageContent({
     [userId, effectiveOfficeId],
   );
 
-  const [search, setSearch] = useState("");
+  /**
+   * Seeded from `?search`, so a drill-down INHERITS the term that produced the number clicked.
+   *
+   * The KPI cards and the kanban both read a search-narrowed board, and every KPI destination is this
+   * same page. Landing with an empty box would open a materially wider cohort than the figure clicked —
+   * the card/destination divergence this page already avoids for rep, estimator and office.
+   *
+   * Seeded ONCE (lazy initial state), never continuously synced back. Writing the term to the URL on
+   * every keystroke would change boardRelevantParamKey mid-type and re-fire the board sync effect
+   * alongside this component's own debounced refetch — the double-fetch #1074 exists to remove. The box
+   * stays visible and clearable, so an inherited term is never an invisible filter.
+   */
+  const [search, setSearch] = useState(() => searchParams.get("search") ?? "");
   /**
    * The term the BOARD REQUEST is keyed on. The input stays on the raw `search` state so typing is
    * instant; only this settled value reaches the server, because the pipeline query materializes the
@@ -1672,6 +1691,28 @@ function DealListPageContent({
     non_service: countAtRiskDeals(kpiAtRiskColumns, "non_service", boardAtRiskByStageSlug),
     all: countAtRiskDeals(kpiAtRiskColumns, "all", boardAtRiskByStageSlug),
   };
+  /**
+   * The page's URL params PLUS the active board search — the query context every drill-down inherits.
+   *
+   * The term lives in component state rather than the URL (see the `search` useState for why it is not
+   * synced back), so it does not ride along in `searchParams` the way rep/estimator/office do. Every
+   * destination below is built from a number the SEARCHED board produced, so all of them have to carry
+   * it or they open a wider cohort than the figure that was clicked.
+   *
+   * ONE merge, used by the KPI cards and the stage drill-down alike. Doing it per call site is how five
+   * of the six ended up forwarding it and the sixth silently not.
+   *
+   * `debouncedSearch`, not `search`: the displayed numbers were computed from the debounced term, and the
+   * destination has to match what was clicked. Guarded at >= 2 characters because that is the term that
+   * actually narrowed the board — see hasEffectiveDealSearch on the server, which is the same rule.
+   */
+  const drilldownQueryParams = useMemo(() => {
+    const params = new URLSearchParams(searchParams);
+    const term = debouncedSearch.trim();
+    if (term.length >= 2) params.set("search", term);
+    else params.delete("search");
+    return params;
+  }, [debouncedSearch, searchParams]);
   // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
   // must land on that same cohort — not the full active pipeline (which would show a larger, different set
   // than the number on the card). Everywhere else it drills into the full active pipeline.
@@ -1679,23 +1720,23 @@ function DealListPageContent({
     activePipelineDrilldownFilter(dashboardView.boardMode, atRiskRouteBucket),
     scope,
     undefined,
-    { queryParams: searchParams }
+    { queryParams: drilldownQueryParams }
   );
   const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod, {
-    queryParams: searchParams,
+    queryParams: drilldownQueryParams,
   });
   // One destination per bucket, built through atRiskFilterForRouteBucket — the inverse of the
   // atRiskRouteBucketForFilter the destination page uses to narrow its board and list. That round trip
   // is the card↔list contract: whatever bucket produced the number also produces the rows.
   const atRiskDestinations: Record<AtRiskRouteBucket, string> = {
     service: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("service"), scope, undefined, {
-      queryParams: searchParams,
+      queryParams: drilldownQueryParams,
     }),
     non_service: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("non_service"), scope, undefined, {
-      queryParams: searchParams,
+      queryParams: drilldownQueryParams,
     }),
     all: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("all"), scope, undefined, {
-      queryParams: searchParams,
+      queryParams: drilldownQueryParams,
     }),
   };
   const wonCaption =
@@ -1800,32 +1841,20 @@ function DealListPageContent({
 
   const openStage = (column: DealBoardColumn) => {
     if (column.stage.slug === "pending_rfp") {
-      // Preserve office context (?officeId=…) so a cross-office viewer stays in the same office.
-      const qs = searchParams.toString();
+      // Preserve office context (?officeId=…) so a cross-office viewer stays in the same office, and the
+      // active search — this column's count is search-narrowed like every other, so the queue it opens
+      // has to be too (the /deals/pending-rfp route applies the same shared predicate).
+      const qs = drilldownQueryParams.toString();
       navigate(qs ? `/deals/pending-rfp?${qs}` : "/deals/pending-rfp");
       return;
     }
     /**
-     * Carry the active board search into the stage drill-down.
-     *
-     * The term is component state, not a URL param, so it does not ride along in `searchParams` the way
-     * the rep/estimator/date dimensions do. Without this a searched column's own affordance breaks its
-     * promise: "Showing 50 of 87 — view all 87" opens a stage page listing all 312, because the column
-     * count is now search-narrowed while the destination was not.
-     *
-     * `debouncedSearch`, not `search` — the board's numbers were computed from the debounced term, and the
-     * destination has to match the number the user clicked. Guarded at >= 2 characters for the same
-     * reason: that is the term that actually narrowed the board (see getDealsForPipeline). The stage page
-     * reads a bare `search` param and normalizes it into its FilterBar's fb_search.
+     * `drilldownQueryParams`, not the raw `searchParams`: a searched column's affordance must keep its
+     * promise. "Showing 50 of 87 — view all 87" has to open those 87, not the stage's full 312, because
+     * the column count is search-narrowed. The stage page reads a bare `search` param and normalizes it
+     * into its FilterBar's fb_search, so the term stays visible and clearable there.
      */
-    const stageParams = new URLSearchParams(searchParams);
-    const boardSearchTerm = debouncedSearch.trim();
-    if (boardSearchTerm.length >= 2) {
-      stageParams.set("search", boardSearchTerm);
-    } else {
-      stageParams.delete("search");
-    }
-    navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, stageParams));
+    navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, drilldownQueryParams));
   };
 
   useEffect(() => {

@@ -357,7 +357,16 @@ export function buildDealStageWorkspacePath(input: {
       if (key === "assignedRepId" && hasEstimator) continue;
       // estimatorId rides along with assignedRepId: a stage column counted under an estimator filter must
       // open a stage page holding the same set, or the drill-down stops reconciling with the board.
-      if (key === "assignedRepId" || key === "estimatorId" || key.startsWith("estimate_sent_")) {
+      // `search` rides along for the same reason: the board's column count is search-narrowed, so its
+      // "Showing 50 of 87 — view all 87" must open those 87 and not the whole stage. This allowlist is
+      // the ONLY thing that reaches the generated URL — a caller setting a key that is not named here is
+      // silently dropped, which is exactly how the first cut of this shipped as a no-op.
+      if (
+        key === "assignedRepId" ||
+        key === "estimatorId" ||
+        key === "search" ||
+        key.startsWith("estimate_sent_")
+      ) {
         params.set(key, value);
       }
     }

@@ -114,6 +114,21 @@ export function PendingRfpPage() {
   const location = useLocation();
   const navigate = useNavigate();
 
+  // The board search this queue was opened under, if any. Guarded at >= 2 characters so the chip only
+  // ever claims a narrowing the server actually applied (usePendingRfp and getPendingRfpDeals use the
+  // same threshold) — a shorter term filters nothing and must not be advertised as if it did.
+  const activeSearch = useMemo(() => {
+    const term = (new URLSearchParams(location.search).get("search") ?? "").trim();
+    return term.length >= 2 ? term : null;
+  }, [location.search]);
+  // Clearing drops ONLY the search, keeping office and estimator context intact.
+  const clearSearchTo = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    params.delete("search");
+    const query = params.toString();
+    return query ? `${location.pathname}?${query}` : location.pathname;
+  }, [location.pathname, location.search]);
+
   const rows = useMemo(() => {
     const list = (deals ?? []).map((deal) => {
       const ageDays = computeAgeDays(deal.triggeredAt);
@@ -151,6 +166,27 @@ export function PendingRfpPage() {
           <p className="text-sm text-muted-foreground">
             Deals awaiting RFP approval — visible to everyone in your office.
           </p>
+          {/*
+            An inherited board search is SHOWN, never applied silently. This queue is opened by clicking
+            the board's Pending RFP column, whose count is search-narrowed, so the term has to travel with
+            it or the number and this list disagree. But a filter the page cannot see or undo is its own
+            bug — the reason this term was deliberately dropped from drill-downs before there was anywhere
+            to display it. Hence a labelled chip with a way out.
+          */}
+          {activeSearch && (
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-muted-foreground">Filtered by search:</span>
+              <span className="rounded-full bg-slate-100 px-2.5 py-0.5 font-semibold text-slate-700">
+                {activeSearch}
+              </span>
+              <Link
+                to={clearSearchTo}
+                className="rounded font-semibold text-brand-red underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+              >
+                Clear
+              </Link>
+            </p>
+          )}
         </div>
         <Button
           variant="outline"

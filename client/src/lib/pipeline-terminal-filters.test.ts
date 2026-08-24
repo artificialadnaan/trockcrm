@@ -284,15 +284,42 @@ describe("buildDealStageWorkspacePath (board column -> stage drill-down)", () =>
     expect(path).toContain("assignedRepId=rep-1");
   });
 
+  it("forwards the board's search term to the stage drill-down", () => {
+    // The board's column count is search-narrowed (getDealsForPipeline applies the term to the column
+    // AGGREGATE, not just the cards), so "Showing 50 of 87 — view all 87" has to open those 87.
+    //
+    // This assertion is on the GENERATED PATH deliberately. The page-level test can only see the object
+    // handed to this builder, because it mocks it — and the first cut of this change passed that test
+    // while shipping a no-op, since `search` was not in the allowlist below and never reached the URL.
+    // The allowlist is the artifact; the call site is only its representation.
+    const path = buildDealStageWorkspacePath({
+      stageId: "stage-1",
+      scope: "all",
+      filters: noDates,
+      queryParams: new URLSearchParams("search=bellemont"),
+    });
+    expect(path).toContain("search=bellemont");
+  });
+
+  it("percent-encodes a multi-word search term rather than emitting a broken query string", () => {
+    const path = buildDealStageWorkspacePath({
+      stageId: "stage-1",
+      scope: "all",
+      filters: noDates,
+      queryParams: new URLSearchParams("search=bellemont victoria"),
+    });
+    expect(new URL(path, "https://x.test").searchParams.get("search")).toBe("bellemont victoria");
+  });
+
   it("still drops unrelated params, so the allowlist has not become a pass-through", () => {
     const path = buildDealStageWorkspacePath({
       stageId: "stage-1",
       scope: "all",
       filters: noDates,
-      queryParams: new URLSearchParams("estimatorId=est-1&search=roof&period=mtd"),
+      queryParams: new URLSearchParams("estimatorId=est-1&period=mtd&regionId=region-9"),
     });
     expect(path).toContain("estimatorId=est-1");
-    expect(path).not.toContain("search=");
     expect(path).not.toContain("period=");
+    expect(path).not.toContain("regionId=");
   });
 });

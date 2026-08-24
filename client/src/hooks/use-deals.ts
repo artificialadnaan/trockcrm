@@ -1493,10 +1493,20 @@ export function usePendingRfp() {
     // string here — so requesting the unfiltered queue made the destination list every pending RFP under
     // a count that had been scoped to one estimator. `search` is already this callback's dependency, so
     // changing the filter refetches.
-    const estimatorId = new URLSearchParams(search).get("estimatorId");
-    const path = estimatorId
-      ? `/deals/pending-rfp?estimatorId=${encodeURIComponent(estimatorId)}`
-      : "/deals/pending-rfp";
+    //
+    // The board's TEXT search rides along for exactly the same reason, and through the same door: it is
+    // ANDed into those common conditions too, so this column's count is search-narrowed and a queue that
+    // ignored the term would list deals the number never counted.
+    const inbound = new URLSearchParams(search);
+    const outbound = new URLSearchParams();
+    const estimatorId = inbound.get("estimatorId");
+    if (estimatorId) outbound.set("estimatorId", estimatorId);
+    // Guarded at >= 2 characters to match the server's own rule, so this never asks for a narrowing the
+    // board did not apply. URLSearchParams handles the encoding.
+    const boardSearch = (inbound.get("search") ?? "").trim();
+    if (boardSearch.length >= 2) outbound.set("search", boardSearch);
+    const query = outbound.toString();
+    const path = query ? `/deals/pending-rfp?${query}` : "/deals/pending-rfp";
     return api<{ deals: PendingRfpDeal[] }>(path)
       .then((r) => {
         if (isCurrent()) setDeals(r.deals);

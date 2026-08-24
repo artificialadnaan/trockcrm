@@ -912,11 +912,28 @@ export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFi
   };
 }
 
+/**
+ * Does this term actually narrow a query?
+ *
+ * ONE definition, because two call sites depend on agreeing exactly: the board applies the search
+ * predicate when this is true, and the Won YTD definition snapshot refuses to publish when it is true.
+ * If those two ever disagreed, a term in the gap would narrow the Won column AND still be written to
+ * `deals_dashboard.won_ytd` as the all-deals baseline. Mirrors getDeals' own >= 2 guard.
+ */
+function hasEffectiveDealSearch(search: string | undefined | null): boolean {
+  return typeof search === "string" && search.trim().length >= 2;
+}
+
 function isGlobalCurrentWonYtdBoardRequest(input: {
   scope: WorkspaceScope | undefined;
   assignedRepId: string | undefined;
   /** Any estimator narrowing disqualifies the request, exactly as an owner filter does — see below. */
   estimatorId: string | undefined;
+  /**
+   * The board's text search, raw. Judged by the SAME >= 2 character rule getDealsForPipeline applies
+   * when deciding whether to narrow, so "eligible" here can never disagree with "narrowed" there.
+   */
+  search: string | undefined;
   wonPeriodFrom: string | null;
   wonPeriodTo: string | null;
   wonSince: string | null;
@@ -940,6 +957,12 @@ function isGlobalCurrentWonYtdBoardRequest(input: {
     // not just the owner one. An estimator-filtered all/YTD board would otherwise write that person's
     // subset over deals_dashboard.won_ytd and hold it there until the next unfiltered YTD request.
     !input.estimatorId &&
+    // A TEXT SEARCH narrows exactly as hard as an owner or estimator filter, and is far easier to
+    // trigger: it is a box on the default All-scope board, and that board's default period IS YTD. Left
+    // out, typing two characters would write the matching subset's count/value over the published
+    // all-deals snapshot and hold it there until the next unsearched YTD request — which is precisely
+    // the input the won-metric reduction alert watches, so it would also fire a false alarm.
+    !hasEffectiveDealSearch(input.search) &&
     input.wonPeriodFrom === ytd.from &&
     input.wonPeriodTo === ytd.to &&
     terminalBoundsMatchYtd
@@ -4103,8 +4126,8 @@ export async function getDealsForPipeline(
    * keystroke of every search. Lifecycle-agnostic and read-only — it widens no visibility, so it composes
    * with the scope predicate above rather than competing with it.
    */
-  if (filters?.search && filters.search.trim().length >= 2) {
-    commonConditions.push(buildDealSearchCondition(filters.search));
+  if (hasEffectiveDealSearch(filters?.search)) {
+    commonConditions.push(buildDealSearchCondition(filters!.search!));
   }
 
   const responseStages = stages.filter((stage) => {
@@ -4469,6 +4492,7 @@ export async function getDealsForPipeline(
       scope: filters?.scope,
       assignedRepId: filters?.assignedRepId,
       estimatorId: filters?.estimatorId,
+      search: filters?.search,
       wonPeriodFrom,
       wonPeriodTo,
       wonSince: wonSignedDateSince,

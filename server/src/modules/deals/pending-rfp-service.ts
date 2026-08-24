@@ -2,6 +2,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { deals, users, pipelineStageConfig } from "@trock-crm/shared/schema";
 import { buildEstimatorCondition } from "./deal-filter-predicates.js";
+import { buildDealSearchCondition } from "../search/unified-search.js";
 import {
   PENDING_RFP_STATUSES,
   PENDING_RFP_ATTENTION_STATUSES,
@@ -96,7 +97,7 @@ async function opportunityStageIds(tenantDb: any): Promise<string[]> {
 // NO office WHERE). Returns the Pending-RFP bucket oldest-first.
 export async function getPendingRfpDeals(
   tenantDb: any,
-  filters: { estimatorId?: string } = {},
+  filters: { estimatorId?: string; search?: string } = {},
 ): Promise<PendingRfpDeal[]> {
   const oppStageIds = await opportunityStageIds(tenantDb);
   if (oppStageIds.length === 0) return [];
@@ -141,6 +142,17 @@ export async function getPendingRfpDeals(
         // rep-filtered column has always opened an unfiltered queue. Left alone deliberately rather than
         // silently altering behaviour outside this PR's scope; worth fixing separately.
         ...(filters.estimatorId ? [buildEstimatorCondition(filters.estimatorId)] : []),
+        // Same reasoning as the estimator filter directly above, for the board's TEXT search. The Pending
+        // RFP column's count and preview are narrowed by it (getDealsForPipeline puts the predicate on
+        // commonConditions, which this column's own query shares), so a search-narrowed count that opened
+        // the complete queue would repeat the exact divergence that filter exists to close.
+        //
+        // buildDealSearchCondition is the shared predicate the board, the deals list and the stage
+        // drill-down all use, so this queue resolves the same set they do. >= 2 characters, matching
+        // getDealsForPipeline's own guard — a shorter term narrows neither, so neither may narrow here.
+        ...(filters.search && filters.search.trim().length >= 2
+          ? [buildDealSearchCondition(filters.search)]
+          : []),
       ),
     )
     .orderBy(asc(deals.rfpApprovalRequestedAt));
