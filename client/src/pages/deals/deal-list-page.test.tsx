@@ -3302,6 +3302,52 @@ describe("DealListPage", () => {
     }
   });
 
+  it("never requests a board that pairs a NEW filter with the OLD search term", async () => {
+    // A single history navigation can move `search` AND another board param at once. With the term read
+    // from component state it arrived one effect late, so the hook re-keyed on the new filters while
+    // still holding the old term — one pipeline request for a cohort nobody asked for (briefly rendered),
+    // then a second, correct one. Reading the settled term from the URL makes the two move together.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "bellemont",
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&search=bellemont&assignedRepId=rep-old",
+      "director"
+    );
+
+    try {
+      await act(async () => {
+        view.navigate("/deals?scope=all&search=victoria&assignedRepId=rep-new");
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+
+      // Positional args: scope, includeDd, terminalDateFilters, previewLimit, wonPeriodRange,
+      // assignedRepId, estimateSentDateRange, estimatorId, options.
+      const badPairing = mocks.useDealBoardMock.mock.calls.filter(
+        (call) => call[5] === "rep-new" && (call[8] as { search?: string } | undefined)?.search === "bellemont"
+      );
+      expect(
+        badPairing,
+        "a request combined the new rep with the previous search term"
+      ).toEqual([]);
+
+      // And the destination combination WAS requested.
+      const good = mocks.useDealBoardMock.mock.calls.filter(
+        (call) => call[5] === "rep-new" && (call[8] as { search?: string } | undefined)?.search === "victoria"
+      );
+      expect(good.length).toBeGreaterThan(0);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it("keeps an inherited term on drill-down links before the first board response lands", async () => {
     // The KPI cards render outside the loading branch, so on /deals?search=bellemont they are clickable
     // for the whole 1.6-2.5s pipeline query. `appliedSearch` is still "" then — indistinguishable from

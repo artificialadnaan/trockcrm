@@ -1444,7 +1444,15 @@ function DealListPageContent({
     // the estimator argument lands in the right position.
     undefined,
     selectedEstimatorFilter,
-    { enabled: storedViewResolved, search: debouncedSearch }
+    // The URL is the SETTLED term's single source of truth, so the board's search changes atomically
+    // with its other params. Reading component state here instead put the term one effect BEHIND: a
+    // single history navigation that moved `search` *and* `scope`/`period`/`assignedRepId` re-keyed this
+    // hook with the new filters but the OLD term, firing a pipeline request for a cohort that was never
+    // asked for — and briefly rendering it — before the adopted term fired a second, correct one.
+    //
+    // Typing still flows box -> debounce -> mirror effect -> URL -> here, which is one request per
+    // settled term, not one per keystroke.
+    { enabled: storedViewResolved, search: searchParams.get("search") ?? "" }
   );
 
   useEffect(() => {
