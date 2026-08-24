@@ -23,8 +23,15 @@ beforeAll(async () => {
       rfp_override_state text, rfp_override_decision text, rfp_override_error text,
       rfp_override_note text, rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid,
       rfp_bidboard_attempt_at timestamptz,
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
+      -- The fields buildDealSearchCondition matches beyond name/number, so the search tests below
+      -- exercise the REAL predicate rather than a name-only stand-in.
+      scope_title text, description text, property_address text, property_city text, property_state text,
+      bid_board_customer_name text, company_id uuid, primary_contact_id uuid,
       updated_at timestamptz DEFAULT now()
     );
+    CREATE TABLE companies (id uuid PRIMARY KEY, name text);
+    CREATE TABLE contacts (id uuid PRIMARY KEY, first_name text, last_name text);
     INSERT INTO pipeline_stage_config (id, slug) VALUES
       ('00000000-0000-0000-0000-0000000000aa','opportunity'),
       ('00000000-0000-0000-0000-0000000000dd','dd'),
@@ -56,6 +63,121 @@ beforeAll(async () => {
   tdb = drizzle(pg);
 });
 afterAll(async () => { await pg?.close?.(); });
+
+/**
+ * OWN database, deliberately.
+ *
+ * These fixtures are pending-RFP opportunity rows, so seeding them into the shared instance above would
+ * enlarge the unfiltered queue and break the suites that assert its exact contents — the search feature
+ * would then look like it had changed unrelated behaviour. Isolating it keeps those assertions honest.
+ */
+describe("getPendingRfpDeals — board text search (Greptile #1102 P1)", () => {
+  let searchDb: any;
+  let searchPg: PGlite;
+
+  beforeAll(async () => {
+    searchPg = new PGlite();
+    await searchPg.exec(`
+      CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_active_pipeline boolean DEFAULT true);
+      CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
+      CREATE TABLE companies (id uuid PRIMARY KEY, name text);
+      CREATE TABLE contacts (id uuid PRIMARY KEY, first_name text, last_name text);
+      CREATE TABLE deals (
+        id uuid PRIMARY KEY, sales_source_user_id uuid, name text, is_change_order boolean NOT NULL DEFAULT false,
+        project_number text, deal_number text, workflow_route text,
+        stage_id uuid, is_bid_board_owned boolean DEFAULT false, is_active boolean DEFAULT true,
+        is_test_data boolean DEFAULT false, assigned_rep_id uuid, estimator_user_id uuid,
+        rfp_approval_status text, rfp_approval_requested_at timestamptz, rfp_approval_requested_by uuid,
+        rfp_declined_reason text, rfp_approval_request_event_id uuid, rfp_declined_at timestamptz,
+        rfp_approval_request_id integer, rfp_approval_token text,
+        rfp_conflict_reason text, rfp_conflict_with jsonb, rfp_last_attempt_error text,
+        rfp_override_state text, rfp_override_decision text, rfp_override_error text,
+        rfp_override_note text, rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid,
+        rfp_bidboard_attempt_at timestamptz,
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
+        scope_title text, description text, property_address text, property_city text, property_state text,
+        bid_board_customer_name text, company_id uuid, primary_contact_id uuid,
+        updated_at timestamptz DEFAULT now()
+      );
+      INSERT INTO pipeline_stage_config (id, slug) VALUES ('00000000-0000-0000-0000-0000000000aa','opportunity');
+      INSERT INTO companies (id, name) VALUES ('00000000-0000-0000-0000-0000000000f1','Bellemont Holdings');
+      -- Each row matches "bellemont" through a DIFFERENT field. A name-only ILIKE — which is exactly what
+      -- the old client-side board filter did — returns one of these three and fails the first test.
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_approval_requested_at)
+        VALUES ('00000000-0000-0000-0000-00000000d011','Bellemont Victoria 1','00000000-0000-0000-0000-0000000000aa','pending','2026-06-21T00:00:00Z');
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_approval_requested_at,company_id)
+        VALUES ('00000000-0000-0000-0000-00000000d012','Roof Replacement','00000000-0000-0000-0000-0000000000aa','pending','2026-06-22T00:00:00Z','00000000-0000-0000-0000-0000000000f1');
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_approval_requested_at,property_address)
+        VALUES ('00000000-0000-0000-0000-00000000d013','Exterior Paint','00000000-0000-0000-0000-0000000000aa','pending','2026-06-23T00:00:00Z','3225 Bellemont Dr.');
+      -- Bucket-exclusion controls that WOULD match a bare name ILIKE.
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,is_test_data)
+        VALUES ('00000000-0000-0000-0000-00000000d014','Bellemont Test','00000000-0000-0000-0000-0000000000aa','pending',true);
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,is_active)
+        VALUES ('00000000-0000-0000-0000-00000000d015','Bellemont Inactive','00000000-0000-0000-0000-0000000000aa','pending',false);
+      -- An estimator on ONE matching row, so the compose test can tell "narrowed" from "empty".
+      UPDATE deals SET estimator_user_id = '00000000-0000-0000-0000-0000000000e1' WHERE id = '00000000-0000-0000-0000-00000000d012';
+    `);
+    searchDb = drizzle(searchPg);
+  });
+  afterAll(async () => { await searchPg?.close?.(); });
+
+  it("matches across the SAME fields the deals list searches, not just the deal name", async () => {
+    const rows = await getPendingRfpDeals(searchDb, { search: "bellemont" });
+    // name / company.name / property_address respectively, oldest-request-first.
+    expect(rows.map((r) => r.id)).toEqual([
+      "00000000-0000-0000-0000-00000000d011",
+      "00000000-0000-0000-0000-00000000d012",
+      "00000000-0000-0000-0000-00000000d013",
+    ]);
+  });
+
+  it("returns a different subset for a different term — not a constant", async () => {
+    const rows = await getPendingRfpDeals(searchDb, { search: "Roof Replacement" });
+    expect(rows.map((r) => r.id)).toEqual(["00000000-0000-0000-0000-00000000d012"]);
+  });
+
+  it("still honours the bucket rules — a searched TEST or INACTIVE row stays out", async () => {
+    // "Test"/"Inactive" rows would match a bare name ILIKE; the search predicate is ANDed with the
+    // bucket, never a replacement for it.
+    const rows = await getPendingRfpDeals(searchDb, { search: "Bellemont Test" });
+    expect(rows.map((r) => r.id)).not.toContain("00000000-0000-0000-0000-00000000d014");
+    const inactive = await getPendingRfpDeals(searchDb, { search: "Bellemont Inactive" });
+    expect(inactive.map((r) => r.id)).not.toContain("00000000-0000-0000-0000-00000000d015");
+  });
+
+  it("ignores a one-character term, matching the board's own >= 2 guard", async () => {
+    // "x" is DISCRIMINATING: it appears only in "Exterior Paint" (d013), so a threshold that wrongly
+    // accepted one character would return exactly that row and this test would fail. An earlier version
+    // used "b", which every fixture matches — applying it changed nothing, so the guard could not fire
+    // and a >= 1 mutation slipped through.
+    const oneChar = await getPendingRfpDeals(searchDb, { search: "x" });
+    const unfiltered = await getPendingRfpDeals(searchDb);
+    expect(oneChar.map((r) => r.id)).toEqual(unfiltered.map((r) => r.id));
+    expect(unfiltered.length).toBeGreaterThan(1);
+
+    // Sanity: the same term at two characters DOES narrow, proving the fixture can tell them apart.
+    const twoChar = await getPendingRfpDeals(searchDb, { search: "xt" });
+    expect(twoChar.map((r) => r.id)).toEqual(["00000000-0000-0000-0000-00000000d013"]);
+  });
+
+  it("composes with the estimator filter rather than replacing it", async () => {
+    const rows = await getPendingRfpDeals(searchDb, {
+      estimatorId: "00000000-0000-0000-0000-0000000000e1",
+      search: "bellemont",
+    });
+    // The INTERSECTION: d012 is the estimator's row AND matches the term (via its company name). If
+    // search replaced the estimator predicate this would return all three matches; if it were the other
+    // way round it would ignore the term.
+    expect(rows.map((r) => r.id)).toEqual(["00000000-0000-0000-0000-00000000d012"]);
+
+    // And empty where the two do not overlap — proving both predicates are still ANDed, not either/or.
+    const disjoint = await getPendingRfpDeals(searchDb, {
+      estimatorId: "00000000-0000-0000-0000-0000000000e1",
+      search: "Exterior Paint",
+    });
+    expect(disjoint).toEqual([]);
+  });
+});
 
 describe("getPendingRfpDeals — estimator filter (Codex #1067 P1)", () => {
   // Runs against PGlite, i.e. REAL SQL. That matters more than usual here: the board's Pending RFP column

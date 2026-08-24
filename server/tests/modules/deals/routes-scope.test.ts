@@ -174,6 +174,39 @@ describe("deal routes scope defaults", () => {
     );
   });
 
+  it("forwards the board's search term to the service", async () => {
+    // Without this the term never leaves the browser and the board falls back to filtering the card
+    // slice it already holds — the 0/0 regression. The >= 2 char guard lives in the service, so the
+    // route's job is only to hand the raw term over.
+    const { req } = await invokeRoute("/pipeline", { includeDd: "true", search: "bellemont" });
+    expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
+      req.tenantDb,
+      "director",
+      "director-1",
+      expect.objectContaining({ search: "bellemont" }),
+      "director"
+    );
+  });
+
+  it("rejects a repeated ?search with a 400 instead of throwing a 500 downstream", async () => {
+    // Express aggregates a repeated key into an array, and the service's `.trim()` on an array throws a
+    // TypeError that surfaces as an opaque 500. readOptionalStringParam answers with a named 400.
+    await expect(
+      invokeRoute("/pipeline", { includeDd: "true", search: ["a", "b"] as unknown as string })
+    ).rejects.toMatchObject({ statusCode: 400, message: "search must be a single value" });
+  });
+
+  it("leaves search undefined when the board sends no term", async () => {
+    const { req } = await invokeRoute("/pipeline", { includeDd: "true" });
+    expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
+      req.tenantDb,
+      "director",
+      "director-1",
+      expect.objectContaining({ search: undefined }),
+      "director"
+    );
+  });
+
   it("only opts into the board-aggregates contract when the caller asks for it", async () => {
     // Default OFF is load-bearing in two directions: an OLD web bundle carves its Pending RFP column out
     // of pipelineColumns and cannot start sending a flag, and mobile-crm never reads the summary but

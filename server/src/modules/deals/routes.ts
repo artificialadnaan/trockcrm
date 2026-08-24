@@ -1025,6 +1025,9 @@ router.get("/pending-rfp", requireRole("admin", "director", "rep"), async (req, 
     const deals = await getPendingRfpDeals(req.tenantDb!, {
       // Forwarded from the board's Pending RFP column so the destination matches the count that opened it.
       estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
+      // Same contract for the board's text search: that column's count is search-narrowed, so the queue
+      // it opens must be too, or the number and the list disagree.
+      search: readOptionalStringParam(req.query.search, "search"),
     });
     await req.commitTransaction!();
     res.json({ deals });
@@ -1064,6 +1067,14 @@ router.get("/pipeline", async (req, res, next) => {
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       previewLimit: Number.isFinite(parsedPreviewLimit) ? parsedPreviewLimit : undefined,
+      // The board's text search. The service applies the shared predicate and the >= 2 character guard,
+      // so the kanban and the list below it on the /deals page agree on the term.
+      //
+      // Read through readOptionalStringParam, NOT a bare cast: Express aggregates a repeated key into an
+      // ARRAY (`?search=a&search=b` -> ["a","b"]), and the service's `.trim()` on that throws a
+      // TypeError surfacing as a 500. This is the same helper estimatorId above uses, and it answers a
+      // malformed request with a 400 that names the field.
+      search: readOptionalStringParam(req.query.search, "search"),
       // Opt-in: `boardSummary` + `pendingRfpDeals`, and the Opportunity card exclusion that goes with
       // them. Default OFF so an older web bundle (which builds its Pending RFP column by carving cards
       // out of pipelineColumns, and cannot start sending a flag) and mobile-crm (which never reads the

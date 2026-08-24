@@ -113,7 +113,7 @@ import {
   dealDisplayDateExpr,
 } from "../shared/deal-date-scope.js";
 import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
-import { buildDealSearchCondition } from "../search/unified-search.js";
+import { buildDealSearchCondition, hasEffectiveDealSearch } from "../search/unified-search.js";
 import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import { getWtdPeriod } from "../../lib/period.js";
 import {
@@ -917,6 +917,11 @@ function isGlobalCurrentWonYtdBoardRequest(input: {
   assignedRepId: string | undefined;
   /** Any estimator narrowing disqualifies the request, exactly as an owner filter does — see below. */
   estimatorId: string | undefined;
+  /**
+   * The board's text search, raw. Judged by the SAME >= 2 character rule getDealsForPipeline applies
+   * when deciding whether to narrow, so "eligible" here can never disagree with "narrowed" there.
+   */
+  search: string | undefined;
   wonPeriodFrom: string | null;
   wonPeriodTo: string | null;
   wonSince: string | null;
@@ -940,6 +945,12 @@ function isGlobalCurrentWonYtdBoardRequest(input: {
     // not just the owner one. An estimator-filtered all/YTD board would otherwise write that person's
     // subset over deals_dashboard.won_ytd and hold it there until the next unfiltered YTD request.
     !input.estimatorId &&
+    // A TEXT SEARCH narrows exactly as hard as an owner or estimator filter, and is far easier to
+    // trigger: it is a box on the default All-scope board, and that board's default period IS YTD. Left
+    // out, typing two characters would write the matching subset's count/value over the published
+    // all-deals snapshot and hold it there until the next unsearched YTD request — which is precisely
+    // the input the won-metric reduction alert watches, so it would also fire a false alarm.
+    !hasEffectiveDealSearch(input.search) &&
     input.wonPeriodFrom === ytd.from &&
     input.wonPeriodTo === ytd.to &&
     terminalBoundsMatchYtd
@@ -3929,6 +3940,12 @@ export async function getDealsForPipeline(
     includeDd?: boolean;
     previewLimit?: number;
     /**
+     * Free-text search, applied in SQL across the same fields as the deals list (see
+     * buildDealSearchCondition). Narrows the column aggregates, the card slice and the Pending RFP
+     * preview together — a term shorter than 2 characters is ignored, mirroring getDeals.
+     */
+    search?: string;
+    /**
      * OPT-IN to the board-aggregates contract, and the single switch behind all three of its parts:
      *   - `boardSummary` (the at-risk counts + the Pending RFP totals) is computed and returned;
      *   - `pendingRfpDeals` (the Pending RFP column's own capped preview) is fetched and returned;
@@ -4076,6 +4093,30 @@ export async function getDealsForPipeline(
   }
 
   commonConditions.push(excludeTestDataCondition("deals"));
+
+  /**
+   * The kanban's text search, resolved in SQL over every matching deal.
+   *
+   * It used to be a client-side filter over `column.cards`. That was survivable only while the board
+   * fetched 1000 cards per column; #1074 cut the slice to 50 and the search silently became "search the
+   * top 50 of each column" — a real project name returned 0/0 across the whole board while the list
+   * below the board, which searches server-side, found it. Same class of failure as the at-risk counts
+   * that PR moved server-side, from the other direction: there the numbers were wrong, here the rows are.
+   *
+   * On `commonConditions` DELIBERATELY, which is the one spine feeding the column aggregate, the card
+   * slice AND the Pending RFP preview. Applying it to the cards alone would leave a column reading
+   * "0 of 312" above four visible cards. Everything the board draws narrows together, exactly as it
+   * already does for the rep, estimator and office dimensions sitting immediately above.
+   *
+   * `buildDealSearchCondition` is the SAME predicate getDeals applies to the list below the board (and
+   * the stage drill-down its "view all" opens), so the three resolve one set. The >= 2 character guard
+   * mirrors getDeals too: a board that narrowed on one character would disagree with that list for one
+   * keystroke of every search. Lifecycle-agnostic and read-only — it widens no visibility, so it composes
+   * with the scope predicate above rather than competing with it.
+   */
+  if (hasEffectiveDealSearch(filters?.search)) {
+    commonConditions.push(buildDealSearchCondition(filters!.search!));
+  }
 
   const responseStages = stages.filter((stage) => {
     if (!stage.isTerminal) return filters?.includeDd || stage.isActivePipeline;
@@ -4439,6 +4480,7 @@ export async function getDealsForPipeline(
       scope: filters?.scope,
       assignedRepId: filters?.assignedRepId,
       estimatorId: filters?.estimatorId,
+      search: filters?.search,
       wonPeriodFrom,
       wonPeriodTo,
       wonSince: wonSignedDateSince,

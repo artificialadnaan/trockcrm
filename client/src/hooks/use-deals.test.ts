@@ -348,12 +348,14 @@ async function renderStageResultProbe() {
  * parameters — and fetching first meant issuing the 1.6-2.5s pipeline query twice per cold load.
  */
 let hookBoardEnabled = true;
+let hookBoardSearch: string | undefined;
 let latestGatedResult: ReturnType<typeof useDealBoard> | null = null;
 function GatedBoardProbe() {
   // Positional args: scope, includeDd, terminalDateFilters, previewLimit, wonPeriodRange,
   // assignedRepId, estimateSentDateRange, estimatorId, options.
   latestGatedResult = useDealBoard("mine", false, undefined, 50, null, undefined, undefined, undefined, {
     enabled: hookBoardEnabled,
+    search: hookBoardSearch,
   });
   return null;
 }
@@ -519,6 +521,130 @@ describe("useDealBoard — the enabled gate", () => {
       root.unmount();
       await flushEffects();
     });
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * The board's text search is a REQUEST parameter, not a filter over the cards already in hand. Once the
+   * board began fetching a 50-card slice per column (#1074), a client-side filter could only ever search
+   * that slice — the board reported 0/0 for deals sitting in the database.
+   */
+  it("carries the search term into the pipeline request", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = "bellemont victoria";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    const url = String(apiMock.mock.calls[0]![0]);
+    // URLSearchParams encodes the space; decode so the assertion is about the TERM, not the encoding.
+    expect(decodeURIComponent(new URL(url, "https://x.test").searchParams.get("search") ?? "")).toBe(
+      "bellemont victoria"
+    );
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    hookBoardSearch = undefined;
+    vi.unstubAllGlobals();
+  });
+
+  it("reports the term the RESOLVED board was fetched with, so callers can build links from it", async () => {
+    // Callers build drill-down destinations from this. It must describe the response in state, never the
+    // request in flight — otherwise a link opens a cohort different from the numbers being displayed.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = "bellemont victoria";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(latestGatedResult?.appliedSearch).toBe("bellemont victoria");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    hookBoardSearch = undefined;
+    vi.unstubAllGlobals();
+  });
+
+  it("reports an EMPTY applied term for an unsearched board", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = undefined;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(latestGatedResult?.appliedSearch).toBe("");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("omits the search parameter entirely when the box is empty or whitespace", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = "   ";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    // A `search=` with no value would be a no-op on the server, but sending it makes every unsearched
+    // board load carry a meaningless parameter and muddies the request key.
+    expect(String(apiMock.mock.calls[0]![0])).not.toContain("search=");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    hookBoardSearch = undefined;
     vi.unstubAllGlobals();
   });
 });

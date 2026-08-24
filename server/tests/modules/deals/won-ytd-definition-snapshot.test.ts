@@ -131,6 +131,42 @@ describe("main Deals Dashboard Won YTD definition snapshot", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("does not let a SEARCHED board overwrite the global metric definition", async () => {
+    // The board's text search narrows exactly as hard as an owner or estimator filter, and is far easier
+    // to reach: it is a box on the default All-scope board, whose default period IS YTD. Without this
+    // gate, typing two characters publishes the matching subset's count/value as the all-deals baseline —
+    // and that value is what the won-metric reduction alert watches, so it would also fire a false alarm.
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { search: "bellemont" });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("STILL records the snapshot for a term too short to narrow the board", async () => {
+    // The eligibility rule here and the narrowing rule in getDealsForPipeline are one shared predicate
+    // (hasEffectiveDealSearch). This is the half that proves they agree in the other direction: a term
+    // the board does NOT filter on must not block the snapshot either, or a stray keystroke would stall
+    // the published definition. A drifting copy of the >= 2 rule fails one of these two tests.
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { search: "b" });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(containsValue(execute.mock.calls[0]?.[0], "deals_dashboard.won_ytd")).toBe(true);
+  });
+
+  it("STILL records the snapshot for a whitespace-only term", async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { search: "   " });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it("only ignores the migration-not-yet-present PostgreSQL error", async () => {
     const missingFunction = vi.fn().mockRejectedValue({ code: "42883" });
     await expect(getGlobalYtdBoard(buildTenantDb(missingFunction))).resolves.toBeDefined();

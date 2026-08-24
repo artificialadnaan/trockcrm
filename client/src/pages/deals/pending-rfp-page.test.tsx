@@ -118,6 +118,59 @@ describe("PendingRfpPage", () => {
     container.remove();
   });
 
+  it("SHOWS an inherited board search, with a way to clear it", () => {
+    // This queue is opened from the board's Pending RFP column, whose count is search-narrowed, so the
+    // term travels with the click. A filter the page applies but never displays is its own bug — the
+    // reason drill-downs used to drop the term outright — so it must be visible and reversible.
+    mocks.usePendingRfpMock.mockReturnValue({
+      deals: FIXTURE_DEALS,
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    root = renderRoute(container, "/deals/pending-rfp?officeId=A&search=bellemont");
+
+    expect(container.textContent).toContain("Filtered by search:");
+    expect(container.textContent).toContain("bellemont");
+    const clear = Array.from(container.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent?.trim() === "Clear"
+    );
+    expect(clear).toBeTruthy();
+    // Clearing drops ONLY the search — office context has to survive or a cross-office viewer is
+    // silently sent back to their active office.
+    const href = clear!.getAttribute("href") ?? "";
+    const params = new URL(href, "https://x.test").searchParams;
+    expect(params.get("search")).toBeNull();
+    expect(params.get("officeId")).toBe("A");
+  });
+
+  it("does not claim a filter for a term too short for the server to apply", () => {
+    mocks.usePendingRfpMock.mockReturnValue({
+      deals: FIXTURE_DEALS,
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    root = renderRoute(container, "/deals/pending-rfp?search=b");
+
+    expect(container.textContent).not.toContain("Filtered by search:");
+  });
+
+  it("shows no search chip on the ordinary unsearched queue", () => {
+    mocks.usePendingRfpMock.mockReturnValue({
+      deals: FIXTURE_DEALS,
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    root = renderRoute(container);
+
+    expect(container.textContent).not.toContain("Filtered by search:");
+  });
+
   it("renders the page heading and loading state", () => {
     root = renderRoute(container);
     expect(container.textContent).toContain("Pending RFP");

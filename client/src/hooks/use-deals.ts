@@ -1189,10 +1189,20 @@ export function useDealBoard(
    * call site that passes the bag (`{ enabled }` is not a `string`) — which is exactly how the merge that
    * introduced this ninth parameter found the one probe that had been passing it in the 8th slot.
    */
-  options: { enabled?: boolean } = {}
+  options: { enabled?: boolean; search?: string } = {}
 ) {
-  const { enabled = true } = options;
+  const { enabled = true, search } = options;
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
+  /**
+   * The search term the board currently IN STATE was fetched with — not the one being typed.
+   *
+   * A drill-down destination must describe the population the user can see. `search` changes the moment
+   * the debounce settles, but the pipeline request behind it can take seconds, and this hook deliberately
+   * keeps the previous response on screen meanwhile (no blanking). During that window the KPI cards show
+   * the OLD cohort's numbers while a destination built from the new term would open a different one — so
+   * clicking a displayed count lands somewhere it does not describe. Callers build links from this.
+   */
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Latest-wins guard (mirrors useDeals): a stale response from a superseded request must never overwrite
@@ -1240,15 +1250,34 @@ export function useDealBoard(
     if (estimateSentDateRange?.to) {
       params.set("estimateSentTo", estimateSentDateRange.to);
     }
+    // The board's text search, resolved SERVER-side across every matching deal. It was a client-side
+    // filter over the cards already in hand, which turned into "search the top 50 of each column" the
+    // moment the board started fetching a slice — a real project name returned 0/0 board-wide. Sent as a
+    // request parameter, it narrows the column aggregates, the cards and the Pending RFP preview
+    // together, so the caller must NOT re-filter the returned cards: the server matches more fields than
+    // any client haystack does (scope title, description, address, contact and company names), and a
+    // second pass would drop rows the header count still counts.
+    const requestedSearch = search?.trim() ?? "";
+    if (requestedSearch.length > 0) {
+      params.set("search", requestedSearch);
+    }
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
-        if (requestId === boardRequestIdRef.current) setBoard(normalized);
+        // Latest-wins, and the term is recorded with the response it belongs to — so a caller building
+        // drill-down links can never describe a cohort the user is not looking at yet.
+        if (requestId === boardRequestIdRef.current) {
+          setBoard(normalized);
+          setAppliedSearch(requestedSearch);
+        }
         return normalized;
       })
       .catch((err: unknown) => {
         if (requestId === boardRequestIdRef.current) {
           setBoard(null);
+          // No board, no cohort to describe — clear the term with it so a stale one cannot outlive the
+          // response it belonged to.
+          setAppliedSearch("");
           setError(err instanceof Error ? err.message : "Failed to load deal board");
         }
         throw err;
@@ -1265,6 +1294,9 @@ export function useDealBoard(
     includeDd,
     previewLimit,
     scope,
+    // A new term must re-issue the request — without this dep the board keeps showing the previous
+    // search's rows. Callers pass a DEBOUNCED value so a keystroke does not fire the pipeline query.
+    search,
     terminalDateFilters,
     wonPeriodRange?.from,
     wonPeriodRange?.to,
@@ -1274,7 +1306,7 @@ export function useDealBoard(
     void refetch().catch(() => undefined);
   }, [refetch]);
 
-  return { board, loading, error, refetch };
+  return { board, appliedSearch, loading, error, refetch };
 }
 
 export function useDealStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" | "watched" | "on_hold" }) {
@@ -1480,10 +1512,20 @@ export function usePendingRfp() {
     // string here — so requesting the unfiltered queue made the destination list every pending RFP under
     // a count that had been scoped to one estimator. `search` is already this callback's dependency, so
     // changing the filter refetches.
-    const estimatorId = new URLSearchParams(search).get("estimatorId");
-    const path = estimatorId
-      ? `/deals/pending-rfp?estimatorId=${encodeURIComponent(estimatorId)}`
-      : "/deals/pending-rfp";
+    //
+    // The board's TEXT search rides along for exactly the same reason, and through the same door: it is
+    // ANDed into those common conditions too, so this column's count is search-narrowed and a queue that
+    // ignored the term would list deals the number never counted.
+    const inbound = new URLSearchParams(search);
+    const outbound = new URLSearchParams();
+    const estimatorId = inbound.get("estimatorId");
+    if (estimatorId) outbound.set("estimatorId", estimatorId);
+    // Guarded at >= 2 characters to match the server's own rule, so this never asks for a narrowing the
+    // board did not apply. URLSearchParams handles the encoding.
+    const boardSearch = (inbound.get("search") ?? "").trim();
+    if (boardSearch.length >= 2) outbound.set("search", boardSearch);
+    const query = outbound.toString();
+    const path = query ? `/deals/pending-rfp?${query}` : "/deals/pending-rfp";
     return api<{ deals: PendingRfpDeal[] }>(path)
       .then((r) => {
         if (isCurrent()) setDeals(r.deals);
