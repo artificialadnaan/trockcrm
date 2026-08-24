@@ -1,4 +1,4 @@
-// The runner's CONCURRENTLY pre-step for 0233.
+// The runner's CONCURRENTLY pre-step for 0237.
 //
 // The pre-step exists so API boot never holds a write-blocking lock on `tasks` across every office at
 // once (see task-source-index.ts). Two things about it are worth a test rather than a reading: the
@@ -12,11 +12,11 @@ import {
   buildTaskSourceIndexStatement,
 } from "../../src/migrations/task-source-index.js";
 
-describe("0233 task-source index pre-step", () => {
+describe("0237 task-source index pre-step", () => {
   // If this drifts the runner silently stops intercepting and the plain CREATE INDEX in the file runs
   // inline again — the exact lock-on-boot this pre-step was added to avoid, with nothing to signal it.
   it("names the migration file the runner dispatches on", () => {
-    expect(TASK_SOURCE_INDEX_MIGRATION).toBe("0233_task_source_classification.sql");
+    expect(TASK_SOURCE_INDEX_MIGRATION).toBe("0237_tasks_assigned_source_status_index.sql");
   });
 
   it("builds the index CONCURRENTLY, on the columns the file declares", () => {

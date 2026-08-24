@@ -3,25 +3,31 @@ import type pg from "pg";
 // Mirrors the project-number / audit-log / bid-board / deal-stage-history / activities index-migration
 // pattern.
 //
-// Migration 0233 adds `tasks.source` and wants an (assigned_to, source, status, due_date) index to serve
-// the new per-source task tabs. `tasks` is written by the rules engine, the email-assignment queue, two
-// crons, deal reassignment and every person using the New Task form, so it is never idle. A plain
-// CREATE INDEX inside the file's DO block takes a write-blocking SHARE lock, and because the whole loop
-// is ONE statement sent as a single client.query() those locks are all held until the LAST office
-// finishes: task writes across every office would queue behind it and start failing on the app's 30/45s
-// timeouts — on API boot, which is exactly when the queue is deepest.
+// Migration 0237 adds an (assigned_to, source, status, due_date) index to serve the per-source task
+// tabs. `tasks` is written by the rules engine, the email-assignment queue, two crons, deal reassignment
+// and every person using the New Task form, so it is never idle. A plain CREATE INDEX inside a migration
+// file's DO block takes a write-blocking SHARE lock, and because the whole loop is ONE statement sent as
+// a single client.query() those locks are all held until the LAST office finishes: task writes across
+// every office would queue behind it and start failing on the app's 30/45s timeouts — on API boot,
+// which is exactly when the queue is deepest.
 //
-// CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so the runner intercepts 0233 and
+// CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so the runner intercepts 0237 and
 // builds each tenant's index here first, one statement at a time. The file's plain
 // `CREATE INDEX IF NOT EXISTS` then no-ops on existing tenants, while still serving as the marker the
 // office provisioner replays for schemas created after this deploy.
 //
-// Note the ORDER relative to the file: this pre-step runs BEFORE the SQL file, so it must tolerate a
-// tasks table that does not have the `source` column yet — hence the column check below. On the first
-// deploy every office skips here and the file's own CREATE INDEX builds it (small, since the column was
-// just added and the table is already locked by the ALTER in the same statement); on any subsequent
-// replay the column exists and this path does the real, non-blocking work.
-export const TASK_SOURCE_INDEX_MIGRATION = "0233_task_source_classification.sql";
+// WHY THE INDEX IS NOT IN 0233, WHICH ADDS THE COLUMN. This pre-step runs BEFORE its file, and it can
+// only build an index on a column that already exists. When the column and the index shared a migration,
+// the FIRST deploy hit this function before the column existed, skipped every schema, and left the
+// file's plain CREATE INDEX to do the blocking build inside the migration's single transaction — the
+// precise outage this pre-step exists to prevent, on the one deploy where it matters most. The second
+// deploy worked, which is why nothing reported it. With the column landed by 0233 and the index by 0237,
+// the precondition holds by construction rather than by luck.
+//
+// The column check below is now a defensive skip, not the normal path: it covers a schema that never
+// received 0233 (no tasks table, so 0233 skipped it too), and 0237's own DO loop applies the identical
+// test so both halves act on exactly the same set of schemas.
+export const TASK_SOURCE_INDEX_MIGRATION = "0237_tasks_assigned_source_status_index.sql";
 
 export const TASK_SOURCE_INDEX_NAME = "tasks_assigned_source_status_idx";
 
@@ -43,7 +49,7 @@ function validateOfficeSchemaName(schemaName: string): string {
   return schemaName;
 }
 
-/** Kept in lockstep with the plain CREATE INDEX in 0233, which no-ops once this has built it. */
+/** Kept in lockstep with the plain CREATE INDEX in 0237, which no-ops once this has built it. */
 export function buildTaskSourceIndexStatement(schemaName: string): string {
   const safeSchemaName = quoteIdentifier(validateOfficeSchemaName(schemaName));
   return `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${TASK_SOURCE_INDEX_NAME}
@@ -84,8 +90,9 @@ export async function runTaskSourceIndexMigration(client: pg.Client): Promise<vo
     const schemaName = validateOfficeSchemaName(row.schema_name);
     const safeSchemaName = quoteIdentifier(schemaName);
 
-    // The column arrives with the SQL file, which runs after this. Nothing to index yet on a first
-    // deploy — skip rather than raising on the undefined column and aborting the whole migration.
+    // 0233 landed this column in an earlier migration, so on a normal deploy it is present. A schema
+    // without it never received 0233 either (it has no tasks table) — skip rather than raising on the
+    // undefined column and aborting the whole migration for every other office.
     if (!(await hasSourceColumn(client, schemaName))) continue;
 
     const validity = await getIndexValidity(client, schemaName);

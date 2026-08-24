@@ -98,8 +98,13 @@ async function runMigrations(): Promise<void> {
         // file's DO block would hold a write-blocking SHARE lock across ALL offices until the last one
         // finished — on API boot. Build each tenant's index CONCURRENTLY first; the file's plain
         // statement then no-ops on existing schemas while remaining the marker the office provisioner
-        // replays for new ones. (On the very first deploy the column does not exist yet, so the pre-step
-        // skips and the file builds the index itself against a table it has already locked.)
+        // replays for new ones.
+        //
+        // The `source` column this indexes is added by 0233, which sorts EARLIER and has therefore
+        // already run by the time we get here. That ordering is the whole reason the index is not in
+        // 0233 itself: a pre-step cannot build an index on a column that does not exist yet, so sharing
+        // one migration made this skip every schema on the first deploy and handed the blocking build
+        // back to the file.
         await runTaskSourceIndexMigration(client);
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);

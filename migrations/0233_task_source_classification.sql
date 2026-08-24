@@ -45,12 +45,20 @@
 -- Both UPDATEs are also guarded on the value actually changing, so a row that is already classified
 -- correctly is never rewritten at all.
 --
--- NO INLINE INDEX BUILD ON THE HOT PATH — see server/src/migrations/task-source-index.ts. The runner
--- builds tasks_assigned_source_status_idx CONCURRENTLY per office BEFORE executing this file; the plain
--- CREATE INDEX IF NOT EXISTS below then no-ops on existing tenants while remaining the marker the office
--- provisioner replays for schemas created after this deploy.
+-- THE INDEX IS NOT IN THIS FILE, AND THAT IS THE POINT. The tabs need an
+-- (assigned_to, source, status, due_date) index; 0237 builds it instead -- see
+-- migrations/0237_tasks_assigned_source_status_index.sql and server/src/migrations/task-source-index.ts.
+--
+-- The runner builds that index CONCURRENTLY in a pre-step so API boot never holds a write-blocking lock
+-- on `tasks` across every office at once. A pre-step can only build on a column that already EXISTS, so
+-- while the column and the index lived in ONE migration the pre-step found no `source` column on the
+-- FIRST deploy, skipped every schema, and a plain CREATE INDEX here did the build instead: inside the
+-- single transaction this file is sent as, across all offices, during boot. It worked on the second
+-- deploy, which is exactly why it would not have been caught. Adding the column and building the index
+-- are two phases, and keeping them in two migrations is what makes that ordering true rather than
+-- hoped for.
 
--- Existing tenants: add the column, classify the history, build the index in every office_* schema.
+-- Existing tenants: add the column and classify the history in every office_* schema.
 DO $tenant$
 DECLARE
   schema_name text;
@@ -140,16 +148,6 @@ BEGIN
 
     EXECUTE format('ALTER TABLE %1$I.tasks ENABLE TRIGGER audit_tasks', schema_name);
     EXECUTE format('ALTER TABLE %1$I.tasks ENABLE TRIGGER set_tasks_updated_at', schema_name);
-
-    -- No-ops on every tenant the runner's CONCURRENTLY pre-step already built this for; the real work
-    -- happens there. Present so a schema created after this deploy still gets the index.
-    EXECUTE format(
-      $sql$
-        CREATE INDEX IF NOT EXISTS tasks_assigned_source_status_idx
-          ON %1$I.tasks (assigned_to, source, status, due_date);
-      $sql$,
-      schema_name
-    );
   END LOOP;
 END $tenant$;
 
@@ -166,8 +164,6 @@ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $constraint$;
 
-CREATE INDEX IF NOT EXISTS tasks_assigned_source_status_idx
-  ON office_dallas.tasks (assigned_to, source, status, due_date);
 -- TENANT_SCHEMA_END
 
 COMMENT ON COLUMN office_dallas.tasks.source IS

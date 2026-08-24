@@ -177,20 +177,20 @@ describe("migration 0233 — tasks.source classification", () => {
     }
   });
 
-  it("builds the assigned/source/status index in EVERY office schema", async () => {
+  // The index this column serves is built by 0237, NOT here, and that separation is load-bearing: the
+  // runner's CONCURRENTLY pre-step cannot build an index on a column that does not exist yet, so an
+  // index in THIS file would be built inline — inside the single transaction the runner sends it as,
+  // holding write-blocking locks across every office, on API boot. Asserted as an absence so the
+  // blocking build cannot quietly come back. See 0237-tasks-assigned-source-status-index.runtime.test.
+  it("builds NO index — that is 0237's job, for lock-safety reasons", async () => {
     await seedOffices([...OFFICES]);
     await pg.exec(migrationSql(MIGRATION));
 
-    for (const schema of OFFICES) {
-      const result = await pg.query<{ indexdef: string }>(
-        `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2`,
-        [schema, INDEX_NAME]
-      );
-      expect(result.rows[0]?.indexdef, `${schema}.${INDEX_NAME}`).toBeDefined();
-      // The column ORDER is the point: assigned_to scopes the list, source is the new tab filter, and
-      // status/due_date serve the bucket predicates that follow it.
-      expect(result.rows[0]!.indexdef).toContain("assigned_to, source, status, due_date");
-    }
+    const found = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pg_indexes WHERE indexname = $1`,
+      [INDEX_NAME]
+    );
+    expect(found.rows[0]?.n).toBe(0);
   });
 
   // Executed, not grepped: a CHECK constraint that exists but does not constrain is the failure this
@@ -423,7 +423,7 @@ describe("migration 0233 — tasks.source classification", () => {
 
   // The provisioner replays ONLY the marked block for offices created after this deploy. If it drifts
   // from the loop, a new office comes up missing the column and every task write there 500s.
-  it("has a TENANT_SCHEMA block that produces the same column, CHECK and index as the loop", async () => {
+  it("has a TENANT_SCHEMA block that produces the same column and CHECK as the loop", async () => {
     const raw = migrationSql(MIGRATION);
     const block = raw.split("-- TENANT_SCHEMA_START")[1]?.split("-- TENANT_SCHEMA_END")[0];
     expect(block, "TENANT_SCHEMA_START/END markers must be present").toBeTruthy();
@@ -438,11 +438,12 @@ describe("migration 0233 — tasks.source classification", () => {
     await pg.exec(block!);
 
     expect(await columnExists("office_dallas", "tasks", "source")).toBe(true);
+    // No index here either — a new office gets it from 0237's block, which the provisioner replays too.
     const index = await pg.query<{ n: number }>(
       `SELECT COUNT(*)::int AS n FROM pg_indexes WHERE schemaname='office_dallas' AND indexname=$1`,
       [INDEX_NAME]
     );
-    expect(index.rows[0]?.n).toBe(1);
+    expect(index.rows[0]?.n).toBe(0);
     await expect(
       pg.exec(`INSERT INTO office_dallas.tasks (title, source) VALUES ('bogus', 'imported')`)
     ).rejects.toThrow();
