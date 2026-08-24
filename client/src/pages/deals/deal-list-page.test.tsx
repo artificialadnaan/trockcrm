@@ -2819,28 +2819,119 @@ describe("DealListPage", () => {
     expect(html).not.toMatch(/Contract.*1\/2.*\$550\.0K/);
   });
 
-  it("excludes on-hold cards from search-filtered column totals", async () => {
+  /**
+   * The board's text search resolves SERVER-side.
+   *
+   * It used to be a client-side filter over `column.cards` that recounted each column from the surviving
+   * cards. That silently became "search the top 50 of each column" when #1074 cut the card slice, and the
+   * board answered 0/0 for deals that plainly exist. The term now travels with the board REQUEST.
+   *
+   * The on-hold-$-excluded-from-column-totals invariant that the previous test asserted THROUGH that
+   * client recount has not been dropped — it moved to where it now lives. The column's count and total
+   * come from the server's aggregate, whose FILTER clause is aliasedActiveDealCountFilterSql; see the
+   * server's terminal-aware-value + board-summary-aggregates suites. Re-asserting it here would only
+   * re-test the mock.
+   */
+  async function typeBoardSearch(view: { container: HTMLElement }, term: string) {
+    const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      valueSetter?.call(input, term);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // Clear the debounce that keeps the pipeline query off the keystroke path.
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+  }
+
+  it("sends the board search to the SERVER rather than filtering the cards it already holds", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      // The options bag is the 9th argument. If the term never reaches the request, the board is back to
+      // filtering the slice it holds — the 0/0 regression.
+      const options = mocks.useDealBoardMock.mock.lastCall?.[8];
+      expect(options).toEqual(expect.objectContaining({ search: "bellemont" }));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("does not re-issue the board query on every keystroke", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+
+      for (const term of ["b", "be", "bel", "bell", "belle"]) {
+        await act(async () => {
+          valueSetter?.call(input, term);
+          input!.dispatchEvent(new Event("input", { bubbles: true }));
+          // Well inside the debounce window — a partial term must not reach the request.
+          vi.advanceTimersByTime(50);
+        });
+      }
+
+      const searchesMidType = mocks.useDealBoardMock.mock.calls
+        .map((call) => (call[8] as { search?: string } | undefined)?.search)
+        .filter((term) => term);
+      expect(searchesMidType).toEqual([]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+      expect((mocks.useDealBoardMock.mock.lastCall?.[8] as { search?: string })?.search).toBe("belle");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("renders every card the server returned for a search, and keeps the server's column totals", async () => {
+    // The server matches a WIDER field set than any client haystack — scope title, description, property
+    // address, company and contact names, owner. This card matches NONE of the fields the old client
+    // filter looked at, so re-adding that filter would drop it while the header still counted it. The
+    // header figures are likewise the server's, and deliberately not derivable from the two cards.
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
           {
             stage: { id: "stage-contract", name: "Contract", slug: "contract" },
-            count: 2,
-            totalValue: 550000,
+            count: 40,
+            totalCount: 312,
+            totalValue: 9500000,
             cards: [
               makeDeal({
-                id: "deal-active-search",
-                name: "Roof Search Active",
+                id: "deal-matched-on-description",
+                name: "Totally Unrelated Name",
                 stageId: "stage-contract",
                 bidEstimate: "250000",
                 onHold: false,
               }),
               makeDeal({
-                id: "deal-on-hold-search",
-                name: "Roof Search Held",
+                id: "deal-matched-on-address",
+                name: "Also Unrelated",
                 stageId: "stage-contract",
                 bidEstimate: "300000",
-                onHold: true,
+                onHold: false,
               }),
             ],
           },
@@ -2855,18 +2946,93 @@ describe("DealListPage", () => {
     const view = await renderPageDom("/deals?scope=all", "director");
 
     try {
-      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
-      expect(input).not.toBeNull();
-
-      await act(async () => {
-        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-        valueSetter?.call(input, "Roof Search");
-        input!.dispatchEvent(new Event("input", { bubbles: true }));
-      });
+      await typeBoardSearch(view, "bellemont");
 
       const html = normalize(view.container.innerHTML);
-      expect(html).toMatch(/Contract.*1\/2.*\$250\.0K/);
-      expect(html).not.toMatch(/Contract.*1\/2.*\$550\.0K/);
+      // Both cards survive: the server already decided they match.
+      expect(view.container.querySelector('[data-virtualized-card-count="2"]')).not.toBeNull();
+      // The header reads the server's aggregate, NOT a recount of the two cards it happens to hold.
+      expect(html).toMatch(/Contract.*40\/312.*\$9\.5M/);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("carries the board search into the stage drill-down, so 'view all N' opens exactly those N", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 40,
+            totalCount: 87,
+            totalValue: 9500000,
+            cards: [],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      const header = Array.from(view.container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Contract"
+      );
+      expect(header).toBeTruthy();
+      await act(async () => {
+        header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      // The column's count is search-narrowed; a destination that ignored the term would list the whole
+      // stage and the affordance's number would not survive the click.
+      const queryParams = mocks.buildDealStageWorkspacePathMock.mock.lastCall?.[0]?.queryParams;
+      expect(new URLSearchParams(queryParams).get("search")).toBe("bellemont");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("does not attach a stale search to a stage drill-down opened with the box cleared", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 40,
+            totalCount: 312,
+            totalValue: 9500000,
+            cards: [],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+      await typeBoardSearch(view, "");
+
+      const header = Array.from(view.container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Contract"
+      );
+      await act(async () => {
+        header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const queryParams = mocks.buildDealStageWorkspacePathMock.mock.lastCall?.[0]?.queryParams;
+      expect(new URLSearchParams(queryParams).get("search")).toBeNull();
     } finally {
       await view.cleanup();
     }

@@ -174,6 +174,31 @@ describe("deal routes scope defaults", () => {
     );
   });
 
+  it("forwards the board's search term to the service", async () => {
+    // Without this the term never leaves the browser and the board falls back to filtering the card
+    // slice it already holds — the 0/0 regression. The >= 2 char guard lives in the service, so the
+    // route's job is only to hand the raw term over.
+    const { req } = await invokeRoute("/pipeline", { includeDd: "true", search: "bellemont" });
+    expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
+      req.tenantDb,
+      "director",
+      "director-1",
+      expect.objectContaining({ search: "bellemont" }),
+      "director"
+    );
+  });
+
+  it("leaves search undefined when the board sends no term", async () => {
+    const { req } = await invokeRoute("/pipeline", { includeDd: "true" });
+    expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
+      req.tenantDb,
+      "director",
+      "director-1",
+      expect.objectContaining({ search: undefined }),
+      "director"
+    );
+  });
+
   it("only opts into the board-aggregates contract when the caller asks for it", async () => {
     // Default OFF is load-bearing in two directions: an OLD web bundle carves its Pending RFP column out
     // of pipelineColumns and cannot start sending a flag, and mobile-crm never reads the summary but

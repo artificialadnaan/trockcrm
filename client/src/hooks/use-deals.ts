@@ -1189,9 +1189,9 @@ export function useDealBoard(
    * call site that passes the bag (`{ enabled }` is not a `string`) — which is exactly how the merge that
    * introduced this ninth parameter found the one probe that had been passing it in the 8th slot.
    */
-  options: { enabled?: boolean } = {}
+  options: { enabled?: boolean; search?: string } = {}
 ) {
-  const { enabled = true } = options;
+  const { enabled = true, search } = options;
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1240,6 +1240,16 @@ export function useDealBoard(
     if (estimateSentDateRange?.to) {
       params.set("estimateSentTo", estimateSentDateRange.to);
     }
+    // The board's text search, resolved SERVER-side across every matching deal. It was a client-side
+    // filter over the cards already in hand, which turned into "search the top 50 of each column" the
+    // moment the board started fetching a slice — a real project name returned 0/0 board-wide. Sent as a
+    // request parameter, it narrows the column aggregates, the cards and the Pending RFP preview
+    // together, so the caller must NOT re-filter the returned cards: the server matches more fields than
+    // any client haystack does (scope title, description, address, contact and company names), and a
+    // second pass would drop rows the header count still counts.
+    if (search && search.trim().length > 0) {
+      params.set("search", search.trim());
+    }
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
@@ -1265,6 +1275,9 @@ export function useDealBoard(
     includeDd,
     previewLimit,
     scope,
+    // A new term must re-issue the request — without this dep the board keeps showing the previous
+    // search's rows. Callers pass a DEBOUNCED value so a keystroke does not fire the pipeline query.
+    search,
     terminalDateFilters,
     wonPeriodRange?.from,
     wonPeriodRange?.to,

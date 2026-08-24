@@ -9,6 +9,7 @@ import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useRepRoster } from "@/hooks/use-rep-roster";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
@@ -1273,6 +1274,15 @@ function DealListPageContent({
   );
 
   const [search, setSearch] = useState("");
+  /**
+   * The term the BOARD REQUEST is keyed on. The input stays on the raw `search` state so typing is
+   * instant; only this settled value reaches the server, because the pipeline query materializes the
+   * open pipeline and firing it per keystroke would undo the load-time work of #1074.
+   *
+   * The board asks the server rather than filtering the cards it holds: the slice is 50 per column, so a
+   * client-side filter searched the top 50 and reported 0/0 for anything below it.
+   */
+  const debouncedSearch = useDebouncedValue(search);
   const [drilldownPage, setDrilldownPage] = useState(1);
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     resolveDrilldownTerminalDateFilters(searchParams)
@@ -1391,7 +1401,7 @@ function DealListPageContent({
     // the estimator argument lands in the right position.
     undefined,
     selectedEstimatorFilter,
-    { enabled: storedViewResolved }
+    { enabled: storedViewResolved, search: debouncedSearch }
   );
 
   useEffect(() => {
@@ -1552,7 +1562,22 @@ function DealListPageContent({
       stageIdFamilies: families.map((family) => family.ids),
     };
   }, [stages]);
-  const unsearchedColumns = useMemo(() => {
+  /**
+   * The kanban's columns: the board payload narrowed to the stage / at-risk / route set this view shows.
+   *
+   * NO TEXT SEARCH IS APPLIED HERE, deliberately, and there is no longer a separate "searched" copy of
+   * this set. The search used to be layered on top of it client-side, over `column.cards`, which stopped
+   * being a whole-column search when #1074 cut the slice to 50 per column: the board answered 0/0 for a
+   * deal that plainly existed. The term now travels with the board REQUEST, so these columns arrive
+   * already narrowed — cards and header counts alike.
+   *
+   * Re-filtering them here would not be a harmless belt-and-braces. The server matches a WIDER field set
+   * than any client haystack (scope title, description, property address, company and contact names,
+   * owner), so a second client pass would hide rows the column's own count still counts — the "right
+   * number, wrong board" divergence, reintroduced from the client side. It would also recount from a
+   * capped array and so cap the displayed total at the slice size.
+   */
+  const columns = useMemo(() => {
     if (dashboardView.boardStageSlugs.length > 0) {
       return boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug));
     }
@@ -1568,17 +1593,17 @@ function DealListPageContent({
     return boardColumns;
   }, [atRiskRouteBucket, boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs]);
   /**
-   * The column set the three At-Risk KPI cards count over: `unsearchedColumns` with the view's ROUTE
+   * The column set the three At-Risk KPI cards count over: `columns` with the view's ROUTE
    * narrowing removed. Each card then applies its OWN bucket to this one set, which is what makes
    * Service + Non-service === All hold on every view — including while standing on a route drill-down,
    * where narrowing the counters too would zero the other card while its link still opened a non-empty
    * list (exactly the card/list divergence this split has to avoid).
    *
-   * On every non-route view the bucket is "all", so this IS `unsearchedColumns` and the "All at risk"
+   * On every non-route view the bucket is "all", so this IS `columns` and the "All at risk"
    * number is byte-identical to the single pre-split card's.
    *
    * KNOWN GAP (not fixed here): on a STAGE-SCOPED view — Won, Opportunities, Bid Board —
-   * `unsearchedColumns` is only that view's columns, while every at-risk link opens the ALL-STAGE
+   * `columns` is only that view's columns, while every at-risk link opens the ALL-STAGE
    * cohort. On the Won drill-down the visible columns are terminal, so all three cards read 0 while
    * their destinations hold rows. This is pre-existing behaviour of the single "At risk" card (it read 0
    * there before this split too), not something the route split introduced. The fix is to count from
@@ -1587,46 +1612,16 @@ function DealListPageContent({
    * decision rather than a bug fix and is deliberately not taken here.
    */
   const kpiAtRiskColumns = useMemo(
-    () => (atRiskRouteBucket === "all" ? unsearchedColumns : getAtRiskBoardColumns(boardColumns, "all")),
-    [atRiskRouteBucket, boardColumns, unsearchedColumns]
+    () => (atRiskRouteBucket === "all" ? columns : getAtRiskBoardColumns(boardColumns, "all")),
+    [atRiskRouteBucket, boardColumns, columns]
   );
-  /**
-   * The kanban's columns: `unsearchedColumns` with ONLY the text search layered on.
-   *
-   * This is DERIVED from unsearchedColumns rather than re-selecting the stage/at-risk/route set a second
-   * time. The two used to be separate copies of the same selection chain, which meant the route narrowing
-   * had to be added in two places to stay correct — the board and list would otherwise have shown the full
-   * at-risk cohort under a route card's number. One selection, one place, no drift.
-   */
-  const columns = useMemo(() => {
-    const searchTerm = search.trim().toLowerCase();
-    if (!searchTerm) return unsearchedColumns;
-    return unsearchedColumns.map((column) => {
-      const cards = column.cards.filter((deal) => {
-        const haystack = [
-          deal.name,
-          deal.dealNumber,
-          deal.projectNumber,
-          deal.companyName,
-          deal.propertyCity,
-          deal.propertyState,
-          deal.assignedRepName,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-        return haystack.includes(searchTerm);
-      });
-      return recountColumnFromCards(column, cards);
-    });
-  }, [search, unsearchedColumns]);
   // On the at-risk drill-down the Active Pipeline KPI card aggregates the SAME at-risk-filtered set that
-  // feeds the kanban (unsearchedColumns) — not the whole open board. Those columns are recounted from
+  // feeds the kanban (columns) — not the whole open board. Those columns are recounted from
   // CARDS, so this card's reconciliation with the At-Risk KPI (which reads the server summary) holds
   // because this route requests SLA_DRILLDOWN_PREVIEW_LIMIT cards, not because the two share a source.
   // See getAtRiskBoardColumns. Everywhere else it stays the full active (non-terminal) pipeline.
   const activePipelineColumns =
-    dashboardView.boardMode === "at_risk" ? unsearchedColumns : getActivePipelineColumns(boardColumns);
+    dashboardView.boardMode === "at_risk" ? columns : getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(
     () =>
       dashboardView.boardStageSlugs.length > 0
@@ -1810,7 +1805,27 @@ function DealListPageContent({
       navigate(qs ? `/deals/pending-rfp?${qs}` : "/deals/pending-rfp");
       return;
     }
-    navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, searchParams));
+    /**
+     * Carry the active board search into the stage drill-down.
+     *
+     * The term is component state, not a URL param, so it does not ride along in `searchParams` the way
+     * the rep/estimator/date dimensions do. Without this a searched column's own affordance breaks its
+     * promise: "Showing 50 of 87 — view all 87" opens a stage page listing all 312, because the column
+     * count is now search-narrowed while the destination was not.
+     *
+     * `debouncedSearch`, not `search` — the board's numbers were computed from the debounced term, and the
+     * destination has to match the number the user clicked. Guarded at >= 2 characters for the same
+     * reason: that is the term that actually narrowed the board (see getDealsForPipeline). The stage page
+     * reads a bare `search` param and normalizes it into its FilterBar's fb_search.
+     */
+    const stageParams = new URLSearchParams(searchParams);
+    const boardSearchTerm = debouncedSearch.trim();
+    if (boardSearchTerm.length >= 2) {
+      stageParams.set("search", boardSearchTerm);
+    } else {
+      stageParams.delete("search");
+    }
+    navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, stageParams));
   };
 
   useEffect(() => {

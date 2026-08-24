@@ -1064,6 +1064,10 @@ router.get("/pipeline", async (req, res, next) => {
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       previewLimit: Number.isFinite(parsedPreviewLimit) ? parsedPreviewLimit : undefined,
+      // The board's text search, read the SAME way GET /deals reads its own, so the kanban and the list
+      // below it on the /deals page agree on the term. The service applies the shared predicate and the
+      // >= 2 character guard. Absent on a board load with an empty search box, which is the common case.
+      search: req.query.search as string | undefined,
       // Opt-in: `boardSummary` + `pendingRfpDeals`, and the Opportunity card exclusion that goes with
       // them. Default OFF so an older web bundle (which builds its Pending RFP column by carving cards
       // out of pipelineColumns, and cannot start sending a flag) and mobile-crm (which never reads the
