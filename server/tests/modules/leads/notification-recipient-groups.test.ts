@@ -1,9 +1,12 @@
+import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { notificationRecipientGroups, users } from "@trock-crm/shared/schema";
 import { NOTIFICATION_RECIPIENT_GROUPS } from "@trock-crm/shared/types";
 import {
   getNotificationRecipientGroup,
   getNotificationRecipients,
+  resolveNotificationRecipients,
+  updateNotificationRecipientAssignments,
 } from "../../../src/modules/leads/due-diligence-service";
 
 /**
@@ -44,8 +47,18 @@ function buildTenantDb(options: {
     displayName: person.displayName,
   });
 
+  const tx = {
+    delete: vi.fn(() => ({ where: vi.fn(async () => { state.assignedUserIds = []; }) })),
+    insert: vi.fn(() => ({
+      values: vi.fn(async (rows: Array<{ userId: string }>) => {
+        state.assignedUserIds = rows.map((row) => row.userId);
+      }),
+    })),
+  };
+
   return {
     state,
+    tx,
     db: {
       select: vi.fn((fields?: Record<string, unknown>) => {
         let selectedTable: unknown = null;
@@ -62,6 +75,12 @@ function buildTenantDb(options: {
                 state.people
                   .filter((person) => state.assignedUserIds.includes(person.id) && person.isActive !== false)
                   .map(toRecipient),
+              );
+            }
+            // The assignment WRITE checks the named users exist and reads their role back for the gate.
+            if (selectedTable === users && fields && "id" in fields) {
+              return Promise.resolve(
+                state.people.map((person) => ({ id: person.id, role: person.role })),
               );
             }
             if (selectedTable === users) {
@@ -89,6 +108,7 @@ function buildTenantDb(options: {
           })),
         })),
       })),
+      transaction: vi.fn(async (callback: (handle: typeof tx) => Promise<void>) => callback(tx)),
     } as never,
   };
 }
@@ -135,6 +155,73 @@ describe("getNotificationRecipients", () => {
   });
 });
 
+describe("resolveNotificationRecipients", () => {
+  it("says whether the group row exists, so a job can log 'not configured' instead of mailing nobody", async () => {
+    // Group rows are created lazily by the admin page. A job that reads a key nobody has visited gets the
+    // same empty array as a key an admin deliberately emptied, and the two need different log lines — the
+    // silent-nobody failure this whole PR is named after.
+    const missing = buildTenantDb({ group: null, assignedUserIds: [], people: PEOPLE });
+    const present = buildTenantDb({
+      group: { id: "g1", key: "marketing_expense_approver", name: "Marketing Expense Approver", description: "" },
+      assignedUserIds: [],
+      people: PEOPLE,
+    });
+
+    await expect(resolveNotificationRecipients(missing.db, "marketing_expense_approver")).resolves.toMatchObject({
+      recipients: [],
+      groupExists: false,
+    });
+    await expect(resolveNotificationRecipients(present.db, "marketing_expense_approver")).resolves.toMatchObject({
+      recipients: [],
+      groupExists: true,
+    });
+  });
+});
+
+describe("updateNotificationRecipientAssignments role gate", () => {
+  const GROUP = { id: "g1", key: "lead_due_diligence", name: "Lead Due Diligence", description: "" };
+
+  it("refuses to make a non-admin/director a due-diligence approver", async () => {
+    // The page filters the picker, but the API is what an admin's browser actually talks to. A DD
+    // assignment hands out an approve/decline token that needs no login, so this cannot be UI-only.
+    const { db, state } = buildTenantDb({ group: GROUP, assignedUserIds: ["admin-1"], people: PEOPLE });
+
+    await expect(
+      updateNotificationRecipientAssignments(db, "lead_due_diligence", ["rep-1"]),
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(state.assignedUserIds).toEqual(["admin-1"]);
+  });
+
+  it("names the offending user and the roles that are allowed", async () => {
+    const { db } = buildTenantDb({ group: GROUP, assignedUserIds: [], people: PEOPLE });
+
+    await expect(
+      updateNotificationRecipientAssignments(db, "lead_due_diligence", ["rep-1"]),
+    ).rejects.toMatchObject({ message: expect.stringContaining("rep-1") });
+  });
+
+  it("still accepts admins and directors for due diligence", async () => {
+    const { db, state } = buildTenantDb({ group: GROUP, assignedUserIds: [], people: PEOPLE });
+
+    await updateNotificationRecipientAssignments(db, "lead_due_diligence", ["admin-1", "director-1"]);
+
+    expect(state.assignedUserIds).toEqual(["admin-1", "director-1"]);
+  });
+
+  it("lets a rep onto an unrestricted group — that is the whole point of the bid due date report", async () => {
+    const { db, state } = buildTenantDb({
+      group: { id: "g2", key: "bid_due_date_report", name: "Bid Due Date Report", description: "" },
+      assignedUserIds: [],
+      people: PEOPLE,
+    });
+
+    await updateNotificationRecipientAssignments(db, "bid_due_date_report", ["rep-1"]);
+
+    expect(state.assignedUserIds).toEqual(["rep-1"]);
+  });
+});
+
 describe("the well-known group registry", () => {
   it("registers the two keys the upcoming reports need", () => {
     expect(NOTIFICATION_RECIPIENT_GROUPS.map((group) => group.key)).toEqual(
@@ -156,12 +243,79 @@ describe("the well-known group registry", () => {
     },
   );
 
+  it("has no duplicate keys — two entries sharing a key would render two sections over one state slot", () => {
+    const keys = NOTIFICATION_RECIPIENT_GROUPS.map((group) => group.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("warns about the WIDENING, not about silence, for every group that has a fallback", () => {
+    // Emptying a group with a fallback does not stop the mail, it sends it to every admin and director.
+    // Copy that says the opposite is what talks an admin into doing it.
+    for (const group of NOTIFICATION_RECIPIENT_GROUPS.filter((entry) => entry.fallbackToAdminsAndDirectors)) {
+      expect(group.emptyWarning, `${group.key} does not mention who receives it instead`).toMatch(
+        /admins? and directors?/i,
+      );
+      expect(group.emptyWarning, `${group.key} claims the mail stops`).not.toMatch(
+        /will not be sent|no longer|stop(s|ped)? /i,
+      );
+    }
+  });
+
+  it("restricts due-diligence membership to admins and directors, and restricts nothing else", () => {
+    // DD recipients are mailed a decision token that authenticates on its own, so membership here is a
+    // permission. The other two are mailing lists and must stay open — the bid report goes to a `rep`.
+    const byKey = Object.fromEntries(NOTIFICATION_RECIPIENT_GROUPS.map((group) => [group.key, group]));
+    expect(byKey.lead_due_diligence.assignableRoles).toEqual(["admin", "director"]);
+    expect(byKey.bid_due_date_report.assignableRoles).toBeUndefined();
+    expect(byKey.marketing_expense_approver.assignableRoles).toBeUndefined();
+  });
+
+  // The lazy upsert only fires when an admin opens the page. Until then a job reading the key sees an
+  // empty list it cannot distinguish from a deliberately emptied one, so every registered key needs a row
+  // that exists at deploy time. A fourth entry added with no migration fails here rather than in the field.
+  it.each(NOTIFICATION_RECIPIENT_GROUPS.map((group) => [group.key, group] as const))(
+    "seeds a %s group row in a migration, not only on first page view",
+    (key, definition) => {
+      const seeds = ["0079_notification_recipient_groups.sql", "0232_notification_recipient_groups_registry.sql"]
+        .map((name) => fs.readFileSync(new URL(`../../../../migrations/${name}`, import.meta.url), "utf8"))
+        .join("\n");
+
+      expect(seeds).toContain(`'${key}'`);
+      expect(seeds, `${key}'s seeded name has drifted from the registry`).toContain(`'${definition.name}'`);
+      expect(seeds, `${key}'s seeded description has drifted from the registry`).toContain(
+        `'${definition.description}'`,
+      );
+    },
+  );
+
   it("still throws 404 for a key nobody registered", async () => {
     const { db } = buildTenantDb({ group: null });
 
     await expect(getNotificationRecipientGroup(db, "some_other_unknown_key")).rejects.toMatchObject({
       statusCode: 404,
     });
+  });
+
+  it("reports the fallback as a fallback, so the admin page cannot freeze it into a static list", async () => {
+    // The page pre-ticks what it is told is ASSIGNED. Handing it the fallback under the same name means
+    // the first Save writes those people in as real rows and the fallback never fires again — a director
+    // hired next year silently stops receiving DD, and the list still looks right.
+    const { db } = buildTenantDb({ group: null, assignedUserIds: [], people: PEOPLE });
+
+    const result = await getNotificationRecipientGroup(db, "lead_due_diligence");
+
+    expect(result.recipients.map((recipient) => recipient.userId)).toEqual(["admin-1", "director-1"]);
+    expect(result.assignedUserIds).toEqual([]);
+    expect(result.fallbackApplied).toBe(true);
+  });
+
+  it("reports real assignments as assigned", async () => {
+    const { db } = buildTenantDb({ group: null, assignedUserIds: ["director-1"], people: PEOPLE });
+
+    const result = await getNotificationRecipientGroup(db, "lead_due_diligence");
+
+    expect(result.assignedUserIds).toEqual(["director-1"]);
+    expect(result.fallbackApplied).toBe(false);
   });
 
   it("keeps the lead_due_diligence fallback wired to its group read", async () => {

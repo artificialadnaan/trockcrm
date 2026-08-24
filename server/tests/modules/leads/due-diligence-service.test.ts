@@ -320,7 +320,8 @@ function createRecipientAssignmentDb(options: {
         innerJoin: vi.fn(() => chain),
         where: vi.fn(() => {
           if (selectedTable === users && selectedFields && "id" in selectedFields) {
-            return Promise.resolve(state.users.map((user) => ({ id: user.id })));
+            // `role` comes back too now: `updateNotificationRecipientAssignments` gates DD membership on it.
+            return Promise.resolve(state.users.map((user) => ({ id: user.id, role: user.role ?? "admin" })));
           }
           if (selectedTable === notificationRecipientGroups && selectedFields && "email" in selectedFields) {
             return Promise.resolve(recipients());

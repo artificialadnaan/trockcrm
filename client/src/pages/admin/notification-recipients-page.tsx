@@ -6,7 +6,7 @@ import {
   type NotificationRecipientGroupDefinition,
 } from "@trock-crm/shared/types";
 import { Button } from "@/components/ui/button";
-import { useAdminUsers } from "@/hooks/use-admin-users";
+import { useAdminUsers, type AdminUser } from "@/hooks/use-admin-users";
 import {
   getNotificationRecipientGroup,
   updateNotificationRecipientGroup,
@@ -20,52 +20,78 @@ import {
  * both key off this one static path — so it is strictly more surface for the same job. The sections carry
  * no per-group navigation state and there are three of them; they stack.
  *
- * Every ACTIVE user is assignable, not only admins and directors. The narrower filter came from the first
- * group being an approval queue, and it silently made the other groups unusable: the bid due date report
- * goes to an estimator, whose role is `rep`, and there was no way to tick that box.
+ * WHO IS OFFERED is per group, not global. A mailing list should offer everyone: the bid due date report
+ * goes to an estimator, whose role is `rep`, and the old admin/director-only picker is precisely why she
+ * could not be named. A group whose membership is a PERMISSION must not widen with it — see
+ * `assignableRoles` on the definition, which the server enforces independently.
  */
 
 interface GroupState {
   recipients: NotificationRecipient[];
   selectedUserIds: Set<string>;
+  fallbackApplied: boolean;
   error: string | null;
   loading: boolean;
   saving: boolean;
 }
 
-const INITIAL_GROUP_STATE: GroupState = {
-  recipients: [],
-  selectedUserIds: new Set(),
-  error: null,
-  loading: true,
-  saving: false,
-};
+/** A FACTORY, not a shared constant — one `Set` handed to every key is one mutation away from a leak. */
+function createInitialGroupState(): GroupState {
+  return {
+    recipients: [],
+    selectedUserIds: new Set<string>(),
+    fallbackApplied: false,
+    error: null,
+    loading: true,
+    saving: false,
+  };
+}
+
+function assignableUsersFor(definition: NotificationRecipientGroupDefinition, activeUsers: AdminUser[]) {
+  const allowed = definition.assignableRoles;
+  return allowed ? activeUsers.filter((user) => (allowed as readonly string[]).includes(user.role)) : activeUsers;
+}
 
 export function NotificationRecipientsPage() {
   const { users, loading: usersLoading } = useAdminUsers();
   const [groups, setGroups] = useState<Record<string, GroupState>>(() =>
-    Object.fromEntries(NOTIFICATION_RECIPIENT_GROUPS.map((definition) => [definition.key, INITIAL_GROUP_STATE]))
+    Object.fromEntries(NOTIFICATION_RECIPIENT_GROUPS.map((definition) => [definition.key, createInitialGroupState()]))
   );
-  const [initialLoading, setInitialLoading] = useState(true);
-  const cancelled = useRef(false);
+
+  /**
+   * Which effect run owns the in-flight requests.
+   *
+   * A single `cancelled` boolean does not survive StrictMode, which sets the effect up, tears it down and
+   * sets it up again: the second setup resets the flag, so the FIRST run's outstanding responses come back
+   * alive and overwrite the newer ones — or an edit the admin has already made. Bumping a counter on both
+   * setup and teardown makes a superseded run permanently superseded.
+   */
+  const runId = useRef(0);
+  /** Saves in flight, by key. A ref because two clicks can land before React re-renders — see `save`. */
+  const savingKeys = useRef(new Set<string>());
 
   const patchGroup = useCallback((key: string, patch: Partial<GroupState>) => {
-    if (cancelled.current) return;
     setGroups((current) => ({ ...current, [key]: { ...current[key], ...patch } }));
   }, []);
 
   const loadGroup = useCallback(
-    async (key: string) => {
+    async (key: string, run: number) => {
       patchGroup(key, { loading: true });
       try {
         const result = await getNotificationRecipientGroup(key);
+        if (runId.current !== run) return;
         patchGroup(key, {
           recipients: result.recipients,
-          selectedUserIds: new Set(result.recipients.map((recipient) => recipient.userId)),
+          // ASSIGNED, never the effective recipients. When a group falls back to admins and directors the
+          // server sends both, and ticking the fallback would let any Save write it in as real rows — the
+          // fallback then never fires again and a director hired next year silently stops receiving these.
+          selectedUserIds: new Set(result.assignedUserIds),
+          fallbackApplied: result.fallbackApplied,
           error: null,
           loading: false,
         });
       } catch (err) {
+        if (runId.current !== run) return;
         // Per group, not per page: one key failing must not take the other groups' lists away with it.
         patchGroup(key, {
           error: err instanceof Error ? `Failed to load recipients: ${err.message}` : "Failed to load recipients.",
@@ -77,30 +103,51 @@ export function NotificationRecipientsPage() {
   );
 
   useEffect(() => {
-    cancelled.current = false;
-    void Promise.all(NOTIFICATION_RECIPIENT_GROUPS.map((definition) => loadGroup(definition.key))).then(() => {
-      // Only the FIRST pass blanks the page. A later Retry redraws its own section and leaves the rest.
-      if (!cancelled.current) setInitialLoading(false);
-    });
+    const run = (runId.current += 1);
+    for (const definition of NOTIFICATION_RECIPIENT_GROUPS) {
+      void loadGroup(definition.key, run);
+    }
     return () => {
-      cancelled.current = true;
+      runId.current += 1;
     };
   }, [loadGroup]);
 
   const activeUsers = useMemo(() => users.filter((user) => user.isActive), [users]);
 
+  const toggleRecipient = useCallback((key: string, userId: string, checked: boolean) => {
+    // Computed INSIDE the updater. Reading `state.selectedUserIds` off the render closure works only
+    // because React flushes discrete events one at a time, which is a fact about React, not about us.
+    setGroups((current) => {
+      const group = current[key];
+      const next = new Set(group.selectedUserIds);
+      if (checked) next.add(userId);
+      else next.delete(userId);
+      return { ...current, [key]: { ...group, selectedUserIds: next } };
+    });
+  }, []);
+
   const save = async (definition: NotificationRecipientGroupDefinition) => {
-    const state = groups[definition.key];
-    if (state.saving) return;
-    if (state.selectedUserIds.size === 0) {
+    // The `disabled` attribute cannot stop a double-click that lands in one batch — both clicks are
+    // dispatched before React re-renders, so the button is still enabled for the second. Neither can a
+    // render-scoped `state.saving`, whose closure also still reads false. A ref is written immediately.
+    if (savingKeys.current.has(definition.key)) return;
+
+    const selectedUserIds = [...groups[definition.key].selectedUserIds];
+    if (selectedUserIds.length === 0) {
       const confirmed = window.confirm(`Save with no recipients? ${definition.emptyWarning}`);
       if (!confirmed) return;
     }
 
+    savingKeys.current.add(definition.key);
     patchGroup(definition.key, { saving: true });
     try {
-      const result = await updateNotificationRecipientGroup(definition.key, [...state.selectedUserIds]);
-      patchGroup(definition.key, { recipients: result.recipients, saving: false });
+      const result = await updateNotificationRecipientGroup(definition.key, selectedUserIds);
+      patchGroup(definition.key, {
+        recipients: result.recipients,
+        selectedUserIds: new Set(result.assignedUserIds),
+        fallbackApplied: result.fallbackApplied,
+        saving: false,
+      });
       toast.success("Notification recipients updated");
     } catch (err) {
       patchGroup(definition.key, { saving: false });
@@ -109,10 +156,14 @@ export function NotificationRecipientsPage() {
           ? `Failed to update recipients: ${err.message}`
           : "Failed to update recipients. Please try again."
       );
+    } finally {
+      savingKeys.current.delete(definition.key);
     }
   };
 
-  if (initialLoading || usersLoading) {
+  // Only the user list gates the whole page — without it there is nothing to tick. Each group draws its
+  // own loading and error state, so one slow or broken key cannot take the others down with it.
+  if (usersLoading) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
@@ -130,38 +181,44 @@ export function NotificationRecipientsPage() {
 
       {NOTIFICATION_RECIPIENT_GROUPS.map((definition) => {
         const state = groups[definition.key];
+        const headingId = `notification-group-${definition.key}`;
         return (
-          <section key={definition.key} data-group-key={definition.key} className="border bg-background p-4">
-            <h2 className="font-semibold">{definition.name}</h2>
+          <section
+            key={definition.key}
+            data-group-key={definition.key}
+            aria-labelledby={headingId}
+            className="border bg-background p-4"
+          >
+            <h2 id={headingId} className="font-semibold">{definition.name}</h2>
             <p className="mt-1 text-sm text-muted-foreground">{definition.description}</p>
 
-            {state.error ? (
+            {state.loading ? (
+              <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading recipients
+              </div>
+            ) : state.error ? (
               <div className="mt-4 space-y-3 border border-red-200 bg-red-50 p-4 text-sm text-red-700">
                 <p>{state.error}</p>
-                <Button variant="outline" disabled={state.loading} onClick={() => { void loadGroup(definition.key); }}>
+                <Button variant="outline" onClick={() => { void loadGroup(definition.key, runId.current); }}>
                   Retry
                 </Button>
               </div>
             ) : (
               <>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Current recipients:{" "}
+                  {state.fallbackApplied ? "No one is assigned, so these currently go to: " : "Current recipients: "}
                   {state.recipients.length ? state.recipients.map((recipient) => recipient.email).join(", ") : "none"}
                 </p>
                 <div className="mt-4 grid gap-2">
                   {/* TODO: Replace checkbox list with autocomplete picker when user count
                       exceeds ~50. Current pattern is fine for the existing T Rock team size. */}
-                  {activeUsers.map((user) => (
+                  {assignableUsersFor(definition, activeUsers).map((user) => (
                     <label key={user.id} className="flex items-center gap-3 border p-3 text-sm">
                       <input
                         type="checkbox"
                         checked={state.selectedUserIds.has(user.id)}
-                        onChange={(event) => {
-                          const next = new Set(state.selectedUserIds);
-                          if (event.target.checked) next.add(user.id);
-                          else next.delete(user.id);
-                          patchGroup(definition.key, { selectedUserIds: next });
-                        }}
+                        onChange={(event) => toggleRecipient(definition.key, user.id, event.target.checked)}
                       />
                       <span className="font-medium">{user.displayName}</span>
                       <span className="text-muted-foreground">{user.email}</span>

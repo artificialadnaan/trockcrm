@@ -122,13 +122,42 @@ export interface NotificationRecipientOptions {
   fallbackToAdminsAndDirectors?: boolean;
 }
 
-/** Who a notification group's mail goes to. Key-agnostic — every group resolves through here. */
-export async function getNotificationRecipients(
+export interface NotificationRecipientResolution {
+  /** Who the mail actually goes to — the assignments, or the fallback when they are empty. */
+  recipients: Array<{ userId: string; email: string; displayName: string }>;
+  /**
+   * The rows genuinely written in `notification_recipient_assignments`, never the fallback.
+   *
+   * Separate from `recipients` because the admin page pre-ticks what it is told is assigned. Handed the
+   * fallback under the same name it ticks every admin and director, and the next Save — including a stray
+   * one while configuring a different group — writes them in as real rows. The fallback then never fires
+   * again, so a director hired next year silently stops receiving DD and the list still looks correct.
+   */
+  assignedUserIds: string[];
+  /**
+   * Whether a `notification_recipient_groups` row exists for this key at all.
+   *
+   * Group rows are created lazily, when an admin first opens the page. Without this, a job reading a key
+   * nobody has visited gets exactly the same empty array as a key an admin deliberately emptied, and those
+   * two want different log lines — "not configured yet" against "configured to nobody".
+   */
+  groupExists: boolean;
+  fallbackApplied: boolean;
+}
+
+/** Who a notification group's mail goes to, with the provenance a caller needs to log a real message. */
+export async function resolveNotificationRecipients(
   tenantDb: TenantDb,
   key: string,
   options: NotificationRecipientOptions = {},
-) {
-  const rows = await tenantDb
+): Promise<NotificationRecipientResolution> {
+  const [groupRow] = await tenantDb
+    .select({ id: notificationRecipientGroups.id })
+    .from(notificationRecipientGroups)
+    .where(eq(notificationRecipientGroups.key, key))
+    .limit(1);
+
+  const assigned = await tenantDb
     .select({
       userId: users.id,
       email: users.email,
@@ -139,11 +168,14 @@ export async function getNotificationRecipients(
     .innerJoin(users, eq(users.id, notificationRecipientAssignments.userId))
     .where(and(eq(notificationRecipientGroups.key, key), eq(users.isActive, true)));
 
-  if (rows.length > 0 || !options.fallbackToAdminsAndDirectors) {
-    return rows;
+  const assignedUserIds = assigned.map((row) => row.userId);
+  const groupExists = Boolean(groupRow);
+
+  if (assigned.length > 0 || !options.fallbackToAdminsAndDirectors) {
+    return { recipients: assigned, assignedUserIds, groupExists, fallbackApplied: false };
   }
 
-  return tenantDb
+  const fallback = await tenantDb
     .select({
       userId: users.id,
       email: users.email,
@@ -151,6 +183,18 @@ export async function getNotificationRecipients(
     })
     .from(users)
     .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
+
+  return { recipients: fallback, assignedUserIds, groupExists, fallbackApplied: true };
+}
+
+/** Key-agnostic. The array form, for the send paths that only care who to mail. */
+export async function getNotificationRecipients(
+  tenantDb: TenantDb,
+  key: string,
+  options: NotificationRecipientOptions = {},
+) {
+  const resolution = await resolveNotificationRecipients(tenantDb, key, options);
+  return resolution.recipients;
 }
 
 /** The DD call sites' name for the above. The fallback stays on for this key and only this key. */
@@ -958,10 +1002,12 @@ export async function getNotificationRecipientGroup(tenantDb: TenantDb, key: str
   if (!group) {
     throw new AppError(404, "Notification recipient group not found");
   }
-  const recipients = await getNotificationRecipients(tenantDb, key, {
+  const { recipients, assignedUserIds, fallbackApplied } = await resolveNotificationRecipients(tenantDb, key, {
     fallbackToAdminsAndDirectors: notificationRecipientGroupByKey(key)?.fallbackToAdminsAndDirectors ?? false,
   });
-  return { group, recipients };
+  // `assignedUserIds` and `fallbackApplied` travel separately from `recipients` so the page can SHOW who
+  // would be mailed today without pre-ticking people nobody chose. See NotificationRecipientResolution.
+  return { group, recipients, assignedUserIds, fallbackApplied };
 }
 
 export async function updateNotificationRecipientAssignments(tenantDb: TenantDb, key: string, userIds: string[]) {
@@ -979,17 +1025,35 @@ export async function updateNotificationRecipientAssignments(tenantDb: TenantDb,
 
   if (uniqueUserIds.length > 0) {
     const existingUsers = await tenantDb
-      .select({ id: users.id })
+      .select({ id: users.id, role: users.role })
       .from(users)
       .where(inArray(users.id, uniqueUserIds));
-    const existingIds = new Set(existingUsers.map((user) => user.id));
-    const missingIds = uniqueUserIds.filter((userId) => !existingIds.has(userId));
+    const roleByUserId = new Map(existingUsers.map((user) => [user.id, user.role]));
+    const missingIds = uniqueUserIds.filter((userId) => !roleByUserId.has(userId));
 
     if (missingIds.length > 0) {
       throw new AppError(
         400,
         `Invalid user ID(s): ${missingIds.join(", ")}. These users do not exist in the system.`
       );
+    }
+
+    // Enforced HERE and not only in the picker, because the picker is a suggestion and this is the door.
+    // For a group whose membership is a permission rather than a subscription — DD hands out a decision
+    // token that authenticates on its own — a filtered checkbox list is not a control, it is a hint.
+    const assignableRoles = notificationRecipientGroupByKey(key)?.assignableRoles;
+    if (assignableRoles) {
+      const disallowedIds = uniqueUserIds.filter((userId) => {
+        const role = roleByUserId.get(userId);
+        return role !== undefined && !assignableRoles.includes(role);
+      });
+
+      if (disallowedIds.length > 0) {
+        throw new AppError(
+          400,
+          `User ID(s) ${disallowedIds.join(", ")} cannot be assigned to "${key}". Allowed roles: ${assignableRoles.join(", ")}.`
+        );
+      }
     }
   }
 

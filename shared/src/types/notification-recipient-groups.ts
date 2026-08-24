@@ -1,3 +1,5 @@
+import type { UserRole } from "./enums.js";
+
 /**
  * The notification recipient groups an admin can assign people to, in the order the admin page renders
  * them.
@@ -28,8 +30,22 @@ export interface NotificationRecipientGroupDefinition {
    * On for lead due diligence since it shipped — an unassigned DD group still mails the people who can act
    * on it. Off by default, because a fallback is only right where the whole leadership team is a defensible
    * audience; a report meant for one estimator is not improved by going to all of them.
+   *
+   * Whatever this says, `emptyWarning` has to agree with it. A group with a fallback does not go quiet when
+   * it is emptied, it WIDENS, and telling an admin the opposite is how they widen it on purpose.
    */
   fallbackToAdminsAndDirectors: boolean;
+  /**
+   * Which roles may be assigned to this group. Unset means every active user, which is the right default
+   * for a mailing list — the bid due date report goes to an estimator, whose role is `rep`.
+   *
+   * Set it when membership is a PERMISSION rather than a subscription. Lead due diligence is the case in
+   * point: its recipients are mailed a decision token, and `decideDueDiligenceByToken` authenticates on
+   * that token alone with no role check, so anyone on this list can approve a new customer regardless of
+   * what the CRM would otherwise let them do. Assignment changes are not audited either, so the narrow
+   * list is the only thing standing between "admin ticks a box" and "a field user approves customers".
+   */
+  assignableRoles?: readonly UserRole[];
 }
 
 export const NOTIFICATION_RECIPIENT_GROUPS: readonly NotificationRecipientGroupDefinition[] = [
@@ -37,8 +53,13 @@ export const NOTIFICATION_RECIPIENT_GROUPS: readonly NotificationRecipientGroupD
     key: "lead_due_diligence",
     name: "Lead Due Diligence",
     description: "Recipients who receive new-customer lead due diligence approval requests.",
-    emptyWarning: "Due Diligence approval emails will not be sent until recipients are added back.",
+    // NOT "the emails stop", which is what this said and is the opposite of what happens. Emptying this
+    // list turns the fallback back on, so the request goes to EVERY active admin and director, each one
+    // holding a link that approves or declines the customer without signing in.
+    emptyWarning:
+      "Approval requests will go to every active admin and director instead — each of them able to approve or decline from the email.",
     fallbackToAdminsAndDirectors: true,
+    assignableRoles: ["admin", "director"],
   },
   {
     key: "bid_due_date_report",
