@@ -1,12 +1,17 @@
 import jwt, { type SignOptions } from "jsonwebtoken";
 import crypto from "crypto";
-import { eq, and, like } from "drizzle-orm";
+import { eq, and, like, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { db } from "../../db.js";
 import { offices, users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
 import { getUserLocalAuthGate } from "./local-auth-service.js";
 import { getOfficeAccess } from "./office-access.js";
+import {
+  buildPendingAssignmentPredicate,
+  pendingAssignmentTodayCt,
+} from "../tasks/pending-assignment-predicate.js";
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
@@ -140,6 +145,91 @@ export async function getUserOnboardingGateStatus({
       cleanupUrl: cleanupAppUrl(),
     };
   }
+}
+
+/**
+ * Does this person have an assignment the login modal should interrupt them with? (F6, migration 0235)
+ *
+ * WHY THIS IS NOT SIMPLY A TASKS-SERVICE CALL. `app.use("/api/auth", authRoutes)` is mounted BEFORE the
+ * tenant router, so nothing under auth/ has a `req.tenantDb` — grep for it and this directory returns
+ * nothing at all. The acknowledgement table is per-office. So this mirrors getUserOnboardingGateStatus
+ * above: resolve the office slug out of public.offices, validate it into a schema name, and reach the
+ * tenant schema by name through the shared pool.
+ *
+ * THE PREDICATE IS IMPORTED, NOT RESTATED. It is the same fragment the modal's own list query uses
+ * (tasks/pending-assignment-predicate.ts). Two hand-written copies drift silently in both directions: a
+ * flag broader than the list opens an EMPTY modal, and a flag narrower than the list means the
+ * urgent/overdue repeats never fire because nothing ever asks for the list.
+ *
+ * EXISTS, never a count. The answer is a boolean and the table is unbounded per user; counting rows to
+ * compare against zero is work nobody reads. This runs on EVERY /auth/me, which is every page boot —
+ * the spec body's claim that the flag "avoids an extra round trip" is backwards, it ADDS one, and the
+ * only mitigation available is to make that one as cheap as possible.
+ *
+ * FAILS OPEN — the opposite of getUserOnboardingGateStatus, deliberately. That gate withholds the app
+ * until cleanup is done, so its safe answer is "blocked". This one INTERRUPTS somebody with a dialog
+ * they did not ask for, so its safe answer is "don't". A pool hiccup must not manufacture a modal.
+ */
+export async function userHasPendingTaskAssignments({
+  userId,
+  officeId,
+}: {
+  userId: string;
+  officeId: string;
+}): Promise<boolean> {
+  try {
+    const officeResult = await pool.query<{ office_slug: string | null }>(
+      "SELECT slug AS office_slug FROM public.offices WHERE id = $1 LIMIT 1",
+      [officeId],
+    );
+    const schemaName = tenantSchemaForOfficeSlug(officeResult.rows[0]?.office_slug);
+    if (!schemaName) return false;
+
+    // to_regclass rather than an optimistic query: between the API running migrations and an office
+    // being provisioned the table genuinely is absent, and an unguarded reference 42P01s inside login.
+    const tableResult = await pool.query<{ exists: string | null }>(
+      "SELECT to_regclass($1) AS exists",
+      [`${schemaName}.task_assignment_acknowledgements`],
+    );
+    if (!tableResult.rows[0]?.exists) return false;
+
+    const predicate = buildPendingAssignmentPredicate({
+      userId,
+      todayCt: pendingAssignmentTodayCt(),
+      schema: schemaName,
+    });
+    const { sql: predicateSql, params } = renderTenantPredicate(predicate);
+
+    const result = await pool.query<{ has_pending: boolean }>(
+      `
+        SELECT EXISTS (
+          SELECT 1
+            FROM "${schemaName}".tasks
+           WHERE ${predicateSql}
+           LIMIT 1
+        ) AS has_pending
+      `,
+      params,
+    );
+    return result.rows[0]?.has_pending === true;
+  } catch (error) {
+    console.error("[auth] pending task assignment lookup failed — treating as none", error);
+    return false;
+  }
+}
+
+/**
+ * Render a Drizzle `sql` fragment down to a parameterised string for the raw `pool`.
+ *
+ * The predicate is authored as a Drizzle fragment because it is built from the real column definitions
+ * — a renamed column becomes a compile error rather than a runtime 42703. This side has no Drizzle
+ * connection to execute it on, so the dialect renders it here and the placeholders are handed to
+ * node-postgres unchanged. Values stay BOUND; nothing is interpolated except the schema name, which
+ * buildPendingAssignmentPredicate validates.
+ */
+function renderTenantPredicate(fragment: SQL): { sql: string; params: unknown[] } {
+  const query = new PgDialect().sqlToQuery(fragment);
+  return { sql: query.sql, params: query.params };
 }
 
 export async function buildAuthenticatedUser(userId: string) {

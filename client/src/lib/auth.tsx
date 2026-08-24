@@ -43,6 +43,16 @@ interface User {
    * same allowlist, so treating a missing flag as "no" only hides an action that would have 403'd.
    */
   canMoveDealBackToOpportunity?: boolean;
+  /**
+   * True iff this person has a task assignment the new-assignment modal has not shown them yet (or an
+   * urgent/high/overdue one that re-shows until it leaves `pending`). Drives <TaskAssignmentModal/>.
+   *
+   * It rides EVERY auth response — dev login, local login, mobile login, /auth/me and, critically,
+   * /local/change-password — because `localLogin` sets `user` in place and never refetches /auth/me,
+   * and a newly provisioned person is held on the force-password-change screen until that last one
+   * answers. A flag present only on /auth/me is invisible on the login it is about.
+   */
+  hasPendingTaskAssignments?: boolean;
 }
 
 interface AuthContextValue {

@@ -1,9 +1,19 @@
 import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, jobQueue, taskResolutionState, tasks } from "@trock-crm/shared/schema";
+import {
+  deals,
+  jobQueue,
+  taskAssignmentAcknowledgements,
+  taskResolutionState,
+  tasks,
+} from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { TASK_RULES } from "./rules/config.js";
+import {
+  buildPendingAssignmentPredicate,
+  pendingAssignmentTodayCt,
+} from "./pending-assignment-predicate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -1248,4 +1258,130 @@ export async function snoozeTask(
     .returning();
 
   return result[0];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// F6 — new-assignment login modal
+//
+// Reads and writes the per-office `task_assignment_acknowledgements` table (migration 0235). The
+// SELECT half decides what interrupts somebody at login; the INSERT half records that it did.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * How many assignments the modal shows at once.
+ *
+ * Five, with an "and N more" line, because a modal listing forty tasks is a wall and a wall is what
+ * gets reflex-dismissed. The number is exported so the test that proves urgent work survives the cap
+ * cannot drift away from the cap it is proving.
+ */
+export const PENDING_ASSIGNMENT_MODAL_LIMIT = 5;
+
+export type PendingAssignmentTask = {
+  id: string;
+  title: string;
+  priority: string;
+  dueDate: string | null;
+  /** Display name of whoever created the task. The point of the feature; null if the user is gone. */
+  assignedByName: string | null;
+};
+
+/**
+ * The assignments to put in front of `userId` at login, most urgent first, capped at five.
+ *
+ * ⚠️ ORDER BY. `priority` is a Postgres ENUM declared ('urgent','high','normal','low'), and enum
+ * comparison follows DECLARATION order — so the obvious `ORDER BY priority DESC` sorts low → normal →
+ * high → urgent and, at LIMIT 5, drops urgent and high off the end. The urgent-repeat rule then
+ * re-selects those same never-displayed rows every login and the modal becomes a permanent nag showing
+ * the least important work in the office. `taskPriorityRankSql()` (rank 0 = urgent) ordered ASC is the
+ * fix, and it is reused rather than re-derived because the CASE already exists twice in this file.
+ *
+ * `total` is the count of everything matching, not of the page: it feeds the "and N more" line, and
+ * counting the returned array would just report the limit.
+ */
+export async function getPendingAssignmentTasks(
+  tenantDb: TenantDb,
+  userId: string
+): Promise<{ tasks: PendingAssignmentTask[]; total: number }> {
+  const predicate = buildPendingAssignmentPredicate({
+    userId,
+    todayCt: pendingAssignmentTodayCt(),
+  });
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      ${tasks.id}                AS id,
+      ${tasks.title}             AS title,
+      ${tasks.priority}::text    AS priority,
+      ${tasks.dueDate}::text     AS due_date,
+      (SELECT display_name FROM public.users WHERE id = ${tasks.createdBy}) AS assigned_by_name,
+      -- Computed over the full matching set BEFORE the LIMIT applies, so one round trip answers both
+      -- "what do we show" and "how many more are there".
+      COUNT(*) OVER ()::int      AS total
+    FROM tasks
+    WHERE ${predicate}
+    ORDER BY ${taskPriorityRankSql()} ASC, ${tasks.dueDate} ASC NULLS LAST, ${taskIdSqlRaw} ASC
+    LIMIT ${PENDING_ASSIGNMENT_MODAL_LIMIT}
+  `);
+
+  const rows = ((result as any).rows ?? result) as Array<Record<string, unknown>>;
+
+  return {
+    tasks: rows.map((row) => ({
+      id: String(row.id),
+      title: String(row.title),
+      priority: String(row.priority),
+      dueDate: (row.due_date as string | null) ?? null,
+      assignedByName: (row.assigned_by_name as string | null) ?? null,
+    })),
+    total: Number(rows[0]?.total ?? 0),
+  };
+}
+
+/** A task id we are willing to hand to Postgres. Anything else is dropped before it can raise 22P02. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Record that `userId` has been shown these assignments. Returns how many ids were actually theirs.
+ *
+ * OWNERSHIP IS RE-DERIVED SERVER-SIDE, never trusted from the payload — acknowledging is a write
+ * against another person's accountability record, so a client must not be able to mark somebody else's
+ * assignment as seen. Ids that fail the check are dropped SILENTLY rather than 403'd: the modal posts
+ * whatever it last rendered, so a stale client that has since had a task reassigned away would
+ * otherwise wedge itself against an error it cannot act on, and re-show the same dialog forever.
+ *
+ * Non-uuid ids are filtered before the query, not caught after it: `invalid input syntax for type uuid`
+ * is a 22P02 that surfaces as a 500 on a path whose entire contract is to fail quietly.
+ *
+ * ON CONFLICT DO NOTHING is the real idempotency guarantee — a double click, a StrictMode double-invoke
+ * and a retried request all collapse to the one row the unique constraint allows. The client-side guard
+ * is a courtesy on top of it, not the mechanism.
+ */
+export async function acknowledgeTaskAssignments(
+  tenantDb: TenantDb,
+  userId: string,
+  taskIds: unknown
+): Promise<number> {
+  const candidates = Array.from(
+    new Set(
+      (Array.isArray(taskIds) ? taskIds : [])
+        .filter((id): id is string => typeof id === "string" && UUID_SHAPE.test(id.trim()))
+        .map((id) => id.trim())
+    )
+  );
+  if (candidates.length === 0) return 0;
+
+  const owned = await tenantDb
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(and(inArray(tasks.id, candidates), eq(tasks.assignedTo, userId)));
+  if (owned.length === 0) return 0;
+
+  await tenantDb
+    .insert(taskAssignmentAcknowledgements)
+    .values(owned.map((row) => ({ taskId: row.id, userId })))
+    .onConflictDoNothing({
+      target: [taskAssignmentAcknowledgements.taskId, taskAssignmentAcknowledgements.userId],
+    });
+
+  return owned.length;
 }

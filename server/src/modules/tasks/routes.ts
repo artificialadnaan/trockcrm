@@ -21,6 +21,8 @@ import {
   isTaskSortBy,
   isTaskSection,
   isTaskSource,
+  getPendingAssignmentTasks,
+  acknowledgeTaskAssignments,
   type TaskSortDir,
 } from "./service.js";
 import {
@@ -369,6 +371,40 @@ router.post("/:id/ack", async (req, res, next) => {
 // =============================================================================================
 // END F4 — TASK CLOSED LOOP
 // =============================================================================================
+
+// ═══ F6 — new-assignment login modal ═════════════════════════════════════════════════════════
+// Both routes live in one block so a parallel branch adding its own literal routes at this anchor
+// resolves as a block move rather than an interleave. Registered ABOVE the anchor banner below for
+// the reason the banner gives: `GET /:id` would otherwise swallow /pending-acknowledgement.
+
+// GET /api/tasks/pending-acknowledgement — assignments to interrupt this person with at login.
+router.get("/pending-acknowledgement", async (req, res, next) => {
+  try {
+    // Scoped to the authenticated caller and to nothing else. There is deliberately no userId
+    // parameter: this is somebody's personal "have you seen this" record, not a manager report.
+    const result = await getPendingAssignmentTasks(req.tenantDb!, req.user!.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tasks/acknowledge — record that the modal has shown these exact assignment versions to the caller.
+router.post("/acknowledge", async (req, res, next) => {
+  try {
+    // 204 whatever the payload turns out to be. The service filters to assignments genuinely owned by
+    // the caller AT the version the modal rendered, and silently drops stale/malformed rows. A 400 or
+    // 403 would wedge a modal that lost a reassignment race into re-showing forever with no action
+    // available to it. Ownership and version binding are enforced; they just are not announced.
+    await acknowledgeTaskAssignments(req.tenantDb!, req.user!.id, req.body?.assignments);
+    await req.commitTransaction!();
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 
 // ---------------------------------------------------------------------------------------------
 // ADD NEW SINGLE-SEGMENT GET ROUTES ABOVE THIS LINE.
