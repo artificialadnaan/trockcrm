@@ -1090,6 +1090,13 @@ router.delete("/:id", requireAdmin, async (req, res, next) => {
     const fileId = req.params.id as string;
     const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
+    // Deletion is a write that depends on request status, so the same rule applies. `requireAdmin` limits
+    // WHO may do this; it says nothing about WHEN. Without this an admin could soft-delete a supporting
+    // document after the request was approved, and `loadDetail` selects only active files — so it would
+    // simply vanish from the record of what the approver was shown.
+    if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
+    }
     await assertDealLinkedFileMutationAllowed(req, existing, "delete");
 
     const deletedFile = await deleteFile(req.tenantDb!, fileId, req.user!.role, req.user!.id);

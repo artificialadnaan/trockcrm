@@ -3,6 +3,7 @@ import { CheckCircle, ChevronDown, ChevronRight, Inbox, Loader2, Megaphone, Pape
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { isApiError } from "@/lib/api";
+import { downloadFile } from "@/hooks/use-files";
 import {
   decideMarketingExpenseRequest,
   getMarketingExpenseRequest,
@@ -161,10 +162,22 @@ function RequestDetail({ detail }: { detail: MarketingExpenseRequestDetail }) {
           <p className="text-sm text-muted-foreground">No supporting documents were attached.</p>
         ) : (
           <ul className="space-y-1">
+            {/*
+              OPENABLE, not merely listed. Seeing that a quote exists is not reading it, and the decision
+              this panel gates is supposed to rest on the contents. The download route runs
+              assertMarketingExpenseRequestReadAccess, which this approver has already passed to be here.
+            */}
             {detail.attachments.map((attachment) => (
-              <li key={attachment.id} className="flex items-center gap-2 text-sm text-slate-700">
-                <Paperclip className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">{attachment.displayName}</span>
+              <li key={attachment.id} className="flex items-center gap-2 text-sm">
+                <Paperclip className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                <button
+                  type="button"
+                  data-testid={`mer-attachment-${attachment.id}`}
+                  onClick={() => void downloadFile(attachment.id)}
+                  className="truncate rounded font-medium text-brand-red underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+                >
+                  {attachment.displayName}
+                </button>
                 <span className="text-xs text-muted-foreground">
                   {Math.max(1, Math.round(attachment.fileSizeBytes / 1024))} KB
                 </span>

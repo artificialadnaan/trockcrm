@@ -71,6 +71,13 @@ async function renderAt(url: string, useHook: () => unknown) {
   });
 }
 
+/** Lets a bespoke probe component sit under the same router while still exposing `navigate`. */
+function ProbeWithNav({ Probe }: { Probe: () => null }) {
+  const navigate = useNavigate();
+  navigateTo = (url: string) => navigate(url);
+  return <Probe />;
+}
+
 async function switchOfficeTo(url: string) {
   await act(async () => {
     navigateTo(url);
@@ -108,5 +115,96 @@ describe("useMarketingExpenseQueue", () => {
 
     await switchOfficeTo("/admin/marketing-expense-requests?officeId=office-b");
     expect(api).toHaveBeenCalledTimes(2);
+  });
+});
+
+// A KEYED DEPENDENCY ANSWERS "HAVE I STARTED?", NOT "WHICH REQUEST IS THIS AN ANSWER TO?"
+//
+// Adding the office scope to the dependency list makes a switch RE-ISSUE the read. It does nothing about
+// the first read still being in flight: if the old office's response lands second, it overwrites the new
+// office's rows and the page shows another tenant's data with no indication anything is wrong. Every action
+// fired from those rows then goes to the currently-scoped tenant.
+//
+// The fix is request identity captured at issue time and compared at resolution — losers are discarded
+// without touching state.
+describe("out-of-order responses", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("discards a stale response that resolves AFTER a newer one", async () => {
+    const first = deferred<{ requests: unknown[] }>();
+    const second = deferred<{ requests: unknown[] }>();
+    api.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+    const seen: unknown[][] = [];
+    function Probe() {
+      const { requests } = useMyMarketingExpenseRequests();
+      seen.push(requests);
+      return null;
+    }
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/marketing-expense-requests?officeId=office-a"]}>
+          <Routes>
+            <Route path="*" element={<ProbeWithNav Probe={Probe} />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+    await switchOfficeTo("/marketing-expense-requests?officeId=office-b");
+
+    // Office B answers first, then the stale office-A read finally lands.
+    await act(async () => {
+      second.resolve({ requests: [{ id: "b-1" }] });
+    });
+    await act(async () => {
+      first.resolve({ requests: [{ id: "a-1" }] });
+    });
+
+    const latest = seen[seen.length - 1] as Array<{ id: string }>;
+    expect(latest.map((row) => row.id)).toEqual(["b-1"]);
+  });
+
+  it("a LOSER resolving first does not clear the loading latch the winner still owns", async () => {
+    // The order that matters. If the stale office-A read resolves BEFORE office-B's, an unconditional
+    // `setLoading(false)` in its finally block ends the spinner while the real read is still in flight —
+    // the page renders its empty state and tells the user this office has no requests.
+    const first = deferred<{ requests: unknown[] }>();
+    const second = deferred<{ requests: unknown[] }>();
+    api.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+    const loadings: boolean[] = [];
+    function Probe() {
+      const { loading } = useMyMarketingExpenseRequests();
+      loadings.push(loading);
+      return null;
+    }
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/marketing-expense-requests?officeId=office-a"]}>
+          <Routes>
+            <Route path="*" element={<ProbeWithNav Probe={Probe} />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+    await switchOfficeTo("/marketing-expense-requests?officeId=office-b");
+
+    // The STALE read answers first and must change nothing.
+    await act(async () => {
+      first.resolve({ requests: [{ id: "a-1" }] });
+    });
+    expect(loadings[loadings.length - 1]).toBe(true);
+
+    // The winner then lands and ends the load.
+    await act(async () => {
+      second.resolve({ requests: [{ id: "b-1" }] });
+    });
+    expect(loadings[loadings.length - 1]).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import type {
@@ -47,19 +47,33 @@ export function useMyMarketingExpenseRequests() {
   // dependency list the page keeps showing the previous office's rows while every action fired from them
   // goes to the new tenant. The approver email links here WITH an ?officeId, so this is the ordinary path.
   const officeScopeId = useOfficeScopeId();
+  /**
+   * Which read is the current one.
+   *
+   * The dependency list answers "have I started a new read?"; it says nothing about "which read is this an
+   * answer to". After an office switch both are in flight, and if the OLD one resolves second it overwrites
+   * the new office's rows — the page then shows another tenant's data with no sign anything is wrong, and
+   * every action fired from those rows is sent to the currently-scoped tenant. Identity is captured when
+   * the request is issued and compared when it resolves; a loser touches no state at all, including
+   * `loading`, so it cannot clear a latch the winner still owns.
+   */
+  const latestRequestId = useRef(0);
 
   const refetch = useCallback(async () => {
+    const requestId = ++latestRequestId.current;
     setLoading(true);
     setError(null);
     try {
       const data = await api<{ requests: MarketingExpenseRequestSummary[] }>(
         "/marketing-expense-requests/mine",
       );
+      if (requestId !== latestRequestId.current) return;
       setRequests(data.requests ?? []);
     } catch (err) {
+      if (requestId !== latestRequestId.current) return;
       setError(err instanceof Error ? err.message : "Failed to load your expense requests");
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestId.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- officeScopeId is not read in the body; it is
     // read by api() from the URL. It is in the list to make the office switch RE-RUN this.
@@ -79,19 +93,25 @@ export function useMarketingExpenseQueue(status: MarketingExpenseQueueStatus) {
   const [error, setError] = useState<string | null>(null);
   // Same reason as above: the tenant scope lives in the URL, not in this closure.
   const officeScopeId = useOfficeScopeId();
+  // Same race, and the queue has a second trigger for it: switching TABS re-issues too, so a slow
+  // "pending" read can land after a fast "denied" one and repaint the wrong tab's rows.
+  const latestRequestId = useRef(0);
 
   const refetch = useCallback(async () => {
+    const requestId = ++latestRequestId.current;
     setLoading(true);
     setError(null);
     try {
       const data = await api<{ requests: MarketingExpenseRequestSummary[] }>(
         `/marketing-expense-requests?status=${encodeURIComponent(status)}`,
       );
+      if (requestId !== latestRequestId.current) return;
       setRequests(data.requests ?? []);
     } catch (err) {
+      if (requestId !== latestRequestId.current) return;
       setError(err instanceof Error ? err.message : "Failed to load the expense request queue");
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestId.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above: officeScopeId drives the re-read.
   }, [status, officeScopeId]);

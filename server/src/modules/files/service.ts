@@ -385,6 +385,23 @@ export async function buildDealFileScopeCondition(tenantDb: TenantDb, dealId: st
   return or(eq(files.dealId, dealId), eq(files.leadId, sourceLeadId))!;
 }
 
+/**
+ * THE FILES-SIDE INVARIANT for marketing-expense attachments.
+ *
+ * An expense-request attachment is reachable ONLY through a path that has authorized the parent request.
+ * Deal- and lead-scoped reads satisfy that by construction — an expense attachment carries no deal_id or
+ * lead_id, so it cannot match. Every UNSCOPED read over `files` has to say so explicitly, and this is that
+ * predicate. Applied in: getFiles (unless the caller scoped to a request), getFileStats, getTagSuggestions,
+ * the photo feed, and global search.
+ *
+ * Fixing the per-ID handlers was not enough on its own: the LIST endpoint had no idea the association
+ * existed, and it resolves signed thumbnail URLs for images and rasterized PDFs — so the contents leaked,
+ * not merely the names, to anyone who could open the Files page.
+ */
+export function excludeMarketingExpenseAttachments(): SQL {
+  return isNull(files.marketingExpenseRequestId);
+}
+
 export function activeLatestFileConditions(): SQL[] {
   return [
     eq(files.isActive, true),
@@ -1092,7 +1109,12 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   if (filters.procoreProjectId) conditions.push(eq(files.procoreProjectId, filters.procoreProjectId));
   if (filters.changeOrderId) conditions.push(eq(files.changeOrderId, filters.changeOrderId));
   if (filters.marketingExpenseRequestId) {
+    // The caller scoped to ONE request. The route that accepts this filter has already run
+    // assertMarketingExpenseRequestReadAccess, so these rows are authorized.
     conditions.push(eq(files.marketingExpenseRequestId, filters.marketingExpenseRequestId));
+  } else {
+    // Otherwise this is the general library, and expense attachments are not part of it.
+    conditions.push(excludeMarketingExpenseAttachments());
   }
   if (filters.category) conditions.push(eq(files.category, filters.category));
   if (filters.fileKind === "photos") conditions.push(photoFileCondition());
@@ -1186,7 +1208,7 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
 }
 
 export async function getFileStats(tenantDb: TenantDb, _filters: Record<string, never> = {}): Promise<FileStats> {
-  const where = and(...activeLatestFileConditions());
+  const where = and(...activeLatestFileConditions(), excludeMarketingExpenseAttachments());
   const photoCondition = photoFileCondition();
 
   const [row] = await tenantDb
@@ -1915,7 +1937,9 @@ export async function getTagSuggestions(
   tenantDb: TenantDb,
   dealId?: string
 ): Promise<string[]> {
-  const conditions: SQL[] = [eq(files.isActive, true)];
+  // Tags are free text a requester typed — vendor names, event names — so they leak just as much as the
+  // filename does.
+  const conditions: SQL[] = [eq(files.isActive, true), excludeMarketingExpenseAttachments()];
   if (dealId) conditions.push(await buildDealFileScopeCondition(tenantDb, dealId));
 
   const result = await tenantDb

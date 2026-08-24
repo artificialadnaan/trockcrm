@@ -173,6 +173,43 @@ describe("assertMarketingExpenseAttachmentAccess", () => {
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
+  // A guard is only as strong as the lock it reads under. Unlocked, the lifecycle check is a SNAPSHOT: a
+  // finalization can commit between the check and the file insert, and the evidence still lands on a
+  // decided request. The read therefore takes the request row with FOR UPDATE, in the same transaction as
+  // the write, so the two cannot straddle a finalization.
+  //
+  // Simultaneous execution is not expressible on one PGlite connection, so what is asserted is the
+  // artifact: the statement the guard issues still carries the lock.
+  it("reads the request UNDER A LOCK, so the check and the insert cannot straddle a finalization", async () => {
+    const statements: string[] = [];
+    const spy = {
+      select: (...args: unknown[]) => {
+        const builder = (tenantDb as any).select(...args);
+        const wrap = (node: any): any => {
+          for (const method of ["from", "where", "limit", "for"]) {
+            const original = node[method]?.bind(node);
+            if (!original) continue;
+            node[method] = (...inner: unknown[]) => wrap(original(...inner));
+          }
+          const then = node.then?.bind(node);
+          if (then) {
+            node.then = (ok: unknown, err: unknown) => {
+              try {
+                statements.push((tenantDb as any).dialect.sqlToQuery(node.getSQL()).sql.toLowerCase());
+              } catch { /* pre-execution render is not always possible */ }
+              return then(ok, err);
+            };
+          }
+          return node;
+        };
+        return wrap(builder);
+      },
+    };
+    const request = await draft();
+    await assertMarketingExpenseAttachmentAccess(spy as never, request.id, SUBMITTER);
+    expect(statements.some((entry) => entry.includes("for update"))).toBe(true);
+  });
+
   it("404s an id that does not exist", async () => {
     await expect(
       assertMarketingExpenseAttachmentAccess(tenantDb, U("dead"), SUBMITTER),

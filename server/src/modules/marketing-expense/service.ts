@@ -527,6 +527,11 @@ export async function getMarketingExpenseRequest(
  * Deliberately NOT the same rule as `assertMarketingExpenseAttachmentAccess`. That one is submitter-only
  * and closes on decision, because it governs WRITING evidence. Wiring it into the read paths would lock
  * approvers out of the documents they are being asked to approve.
+ *
+ * A DRAFT is the submitter's alone, approver or not. Under the create-as-draft flow every request passes
+ * through that state, so "approvers can read drafts" means approvers can read everyone's half-filled forms,
+ * placeholder numbers and mid-upload attachments — none of which the submitter has decided to show anyone.
+ * Approvers see a request when it is submitted, which is also the moment the queue starts listing it.
  */
 export async function assertMarketingExpenseRequestReadAccess(
   tenantDb: TenantDb,
@@ -534,7 +539,8 @@ export async function assertMarketingExpenseRequestReadAccess(
   user: ActingUser,
 ): Promise<void> {
   const request = await loadRow(tenantDb, requestId);
-  if (request.submittedBy !== user.id && !isApprover(user)) {
+  if (request.submittedBy === user.id) return;
+  if (!isApprover(user) || request.status === "draft") {
     throw new AppError(403, "You do not have access to this expense request.");
   }
 }
@@ -569,13 +575,19 @@ export function isApprover(user: ActingUser): boolean {
  *
  * Takes a user ID, not a role-bearing user: this rule has no approver branch and never had one, and a
  * `role` parameter it does not read invites a caller to believe otherwise.
+ *
+ * READS UNDER A LOCK (`lockRow`), which is the difference between a guard and a snapshot. Unlocked, a
+ * finalization can commit between this check and the caller's write — the file insert in `confirmUpload`,
+ * the metadata UPDATE in PATCH — and the evidence still lands on a decided request. The lock is taken in
+ * the caller's transaction (the tenant middleware wraps the whole request), so it is held through the write
+ * to commit and the two cannot straddle a status change.
  */
 export async function assertMarketingExpenseAttachmentAccess(
   tenantDb: TenantDb,
   requestId: string,
   userId: string,
 ): Promise<void> {
-  const request = await loadRow(tenantDb, requestId);
+  const request = await lockRow(tenantDb, requestId);
   if (request.submittedBy !== userId) {
     throw new AppError(403, "You can only attach files to your own expense request.");
   }

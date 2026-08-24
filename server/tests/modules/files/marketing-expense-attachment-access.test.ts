@@ -154,6 +154,29 @@ describe("mutating an expense-request attachment", () => {
     expect(response.status).toBe(409);
   });
 
+  // DELETION is a write that depends on request status, so the invariant covers it: an admin could
+  // otherwise soft-delete a supporting document after the request was approved, and `loadDetail` selects
+  // only active files, so it would vanish from the record of what the approver saw. `requireAdmin` limits
+  // WHO can do it; it says nothing about WHEN.
+  it("gates DELETE /:id on the attachment-write rule", async () => {
+    currentUser.role = "admin";
+    await request(createApp()).delete("/api/files/file-1");
+    expect(assertMarketingExpenseAttachmentAccess).toHaveBeenCalledWith(
+      expect.anything(),
+      "req-1",
+      "rep-1",
+    );
+  });
+
+  it("refuses DELETE /:id once the request has been decided", async () => {
+    currentUser.role = "admin";
+    assertMarketingExpenseAttachmentAccess.mockRejectedValue(
+      new AppError(409, "This request has already been decided — its attachments are final."),
+    );
+    const response = await request(createApp()).delete("/api/files/file-1");
+    expect(response.status).toBe(409);
+  });
+
   it("gates PATCH /:id/address on the attachment-write rule too", async () => {
     await request(createApp())
       .patch("/api/files/file-1/address")

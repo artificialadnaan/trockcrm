@@ -294,6 +294,33 @@ describe("the submit sequence", () => {
     expect(mocks.submitMarketingExpenseRequest).toHaveBeenCalledTimes(1);
   });
 
+  it("LOCKS the form once the draft exists, so later edits cannot be silently dropped", async () => {
+    // A retry skips createMarketingExpenseRequest, so anything typed after the draft was created would be
+    // submitted with the ORIGINAL server-side values and the user would never know. Locking makes that
+    // impossible rather than merely unlikely.
+    mocks.submitMarketingExpenseRequest.mockRejectedValueOnce(new Error("no approver"));
+    await renderPage();
+    await fillValid();
+    await submit();
+    expect(field("mer-vendor-event").disabled).toBe(true);
+    expect(field("mer-cost-advertising").disabled).toBe(true);
+    expect(container.querySelector<HTMLInputElement>('[data-testid="mer-attachments"]')!.disabled).toBe(true);
+  });
+
+  it("tells the user WHY the form is locked and what the button will do", async () => {
+    mocks.submitMarketingExpenseRequest.mockRejectedValueOnce(new Error("no approver"));
+    await renderPage();
+    await fillValid();
+    await submit();
+    const notice = container.querySelector('[data-testid="mer-draft-notice"]');
+    expect(notice?.textContent).toContain("MER-0001");
+  });
+
+  it("leaves the form editable before any draft exists", async () => {
+    await renderPage();
+    expect(field("mer-vendor-event").disabled).toBe(false);
+  });
+
   it("does not create a second draft while retrying the uploads", async () => {
     mocks.uploadFile.mockRejectedValueOnce(new Error("network died"));
     await renderPage();

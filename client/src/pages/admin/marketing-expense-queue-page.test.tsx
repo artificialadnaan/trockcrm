@@ -14,12 +14,14 @@ const mocks = vi.hoisted(() => ({
   useMarketingExpenseQueue: vi.fn(),
   decideMarketingExpenseRequest: vi.fn(),
   getMarketingExpenseRequest: vi.fn(),
+  downloadFile: vi.fn(),
   isApiError: vi.fn(),
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
 
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/lib/api", () => ({ isApiError: mocks.isApiError }));
+vi.mock("@/hooks/use-files", () => ({ downloadFile: mocks.downloadFile }));
 vi.mock("@/hooks/use-marketing-expense-requests", () => ({
   useMarketingExpenseQueue: mocks.useMarketingExpenseQueue,
   decideMarketingExpenseRequest: mocks.decideMarketingExpenseRequest,
@@ -289,6 +291,14 @@ describe("reviewing before deciding", () => {
     expect(container.querySelector('[data-testid="mer-detail-req-1"]')!.textContent).toContain(
       "expo-quote.pdf",
     );
+  });
+
+  it("makes each supporting document OPENABLE, not just visible", async () => {
+    // Seeing that a quote exists is not reading it. The decision is supposed to rest on the contents.
+    await renderPage();
+    await click("mer-review-req-1");
+    await click("mer-attachment-file-1");
+    expect(mocks.downloadFile).toHaveBeenCalledWith("file-1");
   });
 
   it("says so when a request has no attachments at all", async () => {

@@ -756,6 +756,36 @@ describe("visibility", () => {
     expect(detail.requestNumber).toBe("MER-0001");
   });
 
+  it("hides an UNSUBMITTED DRAFT from approvers — it has not been shown to anyone yet", async () => {
+    // A draft is work in progress by definition: half-filled fields, placeholder numbers, attachments
+    // still uploading. Under the create-as-draft flow every request passes through that state, so an
+    // approver who can read drafts can read everyone's rough work — and its attachments, which the
+    // submitter has not yet decided to share.
+    const draft = await createDraft();
+    await expect(
+      getMarketingExpenseRequest(tenantDb, { requestId: draft.id, user: { id: APPROVER, role: "director" } }),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    await expect(
+      getMarketingExpenseRequest(tenantDb, { requestId: draft.id, user: { id: APPROVER, role: "admin" } }),
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it("still lets the SUBMITTER read their own draft", async () => {
+    const draft = await createDraft();
+    const detail = await getMarketingExpenseRequest(tenantDb, {
+      requestId: draft.id,
+      user: { id: SUBMITTER, role: "rep" },
+    });
+    expect(detail.status).toBe("draft");
+  });
+
+  it("lets approvers read it the moment it is submitted", async () => {
+    const draft = await createAndSubmit();
+    await expect(
+      getMarketingExpenseRequest(tenantDb, { requestId: draft.id, user: { id: APPROVER, role: "director" } }),
+    ).resolves.toMatchObject({ status: "pending" });
+  });
+
   it("404s an id that does not exist", async () => {
     await expect(
       getMarketingExpenseRequest(tenantDb, { requestId: U("dead"), user: { id: APPROVER, role: "admin" } }),

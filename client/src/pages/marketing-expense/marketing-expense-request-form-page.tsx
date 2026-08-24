@@ -108,6 +108,17 @@ export function MarketingExpenseRequestFormPage() {
   const [attachments, setAttachments] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The draft that has already been created, if any. Once it exists the form is LOCKED.
+   *
+   * A retry skips `createMarketingExpenseRequest`, so anything edited after the draft was created would be
+   * submitted with the ORIGINAL server-side values and the user would never be told — their corrected
+   * amount or vendor silently ignored. There is no update-a-draft endpoint, so the honest options were
+   * "lock it" or "build one"; locking makes the silent loss impossible rather than merely unlikely, and the
+   * notice says which request the button will now submit.
+   */
+  const [createdDraft, setCreatedDraft] = useState<{ id: string; requestNumber: string } | null>(null);
+  const locked = createdDraft !== null;
   // Survives a failed submit so the retry reuses the draft instead of minting a second request number.
   const draftIdRef = useRef<string | null>(null);
   // The attachments that have NOT yet landed. A file is removed only once its upload has succeeded, so a
@@ -164,6 +175,7 @@ export function MarketingExpenseRequestFormPage() {
         const draft = await createMarketingExpenseRequest(form);
         draftIdRef.current = draft.id;
         outstandingFilesRef.current = [...attachments];
+        setCreatedDraft({ id: draft.id, requestNumber: draft.requestNumber });
       }
 
       // Runs on EVERY attempt, retries included, and drains a queue rather than iterating `attachments`.
@@ -232,6 +244,7 @@ export function MarketingExpenseRequestFormPage() {
             <Input
               id="mer-requested-by"
               data-testid="mer-requested-by"
+              disabled={locked}
               value={form.requestedByName}
               onChange={(event) => handleChange("requestedByName", event.target.value)}
             />
@@ -241,6 +254,7 @@ export function MarketingExpenseRequestFormPage() {
             <Input
               id="mer-department"
               data-testid="mer-department"
+              disabled={locked}
               value={form.department}
               onChange={(event) => handleChange("department", event.target.value)}
             />
@@ -251,6 +265,7 @@ export function MarketingExpenseRequestFormPage() {
               id="mer-needed-by"
               data-testid="mer-needed-by"
               type="date"
+              disabled={locked}
               value={form.neededBy}
               onChange={(event) => handleChange("neededBy", event.target.value)}
             />
@@ -260,6 +275,7 @@ export function MarketingExpenseRequestFormPage() {
             <Input
               id="mer-vendor-event"
               data-testid="mer-vendor-event"
+              disabled={locked}
               value={form.vendorEvent}
               onChange={(event) => handleChange("vendorEvent", event.target.value)}
             />
@@ -270,6 +286,7 @@ export function MarketingExpenseRequestFormPage() {
               id="mer-location-dates"
               data-testid="mer-location-dates"
               placeholder="Dallas, TX — Oct 12–14"
+              disabled={locked}
               value={form.locationDates}
               onChange={(event) => handleChange("locationDates", event.target.value)}
             />
@@ -287,6 +304,7 @@ export function MarketingExpenseRequestFormPage() {
             data-testid="mer-purpose"
             className="min-h-28"
             aria-label="What is the request for?"
+            disabled={locked}
             value={form.purpose}
             onChange={(event) => handleChange("purpose", event.target.value)}
           />
@@ -303,6 +321,7 @@ export function MarketingExpenseRequestFormPage() {
             data-testid="mer-expected-return"
             className="min-h-28"
             aria-label="What will TRC receive in return?"
+            disabled={locked}
             value={form.expectedReturn}
             onChange={(event) => handleChange("expectedReturn", event.target.value)}
           />
@@ -321,6 +340,7 @@ export function MarketingExpenseRequestFormPage() {
                 <CurrencyInput
                   id={testId}
                   data-testid={testId}
+                  disabled={locked}
                   value={form[field]}
                   onChange={(value) => handleChange(field, value)}
                 />
@@ -349,6 +369,7 @@ export function MarketingExpenseRequestFormPage() {
                   id={testId}
                   data-testid={testId}
                   aria-label={form[labelField].trim() || "Other amount"}
+                  disabled={locked}
                   value={form[amountField]}
                   onChange={(value) => handleChange(amountField, value)}
                 />
@@ -361,6 +382,7 @@ export function MarketingExpenseRequestFormPage() {
             <Input
               id="mer-budget-job-code"
               data-testid="mer-budget-job-code"
+              disabled={locked}
               value={form.budgetJobCode}
               onChange={(event) => handleChange("budgetJobCode", event.target.value)}
             />
@@ -376,6 +398,7 @@ export function MarketingExpenseRequestFormPage() {
           <label className="flex items-center gap-2 text-sm font-medium">
             <Checkbox
               id="mer-travel-required"
+              disabled={locked}
               checked={form.travelRequired}
               onCheckedChange={(checked) => handleChange("travelRequired", checked)}
             />
@@ -386,6 +409,7 @@ export function MarketingExpenseRequestFormPage() {
             <Textarea
               id="mer-attendees"
               data-testid="mer-attendees"
+              disabled={locked}
               value={form.attendees}
               onChange={(event) => handleChange("attendees", event.target.value)}
             />
@@ -395,6 +419,7 @@ export function MarketingExpenseRequestFormPage() {
             <Textarea
               id="mer-business-meetings"
               data-testid="mer-business-meetings"
+              disabled={locked}
               value={form.businessMeetings}
               onChange={(event) => handleChange("businessMeetings", event.target.value)}
             />
@@ -417,6 +442,7 @@ export function MarketingExpenseRequestFormPage() {
             <Select
               items={PAYMENT_METHOD_ITEMS}
               value={form.paymentMethod ?? NO_PAYMENT_METHOD}
+              disabled={locked}
               onValueChange={(next: string | null) =>
                 handleChange("paymentMethod", !next || next === NO_PAYMENT_METHOD ? null : next)
               }
@@ -444,6 +470,7 @@ export function MarketingExpenseRequestFormPage() {
               <label key={kind} className="flex items-center gap-2 text-sm">
                 <Checkbox
                   id={`mer-attachment-kind-${kind}`}
+                  disabled={locked}
                   checked={form.attachmentKinds.includes(kind)}
                   onCheckedChange={(checked) => toggleAttachmentKind(kind, checked)}
                 />
@@ -465,6 +492,7 @@ export function MarketingExpenseRequestFormPage() {
               data-testid="mer-attachments"
               type="file"
               multiple
+              disabled={locked}
               onChange={(event) => setAttachments(Array.from(event.target.files ?? []))}
             />
             {attachments.length > 0 && (
@@ -491,6 +519,16 @@ export function MarketingExpenseRequestFormPage() {
           </div>
         </CardContent>
       </Card>
+
+      {createdDraft && (
+        <Card>
+          <CardContent data-testid="mer-draft-notice" className="p-4 text-sm text-slate-700">
+            Request <strong>{createdDraft.requestNumber}</strong> has been created as a draft and the form is
+            locked so nothing you have typed can be lost. Press <strong>Submit for approval</strong> again to
+            finish sending it; the button retries only the steps that did not complete.
+          </CardContent>
+        </Card>
+      )}
 
       {error && (
         <Card>
