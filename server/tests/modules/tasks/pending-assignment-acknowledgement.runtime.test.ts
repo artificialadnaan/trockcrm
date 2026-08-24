@@ -20,6 +20,7 @@ import { tasks, taskAssignmentAcknowledgements } from "@trock-crm/shared/schema"
 import {
   getPendingAssignmentTasks,
   acknowledgeTaskAssignments,
+  updateTask,
   PENDING_ASSIGNMENT_MODAL_LIMIT,
 } from "../../../src/modules/tasks/service.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -30,6 +31,9 @@ const ALICE = uid("a1");
 const BOB = uid("b1");
 /** A third party, for fixtures where both ALICE and BOB take turns holding the task. */
 const CARLA = uid("c1");
+
+/** Two hours ago. Every fixture task is created and assigned here; everything else happens after. */
+const SEEDED_AT = new Date(Date.now() - 2 * 60 * 60 * 1000);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -76,22 +80,40 @@ async function seed(rows: SeedTask[]) {
       dueDate: row.dueDate ?? null,
       source: row.source ?? "manual",
       isTestData: row.isTestData ?? false,
+      // SEEDED IN THE PAST, both stamps together, because the ordering of these timestamps IS the
+      // behaviour under test. A task created "now" leaves no room between its creation and a
+      // reassignment on the same clock — Postgres now() is the transaction timestamp, so an insert and
+      // an immediate update can tie at microsecond resolution — and every later event (an
+      // acknowledgement, a handoff, a re-acknowledgement) has to be able to land strictly after it.
+      // Equal to each other, which is what "never changed hands" means.
+      createdAt: SEEDED_AT,
+      assignedAt: SEEDED_AT,
     });
   }
 }
 
 /** Move a task to a new assignee the way the PATCH flow does — stamping when it changed hands. */
+/** Push every existing acknowledgement an hour into the past. See reassign() for why. */
+async function ageAcknowledgements() {
+  await pg.exec(
+    `UPDATE public.task_assignment_acknowledgements
+        SET acknowledged_at = acknowledged_at - interval '1 hour'`
+  );
+}
+
 async function reassign(taskId: string, toUserId: string) {
   // TIME PASSES BEFORE A HANDOFF. In production hours separate an acknowledgement from the
   // reassignment that supersedes it; PGlite performs both in the same millisecond, which would make
   // `acknowledged_at >= assigned_at` ambiguous in exactly the comparison these tests are about. Ageing
   // the existing acknowledgements rather than post-dating the assignment keeps assigned_at on the real
   // clock, so a genuine re-acknowledgement afterwards is still able to be later than it.
-  await pg.exec(
-    `UPDATE public.task_assignment_acknowledgements
-        SET acknowledged_at = acknowledged_at - interval '1 hour'`
-  );
-  await pg.query(`UPDATE public.tasks SET assigned_to = $2, assigned_at = now() WHERE id = $1`, [
+  await ageAcknowledgements();
+  // now() is safe here precisely because fixtures are seeded two hours in the past: the handoff is
+  // unambiguously after the creation it has to be distinguished from, and still before any
+  // re-acknowledgement that follows it.
+  await pg.query(
+    `UPDATE public.tasks SET assigned_to = $2, assigned_at = now() WHERE id = $1`,
+    [
     taskId,
     toUserId,
   ]);
@@ -332,6 +354,39 @@ describe("an acknowledgement answers ONE assignment, not a task forever", () => 
     expect(await ackRowCount(uid("1"), ALICE)).toBe(1);
   });
 
+  // THE REAL WRITE SITE, not a hand-rolled UPDATE. `assigned_at` is only ever stamped in updateTask,
+  // so a fixture that sets it itself would prove the predicate works and say nothing about whether
+  // anything in the application ever writes the column the predicate depends on.
+  it("is stamped by updateTask itself, so a real reassignment tells the prior assignee again", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+    await ageAcknowledgements();
+
+    await updateTask(tdb, uid("1"), { assignedTo: BOB }, "admin", CARLA);
+    await ageAcknowledgements();
+    await updateTask(tdb, uid("1"), { assignedTo: ALICE }, "admin", CARLA);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+    expect(result.tasks.map((t) => t.id)).toEqual([uid("1")]);
+    expect(result.tasks[0]?.isNew).toBe(true);
+  });
+
+  it("does not re-stamp on an edit that leaves the assignee alone", async () => {
+    await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+
+    // Deliberately NOT ageing the acknowledgement here: it answers the assignment the task already
+    // has, and the point is that a title edit leaves that assignment — and therefore that answer —
+    // alone. Ageing it would make the ORIGINAL assignment look newer than its own acknowledgement and
+    // the test would pass for a reason that has nothing to do with updateTask.
+    //
+    // Re-stamping on every PATCH would invalidate the assignee's acknowledgement whenever anybody
+    // touched the row — the modal repeating forever because somebody fixed a typo in the title.
+    await updateTask(tdb, uid("1"), { title: "Corrected title" }, "admin", CARLA);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
   it("does not resurrect an assignment for somebody it was taken AWAY from", async () => {
     await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA }]);
     await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
@@ -372,6 +427,17 @@ describe("a task you wrote for yourself is not an assignment", () => {
 
   it("does not show a manual task with no recorded creator — there is nobody to attribute it to", async () => {
     await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: null }]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  // The case that makes the NULL test load-bearing rather than decorative. On a task that has never
+  // changed hands, three-valued logic already excludes a NULL creator — `NULL <> anything` is NULL. But
+  // the hand-back arm is an OR, and `assigned_at > created_at` is plainly TRUE once the task has moved,
+  // which rescues the row and puts an assignment with nobody's name on it in front of somebody.
+  it("still says nothing about a creator-less task even after it has been reassigned", async () => {
+    await seed([{ id: uid("1"), assignedTo: BOB, createdBy: null }]);
+    await reassign(uid("1"), ALICE);
 
     expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
   });
