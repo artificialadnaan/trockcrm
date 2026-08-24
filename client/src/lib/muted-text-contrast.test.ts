@@ -35,12 +35,77 @@ const SMALL_TEXT = /text-\[(?:9|10|11|12)(?:\.\d)?px\]|text-xs/;
 const ICON = /\bh-\d(?:\.\d)?\s+w-\d(?:\.\d)?\b|\bsize-\d\b/;
 
 /**
- * The count at the time the measured failures were fixed.
+ * Per-FILE counts at the time the measured failures were fixed.
  *
- * Every one of these is `text-slate-400` on small text. Each is a POSSIBLE failure — possible, because
- * whether it fails depends on the background it lands on, which is why they were not swept blindly.
+ * PER FILE, NOT A TOTAL, and that distinction is the whole guard. A single aggregate with a tolerance —
+ * which is what this was — lets a change delete five sites in one file, add five in another, and pass
+ * both assertions while shipping five new low-contrast labels. Balanced books, unchanged number, real
+ * regression. Codex caught that; it is not hypothetical, it is just arithmetic.
+ *
+ * File paths rather than file:line, because line numbers move on every unrelated edit above them and a
+ * baseline nobody can keep accurate is a baseline people delete. A count per file is tight enough that
+ * hiding a new site means removing one from the SAME file.
+ *
+ * Each entry is `text-slate-400` on small text — a POSSIBLE failure, since whether it fails depends on the
+ * background it lands on. That is why they were not swept blindly. LOWER these numbers as sites are fixed;
+ * never raise one without saying why it is on a dark surface.
  */
-const KNOWN_REMAINING = 142;
+const BASELINE: Record<string, number> = {
+  "components/__harness__/list-detail-harness.tsx": 5,
+  "components/__harness__/mobile-ui-harness.tsx": 1,
+  "components/auth/auth-entry-screen.tsx": 2,
+  "components/deals/deals-list-section.tsx": 1,
+  "components/deals/pipeline-progress.tsx": 1,
+  "components/director/rep-commission-drilldown.tsx": 6,
+  "components/email/email-compose-dialog.tsx": 1,
+  "components/layout/detail-page-shell.tsx": 1,
+  "components/layout/sidebar.tsx": 1,
+  "components/leads/lead-kanban-board.tsx": 1,
+  "components/pipeline/pipeline-board-column.tsx": 1,
+  "components/pipeline/pipeline-record-card.tsx": 3,
+  "components/reports/data-mining-section.tsx": 5,
+  "components/reports/forecast-variance-section.tsx": 6,
+  "components/reports/regional-ownership-section.tsx": 7,
+  "components/reports/source-performance-section.tsx": 2,
+  "pages/admin/pipeline-config-page.tsx": 2,
+  "pages/admin/users-page.tsx": 7,
+  "pages/commissions/team-commissions-page.tsx": 3,
+  "pages/companies/company-list-page.tsx": 2,
+  "pages/contacts/contact-list-page.tsx": 1,
+  "pages/dashboard/rep-dashboard-page.tsx": 3,
+  "pages/deals/deal-billing-tab.tsx": 3,
+  "pages/deals/deal-detail-page.tsx": 1,
+  "pages/director/director-rep-detail.tsx": 3,
+  "pages/files/files-page.tsx": 1,
+  "pages/leads/lead-list-page.tsx": 1,
+  "pages/projects/projects-page.tsx": 1,
+  "pages/projects/weekly-report-history-panel.tsx": 7,
+  "pages/projects/weekly-report-send-dialog.tsx": 6,
+  "pages/properties/property-list-page.tsx": 3,
+  "pages/public/daily-summary-page.tsx": 8,
+  "pages/reports/at-risk-page.tsx": 2,
+  "pages/reports/daily-activity-log-page.tsx": 1,
+  "pages/reports/field-team-page.tsx": 2,
+  "pages/reports/forecast-confidence-page.tsx": 4,
+  "pages/reports/monday-showcase/evidence-drawer.tsx": 1,
+  "pages/reports/platform-usage-page.tsx": 5,
+  "pages/reports/platform-usage-rep-detail-page.tsx": 2,
+  "pages/reports/qc-reports-page.tsx": 4,
+  "pages/reports/rep-pack-page.tsx": 5,
+  "pages/scorecards/corrective-action-responder.tsx": 1,
+  "preview-main.tsx": 1,
+  "preview/commissions-preview.tsx": 1,
+  "preview/companies-preview.tsx": 1,
+  "preview/company-detail-preview.tsx": 2,
+  "preview/contacts-preview.tsx": 1,
+  "preview/deal-detail-preview.tsx": 2,
+  "preview/deals-preview.tsx": 2,
+  "preview/director-dashboard-preview.tsx": 2,
+  "preview/files-page-preview.tsx": 1,
+  "preview/leads-preview.tsx": 2,
+  "preview/properties-preview.tsx": 1,
+  "preview/rep-dashboard-preview.tsx": 3,
+};
 
 
 /** Tailwind slate scale + white, as RGB. Only the tokens this codebase actually pairs. */
@@ -135,31 +200,42 @@ function smallSlate400Sites(): string[] {
 
 describe("muted text does not get quieter", () => {
   it("finds the sites at all — an empty sweep would make the ratchet meaningless", () => {
-    // The standing failure of a counting guard: the scan breaks, the count drops to zero, and it reads as
-    // an improvement. A floor is as important as the ceiling.
+    // The standing failure of a counting guard: the scan breaks, everything reports zero, and it reads as
+    // an improvement. A floor matters as much as a ceiling.
     expect(smallSlate400Sites().length).toBeGreaterThan(50);
   });
 
-  it("does not add new small-text slate-400, which is 2.5:1 on a light background", () => {
-    const sites = smallSlate400Sites();
+  it("adds no small-text slate-400 to a file that already has some", () => {
+    // Per-file, so a removal elsewhere cannot pay for an addition here.
+    const byFile: Record<string, number> = {};
+    for (const site of smallSlate400Sites()) {
+      const file = site.slice(0, site.lastIndexOf(":"));
+      byFile[file] = (byFile[file] ?? 0) + 1;
+    }
+
+    const grown = Object.entries(byFile)
+      .filter(([file, count]) => file in BASELINE && count > BASELINE[file]!)
+      .map(([file, count]) => `${file}: ${BASELINE[file]} → ${count}`);
+
     expect(
-      sites.length,
-      sites.length > KNOWN_REMAINING
-        ? `${sites.length - KNOWN_REMAINING} new small-text text-slate-400 site(s). On a light background ` +
-          "that is ~2.5:1 against a 4.5:1 requirement — use text-slate-500 (4.76:1) unless this sits on a " +
-          "dark surface, in which case lower KNOWN_REMAINING and say so."
-        : "",
-    ).toBeLessThanOrEqual(KNOWN_REMAINING);
+      grown,
+      "new small-text text-slate-400. On a light background that is ~2.5:1 against a 4.5:1 requirement — " +
+        "use text-slate-500 (4.76:1), or text-slate-600 on a slate-100 surface. If it genuinely sits on a " +
+        "dark surface, raise the baseline for that file and say so.",
+    ).toEqual([]);
   });
 
-  it("keeps the recorded baseline honest when sites are removed", () => {
-    // The ratchet only ratchets if the number tracks reality. Drifting far below means somebody fixed a
-    // batch and left the constant behind, and the guard silently stops catching the next regression.
-    const sites = smallSlate400Sites();
-    expect(
-      sites.length,
-      `KNOWN_REMAINING is ${KNOWN_REMAINING} but only ${sites.length} sites remain — lower the constant.`,
-    ).toBeGreaterThan(KNOWN_REMAINING - 10);
+  it("adds no small-text slate-400 to a file that had none", () => {
+    // The other half. Without this, a brand-new file could carry any number of them and every per-file
+    // comparison above would simply not apply to it.
+    const introduced = [
+      ...new Set(
+        smallSlate400Sites()
+          .map((site) => site.slice(0, site.lastIndexOf(":")))
+          .filter((file) => !(file in BASELINE)),
+      ),
+    ];
+    expect(introduced, "these files are newly using small-text text-slate-400").toEqual([]);
   });
 
   it("leaves the audited pages CONTRAST-clean, not merely free of one token", () => {
