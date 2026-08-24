@@ -32,6 +32,7 @@ import {
 import { getDealById } from "../deals/service.js";
 import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
+import { assertMarketingExpenseAttachmentAccess } from "../marketing-expense/service.js";
 import {
   getPhotoFeed,
   getNewPhotoCount,
@@ -151,6 +152,18 @@ async function assertLeadFileAccess(req: express.Request, leadId: string) {
   await assertLeadCollaboratorAccess(req.tenantDb!, leadId, req.user!);
 }
 
+/**
+ * Supporting documents on a marketing expense request. The rule lives in that module because it is about
+ * the REQUEST's lifecycle — the submitter only, and only while the decision is still outstanding — and
+ * this file has no business knowing what an expense request status means.
+ */
+async function assertMarketingExpenseFileAccess(req: express.Request, requestId: string) {
+  await assertMarketingExpenseAttachmentAccess(req.tenantDb!, requestId, {
+    id: req.user!.id,
+    role: req.user!.role,
+  });
+}
+
 // POST /api/files/upload-url — Step 1: request presigned URL
 router.post("/upload-url", async (req, res, next) => {
   try {
@@ -166,6 +179,7 @@ router.post("/upload-url", async (req, res, next) => {
       contactId,
       procoreProjectId,
       changeOrderId,
+      marketingExpenseRequestId,
       description,
       displayName,
       tags,
@@ -195,6 +209,9 @@ router.post("/upload-url", async (req, res, next) => {
     if (leadId) {
       await assertLeadFileAccess(req, leadId);
     }
+    if (marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, marketingExpenseRequestId);
+    }
 
     const result = await requestUploadUrl(
       req.tenantDb!,
@@ -212,6 +229,7 @@ router.post("/upload-url", async (req, res, next) => {
         contactId,
         procoreProjectId: procoreProjectId ? Number(procoreProjectId) : undefined,
         changeOrderId,
+        marketingExpenseRequestId,
         description,
         displayName: typeof displayName === "string" ? displayName : undefined,
         tags,

@@ -23,6 +23,12 @@ export const CRM_ONLY_TENANT_ROUTE_MOUNTS = [
   "/usage",
   "/field-responders",
   "/weekly-reports",
+  // Marketing & advertising expense requests. CRM-only: submitting one is an internal-staff action, and the
+  // queue exposes every requester's name, budget code and spend.
+  //
+  // APPENDED, never inserted. app.ts indexes this array POSITIONALLY, so putting an entry in the middle
+  // silently re-points every mount after it at the wrong router.
+  "/marketing-expense-requests",
 ] as const;
 
 export const FIELD_ACCESSIBLE_ROUTE_MOUNTS = [

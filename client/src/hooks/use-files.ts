@@ -24,6 +24,7 @@ export interface FileRecord {
   thumbnailUrl?: string | null;
   dealId: string | null;
   leadId: string | null;
+  marketingExpenseRequestId?: string | null;
   intakeSection?: string | null;
   intakeRequirementKey?: string | null;
   intakeSource?: string | null;
@@ -353,6 +354,8 @@ export interface UploadFileInput {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  /** A supporting document on a marketing & advertising expense request (migration 0232). */
+  marketingExpenseRequestId?: string;
   description?: string;
   tags?: string[];
   forceEditAfterRfp?: boolean;
@@ -467,6 +470,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
       contactId,
       procoreProjectId: input.procoreProjectId,
       changeOrderId: input.changeOrderId,
+      marketingExpenseRequestId: input.marketingExpenseRequestId,
       description,
       tags,
       forceEditAfterRfp,

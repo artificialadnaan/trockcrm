@@ -58,6 +58,10 @@ import { handleRfpBidBoardCreate, RFP_BIDBOARD_CREATE_JOB } from "./rfp-bidboard
 import { handleRfpVoteOutcomeEmail, RFP_VOTE_OUTCOME_JOB } from "./rfp-vote-outcome.js";
 import { handleWonMetricReductionAlert, WON_METRIC_REDUCTION_ALERT_JOB } from "./won-metric-reduction-alert.js";
 import { handleWeeklyReportSend, WEEKLY_REPORT_SEND_JOB } from "./weekly-report-send.js";
+import {
+  handleMarketingExpenseEmail,
+  MARKETING_EXPENSE_EMAIL_JOB,
+} from "./marketing-expense-email.js";
 import { handleBidBoardIngestJob } from "./bid-board-ingest.js";
 
 const SERVER_MODULE_ROOT =
@@ -128,6 +132,7 @@ export function registerAllJobs() {
   // The weekly report's client delivery. Job type string mirrors WEEKLY_REPORT_SEND_JOB in
   // server/src/modules/weekly-reports/send-service.ts — the server cannot import from this package.
   registerJobHandler(WEEKLY_REPORT_SEND_JOB, handleWeeklyReportSend);
+  registerJobHandler(MARKETING_EXPENSE_EMAIL_JOB, handleMarketingExpenseEmail);
   registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, handleScorecardCorrectiveActionEmail);
   registerJobHandler(GLASSES_WALKTHROUGH_FORWARD_JOB, handleGlassesWalkthroughForward);
   registerJobHandler(

@@ -111,6 +111,7 @@ interface PendingUpload {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  marketingExpenseRequestId?: string;
   description?: string;
   photoCategory?: PhotoCategory | null;
   tags?: string[];
@@ -165,6 +166,12 @@ export interface RequestUploadInput {
   procoreProjectId?: number;
   /** Target change order ID */
   changeOrderId?: string;
+  /**
+   * Target marketing & advertising expense request (migration 0232). A supporting document on the paper
+   * form — a quote, an event agenda, a travel estimate. The route asserts the caller is the request's
+   * submitter and that no decision has been made yet.
+   */
+  marketingExpenseRequestId?: string;
   /** Optional description */
   description?: string;
   /**
@@ -216,6 +223,7 @@ export interface FileFilters {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  marketingExpenseRequestId?: string;
   category?: FileCategory;
   fileKind?: "photos" | "documents";
   linkedType?: "deal" | "lead" | "contact" | "procore" | "change_order" | "unassigned";
@@ -343,13 +351,17 @@ function validateAssociations(input: {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  marketingExpenseRequestId?: string;
   allowUnassigned?: boolean;
 }): void {
   if (input.allowUnassigned) {
     return;
   }
-  if (!input.dealId && !input.leadId && !input.opportunityId && !input.contactId && !input.procoreProjectId && !input.changeOrderId) {
-    throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, or change order).");
+  if (
+    !input.dealId && !input.leadId && !input.opportunityId && !input.contactId
+    && !input.procoreProjectId && !input.changeOrderId && !input.marketingExpenseRequestId
+  ) {
+    throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, change order, or marketing expense request).");
   }
 }
 
@@ -400,12 +412,15 @@ function linkedFileCondition(linkedType: NonNullable<FileFilters["linkedType"]>)
     case "change_order":
       return isNotNull(files.changeOrderId);
     case "unassigned":
+      // Every association column, including the expense-request one. Omitting it would list every
+      // supporting document in the Files page's Unassigned tab, where anybody could re-file it onto a deal.
       return and(
         isNull(files.dealId),
         isNull(files.leadId),
         isNull(files.contactId),
         isNull(files.procoreProjectId),
-        isNull(files.changeOrderId)
+        isNull(files.changeOrderId),
+        isNull(files.marketingExpenseRequestId)
       )!;
   }
 }
@@ -540,6 +555,7 @@ function buildR2Key(
     contactId?: string;
     procoreProjectId?: number;
     changeOrderId?: string;
+    marketingExpenseRequestId?: string;
     category: FileCategory;
     systemFilename: string;
   }
@@ -560,6 +576,9 @@ function buildR2Key(
   }
   if (input.changeOrderId) {
     return `office_${officeSlug}/change-orders/${input.changeOrderId}/${segment}/${input.systemFilename}`;
+  }
+  if (input.marketingExpenseRequestId) {
+    return `office_${officeSlug}/marketing-expense-requests/${input.marketingExpenseRequestId}/${segment}/${input.systemFilename}`;
   }
 
   return `office_${officeSlug}/unassociated/${segment}/${input.systemFilename}`;
@@ -650,6 +669,7 @@ export async function requestUploadUrl(
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
+    marketingExpenseRequestId: input.marketingExpenseRequestId,
     category: resolvedCategory,
     systemFilename,
   });
@@ -687,6 +707,7 @@ export async function requestUploadUrl(
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
+    marketingExpenseRequestId: input.marketingExpenseRequestId,
     description: input.description,
     photoCategory: input.photoCategory,
     tags: input.tags,
@@ -857,6 +878,7 @@ export async function confirmUpload(
       contactId: pending.contactId ?? null,
       procoreProjectId: pending.procoreProjectId ?? null,
       changeOrderId: pending.changeOrderId ?? null,
+      marketingExpenseRequestId: pending.marketingExpenseRequestId ?? null,
       description: pending.description ?? null,
       photoCategory: pending.photoCategory ?? null,
       notes: null,
@@ -1056,6 +1078,9 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   if (filters.contactId) conditions.push(eq(files.contactId, filters.contactId));
   if (filters.procoreProjectId) conditions.push(eq(files.procoreProjectId, filters.procoreProjectId));
   if (filters.changeOrderId) conditions.push(eq(files.changeOrderId, filters.changeOrderId));
+  if (filters.marketingExpenseRequestId) {
+    conditions.push(eq(files.marketingExpenseRequestId, filters.marketingExpenseRequestId));
+  }
   if (filters.category) conditions.push(eq(files.category, filters.category));
   if (filters.fileKind === "photos") conditions.push(photoFileCondition());
   if (filters.fileKind === "documents") conditions.push(documentFileCondition());
@@ -1986,7 +2011,11 @@ export async function getDealPhotoTimeline(
   photos: Array<
     // clientUploadId is the upload queue's idempotency key — kept OUT of this (API-exposed) row so it can't
     // be read off /api/files/deal/:dealId/photos and replayed against confirm-upload.
-    Omit<typeof files.$inferSelect, "clientUploadId"> & {
+    //
+    // marketingExpenseRequestId is omitted for a duller reason: this is a DEAL's photo timeline, the select
+    // below names its columns explicitly, and an expense-request attachment is not a deal photo. Widening
+    // the select just to satisfy the type would put a column in the API response that nothing reads.
+    Omit<typeof files.$inferSelect, "clientUploadId" | "marketingExpenseRequestId"> & {
       uploaderName: string;
       uploaderAvatarUrl: string | null;
       // Display URLs resolved server-side IN-BATCH so clients never round-trip per photo (rate-limit safe).
@@ -2108,3 +2137,13 @@ export async function getDealPhotoUploaders(
     .filter((row): row is { id: string; name: string; avatarUrl: string | null } => Boolean(row.id))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
+
+/**
+ * Internal helpers exposed for tests ONLY.
+ *
+ * These three are module-private on purpose — nothing outside this file should build an R2 key or decide
+ * what "unassigned" means. But they are exactly where the expense-request association had to be threaded,
+ * and testing them through the full presign/confirm round trip would need R2, an office slug and a deal
+ * lookup to prove one boolean. Exported here rather than made public API.
+ */
+export const __filesTestExports = { validateAssociations, buildR2Key, linkedFileCondition };

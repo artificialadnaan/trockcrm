@@ -32,6 +32,9 @@ import { PropertyEditPage } from "@/pages/properties/property-edit-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { DirectoryMergeQueuePage } from "@/pages/admin/directory-merge-queue-page";
 import { LeadDueDiligenceQueuePage } from "@/pages/admin/lead-due-diligence-queue-page";
+import { MarketingExpenseQueuePage } from "@/pages/admin/marketing-expense-queue-page";
+import { MyMarketingExpenseRequestsPage } from "@/pages/marketing-expense/my-marketing-expense-requests-page";
+import { MarketingExpenseRequestFormPage } from "@/pages/marketing-expense/marketing-expense-request-form-page";
 import { NotificationRecipientsPage } from "@/pages/admin/notification-recipients-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
@@ -244,6 +247,24 @@ export function App() {
               <Route path="/deals/service-opportunity/new" element={<ServiceOpportunityNewPage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/pending-rfp" element={<PendingRfpPage />} />
+              {/* Submitting an expense request is an every-CRM-user action, so these two live in the
+                  main nav and NOT under /admin — only the approver queue is admin-gated. */}
+              <Route
+                path="/marketing-expense-requests"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep", "construction"]}>
+                    <MyMarketingExpenseRequestsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/marketing-expense-requests/new"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep", "construction"]}>
+                    <MarketingExpenseRequestFormPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/deals/:id/photos" element={<DealDetailPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
@@ -598,6 +619,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director"]}>
                     <LeadDueDiligenceQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/marketing-expense-requests"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <MarketingExpenseQueuePage />
                   </RequireRole>
                 )}
               />

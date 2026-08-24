@@ -55,6 +55,9 @@ export const ROUTE_TITLES: Record<string, string> = {
   "/sales-review": "Sales Review",
   "/commissions": "Commissions",
 
+  "/marketing-expense-requests": "Expense Requests",
+  "/marketing-expense-requests/new": "New Expense Request",
+
   "/pipeline": "Pipeline",
   "/pipeline/hygiene": "Pipeline Hygiene",
   "/pipeline/my-cleanup": "My Cleanup",
@@ -105,6 +108,7 @@ export const ROUTE_TITLES: Record<string, string> = {
   "/admin/intervention-analytics": "Intervention Analytics",
   "/admin/interventions": "Interventions",
   "/admin/lead-due-diligence-queue": "Lead DD Queue",
+  "/admin/marketing-expense-requests": "Expense Approvals",
   "/admin/merge-queue": "Merge Queue",
   "/admin/migration": "Migration",
   "/admin/migration/contacts": "Migration · Contacts",
