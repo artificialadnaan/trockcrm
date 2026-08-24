@@ -524,20 +524,29 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
     expect(fetches.issuedFor("office-a")).toBe(2);
   });
 
-  it("shows the winning office's assignments once they arrive, even if the loser answered first", async () => {
+  // A superseded response must leave NOTHING behind, not merely lose the last write. Both of the
+  // interleavings above end with the winner's batch in state either way, so neither can tell "the
+  // loser was discarded" apart from "the loser was overwritten". This one can: the winner comes back
+  // EMPTY, so it writes no batch at all, and then the user returns to the abandoned office. If the
+  // loser's response was ever written to state it is still sitting there, and it renders — a modal
+  // built from a response the component decided long ago it did not want, shown without a fresh fetch.
+  it("leaves nothing behind when a superseded response loses the race", async () => {
     const fetches = deferredFetches();
     await render(true, { officeId: "office-a" });
     await changeOfficeTo("office-b");
 
-    // The abandoned office answers FIRST this time — it must not be rendered, and must not consume
-    // the slot that B's answer is still on its way to fill.
     await fetches.resolveFor("office-a", [task({ id: "a1", title: "Dallas roof walk" })]);
+    await fetches.resolveFor("office-b", []);
     expect(dialog()).toBeNull();
 
-    await fetches.resolveFor("office-b", [task({ id: "b1", title: "Atlanta punch list" })]);
+    await changeOfficeTo("office-a");
 
-    expect(dialog()).not.toBeNull();
-    expect(dialog()!.textContent).toContain("Atlanta punch list");
+    // Back on office A, with A's refetch still in flight. Nothing may be on screen yet.
+    expect(dialog(), "a discarded response must not resurface when its office comes back").toBeNull();
+
+    await fetches.resolveFor("office-a", [task({ id: "a2", title: "Fresh Dallas work" })]);
+    expect(dialog()!.textContent).toContain("Fresh Dallas work");
+    expect(dialog()!.textContent).not.toContain("Dallas roof walk");
   });
 });
 

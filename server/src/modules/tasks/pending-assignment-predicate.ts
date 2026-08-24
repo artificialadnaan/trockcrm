@@ -126,10 +126,17 @@ export function buildPendingAssignmentPredicate({
    *   created_by     somebody ELSE put this on your list. The New Task form defaults assignedTo to the
    *                  creator, so without this a person who types their own task is greeted at their
    *                  next login by a dialog informing them of it — the clearest possible way to teach
-   *                  someone the modal is not worth reading. NULL is tested FIRST and excluded, the
-   *                  same shape the sibling branch's reply notification uses, so a row with no
-   *                  recorded creator can never match a caller by accident; it also has nobody to
-   *                  attribute the task to, which is the one thing the modal exists to say.
+   *                  someone the modal is not worth reading.
+   *
+   *                  A NULL created_by is excluded by this same clause, with no separate IS NOT NULL
+   *                  test: `NULL <> anything` is NULL, not true, so the row simply does not match.
+   *                  That is the outcome we want — a task with no recorded creator has nobody to
+   *                  attribute it to, which is the one thing the modal exists to say — and it is
+   *                  covered by its own test. An explicit IS NOT NULL was written here first and
+   *                  removed once mutation testing showed it could not change any outcome; the
+   *                  sibling branch's `assignerId !== null && !== userId` needs its null test because
+   *                  in JavaScript `null !== userId` is TRUE, which is the opposite default. Same
+   *                  intent, and the shape does not transfer between the two languages.
    *   is_test_data   mirrors excludeTestTasks() on the list projections. A demo task greeting somebody
    *                  at login is the worst possible place for one. COALESCE because the auth demo seed
    *                  used to omit the column from its INSERT entirely.
@@ -147,7 +154,6 @@ export function buildPendingAssignmentPredicate({
   return sql`
     ${tasks.assignedTo} = ${userId}
     AND ${tasks.source} = 'manual'
-    AND ${tasks.createdBy} IS NOT NULL
     AND ${tasks.createdBy} <> ${tasks.assignedTo}
     AND COALESCE(${tasks.isTestData}, false) = false
     AND (
