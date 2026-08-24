@@ -28,8 +28,50 @@ import { describe, expect, it } from "vitest";
 
 const CLIENT_SRC = path.resolve(__dirname, "..");
 
-/** Small-text size classes — the sizes where AA demands 4.5:1 rather than 3:1. */
-const SMALL_TEXT = /text-\[(?:9|10|11|12)(?:\.\d)?px\]|text-xs/;
+/**
+ * Tailwind text sizes in px. Arbitrary `text-[Npx]` is parsed separately.
+ */
+const TEXT_SIZE_PX: Record<string, number> = {
+  "text-xs": 12,
+  "text-sm": 14,
+  "text-base": 16,
+  "text-lg": 18,
+  "text-xl": 20,
+  "text-2xl": 24,
+  "text-3xl": 30,
+  "text-4xl": 36,
+  "text-5xl": 48,
+};
+
+/** Weights at or above 700, which is what WCAG means by bold. `font-semibold` is 600 and does not count. */
+const BOLD = /\bfont-(?:bold|extrabold|black)\b/;
+
+/**
+ * Does this class string set NORMAL-size text — the case AA holds to 4.5:1 rather than 3:1?
+ *
+ * WCAG's "large text" is 24px, or 18.66px when bold. Everything below that is normal, and the first
+ * version of this only looked at `text-xs` and `text-[9–12px]` — so `text-sm text-slate-400` on white,
+ * which fails at exactly the same 2.56:1, was invisible to the guard. `text-sm` is the most common size in
+ * this codebase; excluding it left the ratchet policing the minority of cases.
+ *
+ * A string with no explicit size is skipped: the size is inherited and this cannot know it.
+ */
+function isNormalSizeText(classes: string): boolean {
+  let px: number | null = null;
+  const arbitrary = /(?:^|\s)text-\[(\d+(?:\.\d+)?)px\]/.exec(classes);
+  if (arbitrary) px = Number(arbitrary[1]);
+  else {
+    for (const [token, size] of Object.entries(TEXT_SIZE_PX)) {
+      if (new RegExp(`(?:^|\\s)${token}(?![\\w-])`).test(classes)) {
+        px = size;
+        break;
+      }
+    }
+  }
+  if (px === null) return false;
+  const large = px >= 24 || (px >= 18.66 && BOLD.test(classes));
+  return !large;
+}
 
 /** An icon, not text. Sized targets fall under SC 1.4.11 at 3:1 and are not this file's business. */
 const ICON = /\bh-\d(?:\.\d)?\s+w-\d(?:\.\d)?\b|\bsize-\d\b/;
@@ -58,7 +100,7 @@ const ICON = /\bh-\d(?:\.\d)?\s+w-\d(?:\.\d)?\b|\bsize-\d\b/;
 const BASELINE: Record<string, number> = {
   "components/__harness__/list-detail-harness.tsx": 5,
   "components/__harness__/mobile-ui-harness.tsx": 1,
-  "components/auth/auth-entry-screen.tsx": 2,
+  "components/auth/auth-entry-screen.tsx": 3,
   "components/deals/deals-list-section.tsx": 1,
   "components/deals/pipeline-progress.tsx": 1,
   "components/director/rep-commission-drilldown.tsx": 6,
@@ -68,35 +110,39 @@ const BASELINE: Record<string, number> = {
   "components/leads/lead-kanban-board.tsx": 1,
   "components/pipeline/pipeline-board-column.tsx": 1,
   "components/pipeline/pipeline-record-card.tsx": 3,
-  "components/reports/data-mining-section.tsx": 5,
-  "components/reports/forecast-variance-section.tsx": 6,
-  "components/reports/regional-ownership-section.tsx": 7,
-  "components/reports/source-performance-section.tsx": 1,
+  "components/reports/data-mining-section.tsx": 6,
+  "components/reports/forecast-variance-section.tsx": 10,
+  "components/reports/regional-ownership-section.tsx": 12,
+  "components/reports/source-performance-section.tsx": 4,
   "pages/admin/pipeline-config-page.tsx": 2,
   "pages/admin/users-page.tsx": 7,
+  "pages/commissions/commission-evidence-drawer.tsx": 2,
+  "pages/commissions/rep-commissions-page.tsx": 1,
   "pages/commissions/team-commissions-page.tsx": 3,
   "pages/companies/company-list-page.tsx": 2,
   "pages/contacts/contact-list-page.tsx": 1,
   "pages/dashboard/rep-dashboard-page.tsx": 3,
-  "pages/deals/deal-billing-tab.tsx": 2,
+  "pages/deals/deal-billing-tab.tsx": 3,
   "pages/deals/deal-detail-page.tsx": 1,
   "pages/director/director-rep-detail.tsx": 3,
   "pages/files/files-page.tsx": 1,
   "pages/leads/lead-list-page.tsx": 1,
   "pages/projects/projects-page.tsx": 1,
-  "pages/projects/weekly-report-history-panel.tsx": 6,
-  "pages/projects/weekly-report-send-dialog.tsx": 6,
+  "pages/projects/weekly-report-history-panel.tsx": 9,
+  "pages/projects/weekly-report-project-dialog.tsx": 1,
+  "pages/projects/weekly-report-send-dialog.tsx": 7,
+  "pages/projects/weekly-report-settings-dialog.tsx": 1,
   "pages/properties/property-list-page.tsx": 3,
-  "pages/public/daily-summary-page.tsx": 8,
+  "pages/public/daily-summary-page.tsx": 9,
   "pages/reports/at-risk-page.tsx": 2,
   "pages/reports/daily-activity-log-page.tsx": 1,
-  "pages/reports/field-team-page.tsx": 1,
+  "pages/reports/field-team-page.tsx": 2,
   "pages/reports/forecast-confidence-page.tsx": 4,
   "pages/reports/monday-showcase/evidence-drawer.tsx": 1,
   "pages/reports/platform-usage-page.tsx": 5,
   "pages/reports/platform-usage-rep-detail-page.tsx": 2,
-  "pages/reports/qc-reports-page.tsx": 3,
-  "pages/reports/rep-pack-page.tsx": 5,
+  "pages/reports/qc-reports-page.tsx": 5,
+  "pages/reports/rep-pack-page.tsx": 6,
   "pages/scorecards/corrective-action-responder.tsx": 1,
   "preview-main.tsx": 1,
   "preview/commissions-preview.tsx": 1,
@@ -129,6 +175,14 @@ const PALETTE: Record<string, [number, number, number]> = {
   "slate-950": [2, 6, 23],
 };
 
+/** Class strings written either way: "…" and `…`. Interpolations are left in; they carry no classes. */
+function classStrings(line: string): [string, string][] {
+  return [
+    ...[...line.matchAll(/"([^"]*)"/g)].map((m) => [m[0], m[1]!] as [string, string]),
+    ...[...line.matchAll(/`([^`]*)`/g)].map((m) => [m[0], m[1]!] as [string, string]),
+  ];
+}
+
 function relativeLuminance([r, g, b]: [number, number, number]): number {
   const channel = (v: number) => {
     const s = v / 255;
@@ -158,9 +212,9 @@ function contrast(fg: [number, number, number], bg: [number, number, number]): n
 function statedPairs(source: string): { bg: string; fg: string; ratio: number; line: number }[] {
   const out: { bg: string; fg: string; ratio: number; line: number }[] = [];
   source.split("\n").forEach((line, index) => {
-    if (!SMALL_TEXT.test(line)) return;
-    for (const [, classes] of line.matchAll(/"([^"]*)"/g)) {
+    for (const [, classes] of classStrings(line)) {
       if (classes.includes("?")) continue;
+      if (!isNormalSizeText(classes)) continue;
       const bg = /(?:^|\s)bg-(slate-\d{2,3}|white)(?![\w/-])/.exec(classes);
       const fg = /(?:^|\s)text-(slate-\d{2,3}|white)(?![\w/-])/.exec(classes);
       if (!bg || !fg) continue;
@@ -209,9 +263,12 @@ function smallSlate400Sites(): string[] {
         .split("\n")
         .forEach((line, index) => {
           if (!line.includes("text-slate-400")) return;
-          for (const [, classes] of line.matchAll(/"([^"]*)"/g)) {
+          // BACKTICKS TOO. `className={`text-[11px] text-slate-400 ${extra}`}` is an existing convention
+          // here, and a quoted-string-only matcher never saw the outer class list — so those sites were
+          // absent from the baseline AND unreachable by the ratchet.
+          for (const [, classes] of classStrings(line)) {
             if (!classes.includes("text-slate-400")) continue;
-            if (!SMALL_TEXT.test(classes)) continue;
+            if (!isNormalSizeText(classes)) continue;
             if (ICON.test(classes)) continue;
             found.push(`${path.relative(CLIENT_SRC, full)}:${index + 1}`);
           }
