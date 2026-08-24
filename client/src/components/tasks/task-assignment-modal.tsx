@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { useOfficeScopeId } from "@/hooks/use-office-scope";
+import { useOfficeScopeId, useOfficeScopedHref } from "@/hooks/use-office-scope";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -55,12 +55,39 @@ function AssignmentRow({ task }: { task: PendingAssignmentTask }) {
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold text-slate-900">{task.title}</p>
         <p className="mt-0.5 text-xs text-slate-600">
-          {task.assignedByName ? `Assigned by ${task.assignedByName}` : "Assigned to you"}
+          {/* "Created by", not "Assigned by". The PATCH flow reassigns without touching created_by, so
+              after a reassignment the name here is the original author and not whoever routed it —
+              nothing in the schema records that person. Stating what is known beats asserting what is
+              not, on a dialog whose credibility is the only thing making it worth interrupting for. */}
+          {task.createdByName ? `Created by ${task.createdByName}` : "Assigned to you"}
           {due ? ` · Due ${due}` : ""}
         </p>
       </div>
       <PriorityChip priority={task.priority} />
     </li>
+  );
+}
+
+function AssignmentGroup({
+  group,
+  label,
+  tasks,
+}: {
+  group: "new" | "outstanding";
+  label: string | null;
+  tasks: PendingAssignmentTask[];
+}) {
+  return (
+    <section data-assignment-group={group}>
+      {label && (
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600">{label}</h3>
+      )}
+      <ul className="flex flex-col gap-2">
+        {tasks.map((task) => (
+          <AssignmentRow key={task.id} task={task} />
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -73,6 +100,7 @@ type PendingBatch = {
   officeId: string;
   tasks: PendingAssignmentTask[];
   total: number;
+  newTotal: number;
 };
 
 /**
@@ -97,6 +125,7 @@ export function TaskAssignmentModal() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const officeScopeId = useOfficeScopeId();
+  const scopedHref = useOfficeScopedHref();
   const [batch, setBatch] = useState<PendingBatch | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -160,7 +189,12 @@ export function TaskAssignmentModal() {
         previouslyFocusedRef.current =
           document.activeElement instanceof HTMLElement ? document.activeElement : null;
         acknowledgedRef.current = false;
-        setBatch({ officeId: fetchedForOfficeId, tasks: result.tasks, total: result.total });
+        setBatch({
+          officeId: fetchedForOfficeId,
+          tasks: result.tasks,
+          total: result.total,
+          newTotal: result.newTotal,
+        });
         setOpen(true);
       })
       .catch(() => {
@@ -180,9 +214,18 @@ export function TaskAssignmentModal() {
       // reason. Not awaited: the dialog closes on the click, not on the round trip.
       //
       // Posted against `batch.officeId` — the office the ids were READ from — never the office in the
-      // URL at this instant. Those differ the moment somebody changes office scope, and the ids only
-      // exist in one schema: sent to the other, the server's ownership re-derivation matches nothing,
-      // writes nothing, and still answers 204. Nothing surfaces. The modal simply returns next login.
+      // URL at this instant. Task ids exist in exactly one schema; sent to another, the server's
+      // ownership re-derivation matches nothing, writes nothing, and still answers 204. Nothing
+      // surfaces anywhere and the modal simply returns at the next login.
+      //
+      // DEFENCE IN DEPTH, and worth being honest that it is: the render guard below already refuses
+      // to show a batch whose office no longer matches the URL, and handleOpenChange is only
+      // reachable from a rendered dialog — so at every point this line can execute, the two values
+      // are provably equal. Mutating it to `requestOfficeId` does not fail a test, and no test here
+      // pretends otherwise. It stays because "post where you read" is the invariant this code is
+      // actually built on, and expressing it directly is what keeps that true if the render guard is
+      // ever relaxed. The alternative is correctness that depends entirely on a condition twenty
+      // lines away.
       void acknowledgeTaskAssignments(
         batch.tasks.map((task) => task.id),
         batch.officeId
@@ -195,9 +238,13 @@ export function TaskAssignmentModal() {
   );
 
   const handleViewAll = useCallback(() => {
-    navigate("/tasks");
+    // CARRIES THE OFFICE SCOPE. A bare navigate("/tasks") drops ?officeId, and api() then resolves
+    // x-office-id from a URL that no longer names an office — so the list that opens is the user's
+    // HOME office, having just been told about assignments in another one. The tasks the modal named
+    // are simply not there, and nothing says why.
+    navigate(scopedHref("/tasks"));
     handleOpenChange(false);
-  }, [handleOpenChange, navigate]);
+  }, [handleOpenChange, navigate, scopedHref]);
 
   // A batch belonging to an office the user has since navigated away from is never shown. Derived
   // rather than cleared in an effect, so there is no render in which one tenant's assignments are on
@@ -205,9 +252,26 @@ export function TaskAssignmentModal() {
   // rendered dialog, no way for a stale batch to be acknowledged either.
   if (!open || batch === null || batch.officeId !== requestOfficeId) return null;
 
-  const { tasks, total } = batch;
+  const { tasks, total, newTotal } = batch;
   const remaining = Math.max(total - tasks.length, 0);
-  const heading = tasks.length === 1 ? "You have a new task" : `You have ${total} new tasks`;
+
+  // Split for display, never re-derived: `isNew` comes from the same NOT EXISTS the server selected
+  // the row with, so a row can never be filed under a heading that contradicts why it was returned.
+  const newTasks = tasks.filter((task) => task.isNew);
+  const outstandingTasks = tasks.filter((task) => !task.isNew);
+
+  // A repeat is not a new assignment. Urgent, high and overdue work comes back on EVERY login until it
+  // leaves pending, so counting it as new makes the headline false from the second showing onwards.
+  const heading =
+    newTotal === 0
+      ? "Still on your plate"
+      : newTotal === 1
+        ? "You have a new task"
+        : `You have ${newTotal} new tasks`;
+  const description =
+    newTotal === 0
+      ? "Still outstanding, and still assigned to you."
+      : "Assigned to you since you were last here. They are on your tasks page too.";
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -230,16 +294,21 @@ export function TaskAssignmentModal() {
       >
         <DialogHeader>
           <DialogTitle>{heading}</DialogTitle>
-          <DialogDescription>
-            Assigned to you since you were last here. They are on your tasks page too.
-          </DialogDescription>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
-        <ul className="flex flex-col gap-2">
-          {tasks.map((task) => (
-            <AssignmentRow key={task.id} task={task} />
-          ))}
-        </ul>
+        {newTasks.length > 0 && (
+          <AssignmentGroup
+            group="new"
+            // No heading when there is nothing to contrast it with — the dialog title already says
+            // these are new, and a lone "New" label above the only list is noise.
+            label={outstandingTasks.length > 0 ? "New" : null}
+            tasks={newTasks}
+          />
+        )}
+        {outstandingTasks.length > 0 && (
+          <AssignmentGroup group="outstanding" label="Still outstanding" tasks={outstandingTasks} />
+        )}
 
         {remaining > 0 && (
           <p className="text-xs font-medium text-slate-600">

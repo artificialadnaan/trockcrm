@@ -44,28 +44,73 @@ const SCHEMA_NAME = /^office_[a-z][a-z0-9_]*$/;
  */
 export const REPEATING_TASK_PRIORITIES = ["urgent", "high"] as const;
 
-export function buildPendingAssignmentPredicate({
-  userId,
-  todayCt,
-  schema,
-}: PendingAssignmentPredicateOptions): SQL {
+/**
+ * Statuses a FIRST-TIME assignment can arrive in.
+ *
+ * Wider than `pending` on purpose. The PATCH flow changes `assigned_to` without touching `status`, so a
+ * task the previous assignee had already started lands on the new person's list as `in_progress` --
+ * still a brand-new assignment to them, and "somebody assigned me something" is the whole reason this
+ * feature exists. Gating first-time visibility on `pending` drops it before ever asking whether the new
+ * assignee has seen it.
+ *
+ * `scheduled` is deliberately absent: it carries an explicit future surfacing date, so interrupting
+ * somebody at login about work they deferred is the opposite of what the status means, and it comes
+ * back on its own date regardless. Mirrors ACTIVE_BUCKET_STATUSES in service.ts, restated here rather
+ * than imported because service.ts imports THIS module and the cycle would be worse than the echo.
+ */
+export const NEW_ASSIGNMENT_STATUSES = ["pending", "in_progress", "waiting_on", "blocked"] as const;
+
+function quotedList(values: readonly string[]): SQL {
+  return sql.join(
+    values.map((value) => sql.raw(`'${value}'`)),
+    sql`, `
+  );
+}
+
+function assertSchemaName(schema: string | undefined) {
   if (schema !== undefined && !SCHEMA_NAME.test(schema)) {
     // The value reaches here from public.offices.slug, so it is not user input -- but it IS
     // interpolated rather than bound (an identifier cannot be a parameter), and a schema name is
     // exactly the shape that stops being trusted the day somebody adds an office-creation form.
     throw new Error(`Refusing to build a tenant predicate for schema name: ${schema}`);
   }
+}
 
+/**
+ * "This person has never been shown this task."
+ *
+ * ONE definition, used in three places that must agree: the eligibility predicate below, the `is_new`
+ * column the modal groups by, and the ORDER BY that keeps unseen work ahead of repeats. If the flag the
+ * UI labels a row with could ever disagree with the predicate that selected it, the modal would file a
+ * row under "New" that it was only returning as a reminder.
+ */
+export function buildUnseenAssignmentSql({
+  userId,
+  schema,
+}: {
+  userId: string;
+  schema?: string;
+}): SQL {
+  assertSchemaName(schema);
   const ackTable = sql.raw(
     schema
       ? `"${schema}".task_assignment_acknowledgements`
       : "task_assignment_acknowledgements"
   );
+  return sql`NOT EXISTS (
+    SELECT 1 FROM ${ackTable} a
+     WHERE a.task_id = ${tasks.id} AND a.user_id = ${userId}
+  )`;
+}
 
-  const repeatingPriorities = sql.join(
-    REPEATING_TASK_PRIORITIES.map((priority) => sql.raw(`'${priority}'`)),
-    sql`, `
-  );
+export function buildPendingAssignmentPredicate({
+  userId,
+  todayCt,
+  schema,
+}: PendingAssignmentPredicateOptions): SQL {
+  assertSchemaName(schema);
+
+  const unseen = buildUnseenAssignmentSql({ userId, schema });
 
   /**
    * NO `--` COMMENTS INSIDE THE TEMPLATE. This fragment is rendered to a string and executed both by
@@ -74,33 +119,40 @@ export function buildPendingAssignmentPredicate({
    * the entire rest of the query — and the failure mode of a predicate that silently disappears is a
    * modal that fires for every task in the office. The explanation lives here instead:
    *
-   *   assigned_to      the caller, always; never a value from a payload.
-   *   status='pending' the decision was once-per-task, with repeats running "until the task leaves
-   *                    pending". A task somebody has already started, or parked as waiting_on, has
-   *                    visibly been seen and stops interrupting them.
-   *   source='manual'  C4. created_by is NULL on every rules-engine and AI-disconnect task, and those
-   *                    are the bulk of the volume — without this the modal is mostly machine output
-   *                    under a blank "assigned by", and "who assigned it" is why the feature exists.
-   *   is_test_data     mirrors excludeTestTasks() on the list projections. A demo task greeting
-   *                    somebody at login is the worst possible place for one. COALESCE because the auth
-   *                    demo seed used to omit the column from its INSERT entirely.
-   *   NOT EXISTS       "never shown". Migration 0235 seeds this table so it means new, not unread.
-   *   priority IN      the repeat rule.
-   *   due_date <       the overdue repeat. A NULL due_date yields NULL rather than true, so an undated
-   *                    task is never treated as overdue.
+   *   assigned_to    the caller, always; never a value from a payload.
+   *   source         C4. created_by is NULL on every rules-engine and AI-disconnect task, and those are
+   *                  the bulk of the volume — without this the modal is mostly machine output under a
+   *                  blank "assigned by", and "who assigned it" is why the feature exists.
+   *   is_test_data   mirrors excludeTestTasks() on the list projections. A demo task greeting somebody
+   *                  at login is the worst possible place for one. COALESCE because the auth demo seed
+   *                  used to omit the column from its INSERT entirely.
+   *
+   * THEN ONE OF TWO BRANCHES, and the asymmetry between them is the design:
+   *
+   *   NEVER SHOWN    any non-terminal, non-scheduled status. A reassignment does not reset status, so
+   *                  a first-time assignment routinely arrives as in_progress. Migration 0235 seeds the
+   *                  ack table, so "no row" means new rather than merely unread.
+   *   STILL PENDING  the repeat rule — urgent/high, or overdue — and only while the task is still
+   *                  `pending`. Once the assignee has moved it themselves it has visibly been seen and
+   *                  has no business interrupting them again. A NULL due_date yields NULL rather than
+   *                  true, so an undated task is never treated as overdue.
    */
   return sql`
     ${tasks.assignedTo} = ${userId}
-    AND ${tasks.status} = 'pending'
     AND ${tasks.source} = 'manual'
     AND COALESCE(${tasks.isTestData}, false) = false
     AND (
-      NOT EXISTS (
-        SELECT 1 FROM ${ackTable} a
-         WHERE a.task_id = ${tasks.id} AND a.user_id = ${userId}
+      (
+        ${unseen}
+        AND ${tasks.status} IN (${quotedList(NEW_ASSIGNMENT_STATUSES)})
       )
-      OR ${tasks.priority} IN (${repeatingPriorities})
-      OR ${tasks.dueDate} < ${todayCt}
+      OR (
+        ${tasks.status} = 'pending'
+        AND (
+          ${tasks.priority} IN (${quotedList(REPEATING_TASK_PRIORITIES)})
+          OR ${tasks.dueDate} < ${todayCt}
+        )
+      )
     )
   `;
 }

@@ -123,12 +123,16 @@ describe("getPendingAssignmentTasks — what the login modal shows", () => {
     expect(result.total).toBe(1);
   });
 
-  it("names WHO ASSIGNED IT — the entire point of the feature", async () => {
+  // The person who put it on your list, which is what the feature exists to surface. Named from
+  // `created_by`, and reported as the CREATOR rather than the assigner: the PATCH flow changes
+  // assigned_to without touching created_by, so after a reassignment this is the original author and
+  // nothing in the schema records who actually routed it.
+  it("names the person the task came from", async () => {
     await seed([{ id: uid("1"), createdBy: BOB }]);
 
     const result = await getPendingAssignmentTasks(tdb, ALICE);
 
-    expect(result.tasks[0]?.assignedByName).toBe("Adam Shaw");
+    expect(result.tasks[0]?.createdByName).toBe("Adam Shaw");
   });
 
   // C1. Six tasks, LIMIT 5, exactly one urgent -- the smallest fixture that can distinguish
@@ -192,7 +196,6 @@ describe("getPendingAssignmentTasks — what the login modal shows", () => {
     await seed([
       { id: uid("1"), status: "completed" },
       { id: uid("2"), status: "dismissed" },
-      { id: uid("3"), status: "in_progress" },
     ]);
 
     const result = await getPendingAssignmentTasks(tdb, ALICE);
@@ -231,6 +234,142 @@ describe("getPendingAssignmentTasks — what the login modal shows", () => {
     const result = await getPendingAssignmentTasks(tdb, ALICE);
 
     expect(result.tasks).toEqual([]);
+  });
+});
+
+describe("unseen assignments are never crowded out by repeats", () => {
+  // THE EMERGENT DEFECT. Neither half is wrong on its own: LIMIT 5 keeps the modal from being a wall,
+  // and the urgent/high/overdue repeat rule keeps important work in front of people until they deal
+  // with it. Together they invert the feature. Once somebody holds five repeating tasks, those five
+  // are eligible on every login AND they sort first, so they occupy all five slots forever and a
+  // genuinely new assignment is never shown at all -- the modal becomes a permanent display of things
+  // the user has already seen while the one thing they have not stays invisible.
+  //
+  // It is not theoretical: the worst-affected person in production holds 14 pending manual tasks, so
+  // three urgent or overdue ones already take three of the five slots.
+  //
+  // The invariant chosen: A NEVER-ACKNOWLEDGED ASSIGNMENT IS NEVER DISPLACED BY AN ALREADY-SEEN ONE.
+  // Unseen rows sort ahead of repeats outright, so repeats only ever occupy slots unseen work does not
+  // need. Priority still orders WITHIN each group, so the C1 fix keeps working and does not become the
+  // mechanism that buries new work.
+
+  it("shows a brand-new NORMAL task even when five acknowledged URGENT ones are eligible", async () => {
+    const repeating = [uid("1"), uid("2"), uid("3"), uid("4"), uid("5")];
+    await seed(repeating.map((id) => ({ id, priority: "urgent" as const })));
+    await acknowledgeTaskAssignments(tdb, ALICE, repeating);
+    await seed([{ id: uid("9"), priority: "normal", title: "Nobody has seen this one" }]);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    expect(result.tasks.map((t) => t.id)).toContain(uid("9"));
+    // ...and it is FIRST. "Somewhere in the five" would still let a sixth repeat push it out.
+    expect(result.tasks[0]?.id).toBe(uid("9"));
+  });
+
+  it("still shows it when the repeats are OVERDUE rather than urgent", async () => {
+    const yesterday = shiftDays(todayCt(), -1);
+    const repeating = [uid("1"), uid("2"), uid("3"), uid("4"), uid("5")];
+    await seed(repeating.map((id) => ({ id, priority: "high" as const, dueDate: yesterday })));
+    await acknowledgeTaskAssignments(tdb, ALICE, repeating);
+    await seed([{ id: uid("9"), priority: "low", dueDate: null }]);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    expect(result.tasks[0]?.id).toBe(uid("9"));
+  });
+
+  it("orders every unseen task ahead of every repeat, whatever their priorities", async () => {
+    await seed([
+      { id: uid("1"), priority: "urgent" },
+      { id: uid("2"), priority: "urgent" },
+    ]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1"), uid("2")]);
+    await seed([
+      { id: uid("8"), priority: "low" },
+      { id: uid("9"), priority: "normal" },
+    ]);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    // Unseen first (normal before low, so C1's ordering still applies inside the group), then repeats.
+    expect(result.tasks.map((t) => t.id)).toEqual([uid("9"), uid("8"), uid("1"), uid("2")]);
+  });
+
+  it("marks which rows are new so the modal can stop calling a repeat a new assignment", async () => {
+    await seed([{ id: uid("1"), priority: "urgent" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+    await seed([{ id: uid("9"), priority: "normal" }]);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    expect(result.tasks.find((t) => t.id === uid("9"))?.isNew).toBe(true);
+    expect(result.tasks.find((t) => t.id === uid("1"))?.isNew).toBe(false);
+  });
+
+  it("counts the unseen ones separately from the total", async () => {
+    const repeating = [uid("1"), uid("2"), uid("3")];
+    await seed(repeating.map((id) => ({ id, priority: "urgent" as const })));
+    await acknowledgeTaskAssignments(tdb, ALICE, repeating);
+    await seed([{ id: uid("8") }, { id: uid("9") }]);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    expect(result.total).toBe(5);
+    expect(result.newTotal).toBe(2);
+  });
+
+  it("reports newTotal 0 when everything eligible is a repeat", async () => {
+    await seed([{ id: uid("1"), priority: "urgent" }]);
+    await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+
+    const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+    expect(result.total).toBe(1);
+    expect(result.newTotal).toBe(0);
+  });
+});
+
+describe("a reassignment is a new assignment to the person receiving it", () => {
+  // The PATCH flow changes assigned_to without touching status, so a task Alice had already started
+  // arrives on Bob's list as 'in_progress'. Gating FIRST-TIME visibility on status = 'pending' drops it
+  // before ever asking whether Bob has seen it -- and "somebody assigned me something" is the entire
+  // reason this feature exists. Repeats stay pending-only: a task the assignee has themselves moved to
+  // in_progress has visibly been seen, so it has no business interrupting them again.
+
+  for (const status of ["in_progress", "waiting_on", "blocked"] as const) {
+    it(`shows an unseen ${status} task to its new assignee`, async () => {
+      await seed([{ id: uid("1"), status, priority: "normal" }]);
+
+      const result = await getPendingAssignmentTasks(tdb, ALICE);
+
+      expect(result.tasks.map((t) => t.id)).toEqual([uid("1")]);
+      expect(result.tasks[0]?.isNew).toBe(true);
+    });
+
+    it(`does NOT repeat an acknowledged urgent ${status} task`, async () => {
+      await seed([{ id: uid("1"), status, priority: "urgent" }]);
+      await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
+
+      expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+    });
+  }
+
+  // Scheduled work carries an explicit future surfacing date. Interrupting somebody at login about
+  // something deliberately deferred is the opposite of what the status means, and it reappears on its
+  // own date anyway.
+  it("does not show a scheduled task, seen or unseen", async () => {
+    await seed([{ id: uid("1"), status: "scheduled", priority: "urgent" }]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  it("still never shows completed or dismissed work", async () => {
+    await seed([
+      { id: uid("1"), status: "completed", priority: "urgent" },
+      { id: uid("2"), status: "dismissed", priority: "urgent" },
+    ]);
+
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
   });
 });
 

@@ -12,6 +12,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { TASK_RULES } from "./rules/config.js";
 import {
   buildPendingAssignmentPredicate,
+  buildUnseenAssignmentSql,
   pendingAssignmentTodayCt,
 } from "./pending-assignment-predicate.js";
 
@@ -1281,31 +1282,53 @@ export type PendingAssignmentTask = {
   title: string;
   priority: string;
   dueDate: string | null;
-  /** Display name of whoever created the task. The point of the feature; null if the user is gone. */
-  assignedByName: string | null;
+  /**
+   * Display name of whoever CREATED the task.
+   *
+   * Not necessarily whoever assigned it: the PATCH flow changes `assigned_to` without touching
+   * `created_by`, so after a reassignment this names the original author rather than the person who
+   * routed it. Nothing in the schema records the reassignment actor today, so the UI labels this
+   * "Created by" rather than claiming an assigner it cannot identify.
+   */
+  createdByName: string | null;
+  /**
+   * TRUE when this person has never been shown this task; FALSE when it is a repeat of something they
+   * have already acknowledged. Drives both the ordering below and the modal's copy — without it the
+   * modal calls a months-old urgent task a new assignment.
+   */
+  isNew: boolean;
 };
 
 /**
  * The assignments to put in front of `userId` at login, most urgent first, capped at five.
  *
- * ⚠️ ORDER BY. `priority` is a Postgres ENUM declared ('urgent','high','normal','low'), and enum
- * comparison follows DECLARATION order — so the obvious `ORDER BY priority DESC` sorts low → normal →
- * high → urgent and, at LIMIT 5, drops urgent and high off the end. The urgent-repeat rule then
- * re-selects those same never-displayed rows every login and the modal becomes a permanent nag showing
- * the least important work in the office. `taskPriorityRankSql()` (rank 0 = urgent) ordered ASC is the
- * fix, and it is reused rather than re-derived because the CASE already exists twice in this file.
+ * ⚠️ TWO ORDERING RULES, AND THEY HAVE TO BE IN THIS ORDER.
  *
- * `total` is the count of everything matching, not of the page: it feeds the "and N more" line, and
- * counting the returned array would just report the limit.
+ * UNSEEN FIRST. `LIMIT 5` and the urgent/high/overdue repeat rule are each reasonable and together
+ * they invert the feature: repeats stay eligible on every login, so once somebody holds five of them
+ * those five fill every slot forever and a genuinely new assignment is never shown at all. The modal
+ * becomes a permanent display of things the user has already seen while the one thing they have not
+ * stays invisible. The invariant that fixes it is that a never-acknowledged assignment is never
+ * displaced by an already-seen one — repeats get only the slots unseen work does not need.
+ *
+ * THEN PRIORITY, WITHIN each group. `priority` is a Postgres ENUM declared
+ * ('urgent','high','normal','low') and enum comparison follows DECLARATION order, so the obvious
+ * `ORDER BY priority DESC` sorts low → normal → high → urgent and, at LIMIT 5, drops urgent and high
+ * off the end entirely. `taskPriorityRankSql()` (rank 0 = urgent) ordered ASC is the fix, reused rather
+ * than re-derived because the CASE already exists twice in this file. Keeping it SECOND is what stops
+ * the correct urgent-first ordering from becoming the mechanism that buries new work.
+ *
+ * `total` counts everything matching, not the page — it feeds the "and N more" line, and counting the
+ * returned array would just report the limit. `newTotal` counts the unseen ones, so the modal can say
+ * how many are actually new instead of calling a months-old repeat a new assignment.
  */
 export async function getPendingAssignmentTasks(
   tenantDb: TenantDb,
   userId: string
-): Promise<{ tasks: PendingAssignmentTask[]; total: number }> {
-  const predicate = buildPendingAssignmentPredicate({
-    userId,
-    todayCt: pendingAssignmentTodayCt(),
-  });
+): Promise<{ tasks: PendingAssignmentTask[]; total: number; newTotal: number }> {
+  const todayCt = pendingAssignmentTodayCt();
+  const predicate = buildPendingAssignmentPredicate({ userId, todayCt });
+  const unseen = buildUnseenAssignmentSql({ userId });
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -1313,13 +1336,15 @@ export async function getPendingAssignmentTasks(
       ${tasks.title}             AS title,
       ${tasks.priority}::text    AS priority,
       ${tasks.dueDate}::text     AS due_date,
-      (SELECT display_name FROM public.users WHERE id = ${tasks.createdBy}) AS assigned_by_name,
-      -- Computed over the full matching set BEFORE the LIMIT applies, so one round trip answers both
-      -- "what do we show" and "how many more are there".
-      COUNT(*) OVER ()::int      AS total
+      (SELECT display_name FROM public.users WHERE id = ${tasks.createdBy}) AS created_by_name,
+      ${unseen}                  AS is_new,
+      -- Computed over the full matching set BEFORE the LIMIT applies, so one round trip answers all of
+      -- "what do we show", "how many more are there" and "how many of those are actually new".
+      COUNT(*) OVER ()::int      AS total,
+      COUNT(*) FILTER (WHERE ${unseen}) OVER ()::int AS new_total
     FROM tasks
     WHERE ${predicate}
-    ORDER BY ${taskPriorityRankSql()} ASC, ${tasks.dueDate} ASC NULLS LAST, ${taskIdSqlRaw} ASC
+    ORDER BY is_new DESC, ${taskPriorityRankSql()} ASC, ${tasks.dueDate} ASC NULLS LAST, ${taskIdSqlRaw} ASC
     LIMIT ${PENDING_ASSIGNMENT_MODAL_LIMIT}
   `);
 
@@ -1331,9 +1356,11 @@ export async function getPendingAssignmentTasks(
       title: String(row.title),
       priority: String(row.priority),
       dueDate: (row.due_date as string | null) ?? null,
-      assignedByName: (row.assigned_by_name as string | null) ?? null,
+      createdByName: (row.created_by_name as string | null) ?? null,
+      isNew: row.is_new === true,
     })),
     total: Number(rows[0]?.total ?? 0),
+    newTotal: Number(rows[0]?.new_total ?? 0),
   };
 }
 

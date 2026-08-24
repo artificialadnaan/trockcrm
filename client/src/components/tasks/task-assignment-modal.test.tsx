@@ -33,7 +33,8 @@ type PendingTask = {
   title: string;
   priority: string;
   dueDate: string | null;
-  assignedByName: string | null;
+  createdByName: string | null;
+  isNew: boolean;
 };
 
 function task(overrides: Partial<PendingTask> = {}): PendingTask {
@@ -42,14 +43,21 @@ function task(overrides: Partial<PendingTask> = {}): PendingTask {
     title: overrides.title ?? "Walk the Henderson roof",
     priority: overrides.priority ?? "normal",
     dueDate: overrides.dueDate ?? null,
-    assignedByName: overrides.assignedByName ?? "Adam Shaw",
+    createdByName: overrides.createdByName ?? "Adam Shaw",
+    isNew: overrides.isNew ?? true,
     ...overrides,
   };
 }
 
-function setPending(tasks: PendingTask[], total = tasks.length) {
+/** A repeat: already acknowledged, returned again because it is urgent/high/overdue. */
+function repeat(overrides: Partial<PendingTask> = {}): PendingTask {
+  return task({ priority: "urgent", isNew: false, ...overrides });
+}
+
+function setPending(tasks: PendingTask[], total = tasks.length, newTotal?: number) {
+  const resolvedNewTotal = newTotal ?? tasks.filter((t) => t.isNew).length;
   apiMock.mockImplementation(async (path: string) => {
-    if (path === "/tasks/pending-acknowledgement") return { tasks, total };
+    if (path === "/tasks/pending-acknowledgement") return { tasks, total, newTotal: resolvedNewTotal };
     if (path === "/tasks/acknowledge") return undefined;
     throw new Error(`unexpected api call: ${path}`);
   });
@@ -194,8 +202,8 @@ afterEach(async () => {
 });
 
 describe("TaskAssignmentModal — when it appears", () => {
-  it("opens, and names the task and who assigned it", async () => {
-    setPending([task({ title: "Walk the Henderson roof", assignedByName: "Adam Shaw" })]);
+  it("opens, and names the task and where it came from", async () => {
+    setPending([task({ title: "Walk the Henderson roof", createdByName: "Adam Shaw" })]);
 
     await render(true);
 
@@ -352,7 +360,7 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
 
   it("closes even if the acknowledge POST fails — the modal is not a hostage to the network", async () => {
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/tasks/pending-acknowledgement") return { tasks: [task({ id: "t1" })], total: 1 };
+      if (path === "/tasks/pending-acknowledgement") return { tasks: [task({ id: "t1" })], total: 1, newTotal: 1 };
       throw new Error("network down");
     });
     await render(true);
@@ -360,6 +368,77 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
     await click(buttonLabelled("Close"));
 
     expect(dialog()).toBeNull();
+  });
+});
+
+describe("TaskAssignmentModal — it says what is actually true", () => {
+  // A repeat is not a new assignment. The server returns urgent/high/overdue work on EVERY login until
+  // it leaves pending, so after the first showing "3 new tasks assigned to you since you were last
+  // here" is simply false — and copy that is reliably false is how people learn to dismiss a modal
+  // without reading it, which costs exactly the attention the feature was built to buy.
+
+  it("calls new work new", async () => {
+    setPending([task({ id: "n1" }), task({ id: "n2" })]);
+
+    await render(true);
+
+    expect(dialog()!.textContent).toContain("2 new tasks");
+  });
+
+  it("does NOT call a repeat a new assignment", async () => {
+    setPending([repeat({ id: "r1", title: "Chase the Fisher permit" })]);
+
+    await render(true);
+
+    const text = dialog()!.textContent ?? "";
+    expect(text).toContain("Chase the Fisher permit");
+    expect(text).not.toMatch(/\bnew\b/i);
+    expect(text).toContain("Still outstanding");
+  });
+
+  it("counts only the new ones in the heading when both kinds are present", async () => {
+    setPending([task({ id: "n1" }), repeat({ id: "r1" }), repeat({ id: "r2" })]);
+
+    await render(true);
+
+    const heading = document.querySelector<HTMLElement>('[data-slot="dialog-title"]')!.textContent ?? "";
+    expect(heading).toContain("a new task");
+    // The three rows on screen are one new assignment and two reminders. A headline of "3" would be
+    // counting work the person has already been shown.
+    expect(heading).not.toContain("3");
+  });
+
+  it("separates the two groups so a repeat is never filed under new", async () => {
+    setPending([task({ id: "n1", title: "Brand new thing" }), repeat({ id: "r1", title: "Old urgent thing" })]);
+
+    await render(true);
+
+    const groups = Array.from(document.querySelectorAll<HTMLElement>("[data-assignment-group]"));
+    expect(groups.map((g) => g.dataset.assignmentGroup)).toEqual(["new", "outstanding"]);
+    expect(groups[0]!.textContent).toContain("Brand new thing");
+    expect(groups[0]!.textContent).not.toContain("Old urgent thing");
+    expect(groups[1]!.textContent).toContain("Old urgent thing");
+  });
+
+  it("renders no empty group heading when everything is new", async () => {
+    setPending([task({ id: "n1" })]);
+
+    await render(true);
+
+    expect(document.querySelectorAll("[data-assignment-group]")).toHaveLength(1);
+    expect(dialog()!.textContent).not.toContain("Still outstanding");
+  });
+
+  // created_by is the author, and the PATCH flow reassigns without touching it — so after a
+  // reassignment "Assigned by Alice" names somebody who did not assign it. Nothing records the actual
+  // router of the task, so the label states what is known instead of asserting what is not.
+  it("attributes the task to its creator rather than claiming an assigner it cannot identify", async () => {
+    setPending([task({ createdByName: "Adam Shaw" })]);
+
+    await render(true);
+
+    expect(dialog()!.textContent).toContain("Created by Adam Shaw");
+    expect(dialog()!.textContent).not.toContain("Assigned by");
   });
 });
 
@@ -438,7 +517,7 @@ describe("TaskAssignmentModal — office scope", () => {
     expect(dialog()!.textContent).toContain("Dallas roof walk");
 
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/tasks/pending-acknowledgement") return { tasks: [], total: 0 };
+      if (path === "/tasks/pending-acknowledgement") return { tasks: [], total: 0, newTotal: 0 };
       if (path === "/tasks/acknowledge") return undefined;
       throw new Error(`unexpected api call: ${path}`);
     });
@@ -454,7 +533,7 @@ describe("TaskAssignmentModal — office scope", () => {
     await render(true, { officeId: "office-a" });
 
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/tasks/pending-acknowledgement") return { tasks: [task({ id: "b1" })], total: 1 };
+      if (path === "/tasks/pending-acknowledgement") return { tasks: [task({ id: "b1" })], total: 1, newTotal: 1 };
       if (path === "/tasks/acknowledge") return undefined;
       throw new Error(`unexpected api call: ${path}`);
     });
@@ -482,6 +561,17 @@ describe("TaskAssignmentModal — office scope", () => {
 
     expect(officeHeaderOf(acknowledgeCalls()[0])).toBe("office-a");
     expect((acknowledgeCalls()[0]![1] as { json: { taskIds: string[] } }).json.taskIds).toEqual(["a1"]);
+  });
+
+  it("carries the office scope through to the tasks page", async () => {
+    setPending([task({ id: "a1" })]);
+    await render(true, { officeId: "office-a" });
+
+    await click(buttonLabelled("View all tasks"));
+
+    // Dropping ?officeId here would open the HOME office's task list, which does not contain any of
+    // the assignments the modal just named.
+    expect(navigateMock).toHaveBeenCalledWith("/tasks?officeId=office-a");
   });
 
   it("acknowledges against the HOME office explicitly when the URL carries no ?officeId", async () => {

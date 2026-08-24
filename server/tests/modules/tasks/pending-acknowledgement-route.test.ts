@@ -65,7 +65,7 @@ function createTestApp() {
 describe("F6 task routes — reachable through the real router", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    taskServiceMocks.getPendingAssignmentTasks.mockResolvedValue({ tasks: [], total: 0 });
+    taskServiceMocks.getPendingAssignmentTasks.mockResolvedValue({ tasks: [], total: 0, newTotal: 0 });
     taskServiceMocks.acknowledgeTaskAssignments.mockResolvedValue(0);
     taskServiceMocks.getTaskById.mockResolvedValue({ id: "whatever" });
   });
@@ -90,19 +90,23 @@ describe("F6 task routes — reachable through the real router", () => {
     );
   });
 
-  it("returns the tasks and the full total the modal needs for its 'and N more' line", async () => {
-    taskServiceMocks.getPendingAssignmentTasks.mockResolvedValue({
-      tasks: [{ id: "t1", title: "Call back", priority: "urgent", dueDate: null, assignedByName: "Adam Shaw" }],
-      total: 9,
-    });
+  // The fixture mirrors the service's REAL return shape, fields and all. A route test that invents its
+  // own shape keeps passing after the service changes and quietly stops describing the endpoint.
+  it("passes the service payload through verbatim — rows, total and newTotal", async () => {
+    const row = {
+      id: "t1",
+      title: "Call back",
+      priority: "urgent",
+      dueDate: null,
+      createdByName: "Adam Shaw",
+      isNew: true,
+    };
+    taskServiceMocks.getPendingAssignmentTasks.mockResolvedValue({ tasks: [row], total: 9, newTotal: 3 });
 
     const response = await request(createTestApp()).get("/api/tasks/pending-acknowledgement");
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({
-      tasks: [{ id: "t1", title: "Call back", priority: "urgent", dueDate: null, assignedByName: "Adam Shaw" }],
-      total: 9,
-    });
+    expect(response.body).toEqual({ tasks: [row], total: 9, newTotal: 3 });
   });
 
   it("acknowledges through POST /acknowledge and answers 204 with no body", async () => {
