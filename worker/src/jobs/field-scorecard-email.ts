@@ -13,7 +13,7 @@ import {
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 // Reuse the branded-email primitives (frontend URL + hosted logo) so the scorecard email points at
 // trockcrm.com and matches the RFP / project-number emails' look.
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 
 export const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
 

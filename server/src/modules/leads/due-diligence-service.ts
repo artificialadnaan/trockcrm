@@ -27,6 +27,7 @@ import type {
   ExistingCustomerSignal,
   LeadDueDiligenceDetectionSignal,
 } from "@trock-crm/shared/types";
+import { notificationRecipientGroupByKey } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -109,7 +110,24 @@ function resolveSalesRepName(value: unknown) {
   return normalizedDisplayName(value) ?? "Not available";
 }
 
-export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GROUP_KEY) {
+export interface NotificationRecipientOptions {
+  /**
+   * Resolve an EMPTY assignment list to every active admin and director instead of to nobody.
+   *
+   * An option rather than the `key !== "lead_due_diligence"` short-circuit this used to carry. That
+   * comparison read as "only DD has a fallback" and behaved as "only DD gets past this return at all": a
+   * second key with no assignments fell out with `[]`, and the callers below treat an empty recipient list
+   * as a thing to log and move on from, not as an error. The notification simply never arrived.
+   */
+  fallbackToAdminsAndDirectors?: boolean;
+}
+
+/** Who a notification group's mail goes to. Key-agnostic — every group resolves through here. */
+export async function getNotificationRecipients(
+  tenantDb: TenantDb,
+  key: string,
+  options: NotificationRecipientOptions = {},
+) {
   const rows = await tenantDb
     .select({
       userId: users.id,
@@ -121,7 +139,7 @@ export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GR
     .innerJoin(users, eq(users.id, notificationRecipientAssignments.userId))
     .where(and(eq(notificationRecipientGroups.key, key), eq(users.isActive, true)));
 
-  if (rows.length > 0 || key !== GROUP_KEY) {
+  if (rows.length > 0 || !options.fallbackToAdminsAndDirectors) {
     return rows;
   }
 
@@ -133,6 +151,11 @@ export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GR
     })
     .from(users)
     .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
+}
+
+/** The DD call sites' name for the above. The fallback stays on for this key and only this key. */
+export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GROUP_KEY) {
+  return getNotificationRecipients(tenantDb, key, { fallbackToAdminsAndDirectors: key === GROUP_KEY });
 }
 
 async function getLeadSummary(tenantDb: TenantDb, leadId: string) {
@@ -902,15 +925,11 @@ export async function decideDueDiligenceByToken(input: {
   }
 }
 
-const WELL_KNOWN_GROUPS: Record<string, { name: string; description: string }> = {
-  [GROUP_KEY]: {
-    name: "Lead Due Diligence",
-    description: "Recipients who receive new-customer lead due diligence approval requests.",
-  },
-};
-
 async function ensureWellKnownGroup(tenantDb: TenantDb, key: string) {
-  const known = WELL_KNOWN_GROUPS[key];
+  // NOTIFICATION_RECIPIENT_GROUPS in `shared` is the registry — it is what the admin page renders sections
+  // from, so a key that page can offer is by construction a key this can create. The record that used to
+  // sit here held one entry, which made every other key a 404 no admin could clear.
+  const known = notificationRecipientGroupByKey(key);
   if (!known) return null;
   const [row] = await tenantDb
     .insert(notificationRecipientGroups)
@@ -939,7 +958,9 @@ export async function getNotificationRecipientGroup(tenantDb: TenantDb, key: str
   if (!group) {
     throw new AppError(404, "Notification recipient group not found");
   }
-  const recipients = await getLeadDueDiligenceRecipients(tenantDb, key);
+  const recipients = await getNotificationRecipients(tenantDb, key, {
+    fallbackToAdminsAndDirectors: notificationRecipientGroupByKey(key)?.fallbackToAdminsAndDirectors ?? false,
+  });
   return { group, recipients };
 }
 

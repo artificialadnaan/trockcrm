@@ -3,7 +3,7 @@ import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { escapeHtml, isSafeTenantSchema, normalizeText } from "../lib/email-format.js";
 import type { JobHandlerResult } from "../queue.js";
-import { resolveFrontendUrl } from "./project-number-email.js";
+import { resolveFrontendUrl } from "../lib/branded-email.js";
 
 /** Job type emitted by the durable Won-metric reduction outbox. */
 export const WON_METRIC_REDUCTION_ALERT_JOB = "won_metric_reduction_alert";

@@ -65,7 +65,7 @@ import { pool } from "../db.js";
 import { getObjectRangeBuffer, R2_RANGE_READ_TIMEOUT_MS } from "../lib/r2-client.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { escapeHtml, isSafeTenantSchema, normalizeText } from "../lib/email-format.js";
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 import { timedPoolClientQuery, type TimedPoolLike } from "../lib/timed-pool-query.js";
 
 export const GLASSES_WALKTHROUGH_FORWARD_JOB = "glasses_walkthrough_forward";

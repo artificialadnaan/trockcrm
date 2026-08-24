@@ -5,6 +5,7 @@ export * from "./enums.js";
 export * from "./events.js";
 export * from "./lead-validation.js";
 export * from "./lead-due-diligence.js";
+export * from "./notification-recipient-groups.js";
 export * from "./sales-workflow.js";
 export * from "./lead-scoping.js";
 export * from "./call-recordings.js";

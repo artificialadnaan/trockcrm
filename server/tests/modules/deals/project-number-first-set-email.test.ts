@@ -6,9 +6,9 @@ import {
   formatCurrency,
   handleProjectNumberFirstSetEmail,
   resolveChristyProjectNumberRecipient,
-  resolveFrontendUrl,
   resolveProjectNumberEmailCcRecipient,
 } from "../../../../worker/src/jobs/project-number-email.js";
+import { resolveFrontendUrl } from "../../../../worker/src/lib/branded-email.js";
 import { sendSystemEmailWithMetadata } from "../../../../worker/src/lib/system-email.js";
 
 const migrationSql = fs.readFileSync(

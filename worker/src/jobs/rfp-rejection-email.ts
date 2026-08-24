@@ -2,7 +2,7 @@ import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 // Reuse #611's now-merged frontend-URL + branded-template primitives so the RFP-decline email points at
 // trockcrm.com (never the old crm.trockconstruction.com) and matches the project-number email's look.
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 // Single source of truth shared with the server's override-review gate: the notified leadership set and the
 // authorized-reviewer set both derive from RFP_REJECTION_EMAIL_RECIPIENTS, so they can never drift apart.
 import {

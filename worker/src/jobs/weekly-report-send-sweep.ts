@@ -8,15 +8,10 @@ import {
 } from "../lib/system-email.js";
 import { escapeHtml, isSafeTenantSchema, normalizeText } from "../lib/email-format.js";
 import { acquirePgAdvisoryLock } from "../lib/advisory-lock.js";
-import { resolveFrontendUrl } from "./project-number-email.js";
-// The reminder cron owns the branded shell and the leadership dashboard link. Both emails go to the SAME
-// roster about the SAME feature, so they share one look and one URL builder rather than two copies that
-// drift.
-import {
-  renderBrandedEmail,
-  renderDetailRows,
-  weeklyReportDashboardUrl,
-} from "./weekly-report-reminders.js";
+import { renderBrandedEmail, renderDetailRows, resolveFrontendUrl } from "../lib/branded-email.js";
+// The reminder cron still owns the leadership dashboard link. Both emails go to the SAME roster about the
+// SAME feature, so they share one URL builder rather than two copies that drift.
+import { weeklyReportDashboardUrl } from "./weekly-report-reminders.js";
 import {
   WEEKLY_REPORT_SEND_STALL_MINUTES,
   weeklyReportLastSendActivityAt,
@@ -795,8 +790,8 @@ ${trockTeamJoins("wrp", tenantSchema)}
     // that stops the next tick retrying. The throw paths are all currently guarded (every value reaching
     // `escapeHtml` is a non-null string, every Date reaching `Intl` is valid, and the empty-cohort throw
     // is unreachable from here), so this is latent rather than live — but the shell and the detail table
-    // are rendered by `weekly-report-reminders.ts`, which is a different module with its own reasons to
-    // change, and "the composition currently cannot throw" is not a guarantee this file can make.
+    // are rendered by `lib/branded-email.ts`, which is a different module with its own reasons to change,
+    // and "the composition currently cannot throw" is not a guarantee this file can make.
     //
     // Classifying a composition failure as `unknown` is the honest reading: nothing was learned about
     // delivery because nothing was ever sent. `rejected` would be more precise and is not worth a second
