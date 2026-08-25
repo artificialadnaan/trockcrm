@@ -94,16 +94,24 @@ function pendingFetches() {
   return apiMock.mock.calls.filter(([path]) => path === "/tasks/pending-acknowledgement");
 }
 
+/** The office the last render/navigation put in the URL, so reload() can rebuild the same page. */
+let currentOfficeId: string | null = null;
+
 async function render(
   flag: boolean | undefined,
-  { officeId, activeOfficeId }: { officeId?: string | null; activeOfficeId?: string } = {}
+  {
+    officeId,
+    activeOfficeId,
+    userId = "u1",
+  }: { officeId?: string | null; activeOfficeId?: string; userId?: string } = {}
 ) {
+  currentOfficeId = officeId ?? null;
   authMock.mockReturnValue({
     user:
       flag === undefined
         ? null
         : {
-            id: "u1",
+            id: userId,
             hasPendingTaskAssignments: flag,
             officeId: HOME_OFFICE,
             // The office the server computed the flag under. authMiddleware promotes x-office-id into
@@ -123,7 +131,27 @@ async function render(
   await settle();
 }
 
+/**
+ * What a page refresh does to this component: the whole tree is thrown away and rebuilt, so every ref
+ * and every piece of state goes with it. sessionStorage does not.
+ */
+async function reload({ userId }: { userId?: string } = {}) {
+  const officeId = currentOfficeId;
+  if (root) {
+    await act(async () => {
+      root?.unmount();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+  container.remove();
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await render(true, { officeId, userId });
+}
+
 async function changeOfficeTo(officeId: string) {
+  currentOfficeId = officeId;
   await act(async () => {
     setSearchParams?.(new URLSearchParams({ officeId }));
   });
@@ -177,6 +205,10 @@ beforeEach(() => {
   document.body.innerHTML = "";
   document.body.appendChild(container);
   root = createRoot(container);
+  // The once-per-login guard now lives in sessionStorage, which jsdom shares across tests in a file.
+  // Without this, whichever test ran first would silently suppress the modal in all the others.
+  window.sessionStorage.clear();
+  currentOfficeId = null;
 });
 
 // Unmount is AWAITED and flushed. Base UI restores focus when a dialog unmounts, and that restoration
@@ -579,6 +611,74 @@ function setPendingByOffice(
   });
 }
 
+describe("TaskAssignmentModal — a page refresh is not a new login", () => {
+  // A refresh remounts the component and every ref with it, while the auth cookie is long-lived: boot
+  // calls /auth/me, the flag comes back true because urgent/high/overdue repeats stay eligible by
+  // design, and the same dialog opens again. Not once per login — once per RELOAD, which is the
+  // permanent-nag failure this feature has already been rescued from once, arriving by another door.
+  //
+  // So "already shown" has to outlive the component. sessionStorage is the right lifetime and it is
+  // worth being precise about why, because the spec ruled browser storage OUT for acknowledgement:
+  // acknowledgement is an accountability record and has to survive a new device, so it belongs in the
+  // database. This is the opposite kind of fact — "I have already interrupted you in this browsing
+  // session" SHOULD die with the session, and logout() clears both storages, so the guard resets on
+  // exactly the event that defines a new login.
+
+  it("does not interrupt again after a reload", async () => {
+    setPendingByOffice({ "office-a": { tasks: [repeat({ id: "a1", title: "Dallas roof walk" })] } });
+    await render(true, { officeId: "office-a" });
+    expect(dialog()!.textContent).toContain("Dallas roof walk");
+    await click(buttonLabelled("Close"));
+
+    await reload();
+
+    expect(dialog(), "the same repeat, again, on every F5").toBeNull();
+  });
+
+  it("does interrupt after a reload if something NEW has arrived since", async () => {
+    setPendingByOffice({ "office-a": { tasks: [repeat({ id: "a1" })] } });
+    await render(true, { officeId: "office-a" });
+    await click(buttonLabelled("Close"));
+
+    // Adam assigns something while the tab is open; the person reloads.
+    setPendingByOffice({
+      "office-a": { tasks: [task({ id: "a2", title: "Brand new work" }), repeat({ id: "a1" })] },
+    });
+    await reload();
+
+    expect(dialog()!.textContent).toContain("Brand new work");
+  });
+
+  it("starts fresh for a different person signing in on the same tab", async () => {
+    setPendingByOffice({ "office-a": { tasks: [repeat({ id: "a1", title: "Dallas roof walk" })] } });
+    await render(true, { officeId: "office-a" });
+    await click(buttonLabelled("Close"));
+
+    // Not a logout — that clears storage on its own. This is the session-invalidation path, which
+    // bounces to /login without clearing, so the key has to be scoped to the person.
+    await reload({ userId: "u2" });
+
+    expect(dialog()!.textContent).toContain("Dallas roof walk");
+  });
+
+  it("still works when sessionStorage refuses to store anything", async () => {
+    const setItem = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+    try {
+      setPendingByOffice({ "office-a": { tasks: [repeat({ id: "a1", title: "Dallas roof walk" })] } });
+      await render(true, { officeId: "office-a" });
+
+      // Private browsing and full quotas both throw here. The dialog is not allowed to die with it.
+      expect(dialog()!.textContent).toContain("Dallas roof walk");
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+});
+
 describe("TaskAssignmentModal — once per office, per login", () => {
   // Urgent, high and overdue assignments stay eligible after acknowledgement — that is the repeat rule
   // and it is correct. But eligibility is a SERVER answer about a task, and "I have already
@@ -601,7 +701,13 @@ describe("TaskAssignmentModal — once per office, per login", () => {
     await changeOfficeTo("office-a");
 
     expect(dialog(), "the same repeats, a second time, in one login").toBeNull();
-    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(1);
+    // It DOES ask office A again, and that is deliberate rather than an oversight: the answer may have
+    // changed since, and a new assignment arriving while the person was in office B has to be able to
+    // surface. What is suppressed is the second INTERRUPTION, not the second question — which is why
+    // the guard sits on opening the dialog and not on issuing the request.
+    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(2);
+    // ...and nothing was acknowledged a second time, because nothing was shown a second time.
+    expect(acknowledgeCalls()).toHaveLength(1);
   });
 
   it("still interrupts for an office it has NOT shown yet", async () => {

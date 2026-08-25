@@ -146,6 +146,68 @@ const IDLE_FETCH_STATE: FetchState = {
 export const MAX_FETCH_ATTEMPTS = 2;
 
 /**
+ * WHAT THIS PERSON HAS ALREADY BEEN INTERRUPTED WITH, FOR THE LIFE OF THIS BROWSING SESSION.
+ *
+ * ── WHY IT IS STORED AT ALL ────────────────────────────────────────────────────────────────────────
+ * Urgent, high and overdue assignments stay eligible after acknowledgement — that is the repeat rule
+ * and it is correct. But a reload throws away every ref in the component while the auth cookie lives
+ * on, so boot calls /auth/me, the flag comes back true, and the same dialog opens again. Not once per
+ * login: once per F5. That is the permanent-nag failure this feature was already rescued from once,
+ * arriving through a different door.
+ *
+ * ── WHY sessionStorage, WHEN THE SPEC RULED BROWSER STORAGE OUT ────────────────────────────────────
+ * It ruled it out for ACKNOWLEDGEMENT, and rightly: that is an accountability record, it has to survive
+ * a new device and a cleared profile, and "I was never told" must be answerable from the database. It
+ * still is — nothing here replaces that. This is the opposite kind of fact. "I have already shown you
+ * this" is about one browsing session and SHOULD die with it, which is exactly what sessionStorage
+ * does. logout() clears both storages, so the guard resets on precisely the event that starts a new
+ * login. localStorage would be wrong in the other direction: it would outlive the browser and the
+ * repeat would never fire again on that machine.
+ *
+ * ── WHY TASK IDS AND NOT OFFICES ───────────────────────────────────────────────────────────────────
+ * Suppressing a whole office would also suppress work assigned AFTER the modal was shown, which is the
+ * one thing this feature exists to deliver. Remembering the individual assignments already put on
+ * screen suppresses only the repeat, and a genuinely new assignment still opens the dialog on the next
+ * load. Keyed per office as well, so the record stays meaningful without assuming task ids never repeat
+ * across tenant schemas.
+ */
+const SHOWN_STORAGE_PREFIX = "trock:task-assignment-modal:shown:";
+
+/** Scoped to the person. The session-invalidation path bounces to /login WITHOUT clearing storage, so
+ *  a second user signing in on the same tab must not inherit the first one's suppressions. */
+function shownStorageKey(userId: string) {
+  return `${SHOWN_STORAGE_PREFIX}${userId}`;
+}
+
+function shownTaskKey(officeId: string, taskId: string) {
+  return `${officeId}:${taskId}`;
+}
+
+/**
+ * Every read and write is wrapped. Private browsing and a full quota both throw here, and an
+ * interrupting dialog that cannot render because storage said no is a far worse outcome than one that
+ * repeats. On failure the in-memory set still covers the current mount, which is the common case.
+ */
+function readShownTasks(userId: string): string[] {
+  try {
+    const raw = window.sessionStorage.getItem(shownStorageKey(userId));
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistShownTasks(userId: string, keys: Set<string>) {
+  try {
+    window.sessionStorage.setItem(shownStorageKey(userId), JSON.stringify([...keys]));
+  } catch {
+    // Storage unavailable. The in-memory set still suppresses repeats for this mount.
+  }
+}
+
+/**
  * The new-assignment popup: what landed on you while you were away.
  *
  * MOUNTED ONCE, ROUTE-INDEPENDENT, inside AuthGate and OUTSIDE its <Suspense> boundary. Outside,
@@ -186,25 +248,19 @@ export function TaskAssignmentModal() {
   const requestRef = useRef<{ id: number; key: string | null }>({ id: 0, key: null });
 
   /**
-   * Offices whose modal has ACTUALLY BEEN PUT ON SCREEN during this login.
+   * Assignments already put on screen for this person, hydrated from sessionStorage.
    *
-   * Deliberately NOT part of fetchState. That answers "what am I currently showing"; this answers "what
-   * have I already shown", and they are different questions with different lifetimes — fetchState is
-   * replaced every time the office changes, which is exactly when this must survive. Asking one
-   * variable both questions is the shape that produced the latch chain this file has already been
-   * through three times.
+   * Deliberately NOT part of fetchState. That answers "what am I currently showing" and is replaced on
+   * every office change; this answers "what have I already shown" and has to outlive not just the
+   * office change but the component itself. Asking one variable both questions is the shape that
+   * produced the latch chain this file has already been through three times.
    *
-   * WHY IT IS NEEDED AT ALL: urgent, high and overdue assignments stay eligible after acknowledgement
-   * by design — that is the repeat rule. So for a cross-office user, A → B → A re-fetches A, the
-   * repeats are still eligible, and the same interrupting dialog opens a second time in one login.
-   * Eligibility is the server's answer about a TASK and it is correct; "already shown" is a client fact
-   * about this SESSION, and it has to live somewhere other than the thing that decides eligibility.
-   *
-   * ⚠️ ADDED TO WHERE THE DIALOG OPENS, never where the response arrives. A response that came back
-   * empty, failed, or lost a race put nothing in front of anybody, and marking those as shown would
-   * suppress an office the user has genuinely never seen.
+   * Re-hydrated when the user changes, so a second person signing in on the same tab starts clean.
    */
-  const shownOfficesRef = useRef<Set<string>>(new Set());
+  const shownTasksRef = useRef<{ userId: string | null; keys: Set<string> }>({
+    userId: null,
+    keys: new Set(),
+  });
   const acknowledgedRef = useRef(false);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
@@ -213,6 +269,14 @@ export function TaskAssignmentModal() {
   // otherwise the user's home office — exactly the fallback authMiddleware applies when no header
   // arrives, resolved here so it can be PINNED on the request instead of left ambient.
   const requestOfficeId = officeScopeId ?? user?.officeId ?? null;
+
+  // Hydrated during render, and re-hydrated whenever the person changes. Mutating a ref here rather
+  // than in an effect is deliberate: `needsFetch` and the open decision below both read it in the same
+  // pass, and an effect would leave one render seeing an empty set — which is one dialog nobody wanted.
+  const shownUserId = user?.id ?? null;
+  if (shownUserId !== null && shownTasksRef.current.userId !== shownUserId) {
+    shownTasksRef.current = { userId: shownUserId, keys: new Set(readShownTasks(shownUserId)) };
+  }
 
   // The office the server computed `hasPendingTaskAssignments` under. authMiddleware promotes
   // x-office-id into activeOfficeId, so a boot on ?officeId=X yields a flag that describes X.
@@ -233,10 +297,6 @@ export function TaskAssignmentModal() {
   const needsFetch =
     shouldFetch &&
     requestOfficeId !== null &&
-    // Already interrupted them once for this office this login. Not a cache — the answer may well have
-    // changed — but re-asking could only produce the same repeats a second time, and the one thing this
-    // dialog cannot afford is to become something people dismiss without reading.
-    !shownOfficesRef.current.has(requestOfficeId) &&
     (fetchState.office !== requestOfficeId ||
       fetchState.status === "idle" ||
       (fetchState.status === "error" && fetchState.attempts < MAX_FETCH_ATTEMPTS));
@@ -282,13 +342,28 @@ export function TaskAssignmentModal() {
         // queries against a moving table, and a task completed between them lands here. Assigned from
         // the result rather than only set to true, so an office whose answer is "nothing" closes a
         // modal the previous office had opened instead of rendering itself empty.
-        const opening = result.tasks.length > 0;
-        // The office is recorded as shown HERE, at the point the dialog actually opens, and nowhere
-        // else. An empty list opens nothing, so it is not shown; the same is true of the error path
-        // below and of any response that fails the id check above. Recording it from the mere arrival
-        // of a response — or from the result set, which carries only the first five of what may be
-        // more — would mark work as seen that nobody ever laid eyes on.
-        if (opening) shownOfficesRef.current.add(office);
+        // Open only if there is something in here this person has not already been shown. A response
+        // made entirely of repeats they closed earlier — the ordinary case after a reload — opens
+        // nothing; one carrying a newly assigned task still does.
+        const unshown = result.tasks.filter(
+          (candidate) => !shownTasksRef.current.keys.has(shownTaskKey(office, candidate.id))
+        );
+        const opening = unshown.length > 0;
+
+        // Recorded HERE, at the point the dialog actually goes on screen, and nowhere else. An empty
+        // list opens nothing, so nothing is recorded; the same is true of the error path below and of
+        // any response that failed the id check above. Recording from the mere arrival of a response
+        // would mark work as seen that nobody ever laid eyes on.
+        //
+        // EVERY RENDERED TASK, not just the unshown ones — they are all on screen. And only the ones
+        // in `result.tasks`, which is the server's capped page: a sixth eligible task that never
+        // crossed the wire was never shown either, and must stay able to open this dialog later.
+        if (opening && shownTasksRef.current.userId) {
+          for (const rendered of result.tasks) {
+            shownTasksRef.current.keys.add(shownTaskKey(office, rendered.id));
+          }
+          persistShownTasks(shownTasksRef.current.userId, shownTasksRef.current.keys);
+        }
         setOpen(opening);
       })
       .catch(() => {
