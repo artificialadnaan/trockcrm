@@ -13,6 +13,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useOfficeScopedHref } from "@/hooks/use-office-scope";
 import {
   submitMarketingExpenseRequest,
   useMyMarketingExpenseRequests,
@@ -100,6 +101,7 @@ function StatTile({
 
 export function MyMarketingExpenseRequestsPage() {
   const { requests, loading, error, refetch } = useMyMarketingExpenseRequests();
+  const scopedHref = useOfficeScopedHref();
   const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
   const [submittingId, setSubmittingId] = useState<string | null>(null);
 
@@ -177,7 +179,7 @@ export function MyMarketingExpenseRequestsPage() {
           classes are applied to the Link directly rather than smuggled through a wrapper.
         */}
         <Link
-          to="/marketing-expense-requests/new"
+          to={scopedHref("/marketing-expense-requests/new")}
           data-testid="mer-new-request"
           className="inline-flex h-9 items-center justify-center rounded-md bg-brand-red px-4 text-sm font-semibold text-white transition-colors hover:bg-brand-red/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
         >

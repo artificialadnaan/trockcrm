@@ -15,6 +15,7 @@ const currentUser = {
   officeId: "office-1",
   activeOfficeId: "office-1",
 };
+const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
 
 vi.mock("../../../src/middleware/auth.js", () => ({
   authMiddleware: (req: any, _res: any, next: (err?: unknown) => void) => {
@@ -100,7 +101,7 @@ describe("marketing expense request route surface", () => {
 
   it("refuses a rep the decide endpoint", async () => {
     const response = await request(createApp())
-      .post("/api/marketing-expense-requests/req-1/decide")
+      .post(`/api/marketing-expense-requests/${REQUEST_ID}/decide`)
       .send({ decision: "approved" });
     expect(response.status).toBe(403);
     expect(service.decideMarketingExpenseRequest).not.toHaveBeenCalled();
@@ -130,7 +131,7 @@ describe("marketing expense request route surface", () => {
   it("rejects a decision that is neither approved nor denied", async () => {
     currentUser.role = "director";
     const response = await request(createApp())
-      .post("/api/marketing-expense-requests/req-1/decide")
+      .post(`/api/marketing-expense-requests/${REQUEST_ID}/decide`)
       .send({ decision: "skipped" });
     expect(response.status).toBe(400);
     expect(service.decideMarketingExpenseRequest).not.toHaveBeenCalled();
@@ -139,27 +140,49 @@ describe("marketing expense request route surface", () => {
   it("passes the decision through with the session user as the decider", async () => {
     currentUser.role = "director";
     await request(createApp())
-      .post("/api/marketing-expense-requests/req-1/decide")
+      .post(`/api/marketing-expense-requests/${REQUEST_ID}/decide`)
       .send({ decision: "denied", reason: "Over budget", userId: "somebody-else" });
     expect(service.decideMarketingExpenseRequest).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ requestId: "req-1", userId: "user-1", decision: "denied", reason: "Over budget" }),
+      expect.objectContaining({ requestId: REQUEST_ID, userId: "user-1", decision: "denied", reason: "Over budget" }),
     );
   });
 
   it("lets the submitter submit and withdraw their own request", async () => {
-    expect((await request(createApp()).post("/api/marketing-expense-requests/req-1/submit")).status).toBe(200);
-    expect((await request(createApp()).post("/api/marketing-expense-requests/req-1/withdraw")).status).toBe(200);
+    expect((await request(createApp()).post(`/api/marketing-expense-requests/${REQUEST_ID}/submit`)).status).toBe(200);
+    expect((await request(createApp()).post(`/api/marketing-expense-requests/${REQUEST_ID}/withdraw`)).status).toBe(200);
     expect(service.submitMarketingExpenseRequest).toHaveBeenCalledTimes(1);
     expect(service.withdrawMarketingExpenseRequest).toHaveBeenCalledTimes(1);
   });
 
   it("hands :id reads to the service, which owns the submitter-or-approver check", async () => {
-    const response = await request(createApp()).get("/api/marketing-expense-requests/req-1");
+    const response = await request(createApp()).get(`/api/marketing-expense-requests/${REQUEST_ID}`);
     expect(response.status).toBe(200);
     expect(service.getMarketingExpenseRequest).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ requestId: "req-1", user: expect.objectContaining({ id: "user-1", role: "rep" }) }),
+      expect.objectContaining({ requestId: REQUEST_ID, user: expect.objectContaining({ id: "user-1", role: "rep" }) }),
     );
+  });
+
+  it("rejects malformed ids on every :id endpoint before they can reach a UUID query", async () => {
+    // Director makes the decide route pass its role gate too, so every route exercises the shared
+    // request-id parser rather than being short-circuited by authorization.
+    currentUser.role = "director";
+    const app = createApp();
+    const malformedId = "not-a-uuid";
+
+    expect((await request(app).get(`/api/marketing-expense-requests/${malformedId}`)).status).toBe(400);
+    expect((await request(app).post(`/api/marketing-expense-requests/${malformedId}/submit`)).status).toBe(400);
+    expect(
+      (await request(app)
+        .post(`/api/marketing-expense-requests/${malformedId}/decide`)
+        .send({ decision: "approved" })).status,
+    ).toBe(400);
+    expect((await request(app).post(`/api/marketing-expense-requests/${malformedId}/withdraw`)).status).toBe(400);
+
+    expect(service.getMarketingExpenseRequest).not.toHaveBeenCalled();
+    expect(service.submitMarketingExpenseRequest).not.toHaveBeenCalled();
+    expect(service.decideMarketingExpenseRequest).not.toHaveBeenCalled();
+    expect(service.withdrawMarketingExpenseRequest).not.toHaveBeenCalled();
   });
 });

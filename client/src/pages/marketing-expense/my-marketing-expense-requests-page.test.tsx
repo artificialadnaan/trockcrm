@@ -24,6 +24,9 @@ vi.mock("react-router-dom", () => ({
       {children}
     </a>
   ),
+  // The page's real scope helper reads the URL through this hook. Keeping it real verifies the complete
+  // status-page -> New Request link rather than only asserting a mocked helper's return value.
+  useSearchParams: () => [new URLSearchParams(window.location.search)],
 }));
 vi.mock("@/hooks/use-marketing-expense-requests", () => ({
   useMyMarketingExpenseRequests: mocks.useMyMarketingExpenseRequests,
@@ -65,6 +68,7 @@ function state(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.history.replaceState({}, "", "/marketing-expense-requests");
   mocks.useMyMarketingExpenseRequests.mockReturnValue(state());
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -89,6 +93,13 @@ describe("empty state", () => {
     expect(container.textContent).toContain("You have not submitted any expense requests yet");
     const link = container.querySelector<HTMLAnchorElement>('[data-testid="mer-new-request"]');
     expect(link?.getAttribute("href")).toBe("/marketing-expense-requests/new");
+  });
+
+  it("keeps an email-linked office scope when starting a new request", async () => {
+    window.history.replaceState({}, "", "/marketing-expense-requests?officeId=office-atlanta");
+    await renderPage();
+    const link = container.querySelector<HTMLAnchorElement>('[data-testid="mer-new-request"]');
+    expect(link?.getAttribute("href")).toBe("/marketing-expense-requests/new?officeId=office-atlanta");
   });
 });
 

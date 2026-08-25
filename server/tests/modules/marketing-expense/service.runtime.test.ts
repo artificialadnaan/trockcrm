@@ -759,14 +759,33 @@ describe("decisions", () => {
 
 describe("two-stage sequencing", () => {
   async function makeTwoStage() {
-    const draft = await createAndSubmit();
+    const draft = await createDraft();
     await pg.exec(`
       UPDATE ${SCHEMA}.marketing_expense_requests SET steps_required = 2 WHERE id = '${draft.id}';
-      INSERT INTO ${SCHEMA}.marketing_expense_request_approvals (request_id, step_order, approver_group_key)
-      VALUES ('${draft.id}', 2, 'marketing_expense_approver');
     `);
+    await submitMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA,
+      officeId: OFFICE_ID,
+      userId: SUBMITTER,
+      requestId: draft.id,
+    });
     return draft;
   }
+
+  it("creates one approval row for every configured step when submitting", async () => {
+    const draft = await createDraft();
+    await pg.exec(`UPDATE ${SCHEMA}.marketing_expense_requests SET steps_required = 3 WHERE id = '${draft.id}'`);
+
+    const submitted = await submitMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA,
+      officeId: OFFICE_ID,
+      userId: SUBMITTER,
+      requestId: draft.id,
+    });
+
+    expect(submitted.approvals.map((approval) => approval.stepOrder)).toEqual([1, 2, 3]);
+    expect(submitted.approvals.map((approval) => approval.decision)).toEqual([null, null, null]);
+  });
 
   it("does not finalise at step 1 when two steps are required", async () => {
     const draft = await makeTwoStage();

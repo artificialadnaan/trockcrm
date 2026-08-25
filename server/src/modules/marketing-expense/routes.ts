@@ -17,6 +17,9 @@ import {
 } from "./service.js";
 
 const router = Router();
+// The request id is compared directly to UUID columns. Letting a malformed path reach Postgres turns a
+// damaged email link into 22P02 and, ultimately, a generic 500 instead of an actionable client error.
+const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Marketing & advertising expense requests.
@@ -47,7 +50,9 @@ function parseQueueStatus(value: unknown): Exclude<MarketingExpenseStatus, "draf
 
 function requestId(req: Request): string {
   const id = req.params.id;
-  if (typeof id !== "string" || id.length === 0) throw new AppError(400, "A request id is required.");
+  if (typeof id !== "string" || !REQUEST_ID_PATTERN.test(id)) {
+    throw new AppError(400, "A request id must be a valid UUID.");
+  }
   return id;
 }
 

@@ -372,11 +372,16 @@ export async function submitMarketingExpenseRequest(
     throw new AppError(409, "This request has already been submitted.", MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE);
   }
 
-  await tenantDb.insert(marketingExpenseRequestApprovals).values({
-    requestId,
-    stepOrder: 1,
-    approverGroupKey: MARKETING_EXPENSE_APPROVER_GROUP_KEY,
-  });
+  // `stepsRequired` is the parent-side contract for this request's approval workflow. Creating only
+  // step 1 when it is greater than one leaves the parent pending after step 1 but with no remaining row
+  // that can be decided. Materialize every configured step atomically with the draft -> pending transition.
+  await tenantDb.insert(marketingExpenseRequestApprovals).values(
+    Array.from({ length: request.stepsRequired }, (_, index) => ({
+      requestId,
+      stepOrder: index + 1,
+      approverGroupKey: MARKETING_EXPENSE_APPROVER_GROUP_KEY,
+    })),
+  );
 
   const detail = await loadDetail(tenantDb, requestId);
   const snapshot = buildSnapshot(detail, { decision: null, decisionReason: null });

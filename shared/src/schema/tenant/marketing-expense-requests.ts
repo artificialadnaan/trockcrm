@@ -99,7 +99,7 @@ export const marketingExpenseRequests = pgTable(
 );
 
 /**
- * One row per approval STEP. Seeded with step 1 at submit time; a CEO/CFO stage is step 2.
+ * One row per configured approval STEP, all seeded at submit time. A CEO/CFO stage is step 2.
  *
  * `decision IS NULL` means exactly "still actionable" — which is only true because a denial or a
  * withdrawal writes `skipped` to every later step. Without that, a denied step-1 request would leave step 2
