@@ -649,6 +649,39 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
     expect(dialog()!.textContent).toContain("Brand new work");
   });
 
+  // ⚠️ THE CROWDED-OUT RULE, AGAIN — now for the thing that PERSISTS.
+  //
+  // The server sends five rows and a total. A sixth eligible task never crossed the wire, so nobody
+  // saw it, and it is exactly the kind of row the unseen-first ordering exists to surface. Recording
+  // "shown" from the TOTAL rather than from the rendered page would write that sixth task into
+  // storage as already seen — and unlike the in-memory version, this one survives the reload, so the
+  // task would be suppressed for the rest of the session without a person ever laying eyes on it.
+  // Same failure the acknowledgement guard prevents, one layer further out and considerably quieter.
+  it("does not record a task that was crowded out of the page it never appeared on", async () => {
+    setPendingByOffice({
+      "office-a": {
+        tasks: [
+          task({ id: "a1" }),
+          repeat({ id: "a2" }),
+          repeat({ id: "a3" }),
+          repeat({ id: "a4" }),
+          repeat({ id: "a5" }),
+        ],
+        total: 6,
+      },
+    });
+    await render(true, { officeId: "office-a" });
+    expect(dialog()!.textContent).toContain("1 more");
+    await click(buttonLabelled("Close"));
+
+    // The five acknowledged ones drop out; the sixth finally has room.
+    setPendingByOffice({ "office-a": { tasks: [task({ id: "a6", title: "Was crowded out" })] } });
+    await reload();
+
+    expect(dialog(), "the sixth task was recorded as shown without ever being sent").not.toBeNull();
+    expect(dialog()!.textContent).toContain("Was crowded out");
+  });
+
   it("starts fresh for a different person signing in on the same tab", async () => {
     setPendingByOffice({ "office-a": { tasks: [repeat({ id: "a1", title: "Dallas roof walk" })] } });
     await render(true, { officeId: "office-a" });
