@@ -22,7 +22,8 @@ const mocks = vi.hoisted(() => ({
   useTasksMock: vi.fn(),
 }));
 
-vi.mock("@/hooks/use-tasks", () => ({
+vi.mock("@/hooks/use-tasks", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/use-tasks")>()),
   completeTask: mocks.completeTaskMock,
   getTaskStatusLabel: mocks.getTaskStatusLabelMock,
   isTerminalTaskStatus: mocks.isTerminalTaskStatusMock,
@@ -165,7 +166,7 @@ describe("TaskListPage project context", () => {
     });
     mocks.useTaskCountsMock.mockReset();
     mocks.useTaskCountsMock.mockReturnValue({
-      counts: { overdue: 1, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0 },
+      counts: { overdue: 1, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0, bySource: { manual: 0, automated: 1, all: 1 } },
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -479,7 +480,9 @@ describe("TaskListPage project context", () => {
       }
     });
 
-    expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith("rep-2");
+    // Second argument is the automated/manual tab, undefined here because no tab is selected. The
+    // counts endpoint takes it so the summary cards scope to the same rows the buckets do.
+    expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith("rep-2", undefined);
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", assignedTo: "rep-2" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today", assignedTo: "rep-2" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "this_week", assignedTo: "rep-2" }));
@@ -532,7 +535,7 @@ describe("TaskListPage project context", () => {
     // The card must come from counts.completedThisWeek (full-set, sort-independent) so it can't
     // drift when the Completed bucket is re-sorted/limited.
     mocks.useTaskCountsMock.mockReturnValue({
-      counts: { overdue: 0, today: 0, upcoming: 0, completed: 200, completedThisWeek: 7 },
+      counts: { overdue: 0, today: 0, upcoming: 0, completed: 200, completedThisWeek: 7, bySource: { manual: 0, automated: 0, all: 0 } },
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -574,7 +577,7 @@ describe("TaskListPage project context", () => {
 
   it("shows a placeholder in the summary cards while the assignee counts are stale (scope swap in flight)", () => {
     mocks.useTaskCountsMock.mockReturnValue({
-      counts: { overdue: 7, today: 3, upcoming: 0, completed: 0, completedThisWeek: 5 },
+      counts: { overdue: 7, today: 3, upcoming: 0, completed: 0, completedThisWeek: 5, bySource: { manual: 4, automated: 6, all: 10 } },
       loading: true,
       stale: true,
       error: null,
@@ -587,6 +590,36 @@ describe("TaskListPage project context", () => {
     // not the previous assignee's 7 / 3 / 5 — while the new scope's counts are loading.
     const cardValues = Array.from(container.querySelectorAll("p.text-4xl")).map((el) => el.textContent);
     expect(cardValues).toEqual(["—", "—", "—"]);
+
+    // The automated/manual tab labels read the SAME stale counts and must blank too. The cards were
+    // already guarded; the toggle was added later and read counts.bySource straight through, so after
+    // an assignee change its totals went on describing the previous assignee — indefinitely if the
+    // request failed. Asserted through a real render so the page's CALL SITE is covered, not just the
+    // helper that builds the options.
+    const tabs = Array.from(
+      container.querySelectorAll('[role="group"][aria-label="Filter tasks by who created them"] button')
+    ).map((el) => el.textContent);
+    expect(tabs).toEqual(["All", "Manual", "Automated"]);
+    for (const label of tabs) {
+      expect(label, "a stale tab label must carry no number").not.toMatch(/\d/);
+    }
+  });
+
+  it("shows the tab counts once they belong to the current scope", () => {
+    mocks.useTaskCountsMock.mockReturnValue({
+      counts: { overdue: 7, today: 3, upcoming: 0, completed: 0, completedThisWeek: 5, bySource: { manual: 4, automated: 6, all: 10 } },
+      loading: false,
+      stale: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    const tabs = Array.from(
+      container.querySelectorAll('[role="group"][aria-label="Filter tasks by who created them"] button')
+    ).map((el) => el.textContent);
+    expect(tabs).toEqual(["All10", "Manual4", "Automated6"]);
   });
 
   it("a scope (assignee) change reloads in place without a full-page blank after first load", () => {

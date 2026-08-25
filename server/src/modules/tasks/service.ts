@@ -35,6 +35,14 @@ export function isTaskSortBy(value: unknown): value is TaskSortBy {
   return typeof value === "string" && (TASK_SORT_FIELDS as readonly string[]).includes(value);
 }
 
+/** Who created a task: a person, or the system. Recorded on the row (migration 0233), never derived. */
+export type TaskSource = "manual" | "automated";
+export const TASK_SOURCES = ["manual", "automated"] as const;
+
+export function isTaskSource(value: unknown): value is TaskSource {
+  return typeof value === "string" && (TASK_SOURCES as readonly string[]).includes(value);
+}
+
 export interface TaskFilters {
   assignedTo?: string;
   status?: string;
@@ -42,6 +50,7 @@ export interface TaskFilters {
   dealId?: string;
   contactId?: string;
   section?: TaskSection;
+  source?: TaskSource;
   sortBy?: TaskSortBy;
   sortDir?: TaskSortDir;
   page?: number;
@@ -87,6 +96,20 @@ export interface TransitionTaskStatusInput {
 
 const ACTIVE_BUCKET_STATUSES: TaskStatus[] = ["pending", "in_progress", "waiting_on", "blocked"];
 const COMPLETED_BUCKET_STATUSES: TaskStatus[] = ["completed", "dismissed"];
+
+/**
+ * Every status that can surface in an OPEN bucket, and the single denominator behind the per-source
+ * tab counts.
+ *
+ * It is ACTIVE_BUCKET_STATUSES plus 'scheduled', and the 'scheduled' is the whole reason this constant
+ * exists rather than the counts reusing ACTIVE_BUCKET_STATUSES directly. The four open buckets between
+ * them cover every active row (overdue / today / this_week partition by due_date, and `later` mops up
+ * the far-future AND the undated), and `later` additionally unions in everything with status
+ * 'scheduled'. The date-bucket counts below scope to ACTIVE_BUCKET_STATUSES only, so a scheduled task
+ * shows up in the list and in no count at all. Deriving the tab totals from this set instead is what
+ * makes a tab's number agree with the rows underneath it.
+ */
+export const OPEN_WORK_STATUSES: TaskStatus[] = [...ACTIVE_BUCKET_STATUSES, "scheduled"];
 const TERMINAL_STATUSES: TaskStatus[] = ["completed", "dismissed"];
 
 const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -143,6 +166,18 @@ async function writeDismissalResolutionState(
         updatedAt: new Date(),
       },
     });
+}
+
+/**
+ * Excludes seeded demo/test rows from every task read path.
+ *
+ * COALESCE rather than a bare `= false` because the column is only reliably set by one of the two
+ * seeders: scripts/seedTestUsersAndData.ts sets it, and the auth demo seed used to omit it from its
+ * INSERT column list entirely, leaving those rows to the column default. Rows written before that was
+ * fixed still exist.
+ */
+function excludeTestTasks() {
+  return sql`COALESCE(${tasks.isTestData}, false) = false`;
 }
 
 function buildOpenTaskStatusCondition(now: Date) {
@@ -378,6 +413,17 @@ export async function getTasks(
     conditions.push(eq(tasks.contactId, filters.contactId));
   }
 
+  // Automated vs manual. Omitted means BOTH, so every existing caller keeps its current result set —
+  // the ask was the ability to filter, not a change to what people see by default.
+  if (filters.source) {
+    conditions.push(eq(tasks.source, filters.source));
+  }
+
+  // Seeded demo tasks never belong in a real person's list. Applied here, in getTaskById,
+  // getProjectTasks and getTaskCounts together: a filter on the lists but not the counts would make
+  // every tab label disagree with its own rows by however many demo rows the office has.
+  conditions.push(excludeTestTasks());
+
   // Section-based filtering
   // Use office timezone (CT for T Rock) for date bucketing instead of UTC.
   // This ensures "today" matches the user's local date, not UTC midnight.
@@ -447,6 +493,7 @@ export async function getTasks(
       type: tasks.type,
       priority: tasks.priority,
       status: tasks.status,
+      source: tasks.source,
       assignedTo: tasks.assignedTo,
       assignedToName,
       createdBy: tasks.createdBy,
@@ -545,6 +592,7 @@ export async function getProjectTasks(
       type: tasks.type,
       priority: tasks.priority,
       status: tasks.status,
+      source: tasks.source,
       assignedTo: tasks.assignedTo,
       assignedToName,
       createdBy: tasks.createdBy,
@@ -569,7 +617,7 @@ export async function getProjectTasks(
     })
     .from(tasks)
     .leftJoin(deals, eq(tasks.dealId, deals.id))
-    .where(eq(tasks.dealId, dealId))
+    .where(and(eq(tasks.dealId, dealId), excludeTestTasks()))
     .orderBy(desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate), asc(tasks.title));
 }
 
@@ -581,12 +629,43 @@ export async function getTaskCounts(
   tenantDb: TenantDb,
   userRole: string,
   currentUserId: string,
-  targetUserId?: string | null
+  targetUserId?: string | null,
+  source?: TaskSource
 ) {
   // Use office timezone (CT for T Rock) for date bucketing
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
   const effectiveUserId = userRole === "rep" ? currentUserId : (targetUserId ?? null);
-  const scopeClause = effectiveUserId ? sql`WHERE assigned_to = ${effectiveUserId}` : sql``;
+  const assigneeClause = effectiveUserId ? sql` AND assigned_to = ${effectiveUserId}` : sql``;
+  const sourceClause = source ? sql` AND source = ${source}` : sql``;
+
+  // Demo rows are excluded here exactly as they are in the three read projections. If the counts kept
+  // them and the lists dropped them, every tab label would be over by the office's demo-row count and
+  // the two would never reconcile.
+  const scopeClause = sql`WHERE COALESCE(is_test_data, false) = false${assigneeClause}`;
+
+  // The DATE buckets carry the tab selection, because they feed the summary cards that sit directly
+  // above the buckets. The per-source totals deliberately use scopeClause WITHOUT the source: those
+  // are the tab LABELS, and each needs its own number no matter which tab is active — scoping them
+  // would zero the Automated label the moment somebody selected Manual.
+  const bucketScopeClause = sql`${scopeClause}${sourceClause}`;
+
+  // The open-work denominator, shared with the list rather than restated: the four open buckets
+  // between them return exactly the rows with one of these statuses, so a per-source total built from
+  // it reconciles with the rows under each tab. Built from the constant so the two cannot drift.
+  const openWorkList = sql.join(
+    OPEN_WORK_STATUSES.map((status) => sql`${status}`),
+    sql`, `
+  );
+
+  // Two queries, because the two halves answer different questions over different row sets: the tab
+  // labels are unscoped by source, the cards are scoped to the selected tab.
+  const sourceResult = await tenantDb.execute(sql`
+    SELECT
+      COUNT(*) FILTER (WHERE status IN (${openWorkList}) AND source = 'manual')::int AS source_manual,
+      COUNT(*) FILTER (WHERE status IN (${openWorkList}) AND source = 'automated')::int AS source_automated
+    FROM tasks
+    ${scopeClause}
+  `);
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -610,11 +689,15 @@ export async function getTaskCounts(
         AND completed_at >= NOW() - INTERVAL '7 days'
       )::int AS completed_this_week
     FROM tasks
-    ${scopeClause}
+    ${bucketScopeClause}
   `);
 
   const rows = (result as any).rows ?? result;
   const row = rows[0] ?? {};
+  const sourceRows = (sourceResult as any).rows ?? sourceResult;
+  const sourceRow = sourceRows[0] ?? {};
+  const sourceManual = Number(sourceRow.source_manual ?? 0);
+  const sourceAutomated = Number(sourceRow.source_automated ?? 0);
   return {
     overdue: Number(row.overdue ?? 0),
     today: Number(row.today ?? 0),
@@ -624,6 +707,14 @@ export async function getTaskCounts(
     // "Completed this week" summary card so it stays correct regardless of the Completed
     // bucket's sort/limit (the old client calc was capped at the 20 fetched rows).
     completedThisWeek: Number(row.completed_this_week ?? 0),
+    // Tab labels. `all` is the sum of the two rather than its own COUNT so the three numbers cannot
+    // contradict each other — a separate aggregate could disagree with its own parts if the CHECK
+    // constraint ever admitted a third value.
+    bySource: {
+      manual: sourceManual,
+      automated: sourceAutomated,
+      all: sourceManual + sourceAutomated,
+    },
   };
 }
 
@@ -684,6 +775,7 @@ export async function getTaskById(
       type: tasks.type,
       priority: tasks.priority,
       status: tasks.status,
+      source: tasks.source,
       assignedTo: tasks.assignedTo,
       assignedToName,
       createdBy: tasks.createdBy,
@@ -708,7 +800,7 @@ export async function getTaskById(
     })
     .from(tasks)
     .leftJoin(deals, eq(tasks.dealId, deals.id))
-    .where(eq(tasks.id, taskId))
+    .where(and(eq(tasks.id, taskId), excludeTestTasks()))
     .limit(1);
 
   const task = (result[0] ?? null) as any;

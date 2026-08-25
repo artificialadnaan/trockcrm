@@ -32,6 +32,40 @@
 -- once every write site is confirmed deployed, so a NEW write site that forgets the column fails loudly
 -- rather than silently filing its rows as automated.
 --
+-- ⚠️ THE ROLLING-DEPLOY WINDOW — THIS MIGRATION DOES NOT CLOSE IT, AND A FOLLOW-UP MUST.
+-- The API runs migrations before it serves, which orders the NEW container and nothing else. During a
+-- rolling deploy the PREVIOUS API version is still accepting requests, and its createTask does not name
+-- `source`, so a task a person types in that window takes the DEFAULT below and is recorded as
+-- automated. Those rows arrive AFTER the backfill has processed that office, so the initial pass cannot
+-- see them, and nothing repairs them on its own.
+--
+-- THE CONTRACT: the PR that drops this DEFAULT must FIRST re-run the classifier
+-- (server/src/migrations/task-source-backfill.ts). That PR is by definition the moment every explicit
+-- writer is deployed, which is exactly when the repair is both needed and safe, and it deploys long
+-- after the old container has drained. It is not a manual step — it rides the migration that has to
+-- happen anyway.
+--
+-- WHY RE-RUNNING IS SAFE AND EXACT, not a blunt second pass: every automated writer stamps a non-null
+-- origin_rule (rules engine, email queue, AI-disconnect cron, revision routing), and reassignment tasks
+-- are excluded by title AND the assignedAt snapshot key. Once the explicit writers are deployed, NO
+-- legitimately-automated row can match the classify predicate, so a re-run can only touch rows the old
+-- container left behind. Both halves are pinned in task-source-backfill.runtime.test.ts.
+--
+-- WHY A TRANSITIONAL TRIGGER WAS REJECTED. A BEFORE INSERT trigger applying the same predicate would
+-- close the window outright, but it puts a second trigger on `tasks` — the table where triggers have
+-- already nearly cost us the contacts "Last touch" metric — on the hot path of every task INSERT, and
+-- it has to be dropped later. The failure modes are asymmetric, and that is the whole argument: a
+-- repair that never runs leaves a BOUNDED set of rows (one deploy window) misclassified but still
+-- visible in the All tab, fixable at any later date by re-running an idempotent step. A trigger that is
+-- never dropped is UNBOUNDED: it silently overrides every future explicit write, including a machine
+-- writer that legitimately wants 'automated' with a null origin_rule. The thing you forget to remove
+-- should be the thing whose absence is harmless, not the thing whose presence is harmful.
+--
+-- IF THE REPAIR NEVER RUNS: tasks typed by a person during that one deploy window stay filed as
+-- automated permanently. Nothing is hidden — they remain in the default All tab — but the Manual tab
+-- under-reports by that count and those rows are indistinguishable to a user from machine-generated
+-- ones. The damage is bounded to the window and stays repairable indefinitely.
+
 -- ⚠️ THE INVARIANT, AND IT APPLIES TO EVERY FUTURE MIGRATION THAT TOUCHES THIS TABLE:
 --   NOTHING THAT TAKES A LOCK ON `tasks` MAY RUN INSIDE A MIGRATION FILE'S SINGLE TRANSACTION
 --   ACROSS EVERY OFFICE.

@@ -293,6 +293,56 @@ describe("task source backfill — classification", () => {
 // The mechanism itself is proven in per-office-step.runtime.test.ts. What these guard is that the task
 // backfill is actually WIRED to it — a future edit that inlines its own loop here would still classify
 // correctly and would still be the outage the mechanism exists to prevent.
+// THE ROLLING-DEPLOY WINDOW, and the property that makes it recoverable.
+//
+// The API migrates before it serves — but that only orders the NEW container. During a rolling deploy
+// the PREVIOUS API version is still accepting requests, and its createTask does not name `source`, so a
+// task a person types in that window takes the column DEFAULT of 'automated'. Those rows land AFTER the
+// backfill has already processed that office, so the initial pass cannot see them and nothing repairs
+// them on its own.
+//
+// What makes that recoverable rather than permanent is that the classifier is an exact, idempotent
+// REPAIR, not merely a one-shot backfill: re-running it later reclassifies exactly those rows and
+// nothing else. That is only true because every automated writer stamps a non-null origin_rule (rules
+// engine, email queue, AI-disconnect cron, revision routing) and reassignment tasks are excluded by
+// title AND snapshot — so once the explicit writers are deployed, NO legitimate row can match the
+// classify predicate. These tests pin that, because the follow-up that drops the DEFAULT depends on it.
+describe("task source classifier — re-runnable as a repair for the deploy window", () => {
+  it("classifies a hand-typed row created AFTER the initial backfill", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(migrationSql(COLUMN_MIGRATION));
+    await seedTaskShapes("office_dallas");
+    await runTaskSourceBackfill(asClient());
+
+    // A row written by the OLD container mid-deploy: it omits `source`, so the DEFAULT applies.
+    await pg.exec(`
+      INSERT INTO office_dallas.tasks (description, title, type, created_by, origin_rule)
+      VALUES ('window-row', 'Call the client', 'manual', '${HUMAN}', NULL);
+    `);
+    expect(await sourceOf("office_dallas", "window-row")).toBe("automated");
+
+    await runTaskSourceBackfill(asClient());
+
+    expect(await sourceOf("office_dallas", "window-row")).toBe("manual");
+  });
+
+  // The other half, and the one that makes re-running SAFE at any later date: the repair must not
+  // reclassify anything a deployed writer legitimately recorded as automated.
+  it("leaves every legitimately-automated row alone when re-run", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(migrationSql(COLUMN_MIGRATION));
+    await seedTaskShapes("office_dallas");
+    await runTaskSourceBackfill(asClient());
+
+    await runTaskSourceBackfill(asClient());
+
+    for (const shape of ["rule-engine", "email-queue", "ai-disconnect", "revision-routing", "assignment-task", "orphan"]) {
+      expect(await sourceOf("office_dallas", shape), shape).toBe("automated");
+    }
+    expect(await sourceOf("office_dallas", "hand-typed")).toBe("manual");
+  });
+});
+
 describe("task source CHECK — deferred by the migration, validated by the step", () => {
   async function convalidated(schema: string) {
     const r = await pg.query<{ convalidated: boolean }>(
