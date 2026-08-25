@@ -79,6 +79,10 @@ beforeAll(async () => {
       deal_id uuid, lead_id uuid, contact_id uuid, procore_project_id bigint, change_order_id uuid,
       display_name varchar(500) NOT NULL DEFAULT 'doc.pdf',
       file_size_bytes bigint NOT NULL DEFAULT 1,
+      -- loadDetail keeps only the latest active attachment in each file family. These are production
+      -- columns the projection reads, not incidental fixture decoration.
+      parent_file_id uuid,
+      version integer NOT NULL DEFAULT 1,
       is_active boolean NOT NULL DEFAULT true,
       created_at timestamptz NOT NULL DEFAULT NOW()
     );

@@ -88,6 +88,10 @@ beforeAll(async () => {
       is_active boolean NOT NULL DEFAULT true,
       display_name varchar(500) NOT NULL DEFAULT 'doc.pdf',
       file_size_bytes bigint NOT NULL DEFAULT 1,
+      -- loadDetail's attachment projection resolves a version family before every decision response.
+      -- Keep these load-bearing production columns in this hand-built fixture.
+      parent_file_id uuid,
+      version integer NOT NULL DEFAULT 1,
       created_at timestamptz NOT NULL DEFAULT NOW()
     );
     ALTER TABLE ${SCHEMA}.files ADD CONSTRAINT files_association_check
