@@ -154,7 +154,11 @@ function AuditBody({ audit }: { audit: WeeklyReportProjectAudit }) {
   // third disagreement being expressible.
   const outstanding = useMemo(() => audit.reports.filter((r) => r.outstanding).length, [audit.reports]);
   const sent = useMemo(
-    () => audit.reports.filter((r) => r.status === "sent" && !r.supersededById).length,
+    // The audit keeps removed rows visible as evidence, but this is a summary of the current reporting
+    // record. A refile after a removed sent v1 deliberately leaves no `supersededById` on that inactive
+    // row — the send path cannot supersede something no longer live — so status/successor alone would
+    // count one week twice. Removed copies do not contribute to the active sent total.
+    () => audit.reports.filter((r) => r.isActive && r.status === "sent" && !r.supersededById).length,
     [audit.reports],
   );
 

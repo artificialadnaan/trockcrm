@@ -638,6 +638,24 @@ export async function createWeeklyReportDraft(
     throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
 
+  // VERSION IS THE WEEK'S HISTORY, not a property of whichever row happens to remain live. The partial
+  // unique index deliberately permits a new row after someone removes one, but letting that replacement
+  // take the schema default of v1 would make a delivered, deleted v1 invisible to the correction wording:
+  // `priorVersionReachedClient` quite rightly looks only at LOWER versions. A removal cannot recall what
+  // the client received, so a refile must remain strictly above every prior copy, active or otherwise.
+  //
+  // The project row is locked above, serialising normal draft creation for this setup. The value belongs
+  // here rather than in the INSERT's default for the same reason a correction uses an explicit version:
+  // the database's partial uniqueness rule protects live collisions, while this is the monotonic history
+  // rule that protects the client's account of the week.
+  const priorVersions = await client.query(
+    `SELECT COALESCE(MAX(version), 0) AS version
+       FROM weekly_reports
+      WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date`,
+    [input.weeklyReportProjectId, input.weekOf],
+  );
+  const nextVersion = Number(priorVersions.rows[0]?.version ?? 0) + 1;
+
   // What last week said. Everything carried forward comes off ONE row so the three values cannot come
   // from three different weeks — see previousWeeklyReportForCarryOver.
   const carry = await previousWeeklyReportForCarryOver(client, input.weeklyReportProjectId, input.weekOf);
@@ -652,10 +670,10 @@ export async function createWeeklyReportDraft(
   // losing side of a race writes nothing at all, and a resumed draft never re-enters this statement.
   const result = await client.query(
     `INSERT INTO weekly_reports (
-       client_submission_id, weekly_report_project_id, deal_id, week_of,
+       client_submission_id, weekly_report_project_id, deal_id, week_of, version,
        projected_duration_weeks, completion_percent, weather_delay_days, work_completed,
        carried_from_report_id, authored_by, authored_at
-     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6::numeric, $7, $8, $9::uuid, $10::uuid, now())
+     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6, $7::numeric, $8, $9, $10::uuid, $11::uuid, now())
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [
@@ -663,6 +681,7 @@ export async function createWeeklyReportDraft(
       input.weeklyReportProjectId,
       projectRow.deal_id,
       input.weekOf,
+      nextVersion,
       projectRow.projected_duration_weeks,
       // NULL carries as NULL, never as 0. "Nobody has said yet" and "zero percent complete" are
       // different claims about a job and the PDF prints them differently.

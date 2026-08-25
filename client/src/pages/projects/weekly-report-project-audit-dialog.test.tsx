@@ -212,6 +212,21 @@ describe("the summary counts", () => {
     expect(statValue("Reports sent")).toBe("1");
   });
 
+  it("does not count a removed sent copy alongside the live refile", () => {
+    // MUTATION PROOF: a refile after removal does not stamp `supersededById` onto the removed v1, so
+    // omitting `isActive` here makes both sent rows count. The card keeps v1 visible as evidence; only
+    // the active sent summary must exclude it.
+    render({
+      reports: [
+        report({ id: "v2", version: 2, isActive: true }),
+        report({ id: "v1", version: 1, isActive: false, supersededById: null }),
+      ],
+    });
+
+    expect(statValue("Weeks on record")).toBe("1");
+    expect(statValue("Reports sent")).toBe("1");
+  });
+
   it("counts every outstanding week, not just the first", () => {
     render({
       reports: [

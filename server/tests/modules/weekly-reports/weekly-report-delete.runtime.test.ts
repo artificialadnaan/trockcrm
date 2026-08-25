@@ -868,6 +868,39 @@ describe("creating a report after one has been deleted", () => {
     expect(created).toBe(true);
     expect(report.id).not.toBe(reportId);
   });
+
+  it("refiles above a removed delivered version, so the client still receives a correction", async () => {
+    // MUTATION PROOF: filtering this allocation to `is_active`, or leaving the INSERT at its default
+    // version, makes this new row v1. The real send-draft path would then be unable to see the client's
+    // deleted-but-delivered v1 because it correctly asks for an EARLIER version.
+    const project = await seedProject();
+    const v1 = await seedDraft(project.id);
+    await setStatus(v1, "sent");
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports
+          SET send_delivered_at = now(), send_delivery_status = 'delivered'
+        WHERE id = $1::uuid`,
+      [v1],
+    );
+    await deleteWeeklyReport(db, v1, ADMIN_ACTOR, {
+      reason: "The client already received an incorrect copy",
+      confirmWeekOf: WEEK_OF,
+    });
+
+    const { report: v2, created } = await createWeeklyReportDraft(
+      db,
+      { clientSubmissionId: nextSubmissionId(), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+      SUPER_ACTOR,
+    );
+    expect(created).toBe(true);
+    expect(v2.version).toBe(2);
+
+    await setStatus(v2.id, "approved");
+    const sendDraft = await buildWeeklyReportSendDraft(db, v2.id, DIRECTOR_ACTOR);
+    expect(sendDraft.version).toBe(2);
+    expect(sendDraft.isCorrection).toBe(true);
+    expect(sendDraft.contextParagraph).toMatch(/replaces the version sent previously/i);
+  });
 });
 
 describe("what the history list says this actor may do", () => {
