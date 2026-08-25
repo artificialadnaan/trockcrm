@@ -2,12 +2,17 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 import { describe, expect, it } from "vitest";
 import { afterEach, beforeEach, vi } from "vitest";
 import { TaskListPage, getTaskProjectContext } from "./task-list-page";
 import taskListPageSource from "./task-list-page.tsx?raw";
+// The resolver moved to @/lib/task-project-context so the list row and the F4 detail drawer share
+// ONE definition — a deep-linked task labelling its project differently from the same task in the
+// list is exactly the card/drawer divergence this repo keeps re-learning. The behavioural assertions
+// below are unchanged; only the file the source-shape assertions read had to follow the code.
+import taskProjectContextSource from "@/lib/task-project-context.ts?raw";
 
 const mocks = vi.hoisted(() => ({
   completeTaskMock: vi.fn(),
@@ -20,6 +25,10 @@ const mocks = vi.hoisted(() => ({
   useTaskCountsMock: vi.fn(),
   useTaskMock: vi.fn(),
   useTasksMock: vi.fn(),
+  useTasksAwaitingMeMock: vi.fn(),
+  useTaskCommentsMock: vi.fn(),
+  useTaskTimelineMock: vi.fn(),
+  ackTaskRepliesMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-tasks", async (importOriginal) => ({
@@ -31,6 +40,13 @@ vi.mock("@/hooks/use-tasks", async (importOriginal) => ({
   useTaskCounts: mocks.useTaskCountsMock,
   useTask: mocks.useTaskMock,
   useTasks: mocks.useTasksMock,
+  // F4 closed loop. The page also drives the "Needs your attention" bucket and the detail drawer now;
+  // mocked here so this suite keeps testing the LIST rather than starting to exercise the loop's
+  // fetches through an unmocked api layer.
+  useTasksAwaitingMe: mocks.useTasksAwaitingMeMock,
+  useTaskComments: mocks.useTaskCommentsMock,
+  useTaskTimeline: mocks.useTaskTimelineMock,
+  ackTaskReplies: mocks.ackTaskRepliesMock,
 }));
 
 vi.mock("@/hooks/use-task-assignees", () => ({
@@ -171,6 +187,21 @@ describe("TaskListPage project context", () => {
       error: null,
       refetch: vi.fn(),
     });
+    mocks.useTasksAwaitingMeMock.mockReset();
+    mocks.useTasksAwaitingMeMock.mockReturnValue({ tasks: [], loading: false, error: null, refetch: vi.fn() });
+    mocks.useTaskCommentsMock.mockReset();
+    mocks.useTaskCommentsMock.mockReturnValue({
+      comments: [],
+      loop: null,
+      unreadReplyCount: 0,
+      loading: false,
+      error: null,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+    mocks.useTaskTimelineMock.mockReset();
+    mocks.useTaskTimelineMock.mockReturnValue({ entries: [], loading: false, error: null, refetch: vi.fn() });
+    mocks.ackTaskRepliesMock.mockReset();
+    mocks.ackTaskRepliesMock.mockResolvedValue({ acknowledged: false });
     mocks.useTaskMock.mockReset();
     mocks.useTaskMock.mockReturnValue({
       task: null,
@@ -225,10 +256,13 @@ describe("TaskListPage project context", () => {
       dealNumber: "HS-324283495135",
       projectNumber: null,
     })).toBe("HubSpot Import");
-    expect(source).toContain("function getTaskProjectContext");
-    expect(source).toContain("formatDealDisplayNumber(task)");
-    expect(source).toContain("return \"Project linked\";");
+    const resolver = normalize(taskProjectContextSource);
+    expect(resolver).toContain("function getTaskProjectContext");
+    expect(resolver).toContain("formatDealDisplayNumber(task)");
+    expect(resolver).toContain("return \"Project linked\";");
+    // ...and the page still consumes it rather than having grown a second, divergent copy.
     expect(source).toContain("const projectContext = getTaskProjectContext(task);");
+    expect(source).not.toContain("function getTaskProjectContext");
     expect(source).toContain("{projectContext ? <span className=\"truncate\">{projectContext}</span> : null}");
     expect(source).toContain("type GroupKey = \"overdue\" | \"today\" | \"this_week\" | \"later\" | \"completed\";");
     expect(source).toContain("getTaskStatusLabel(task.status)");
@@ -273,7 +307,11 @@ describe("TaskListPage project context", () => {
     renderPage("/tasks/linked-task");
 
     expect(mocks.useTaskMock).toHaveBeenCalledWith("linked-task");
-    expect(container.textContent).toContain("Linked task");
+    // The "Linked task" banner became the conversation drawer (F4/C7): /tasks/:taskId was never a
+    // detail page, and both of the loop's emails deep-link here. The REQUIREMENT this test carries is
+    // unchanged and is what is asserted below — a task opened from a deep link must name its project
+    // and its assignee rather than falling back to the generic labels.
+    expect(container.querySelector('[data-testid="task-conversation-drawer"]')).not.toBeNull();
     expect(container.textContent).toContain("Review linked task");
     // The whole point of the email deep link: the assignee must be able to tell which project the
     // task belongs to, and who it is assigned to. GET /tasks/:id has to supply the joined deal
@@ -302,6 +340,7 @@ describe("TaskListPage project context", () => {
 
     renderPage("/tasks/linked-task");
 
+    expect(container.querySelector('[data-testid="task-conversation-drawer"]')).not.toBeNull();
     expect(container.textContent).toContain("Project linked");
     expect(container.textContent).toContain("Unassigned");
   });
@@ -722,5 +761,40 @@ describe("TaskListPage project context", () => {
     // Only the Overdue bucket switches sort; other buckets keep their own selection.
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", sortBy: "priority", sortDir: "desc" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today", sortBy: "due_date", sortDir: "asc" }));
+  });
+
+  // `?complete=1` arrives from ONE task's emailed "Mark complete" link. Every other query parameter
+  // describes where the reader is — the filters, and `?officeId`, which is load-bearing because
+  // dropping it re-resolves the tenant from the reader's home office. This one describes what they
+  // were asked to do, and about what, so it is the one that must not ride along to a different task.
+  it("carries the view parameters to another conversation but drops the complete flag", () => {
+    function LocationSpy() {
+      const { pathname, search } = useLocation();
+      return <span data-testid="where">{`${pathname}${search}`}</span>;
+    }
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/tasks?source=manual&complete=1"]}>
+          <LocationSpy />
+          <Routes>
+            <Route path="/tasks" element={<TaskListPage />} />
+            <Route path="/tasks/:taskId" element={<TaskListPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+    });
+
+    const open = [...container.querySelectorAll<HTMLElement>("button")].find((b) =>
+      (b.getAttribute("aria-label") ?? b.textContent ?? "").toLowerCase().includes("conversation")
+    );
+    if (!open) throw new Error("no conversation button rendered");
+    act(() => open.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+    const where = container.querySelector('[data-testid="where"]')!.textContent!;
+    expect(where).toContain("source=manual");
+    // Otherwise the next drawer focuses and highlights THAT task's close action as though the email
+    // had asked for it — one click from completing the wrong task.
+    expect(where).not.toContain("complete=1");
   });
 });

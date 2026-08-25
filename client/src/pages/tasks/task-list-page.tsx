@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Check,
@@ -8,6 +8,7 @@ import {
   FileText,
   Flag,
   Mail,
+  MessageSquare,
   MoreHorizontal,
   Phone,
   RefreshCw,
@@ -25,6 +26,7 @@ import {
   useTaskCounts,
   useTask,
   useTasks,
+  useTasksAwaitingMe,
   isTaskSource,
   type Task,
   type TaskSortBy,
@@ -34,10 +36,12 @@ import {
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
+import { TaskConversationDrawer } from "@/components/tasks/task-conversation-drawer";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { formatDealDisplayName, formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { getTaskProjectContext } from "@/lib/task-project-context";
 import { toast } from "sonner";
 
 type GroupKey = "overdue" | "today" | "this_week" | "later" | "completed";
@@ -119,18 +123,10 @@ function getInitials(name: string | null | undefined) {
     .toUpperCase();
 }
 
-export function getTaskProjectContext(task: Pick<Task, "dealId" | "dealName" | "dealIsChangeOrder" | "dealNumber" | "projectNumber">): string | null {
-  if (!task.dealId) return null;
-  const displayNumber = formatDealDisplayNumber(task).label;
-  if (task.dealName) {
-    // A change-order child deal is STORED as "<Parent> — Change Order N" and this context line renders
-    // truncated, so the suffix is the first thing lost. Display-only -- the stored name is unchanged.
-    const dealName = formatDealDisplayName(task.dealName, task.dealIsChangeOrder);
-    return displayNumber === "Pending" ? dealName : `${displayNumber} - ${dealName}`;
-  }
-  if (displayNumber !== "Pending") return displayNumber;
-  return "Project linked";
-}
+// Re-exported, not redefined: the row and the detail drawer must label a task's project identically,
+// and the definition moved to @/lib/task-project-context so both can import the one copy. This export
+// keeps the existing import path (and its suites) working.
+export { getTaskProjectContext };
 
 function formatDueDate(value: string | null) {
   if (!value) return "No date";
@@ -149,8 +145,27 @@ function stopRowKeyDownPropagation(event: React.KeyboardEvent) {
   }
 }
 
-function TaskRow({ task, onUpdate, refreshing = false }: { task: Task; onUpdate: () => void; refreshing?: boolean }) {
+function TaskRow({
+  task,
+  onUpdate,
+  refreshing = false,
+  showUnreadReplies = false,
+}: {
+  task: Task;
+  onUpdate: () => void;
+  refreshing?: boolean;
+  /**
+   * Render the "N replies" affordance. Passed in rather than derived from the row, because the
+   * affordance is only meaningful to the ASSIGNER — an unread marker on the assignee's own list would
+   * be telling them about their own reply. The Needs-your-attention bucket is scoped to
+   * `created_by = me` server-side, which is the only place it is true by construction.
+   */
+  showUnreadReplies?: boolean;
+}) {
   const navigate = useNavigate();
+  // The ROUTER's location, not window.location — they diverge under a MemoryRouter and, more to the
+  // point, the router is the authority for where the app actually is.
+  const { search } = useLocation();
   const [editOpen, setEditOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // While the bucket is refetching (e.g. right after this row's own complete/snooze), these rows are
@@ -203,6 +218,30 @@ function TaskRow({ task, onUpdate, refreshing = false }: { task: Task; onUpdate:
     setEditOpen(true);
   };
 
+  // Navigates rather than opening local state, so the URL the emails deep-link to and the URL a click
+  // produces are the same one — /tasks/<id> is the task's address, and the drawer just renders it.
+  //
+  // The query string rides along. Opening a conversation from a `?source=`/`?assignee=` filtered list
+  // and landing back on an unfiltered one destroys the triage context the drawer exists to preserve —
+  // and `?officeId` is load-bearing besides: dropping it re-resolves the tenant from the reader's
+  // home office and 404s a cross-office task.
+  const openConversation = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    // ...except `complete`, which is the one parameter that names a TASK rather than a view. It arrives
+    // from a specific task's emailed "Mark complete" link, and carrying it to a different task focuses
+    // and highlights that task's close action as though the email had asked for it. The other params
+    // describe where the reader is; this one describes what they were asked to do, and about what.
+    const carried = new URLSearchParams(search);
+    carried.delete("complete");
+    const query = carried.toString();
+    navigate(`/tasks/${task.id}${query ? `?${query}` : ""}`);
+  };
+
+  const unreadReplies = showUnreadReplies ? task.unreadReplyCount ?? 0 : 0;
+  // The SERVER's verdict. `undefined` (an API predating the field) stays permissive so a deploy
+  // window cannot disable every row; the server refuses what it refuses either way.
+  const mayClose = task.canClose !== false;
+
   return (
     <>
       <div
@@ -213,10 +252,12 @@ function TaskRow({ task, onUpdate, refreshing = false }: { task: Task; onUpdate:
       >
         <button
           type="button"
-          disabled={locked || isDone}
+          disabled={locked || isDone || !mayClose}
           onClick={complete}
           onKeyDown={stopRowKeyDownPropagation}
           aria-label={`Complete ${taskTitle}`}
+          // Named, not merely greyed: a disabled control with no explanation reads as a bug.
+          title={mayClose ? undefined : "Only the assignee, the person who assigned this task, or an admin can close it"}
           className={cn(
             "mt-1 flex h-6 w-6 items-center justify-center rounded border-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
             isDone ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-300 text-slate-300 hover:border-emerald-600 hover:text-emerald-600"
@@ -254,6 +295,12 @@ function TaskRow({ task, onUpdate, refreshing = false }: { task: Task; onUpdate:
               <span className="capitalize">{typeLabel(task.type)}</span>
               <span>{getTaskStatusLabel(task.status)}</span>
               {projectContext ? <span className="truncate">{projectContext}</span> : null}
+              {unreadReplies > 0 ? (
+                <span className="flex items-center gap-1.5 font-black text-brand-red">
+                  <span className="h-2 w-2 rounded-full bg-brand-red" aria-hidden />
+                  {unreadReplies} {unreadReplies === 1 ? "reply" : "replies"}
+                </span>
+              ) : null}
             </div>
           </div>
 
@@ -277,6 +324,20 @@ function TaskRow({ task, onUpdate, refreshing = false }: { task: Task; onUpdate:
         </button>
 
         <div className="flex items-center justify-end gap-1 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
+          {/* Available on EVERY row, including completed ones: a reply to a task that was closed
+              before the answer arrived is exactly the sequence the loop exists to record. */}
+          <button
+            type="button"
+            onClick={openConversation}
+            onKeyDown={stopRowKeyDownPropagation}
+            className={cn(
+              "flex h-8 w-8 items-center justify-center rounded-md hover:bg-slate-100",
+              unreadReplies > 0 ? "text-brand-red" : "text-slate-400 hover:text-slate-700"
+            )}
+            aria-label={`Open the conversation for ${taskTitle}`}
+          >
+            <MessageSquare className="h-4 w-4" />
+          </button>
           {!isDone ? (
             <button
               type="button"
@@ -500,6 +561,56 @@ export function buildTaskSourceToggleOptions(
   ];
 }
 
+/**
+ * "Needs your attention" — the tasks YOU assigned that have been answered and not acknowledged.
+ *
+ * Rendered ABOVE the date buckets and outside the GROUP_META loop, because it is not a date bucket:
+ * its rows are assigned to somebody else, are fed by a different endpoint (/tasks/awaiting-me), and
+ * are not filtered by the source/assignee controls — the whole point is that they appear NOWHERE in
+ * the assigner's own list today, since /tasks scopes reps to `assigned_to = me`.
+ *
+ * Hidden entirely when empty rather than shown as a zero: a permanently-present empty section trains
+ * people to stop looking at it, and this one is only useful when it has something in it.
+ */
+function NeedsAttentionGroup({
+  tasks,
+  loading,
+  onUpdate,
+}: {
+  tasks: Task[];
+  loading: boolean;
+  onUpdate: () => void;
+}) {
+  if (loading || tasks.length === 0) return null;
+
+  return (
+    <section
+      data-testid="needs-attention-group"
+      className="overflow-hidden rounded-lg border border-brand-red/40 bg-white"
+    >
+      <div className="flex w-full flex-wrap items-center justify-between gap-3 border-b border-brand-red/20 bg-brand-red/5 px-4 py-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-brand-red" />
+          <div className="min-w-0">
+            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-brand-red">
+              You assigned these
+            </p>
+            <h2 className="text-sm font-black uppercase text-slate-950">Needs your attention</h2>
+          </div>
+        </div>
+        <span className="rounded-full bg-white px-2.5 py-0.5 text-xs font-black tabular-nums text-brand-red ring-1 ring-brand-red/30">
+          {tasks.length}
+        </span>
+      </div>
+      <div>
+        {tasks.map((task) => (
+          <TaskRow key={task.id} task={task} onUpdate={onUpdate} showUnreadReplies />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function TaskListPage() {
   const { user, loading: authLoading } = useAuth();
 
@@ -511,11 +622,12 @@ export function TaskListPage() {
     );
   }
 
-  return <TaskListPageContent role={user.role} />;
+  return <TaskListPageContent role={user.role} userId={user.id} />;
 }
 
-function TaskListPageContent({ role }: { role: string }) {
+function TaskListPageContent({ role, userId }: { role: string; userId: string }) {
   const { taskId } = useParams();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
   const canAssign = role === "admin" || role === "director";
@@ -546,6 +658,12 @@ function TaskListPageContent({ role }: { role: string }) {
   const { tasks: laterTasks, loading: laterLoading, error: laterError, refetch: refetchLater } = useTasks({ section: "later", source: sourceFilter, limit: 200, assignedTo: assigneeFilter, sortBy: laterSort.sortBy, sortDir: laterSort.sortDir });
   const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", source: sourceFilter, limit: 20, assignedTo: assigneeFilter, sortBy: completedSort.sortBy, sortDir: completedSort.sortDir });
   const { task: linkedTask, loading: linkedTaskLoading, error: linkedTaskError, refetch: refetchLinkedTask } = useTask(taskId);
+  const {
+    tasks: awaitingMeTasks,
+    loading: awaitingMeLoading,
+    error: awaitingMeError,
+    refetch: refetchAwaitingMe,
+  } = useTasksAwaitingMe();
 
   const groupLoading: Record<GroupKey, boolean> = {
     overdue: overdueLoading,
@@ -555,7 +673,12 @@ function TaskListPageContent({ role }: { role: string }) {
     completed: completedLoading,
   };
   const loading = countsLoading || overdueLoading || todayLoading || thisWeekLoading || laterLoading || completedLoading || linkedTaskLoading;
-  const error = linkedTaskError ?? overdueError ?? todayError ?? thisWeekError ?? laterError ?? completedError;
+  // awaitingMeError is FIRST, and that ordering is the point. NeedsAttentionGroup hides itself when
+  // it has nothing, so a failed /tasks/awaiting-me renders byte-identically to "nothing needs you" —
+  // the assigner is told they are clear when the truth is that we could not find out. Silence and
+  // zero must never look the same on a surface whose whole job is to say what is waiting.
+  const error =
+    awaitingMeError ?? linkedTaskError ?? overdueError ?? todayError ?? thisWeekError ?? laterError ?? completedError;
 
   const updateAssignee = (assigneeId: string) => {
     const next = new URLSearchParams(searchParams);
@@ -572,6 +695,9 @@ function TaskListPageContent({ role }: { role: string }) {
     refetchLater();
     refetchCompleted();
     refetchLinkedTask();
+    // Acknowledging, replying and completing all change what belongs in this bucket, so it refetches
+    // with everything else rather than only on mount.
+    refetchAwaitingMe();
   };
 
   const grouped = useMemo(() => {
@@ -627,14 +753,39 @@ function TaskListPageContent({ role }: { role: string }) {
         <TaskCreateDialog onCreated={refetchAll} />
       </section>
 
+      {/*
+        THE TASK DETAIL SURFACE. `/tasks/:taskId` used to render one TaskRow in a "Linked task"
+        banner — no thread, no composer, no history — which is what both of this feature's emails
+        deep-linked to. It is now the conversation drawer, at the same URL, so every link that has
+        ever been mailed keeps working and no route had to change.
+      */}
       {taskId && linkedTask ? (
-        <section className="overflow-hidden rounded-lg border border-brand-red/30 bg-white">
-          <div className="border-b border-brand-red/20 bg-brand-red/5 px-4 py-3">
-            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-brand-red">Linked task</p>
-          </div>
-          <TaskRow task={linkedTask} onUpdate={refetchAll} />
-        </section>
+        <TaskConversationDrawer
+          task={linkedTask}
+          currentUserId={userId}
+          // The reply email's "Mark complete" CTA lands here as ?complete=1. It focuses the action;
+          // it never performs it — an emailed link is a GET, and a GET that mutates is one
+          // mail-scanner prefetch away from closing tasks nobody touched.
+          completeRequested={searchParams.get("complete") === "1"}
+          onClose={() => {
+            // Keep the filters, drop the one-shot ?complete flag so a re-open does not re-focus it.
+            const next = new URLSearchParams(searchParams);
+            next.delete("complete");
+            const qs = next.toString();
+            navigate(`/tasks${qs ? `?${qs}` : ""}`);
+          }}
+          onChanged={refetchAll}
+        />
       ) : null}
+
+      <NeedsAttentionGroup
+        tasks={awaitingMeTasks}
+        loading={awaitingMeLoading}
+        onUpdate={refetchAll}
+      />
+
+      {/* Not folded into `refetchAll`'s spinner set on purpose: this bucket hides itself when empty,
+          so gating the whole page's first paint on it would delay the list for no visible gain. */}
 
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard eyebrow="Overdue" value={cardValue(counts.overdue)} badge="Red path" caption="Past due" tone={!countsStale && counts.overdue > 0 ? "red" : "white"} accent="red" />

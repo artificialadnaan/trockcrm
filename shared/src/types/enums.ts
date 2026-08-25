@@ -389,6 +389,10 @@ export const NOTIFICATION_TYPES = [
   "touchpoint_alert",
   "system",
   "won_metric_decrease",
+  // The assignee answered a task you assigned. Postgres enum value added by migration 0234 -- this
+  // list and public.notification_type must move together or every reply's in-app row throws
+  // `invalid input value for enum notification_type` and takes its worker job down with it.
+  "task_replied",
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
