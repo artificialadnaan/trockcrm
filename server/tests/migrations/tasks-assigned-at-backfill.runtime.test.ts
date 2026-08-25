@@ -87,13 +87,17 @@ describe("tasks.assigned_at backfill — what it writes", () => {
     await runTasksAssignedAtBackfill(asClient());
 
     for (const schema of OFFICES) {
-      const result = await pg.query<{ same: boolean; assigned_at: string }>(
-        `SELECT assigned_at = created_at AS same, assigned_at::text FROM ${schema}.tasks`
+      const result = await pg.query<{ same: boolean; hasSeededCreationTime: boolean }>(
+        `SELECT
+           assigned_at = created_at AS same,
+           assigned_at = $1::timestamptz AS "hasSeededCreationTime"
+         FROM ${schema}.tasks`,
+        [SEEDED_CREATED_AT]
       );
       expect(result.rows[0]?.same, `${schema}: assigned_at must equal created_at`).toBe(true);
       // Named explicitly: the DIRECTION of the guess is the decision. now() would post-date every
       // acknowledgement 0235 seeded and re-notify the company about work they have already seen.
-      expect(result.rows[0]?.assigned_at).toContain("2019-06-07");
+      expect(result.rows[0]?.hasSeededCreationTime, `${schema}: assigned_at must use the historical creation time`).toBe(true);
     }
   });
 
@@ -106,8 +110,11 @@ describe("tasks.assigned_at backfill — what it writes", () => {
     await runTasksAssignedAtBackfill(asClient());
 
     for (const schema of OFFICES) {
-      const result = await pg.query<{ updated_at: string }>(`SELECT updated_at::text FROM ${schema}.tasks`);
-      expect(result.rows[0]?.updated_at, `${schema}: set_tasks_updated_at fired`).toContain("2020-01-02");
+      const result = await pg.query<{ unchanged: boolean }>(
+        `SELECT updated_at = $1::timestamptz AS unchanged FROM ${schema}.tasks`,
+        [SEEDED_UPDATED_AT]
+      );
+      expect(result.rows[0]?.unchanged, `${schema}: set_tasks_updated_at fired`).toBe(true);
     }
   });
 
@@ -144,11 +151,15 @@ describe("tasks.assigned_at backfill — what it writes", () => {
     await expect(runTasksAssignedAtBackfill(asClient())).resolves.toBeUndefined();
 
     for (const schema of OFFICES) {
-      const result = await pg.query<{ same: boolean; updated_at: string }>(
-        `SELECT assigned_at = created_at AS same, updated_at::text FROM ${schema}.tasks`
+      const result = await pg.query<{ same: boolean; unchanged: boolean }>(
+        `SELECT
+           assigned_at = created_at AS same,
+           updated_at = $1::timestamptz AS unchanged
+         FROM ${schema}.tasks`,
+        [SEEDED_UPDATED_AT]
       );
       expect(result.rows[0]?.same, schema).toBe(true);
-      expect(result.rows[0]?.updated_at, schema).toContain("2020-01-02");
+      expect(result.rows[0]?.unchanged, `${schema}: a second backfill changed updated_at`).toBe(true);
     }
   });
 

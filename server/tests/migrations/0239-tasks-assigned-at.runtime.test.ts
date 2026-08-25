@@ -179,10 +179,11 @@ describe("migration 0239 — tasks.assigned_at", () => {
     await pg.exec(migrationSql(MIGRATION));
 
     for (const schema of OFFICES) {
-      const result = await pg.query<{ updated_at: string }>(
-        `SELECT updated_at::text FROM ${schema}.tasks`
+      const result = await pg.query<{ unchanged: boolean }>(
+        `SELECT updated_at = $1::timestamptz AS unchanged FROM ${schema}.tasks`,
+        [SEEDED_UPDATED_AT]
       );
-      expect(result.rows[0]?.updated_at, schema).toContain("2020-01-02");
+      expect(result.rows[0]?.unchanged, `${schema}: migration wrote a task row`).toBe(true);
     }
   });
 
@@ -200,10 +201,11 @@ describe("migration 0239 — tasks.assigned_at", () => {
     await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
 
     for (const schema of OFFICES) {
-      const result = await pg.query<{ updated_at: string }>(
-        `SELECT updated_at::text FROM ${schema}.tasks`
+      const result = await pg.query<{ unchanged: boolean }>(
+        `SELECT updated_at = $1::timestamptz AS unchanged FROM ${schema}.tasks`,
+        [SEEDED_UPDATED_AT]
       );
-      expect(result.rows[0]?.updated_at, schema).toContain("2020-01-02");
+      expect(result.rows[0]?.unchanged, `${schema}: a repeated migration wrote a task row`).toBe(true);
     }
   });
 
