@@ -59,11 +59,10 @@ function AssignmentRow({ task }: { task: PendingAssignmentTask }) {
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold text-slate-900">{task.title}</p>
         <p className="mt-0.5 text-xs text-slate-600">
-          {/* "Created by", not "Assigned by". The PATCH flow reassigns without touching created_by, so
-              after a reassignment the name here is the original author and not whoever routed it —
-              nothing in the schema records that person. Stating what is known beats asserting what is
-              not, on a dialog whose credibility is the only thing making it worth interrupting for. */}
-          {task.createdByName ? `Created by ${task.createdByName}` : "Assigned to you"}
+          {/* last_assigned_by is set on every handoff; before the first one, the server falls back to
+              created_by. The modal therefore tells the recipient who actually routed this assignment
+              without losing the useful creator fallback for an untouched task. */}
+          {task.assignedByName ? `Assigned by ${task.assignedByName}` : "Assigned to you"}
           {due ? ` · Due ${due}` : ""}
         </p>
       </div>

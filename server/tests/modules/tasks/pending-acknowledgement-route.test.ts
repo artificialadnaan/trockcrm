@@ -99,7 +99,7 @@ describe("F6 task routes — reachable through the real router", () => {
       title: "Call back",
       priority: "urgent",
       dueDate: null,
-      createdByName: "Adam Shaw",
+      assignedByName: "Adam Shaw",
       isNew: true,
     };
     taskServiceMocks.getPendingAssignmentTasks.mockResolvedValue({ tasks: [row], total: 9, newTotal: 3 });

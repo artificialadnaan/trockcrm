@@ -36,7 +36,7 @@ type PendingTask = {
   title: string;
   priority: string;
   dueDate: string | null;
-  createdByName: string | null;
+  assignedByName: string | null;
   isNew: boolean;
 };
 
@@ -47,7 +47,7 @@ function task(overrides: Partial<PendingTask> = {}): PendingTask {
     title: overrides.title ?? "Walk the Henderson roof",
     priority: overrides.priority ?? "normal",
     dueDate: overrides.dueDate ?? null,
-    createdByName: overrides.createdByName ?? "Adam Shaw",
+    assignedByName: overrides.assignedByName ?? "Adam Shaw",
     isNew: overrides.isNew ?? true,
     ...overrides,
   };
@@ -265,7 +265,7 @@ afterEach(async () => {
 
 describe("TaskAssignmentModal — when it appears", () => {
   it("opens, and names the task and where it came from", async () => {
-    setPending([task({ title: "Walk the Henderson roof", createdByName: "Adam Shaw" })]);
+    setPending([task({ title: "Walk the Henderson roof", assignedByName: "Adam Shaw" })]);
 
     await render(true);
 
@@ -502,16 +502,13 @@ describe("TaskAssignmentModal — it says what is actually true", () => {
     expect(dialog()!.textContent).not.toContain("Still outstanding");
   });
 
-  // created_by is the author, and the PATCH flow reassigns without touching it — so after a
-  // reassignment "Assigned by Alice" names somebody who did not assign it. Nothing records the actual
-  // router of the task, so the label states what is known instead of asserting what is not.
-  it("attributes the task to its creator rather than claiming an assigner it cannot identify", async () => {
-    setPending([task({ createdByName: "Adam Shaw" })]);
+  it("attributes a reassigned task to the person who assigned it", async () => {
+    setPending([task({ assignedByName: "Carla Diaz" })]);
 
     await render(true);
 
-    expect(dialog()!.textContent).toContain("Created by Adam Shaw");
-    expect(dialog()!.textContent).not.toContain("Assigned by");
+    expect(dialog()!.textContent).toContain("Assigned by Carla Diaz");
+    expect(dialog()!.textContent).not.toContain("Created by");
   });
 });
 

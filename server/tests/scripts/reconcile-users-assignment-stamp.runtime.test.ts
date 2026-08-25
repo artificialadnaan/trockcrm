@@ -49,6 +49,11 @@ beforeEach(async () => {
       assigned_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now()
     );
+    CREATE TABLE office_dallas.task_assignment_acknowledgements (
+      task_id uuid NOT NULL,
+      user_id uuid NOT NULL,
+      acknowledged_at timestamptz NOT NULL
+    );
 
     INSERT INTO office_dallas.tasks (title, assigned_to, assigned_at, updated_at)
       VALUES ('inherited work', '${LEAVER}', '${SEEDED_AT}', '${SEEDED_AT}');
@@ -62,8 +67,8 @@ afterAll(async () => {
 });
 
 async function taskRow(title: string) {
-  const result = await pg.query<{ assigned_to: string; assigned_at: string }>(
-    `SELECT assigned_to, assigned_at::text FROM office_dallas.tasks WHERE title = $1`,
+  const result = await pg.query<{ id: string; assigned_to: string; assigned_at: string }>(
+    `SELECT id, assigned_to, assigned_at::text FROM office_dallas.tasks WHERE title = $1`,
     [title]
   );
   return result.rows[0];
@@ -76,6 +81,43 @@ describe("user reconciliation stamps the assignment it transfers", () => {
     const row = await taskRow("inherited work");
     expect(row?.assigned_to).toBe(SURVIVOR);
     expect(row?.assigned_at, "the transfer left the assignment dated 2019").not.toContain("2019-06-07");
+  });
+
+  it("stamps a merge handoff after an acknowledgement made after BEGIN", async () => {
+    const inherited = await taskRow("inherited work");
+    expect(inherited?.id).toBeDefined();
+
+    // The real merge wraps reassignOwnerRecords in a transaction. An acknowledgement can arrive after
+    // BEGIN but before the task UPDATE. PostgreSQL NOW() would retain the BEGIN timestamp and make that
+    // prior acknowledgement satisfy acknowledged_at >= assigned_at; clock_timestamp() must put the
+    // new handoff strictly after it instead.
+    await pg.exec("BEGIN");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await pg.query(
+        `INSERT INTO office_dallas.task_assignment_acknowledgements (task_id, user_id, acknowledged_at)
+         VALUES ($1::uuid, $2::uuid, clock_timestamp())`,
+        [inherited!.id, SURVIVOR]
+      );
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      await reassignOwnerRecords(asClient(), LEAVER, SURVIVOR, "leaver@trockgc.com", "3", []);
+
+      const timing = await pg.query<{ handoff_is_after_ack: boolean }>(
+        `SELECT t.assigned_at > a.acknowledged_at AS handoff_is_after_ack
+           FROM office_dallas.tasks t
+           JOIN office_dallas.task_assignment_acknowledgements a
+             ON a.task_id = t.id AND a.user_id = $2::uuid
+          WHERE t.id = $1::uuid`,
+        [inherited!.id, SURVIVOR]
+      );
+      expect(timing.rows[0]?.handoff_is_after_ack).toBe(true);
+
+      await pg.exec("COMMIT");
+    } catch (error) {
+      await pg.exec("ROLLBACK");
+      throw error;
+    }
   });
 
   // The stamp is not a blanket "touch everything": a row this transfer did not move must keep its

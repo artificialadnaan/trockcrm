@@ -31,6 +31,7 @@ const ALICE = uid("a1");
 const BOB = uid("b1");
 /** A third party, for fixtures where both ALICE and BOB take turns holding the task. */
 const CARLA = uid("c1");
+const DAVE = uid("d1");
 
 /** Two hours ago. Every fixture task is created and assigned here; everything else happens after. */
 const SEEDED_AT = new Date(Date.now() - 2 * 60 * 60 * 1000);
@@ -218,7 +219,8 @@ beforeAll(async () => {
     INSERT INTO public.users (id, display_name) VALUES
       ('${BOB}', 'Adam Shaw'),
       ('${ALICE}', 'Alice Rep'),
-      ('${CARLA}', 'Carla Diaz');
+      ('${CARLA}', 'Carla Diaz'),
+      ('${DAVE}', 'Dave Patel');
   `);
   tdb = drizzle(pg);
 });
@@ -244,16 +246,24 @@ describe("getPendingAssignmentTasks — what the login modal shows", () => {
     expect(result.total).toBe(1);
   });
 
-  // The person who put it on your list, which is what the feature exists to surface. Named from
-  // `created_by`, and reported as the CREATOR rather than the assigner: the PATCH flow changes
-  // assigned_to without touching created_by, so after a reassignment this is the original author and
-  // nothing in the schema records who actually routed it.
-  it("names the person the task came from", async () => {
+  it("uses the creator as the assigner before the first reassignment", async () => {
     await seed([{ id: uid("1"), createdBy: BOB }]);
 
     const result = await getPendingAssignmentTasks(tdb, ALICE);
 
-    expect(result.tasks[0]?.createdByName).toBe("Adam Shaw");
+    expect(result.tasks[0]?.assignedByName).toBe("Adam Shaw");
+  });
+
+  it("names the person who reassigned the task, not its original creator", async () => {
+    const taskId = uid("1");
+    // Alice creates it, Carol moves it from Bob to Dave, then Dave opens the login modal. The
+    // projection has to resolve last_assigned_by rather than returning Alice from created_by.
+    await seed([{ id: taskId, assignedTo: BOB, createdBy: ALICE }]);
+    await updateTask(tdb, taskId, { assignedTo: DAVE }, "admin", CARLA);
+
+    const result = await getPendingAssignmentTasks(tdb, DAVE);
+
+    expect(result.tasks[0]?.assignedByName).toBe("Carla Diaz");
   });
 
   // C1. Six tasks, LIMIT 5, exactly one urgent -- the smallest fixture that can distinguish

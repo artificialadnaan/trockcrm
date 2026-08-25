@@ -1304,14 +1304,13 @@ export type PendingAssignmentTask = {
   priority: string;
   dueDate: string | null;
   /**
-   * Display name of whoever CREATED the task.
+   * Display name of the person who last handed this task to the recipient.
    *
-   * Not necessarily whoever assigned it: the PATCH flow changes `assigned_to` without touching
-   * `created_by`, so after a reassignment this names the original author rather than the person who
-   * routed it. Nothing in the schema records the reassignment actor today, so the UI labels this
-   * "Created by" rather than claiming an assigner it cannot identify.
+   * `lastAssignedBy` records every reassignment; before the first one, the creator is necessarily
+   * the assigner. Resolving `COALESCE(lastAssignedBy, createdBy)` therefore preserves the creator
+   * fallback without misattributing a later handoff to the original author.
    */
-  createdByName: string | null;
+  assignedByName: string | null;
   /**
    * TRUE when this person has never been shown this task; FALSE when it is a repeat of something they
    * have already acknowledged. Drives both the ordering below and the modal's copy — without it the
@@ -1358,7 +1357,9 @@ export async function getPendingAssignmentTasks(
       ${tasks.title}             AS title,
       ${tasks.priority}::text    AS priority,
       ${tasks.dueDate}::text     AS due_date,
-      (SELECT display_name FROM public.users WHERE id = ${tasks.createdBy}) AS created_by_name,
+      (SELECT display_name
+         FROM public.users
+        WHERE id = COALESCE(${tasks.lastAssignedBy}, ${tasks.createdBy})) AS assigned_by_name,
       ${unseen}                  AS is_new,
       -- Computed over the full matching set BEFORE the LIMIT applies, so one round trip answers all of
       -- "what do we show", "how many more are there" and "how many of those are actually new".
@@ -1379,7 +1380,7 @@ export async function getPendingAssignmentTasks(
       title: String(row.title),
       priority: String(row.priority),
       dueDate: (row.due_date as string | null) ?? null,
-      createdByName: (row.created_by_name as string | null) ?? null,
+      assignedByName: (row.assigned_by_name as string | null) ?? null,
       isNew: row.is_new === true,
     })),
     total: Number(rows[0]?.total ?? 0),

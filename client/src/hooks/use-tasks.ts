@@ -735,13 +735,10 @@ export interface PendingAssignmentTask {
   priority: string;
   dueDate: string | null;
   /**
-   * Who CREATED the task; null if that user has since been removed.
-   *
-   * Not necessarily who assigned it — reassignment changes `assigned_to` and leaves `created_by`
-   * alone, and nothing records the person who actually routed it. The UI says "Created by" for that
-   * reason rather than naming an assigner it cannot identify.
+   * Who last handed this task to the recipient, or its creator before the first reassignment.
+   * Null only when neither resolved user has a display name.
    */
-  createdByName: string | null;
+  assignedByName: string | null;
   /**
    * True when this person has never been shown this task. False for a repeat — urgent, high or overdue
    * work the server returns again on every login until it leaves pending. The modal groups on it, so a

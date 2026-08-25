@@ -637,10 +637,14 @@ export async function reassignOwnerRecords(client: pg.Client, fromUserId: string
     // replacement self-assignment case above, whereas an unrelated previous assigner remains the
     // person waiting on the reply. `assigned_at` makes an earlier acknowledgement stop answering this
     // handoff, so the login modal shows the transfer instead of silently inheriting stale state.
+    // `NOW()` is frozen at BEGIN, and merges hold this transaction while earlier rows move. An
+    // acknowledgement written after BEGIN but before this UPDATE would otherwise compare newer than
+    // a falsely old assignment stamp and suppress the new handoff. `clock_timestamp()` is the actual
+    // row-change time, matching updateTask's concurrent-acknowledgement protection.
     const tasks = await client.query(
       `UPDATE ${schemaName}.tasks
           SET assigned_to = $2,
-              assigned_at = NOW(),
+              assigned_at = clock_timestamp(),
               last_assigned_by = CASE
                 WHEN COALESCE(last_assigned_by, created_by) = $1 THEN $2
                 ELSE last_assigned_by
