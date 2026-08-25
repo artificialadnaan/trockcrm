@@ -265,9 +265,12 @@ export function buildWeeklyReportClientEmail(parts: WeeklyReportEmailParts & { s
 /**
  * Record the outcome of an attempt.
  *
- * Conditioned on the report still being an undelivered `sent` — the same discipline every other write in
- * this feature follows. Without it, a stamp from a slow attempt could land on a report that a correction
- * or a concurrent success had already moved on, reporting a failure for a delivery that succeeded.
+ * A FAILED attempt is conditioned on the report still being active and undelivered: without that guard, a
+ * stamp from a slow attempt could land on a report that a correction or a concurrent success had already
+ * moved on, reporting a failure for a delivery that succeeded. A PROVIDER ACCEPTANCE is deliberately
+ * different. Once the provider accepted the message, deleting our row cannot undo that external fact; if
+ * removal commits while the worker awaits the provider, the acceptance still has to be recorded for the
+ * audit trail and for a later replacement's correction wording.
  *
  * ON DELIVERY IT ALSO DROPS THE RAW CLIENT LINK. `send_request.shareUrl` is the only place the unhashed
  * 180-day token ever comes to rest: public.weekly_report_tokens stores a SHA-256 hash precisely so that a
@@ -292,7 +295,10 @@ async function recordAttempt(
               WHEN $3::boolean AND send_request IS NOT NULL THEN send_request - 'shareUrl'
               ELSE send_request
             END
-      WHERE id = $1::uuid AND is_active AND status = 'sent' AND send_delivered_at IS NULL`,
+      WHERE id = $1::uuid
+        AND status = 'sent'
+        AND send_delivered_at IS NULL
+        AND (is_active OR $3::boolean)`,
     [reportId, outcome.error, outcome.delivered],
   );
 }

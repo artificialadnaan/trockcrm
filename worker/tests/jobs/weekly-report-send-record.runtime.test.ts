@@ -255,6 +255,27 @@ describe("recording a delivery", () => {
     expect((await row()).send_delivered_at).not.toBeNull();
   });
 
+  it("records provider acceptance when deletion commits while the provider call is in flight", async () => {
+    // Soft deletion removes the report from the CRM, but it cannot recall an email the provider has
+    // already accepted. The worker read the active row before the send, then leadership deleted it while
+    // the provider call was pending. Acceptance must still reach the historical row: it is the evidence
+    // that lets a replacement accurately say it replaces an earlier copy rather than inventing a first
+    // report for a client who already has one.
+    const sendEmail = vi.fn(async () => {
+      await pg.query(`UPDATE ${SCHEMA}.weekly_reports SET is_active = false WHERE id = $1::uuid`, [REPORT]);
+      return { success: true, messageId: "m1" };
+    });
+
+    await handleWeeklyReportSend(payload(), null, { query, sendEmail, logger: SILENT_LOGGER });
+
+    const after = await row();
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(after.is_active).toBe(false);
+    expect(after.send_delivered_at).not.toBeNull();
+    expect(Number(after.send_attempts)).toBe(1);
+    expect(Object.keys(after.send_request)).not.toContain("shareUrl");
+  });
+
   it("CONTROL: still delivers when the render finishes and nothing has changed", async () => {
     // The same shape as the mid-render guard, minus the correction — so that guard cannot be satisfied by a
     // handler that simply stopped sending whenever a PDF was rendered.
