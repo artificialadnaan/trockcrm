@@ -96,16 +96,82 @@ describe("migration 0239 — tasks.assigned_at", () => {
     }
   });
 
-  // THE BACKFILL MUST NOT COME BACK. Restoring it to the file would restore the cross-tenant lock hold
-  // this PR moved it out to avoid, and it would read as a perfectly ordinary DO block in review.
-  it("contains no backfill and no trigger juggling — both belong to the runner step", async () => {
-    const source = migrationSql(MIGRATION);
+  // AN ALLOWLIST, NOT A DENYLIST — mirroring 0233's guard, and for the reason that one was rewritten.
+  // A denylist names the statements seen to be dangerous so far; a bare `ADD CONSTRAINT ... CHECK`
+  // walked past 0233's first version while doing exactly what it forbade. So the question is inverted:
+  // every lock-taking action this file performs must be named here as safe, and anything new fails
+  // until somebody has justified it. 0239 currently performs exactly one kind.
+  //
+  // Why ADD COLUMN ... DEFAULT now() qualifies, which is less obvious than it looks: PG11+ makes an
+  // ADD COLUMN with a default metadata-only, storing the evaluated value as a "missing value" instead
+  // of rewriting the table — but ONLY when the default contains no VOLATILE function. now() is STABLE,
+  // so it is evaluated once at ALTER time and takes the fast path. random() or clock_timestamp() would
+  // not, and would rewrite every row under ACCESS EXCLUSIVE across every office in one transaction.
+  // That distinction is proved below rather than argued from the manual.
+  const alterTableActions = () => {
+    const actions: string[] = [];
+    const re = /ALTER\s+TABLE\s+[^\s]+\s+([\s\S]*?);/gi;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(migrationSql(MIGRATION))) !== null) {
+      actions.push(match[1].replace(/\s+/g, " ").trim());
+    }
+    return actions;
+  };
+
+  const ALLOWED_ACTIONS = [
+    /^ADD COLUMN IF NOT EXISTS assigned_at timestamptz NOT NULL DEFAULT now\(\)$/i,
+  ];
+
+  it("performs ONLY allowlisted, lock-safe ALTER TABLE actions", () => {
+    const actions = alterTableActions();
+    // One per site: the tenant loop and the provisioner block. If this count moves, a statement was
+    // added or removed and a reviewer should look at it.
+    expect(actions, "expected ADD COLUMN in the loop and in the tenant block").toHaveLength(2);
+
+    for (const action of actions) {
+      const allowed = ALLOWED_ACTIONS.some((pattern) => pattern.test(action));
+      expect(allowed, `not an allowlisted lock-safe action: ALTER TABLE ... ${action}`).toBe(true);
+    }
+  });
+
+  // EXECUTED, not reasoned about. atthasmissing is true only when PG took the metadata-only path and
+  // stored the default as a missing value; a volatile default rewrites the table instead and leaves it
+  // false. This is the difference between an instant ALTER and one holding ACCESS EXCLUSIVE over every
+  // row in every office, and it turns on a property of the default expression that no amount of reading
+  // the statement reveals.
+  it("adds the column WITHOUT rewriting the table — the default takes PG's fast path", async () => {
+    await seedOffices(OFFICES);
+    await pg.exec(`INSERT INTO office_dallas.tasks (title) VALUES ('pre-existing row')`);
+
+    await pg.exec(migrationSql(MIGRATION));
+
+    const result = await pg.query<{ atthasmissing: boolean }>(
+      `SELECT atthasmissing FROM pg_attribute
+        WHERE attrelid = 'office_dallas.tasks'::regclass AND attname = 'assigned_at'`
+    );
+    expect(
+      result.rows[0]?.atthasmissing,
+      "the ADD COLUMN rewrote the table instead of storing a missing value — check the default is not volatile"
+    ).toBe(true);
+  });
+
+  // THE BACKFILL MUST NOT COME BACK. Restoring it would restore the cross-tenant lock hold this PR
+  // moved it out to avoid, and it would read as a perfectly ordinary DO block in review. Kept as
+  // explicit negatives alongside the allowlist because each names its own reason on failure.
+  it("runs no UPDATE, and no trigger juggling — both belong to the runner step", async () => {
+    const source = migrationSql(MIGRATION)
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
 
     expect(source, "an UPDATE here runs inside one transaction spanning every office").not.toMatch(
-      /UPDATE\s+%1\$I\.tasks/
+      /\bUPDATE\b/i
     );
-    expect(source).not.toContain("DISABLE TRIGGER");
-    expect(source).not.toContain("ENABLE TRIGGER");
+    expect(source, "this lock is held across every tenant").not.toMatch(/\bDISABLE\s+TRIGGER\b/i);
+    expect(source).not.toMatch(/\bENABLE\s+TRIGGER\b/i);
+    expect(source, "an index build would be held across every tenant").not.toMatch(
+      /\bCREATE\s+(UNIQUE\s+)?INDEX\b/i
+    );
   });
 
   it("leaves updated_at alone, because it writes no rows at all", async () => {
