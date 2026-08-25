@@ -691,14 +691,40 @@ export async function listActiveUsersWithOfficeAccess() {
   }));
 }
 
-/** Get all users with their office counts for the admin overview table. */
-export async function getUsersWithStats() {
+/**
+ * Get all users with their office counts for the admin overview table.
+ *
+ * `role` remains the home/base role for global user management. `effectiveRole` separately exposes what a
+ * user can do in the active office so an office-scoped control does not accidentally judge an override by
+ * their home-office role.
+ */
+export async function getUsersWithStats(activeOfficeId?: string) {
+  const effectiveRoleSelect = activeOfficeId
+    ? sql`
+        CASE
+          WHEN u.office_id = ${activeOfficeId} THEN u.role
+          WHEN active_uoa.office_id IS NOT NULL THEN COALESCE(active_uoa.role_override, u.role)
+          ELSE NULL
+        END AS effective_role,
+      `
+    : sql``;
+  const activeOfficeJoin = activeOfficeId
+    ? sql`
+        LEFT JOIN user_office_access active_uoa
+          ON active_uoa.user_id = u.id
+         AND active_uoa.office_id = ${activeOfficeId}
+      `
+    : sql``;
+  const activeOfficeGroupBy = activeOfficeId
+    ? sql`, active_uoa.office_id, active_uoa.role_override`
+    : sql``;
   const result = await db.execute(sql`
     SELECT
       u.id,
       u.email,
       u.display_name,
       u.role,
+      ${effectiveRoleSelect}
       u.office_id,
       u.reports_to,
       u.is_active,
@@ -721,6 +747,7 @@ export async function getUsersWithStats() {
     FROM users u
     LEFT JOIN offices o ON o.id = u.office_id
     LEFT JOIN user_office_access uoa ON uoa.user_id = u.id
+    ${activeOfficeJoin}
     LEFT JOIN user_commission_settings cs ON cs.user_id = u.id
     GROUP BY
       u.id,
@@ -745,6 +772,7 @@ export async function getUsersWithStats() {
       cs.new_customer_share_floor,
       cs.new_customer_window_months,
       cs.is_active
+      ${activeOfficeGroupBy}
     ORDER BY u.display_name ASC
   `);
 
@@ -831,6 +859,7 @@ export async function getUsersWithStats() {
     email: r.email,
     displayName: r.display_name,
     role: r.role,
+    ...(activeOfficeId ? { effectiveRole: (r.effective_role ?? null) as UserRole | null } : {}),
     officeId: r.office_id,
     reportsTo: r.reports_to,
     officeName: r.office_name,

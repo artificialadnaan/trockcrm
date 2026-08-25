@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { notificationRecipientAssignments, notificationRecipientGroups, users } from "@trock-crm/shared/schema";
+import {
+  notificationRecipientAssignments,
+  notificationRecipientGroups,
+  userOfficeAccess,
+  users,
+} from "@trock-crm/shared/schema";
 import { NOTIFICATION_RECIPIENT_GROUPS } from "@trock-crm/shared/types";
 import {
   getNotificationRecipientGroup,
@@ -27,6 +32,10 @@ interface Person {
   displayName: string;
   role: string;
   isActive?: boolean;
+  /** Home office, plus the one office grant the role-gate fixture needs to model. */
+  officeId?: string;
+  grantOfficeId?: string;
+  grantRoleOverride?: string | null;
 }
 
 function buildTenantDb(options: {
@@ -62,12 +71,17 @@ function buildTenantDb(options: {
     db: {
       select: vi.fn((fields?: Record<string, unknown>) => {
         let selectedTable: unknown = null;
+        let joinedOfficeAccess = false;
         const chain: Record<string, unknown> = {
           from: vi.fn((table: unknown) => {
             selectedTable = table;
             return chain;
           }),
           innerJoin: vi.fn(() => chain),
+          leftJoin: vi.fn((table: unknown) => {
+            joinedOfficeAccess = table === userOfficeAccess;
+            return chain;
+          }),
           where: vi.fn(() => {
             // The assignment read joins groups → assignments → users; the fallback reads users directly.
             // NOT pre-filtered on isActive, mirroring the query: the resolver does that split itself now,
@@ -84,7 +98,21 @@ function buildTenantDb(options: {
             if (selectedTable === notificationRecipientAssignments) {
               return Promise.resolve(state.assignedUserIds.map((userId) => ({ userId })));
             }
-            // The assignment WRITE checks the named users exist and reads role + isActive back for the gates.
+            // The office-scoped WRITE mirrors authMiddleware: home role, or a grant's override/base role,
+            // or no effective role when the person cannot access this office.
+            if (selectedTable === users && fields && "baseRole" in fields && joinedOfficeAccess) {
+              return Promise.resolve(
+                state.people.map((person) => ({
+                  id: person.id,
+                  baseRole: person.role,
+                  primaryOfficeId: person.officeId ?? "office-home",
+                  isActive: person.isActive !== false,
+                  grantOfficeId: person.grantOfficeId ?? null,
+                  grantRoleOverride: person.grantRoleOverride ?? null,
+                })),
+              );
+            }
+            // The base-role WRITE checks the named users exist and reads role + isActive back for the gates.
             if (selectedTable === users && fields && "id" in fields) {
               return Promise.resolve(
                 state.people.map((person) => ({
@@ -130,6 +158,15 @@ const PEOPLE: Person[] = [
   { id: "rep-1", email: "rep@example.com", displayName: "Rep", role: "rep" },
   { id: "inactive-admin", email: "inactive@example.com", displayName: "Inactive", role: "admin", isActive: false },
   { id: "retired-rep", email: "retired@example.com", displayName: "Retired", role: "rep", isActive: false },
+  {
+    id: "office-admin-rep",
+    email: "office-admin-rep@example.com",
+    displayName: "Office admin rep",
+    role: "rep",
+    officeId: "office-home",
+    grantOfficeId: "office-1",
+    grantRoleOverride: "admin",
+  },
 ];
 
 describe("getNotificationRecipients", () => {
@@ -372,6 +409,33 @@ describe("updateNotificationRecipientAssignments role gate", () => {
     await updateNotificationRecipientAssignments(db, "lead_due_diligence", ["admin-1", "director-1"]);
 
     expect(state.assignedUserIds).toEqual(["admin-1", "director-1"]);
+  });
+
+  it("accepts a base rep whose active-office grant makes them an admin", async () => {
+    // This is the exact override the page needs to offer. Mutating the effective-role calculation back to
+    // baseRole makes this fail, while a missing grant must remain disallowed below.
+    const { db, state } = buildTenantDb({ group: GROUP, assignedUserIds: [], people: PEOPLE });
+
+    await updateNotificationRecipientAssignments(
+      db,
+      "lead_due_diligence",
+      ["office-admin-rep"],
+      "office-1",
+    );
+
+    expect(state.assignedUserIds).toEqual(["office-admin-rep"]);
+  });
+
+  it("does not turn a base admin with no current-office access into a decision recipient", async () => {
+    // An effective role is not simply `role_override ?? baseRole`: a non-home user must have a matching
+    // access row before either can apply. This protects the same boundary authMiddleware enforces.
+    const { db, state } = buildTenantDb({ group: GROUP, assignedUserIds: [], people: PEOPLE });
+
+    await expect(
+      updateNotificationRecipientAssignments(db, "lead_due_diligence", ["admin-1"], "office-1"),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("admin-1") });
+
+    expect(state.assignedUserIds).toEqual([]);
   });
 
   it("lets a rep onto an unrestricted group — that is the whole point of the bid due date report", async () => {

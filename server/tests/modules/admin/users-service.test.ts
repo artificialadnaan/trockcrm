@@ -18,7 +18,7 @@ vi.mock("../../../../server/src/db.js", () => ({
   },
 }));
 
-import { listUsers, updateUser } from "../../../../server/src/modules/admin/users-service.js";
+import { getUsersWithStats, listUsers, updateUser } from "../../../../server/src/modules/admin/users-service.js";
 
 function createSelectChain(result: unknown) {
   return {
@@ -171,5 +171,50 @@ describe("listUsers", () => {
       /Field contractors are managed in the field-user flow/
     );
     expect(tx.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("getUsersWithStats", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("keeps a user's base role while exposing their effective role in the selected office", async () => {
+    // The global Users table must keep showing the home role, but the notification-recipient picker lives
+    // in an active office and needs the grant override. If the SQL stops selecting/mapping effective_role,
+    // a base rep with an admin grant becomes impossible to assign again.
+    dbMocks.execute.mockResolvedValueOnce({
+      rows: [
+        {
+          id: "override-user",
+          email: "override@example.com",
+          display_name: "Override User",
+          role: "rep",
+          effective_role: "admin",
+          office_id: "office-home",
+          reports_to: null,
+          is_active: true,
+          generates_sales: false,
+          estimates_jobs: false,
+          office_name: "Home",
+          extra_office_count: 1,
+        },
+      ],
+    });
+    // Earlier updateUser tests deliberately queue select implementations. clearAllMocks preserves that
+    // queue, so reset this one before making the three independent lookup reads below.
+    dbMocks.select.mockReset();
+    dbMocks.select.mockImplementation(() => ({ from: vi.fn().mockResolvedValue([]) }));
+
+    const result = await getUsersWithStats("office-active");
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: "override-user",
+      role: "rep",
+      effectiveRole: "admin",
+      officeId: "office-home",
+    });
+    expect(dbMocks.execute).toHaveBeenCalledOnce();
   });
 });

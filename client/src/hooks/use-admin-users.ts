@@ -1,12 +1,19 @@
 import { useState, useEffect } from "react";
 import { api } from "@/lib/api";
-import type { CrmAssignableRole } from "@trock-crm/shared/types";
+import type { CrmAssignableRole, UserRole } from "@trock-crm/shared/types";
 
 export interface AdminUser {
   id: string;
   email: string;
   displayName: string;
   role: "admin" | "director" | "rep" | "construction";
+  /**
+   * The role this user has in the currently selected office, or null when they cannot access it.
+   *
+   * `role` deliberately stays their home/base role because the Users page is global-admin management.
+   * Office-scoped controls, such as notification recipients, must use this field for eligibility instead.
+   */
+  effectiveRole?: UserRole | null;
   officeId: string;
   reportsTo?: string | null;
   officeName: string | null;

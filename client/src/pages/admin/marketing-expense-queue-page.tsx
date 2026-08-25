@@ -243,27 +243,77 @@ export function MarketingExpenseQueuePage() {
     }
   }
 
-  /** True when the failure means "somebody else got here first", which is a refetch and not an error. */
-  function handleFailure(err: unknown): boolean {
+  /**
+   * Re-read after a response that does not prove whether the write reached the server.
+   *
+   * A lost connection, a malformed proxy response, or a 5xx can arrive after the database transaction has
+   * committed. Calling it a failure and leaving the panel open invites an approver to submit a duplicate
+   * decision. Close the panel while the button is still busy, establish the current detail state, and then
+   * reload the queue before telling them what happened.
+   */
+  async function reconcileAmbiguousDecision(
+    request: MarketingExpenseRequestSummary,
+  ): Promise<void> {
+    try {
+      const reconciled = await getMarketingExpenseRequest(request.id);
+      closeAll();
+      await refetch();
+      if (reconciled.status === "pending") {
+        toast.warning(
+          `${request.requestNumber} is still pending. We could not confirm the decision response; review the refreshed request before trying again.`,
+        );
+      } else {
+        toast.warning(
+          `${request.requestNumber} is now ${reconciled.status}. The decision response was interrupted, so the queue has been refreshed.`,
+        );
+      }
+    } catch {
+      // We do not know whether the write happened. Remove the in-place controls before the caller can
+      // retry, but do not claim the decision failed when the detail read itself was unavailable.
+      closeAll();
+      await refetch();
+      toast.error(
+        `Could not confirm whether ${request.requestNumber}'s decision was recorded. Refresh the request before trying again.`,
+      );
+    }
+  }
+
+  /**
+   * Handle a failed decision without treating an ambiguous transport outcome as a definitive failure.
+   *
+   * 409 is definitive: another approver already changed the request. A 4xx other than that reached the
+   * application and was rejected before this action could succeed. Everything else can be a response lost
+   * after commit, so it must be reconciled first.
+   */
+  async function handleFailure(request: MarketingExpenseRequestSummary, err: unknown): Promise<void> {
     if (isApiError(err) && err.status === 409) {
       toast.warning("This request was already decided. Refreshing...");
       closeAll();
-      void refetch();
-      return true;
+      await refetch();
+      return;
     }
+
+    if (!isApiError(err) || err.status >= 500 || err.status === 408) {
+      await reconcileAmbiguousDecision(request);
+      return;
+    }
+
     toast.error(err instanceof Error ? err.message : "Could not record the decision.");
-    return false;
   }
 
   async function approve(request: MarketingExpenseRequestSummary) {
     setBusyId(request.id);
     try {
-      await decideMarketingExpenseRequest(request.id, "approved");
-      toast.success(`${request.requestNumber} approved`);
+      const decided = await decideMarketingExpenseRequest(request.id, "approved");
+      toast.success(
+        decided.status === "pending"
+          ? `${request.requestNumber} approval recorded — this request is still pending another approval.`
+          : `${request.requestNumber} approved`,
+      );
       closeAll();
       await refetch();
     } catch (err) {
-      handleFailure(err);
+      await handleFailure(request, err);
     } finally {
       setBusyId(null);
     }
@@ -279,13 +329,17 @@ export function MarketingExpenseQueuePage() {
     }
     setBusyId(request.id);
     try {
-      await decideMarketingExpenseRequest(request.id, "denied", reason);
-      toast.success(`${request.requestNumber} denied`);
+      const decided = await decideMarketingExpenseRequest(request.id, "denied", reason);
+      toast.success(
+        decided.status === "pending"
+          ? `${request.requestNumber} denial recorded — this request is still pending another approval.`
+          : `${request.requestNumber} denied`,
+      );
       setReasons((current) => ({ ...current, [request.id]: "" }));
       closeAll();
       await refetch();
     } catch (err) {
-      handleFailure(err);
+      await handleFailure(request, err);
     } finally {
       setBusyId(null);
     }

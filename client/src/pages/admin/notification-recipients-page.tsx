@@ -62,13 +62,32 @@ function pickerRowsFor(
   definition: NotificationRecipientGroupDefinition,
   allUsers: AdminUser[],
   selectedUserIds: Set<string>
-): Array<{ user: AdminUser; assignable: boolean }> {
+): Array<{ user: AdminUser; assignable: boolean; currentOfficeRole: string | null }> {
   const allowed = definition.assignableRoles;
-  const isAssignable = (user: AdminUser) =>
-    user.isActive && (!allowed || (allowed as readonly string[]).includes(user.role));
+  /**
+   * `role` is the home-office role used by the global Users page. Recipient groups live in the selected
+   * office, so an admin grant that lifts a base rep here must be judged as admin — and a global admin who
+   * has no access to this office must not be offered merely because of their base role.
+   *
+   * Older API responses did not carry `effectiveRole`; keep their existing base-role behavior while a
+   * mixed deploy rolls through. An explicit `null` is different: it means the server established that this
+   * user has no access to the selected office, so it must never fall back to the base role.
+   */
+  const currentOfficeRoleFor = (user: AdminUser) =>
+    Object.prototype.hasOwnProperty.call(user, "effectiveRole")
+      ? user.effectiveRole ?? null
+      : user.role;
+  const isAssignable = (user: AdminUser) => {
+    const currentOfficeRole = currentOfficeRoleFor(user);
+    return user.isActive && (!allowed || (currentOfficeRole !== null && allowed.includes(currentOfficeRole)));
+  };
   return allUsers
     .filter((user) => isAssignable(user) || selectedUserIds.has(user.id))
-    .map((user) => ({ user, assignable: isAssignable(user) }));
+    .map((user) => ({
+      user,
+      assignable: isAssignable(user),
+      currentOfficeRole: currentOfficeRoleFor(user),
+    }));
 }
 
 export function NotificationRecipientsPage() {
@@ -237,7 +256,7 @@ export function NotificationRecipientsPage() {
                 <div className="mt-4 grid gap-2">
                   {/* TODO: Replace checkbox list with autocomplete picker when user count
                       exceeds ~50. Current pattern is fine for the existing T Rock team size. */}
-                  {pickerRowsFor(definition, users, state.selectedUserIds).map(({ user, assignable }) => (
+                  {pickerRowsFor(definition, users, state.selectedUserIds).map(({ user, assignable, currentOfficeRole }) => (
                     <label key={user.id} className="flex items-center gap-3 border p-3 text-sm">
                       <input
                         type="checkbox"
@@ -249,7 +268,9 @@ export function NotificationRecipientsPage() {
                       {assignable ? null : (
                         <span className="text-xs text-red-700">no longer assignable — untick to remove</span>
                       )}
-                      <span className="ml-auto text-xs uppercase text-muted-foreground">{user.role}</span>
+                      <span className="ml-auto text-xs uppercase text-muted-foreground">
+                        {currentOfficeRole ?? user.role}
+                      </span>
                     </label>
                   ))}
                 </div>

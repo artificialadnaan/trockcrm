@@ -88,7 +88,7 @@ beforeEach(() => {
   mocks.getMarketingExpenseRequest.mockResolvedValue(detail());
   refetch = vi.fn();
   mocks.isApiError.mockReturnValue(false);
-  mocks.decideMarketingExpenseRequest.mockResolvedValue({ id: "req-1" });
+  mocks.decideMarketingExpenseRequest.mockResolvedValue(detail());
   mocks.useMarketingExpenseQueue.mockReturnValue({
     requests: [summary()],
     loading: false,
@@ -187,6 +187,23 @@ describe("approving", () => {
     expect(refetch).toHaveBeenCalled();
   });
 
+  it("says an intermediate approval is recorded but NOT final", async () => {
+    // A two-step request stays pending after the first approver. Calling that result "approved" tells the
+    // person who just acted that the spend is cleared when another decision is still required.
+    mocks.decideMarketingExpenseRequest.mockResolvedValueOnce(
+      detail({ status: "pending", stepsRequired: 2 }),
+    );
+    await renderPage();
+    await click("mer-review-req-1");
+    await click("mer-approve-req-1");
+
+    expect(mocks.toast.success).toHaveBeenCalledWith(
+      "MER-0001 approval recorded — this request is still pending another approval.",
+    );
+    expect(mocks.toast.success).not.toHaveBeenCalledWith("MER-0001 approved");
+    expect(refetch).toHaveBeenCalled();
+  });
+
   it("toasts and REFETCHES on a 409 — two approvers clicking at once is the normal case", async () => {
     mocks.isApiError.mockReturnValue(true);
     mocks.decideMarketingExpenseRequest.mockRejectedValue(
@@ -199,7 +216,10 @@ describe("approving", () => {
     expect(refetch).toHaveBeenCalled();
   });
 
-  it("does NOT refetch on an ordinary failure — re-reading would hide the error", async () => {
+  it("reconciles a 5xx decision response before telling the approver it failed", async () => {
+    // A gateway/server error can be emitted after the decision transaction commits. The old handler showed
+    // "boom" and left Approve live, which invited a duplicate decision against a request that may have
+    // already moved. The detail read is the authority after an ambiguous response.
     mocks.isApiError.mockReturnValue(true);
     mocks.decideMarketingExpenseRequest.mockRejectedValue(
       Object.assign(new Error("boom"), { status: 500 }),
@@ -207,8 +227,40 @@ describe("approving", () => {
     await renderPage();
     await click("mer-review-req-1");
     await click("mer-approve-req-1");
-    expect(mocks.toast.error).toHaveBeenCalled();
+
+    expect(mocks.getMarketingExpenseRequest).toHaveBeenCalledTimes(2);
+    expect(refetch).toHaveBeenCalled();
+    expect(mocks.toast.warning).toHaveBeenCalledWith(expect.stringContaining("could not confirm"));
+    expect(mocks.toast.error).not.toHaveBeenCalledWith("boom");
+    // Reconciliation closes the decision panel while the request is refreshed, so the user cannot click
+    // the stale approve button a second time.
+    expect(container.querySelector('[data-testid="mer-approve-req-1"]')).toBeNull();
+  });
+
+  it("reconciles a network failure before offering another decision", async () => {
+    mocks.decideMarketingExpenseRequest.mockRejectedValue(new Error("network interrupted"));
+    await renderPage();
+    await click("mer-review-req-1");
+    await click("mer-approve-req-1");
+
+    expect(mocks.getMarketingExpenseRequest).toHaveBeenCalledTimes(2);
+    expect(refetch).toHaveBeenCalled();
+    expect(mocks.toast.warning).toHaveBeenCalledWith(expect.stringContaining("could not confirm"));
+    expect(container.querySelector('[data-testid="mer-approve-req-1"]')).toBeNull();
+  });
+
+  it("shows a definitive client rejection without a misleading reconciliation", async () => {
+    mocks.isApiError.mockReturnValue(true);
+    mocks.decideMarketingExpenseRequest.mockRejectedValue(
+      Object.assign(new Error("approval window closed"), { status: 400 }),
+    );
+    await renderPage();
+    await click("mer-review-req-1");
+    await click("mer-approve-req-1");
+
+    expect(mocks.getMarketingExpenseRequest).toHaveBeenCalledTimes(1);
     expect(refetch).not.toHaveBeenCalled();
+    expect(mocks.toast.error).toHaveBeenCalledWith("approval window closed");
   });
 });
 
