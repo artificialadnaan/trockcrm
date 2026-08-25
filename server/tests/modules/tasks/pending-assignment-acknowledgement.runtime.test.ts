@@ -19,7 +19,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { tasks, taskAssignmentAcknowledgements } from "@trock-crm/shared/schema";
 import {
   getPendingAssignmentTasks,
-  acknowledgeTaskAssignments,
+  acknowledgeTaskAssignments as acknowledgeTaskAssignmentsService,
   updateTask,
   PENDING_ASSIGNMENT_MODAL_LIMIT,
 } from "../../../src/modules/tasks/service.js";
@@ -145,12 +145,58 @@ function tenantDbWithTaskUpdateInterleave(beforeUpdate: () => Promise<void>) {
   };
 }
 
+/** Captures Drizzle's real SQL and bound values while still executing it against PGlite. */
+function tenantDbWithQueryCapture() {
+  const queries: Array<{ text: string; params: unknown[] }> = [];
+  const client = {
+    query: async (...args: Parameters<PGlite["query"]>) => {
+      const [query, params] = args;
+      queries.push({ text: String(query), params: Array.isArray(params) ? params : [] });
+      return pg.query(...args);
+    },
+  } as unknown as PGlite;
+
+  return { tenantDb: drizzle(client), queries };
+}
+
 async function ackRowCount(taskId: string, userId: string) {
   const result = await pg.query<{ n: number }>(
     `SELECT COUNT(*)::int AS n FROM task_assignment_acknowledgements WHERE task_id = $1 AND user_id = $2`,
     [taskId, userId]
   );
   return result.rows[0]?.n ?? 0;
+}
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Existing behavioural tests acknowledge the task they are currently exercising. Keep that intent
+ * readable while making the production service receive the same lossless version the browser does.
+ * Dedicated tests below deliberately bypass this helper for stale/malformed payloads.
+ */
+async function acknowledgementPayload(taskIds: unknown) {
+  if (!Array.isArray(taskIds)) return taskIds;
+  return Promise.all(
+    taskIds.map(async (taskId) => {
+      if (typeof taskId !== "string" || !UUID_SHAPE.test(taskId)) {
+        return { taskId, assignmentVersion: "not-a-server-issued-version" };
+      }
+      const result = await pg.query<{ assignment_version: string }>(
+        `SELECT to_char(assigned_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS assignment_version
+           FROM public.tasks
+          WHERE id = $1::uuid`,
+        [taskId]
+      );
+      return {
+        taskId,
+        assignmentVersion: result.rows[0]?.assignment_version ?? "1970-01-01T00:00:00.000000Z",
+      };
+    })
+  );
+}
+
+async function acknowledgeTaskAssignments(tenantDb: any, userId: string, taskIds: unknown) {
+  return acknowledgeTaskAssignmentsService(tenantDb, userId, await acknowledgementPayload(taskIds));
 }
 
 beforeAll(async () => {
@@ -192,6 +238,9 @@ describe("getPendingAssignmentTasks — what the login modal shows", () => {
     const result = await getPendingAssignmentTasks(tdb, ALICE);
 
     expect(result.tasks.map((t) => t.id)).toEqual([uid("1")]);
+    // This is deliberately six-digit UTC text rather than a JSON Date. A Date truncates Postgres
+    // microseconds and could never be used as an exact optimistic-concurrency version on POST.
+    expect(result.tasks[0]?.assignmentVersion).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
     expect(result.total).toBe(1);
   });
 
@@ -363,6 +412,35 @@ describe("an acknowledgement answers ONE assignment, not a task forever", () => 
 
     // No reassignment: the ack still answers the assignment it was made against.
     expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  it("does not let a stale modal acknowledge a task that left and came back", async () => {
+    const taskId = uid("1");
+    await seed([{ id: taskId, assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    const displayed = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
+
+    // The modal is still open while two other edits hand the task away and then back. At close time
+    // Alice owns it again, so an id-and-owner-only write would wrongly acknowledge the NEW handoff.
+    await pg.query(
+      `UPDATE public.tasks SET assigned_to = $2::uuid, assigned_at = '2030-01-01T00:00:00.000001Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [taskId, BOB]
+    );
+    await pg.query(
+      `UPDATE public.tasks SET assigned_to = $2::uuid, assigned_at = '2030-01-01T00:00:00.000002Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [taskId, ALICE]
+    );
+
+    const acknowledged = await acknowledgeTaskAssignmentsService(tdb, ALICE, [
+      { taskId, assignmentVersion: displayed.assignmentVersion },
+    ]);
+
+    expect(acknowledged, "a stale displayed version must not write an acknowledgement").toBe(0);
+    expect(await ackRowCount(taskId, ALICE)).toBe(0);
+    const current = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
+    expect(current.assignmentVersion).not.toBe(displayed.assignmentVersion);
+    expect(current.id).toBe(taskId);
   });
 
   it("re-acknowledging after a hand-back settles it again", async () => {
@@ -741,6 +819,25 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
     expect(await ackRowCount(uid("1"), ALICE)).toBe(1);
   });
 
+  it("timestamps an acknowledgement with PostgreSQL NOW(), not the application clock", async () => {
+    await seed([{ id: uid("1"), priority: "normal" }]);
+    const displayed = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
+    const { tenantDb, queries } = tenantDbWithQueryCapture();
+
+    await acknowledgeTaskAssignmentsService(tenantDb as any, ALICE, [
+      { taskId: displayed.id, assignmentVersion: displayed.assignmentVersion },
+    ]);
+
+    const upsert = queries.find((query) => /insert into "task_assignment_acknowledgements"/i.test(query.text));
+    expect(upsert?.text, "the conflict branch must use the database clock").toMatch(/now\(\)/i);
+    // `new Date()` would arrive as a bound JS Date here. Values are ids/user ids only; the timestamp
+    // lives in SQL so it shares the assigned_at comparison's clock even on a skewed API host.
+    expect(upsert?.params.some((value) => value instanceof Date)).toBe(false);
+    // The version check and upsert are two statements, so the qualifying tasks row must stay locked
+    // through the route transaction. Without this, a reassignment could commit in their gap.
+    expect(queries.some((query) => /from "tasks".*for update/is.test(query.text))).toBe(true);
+  });
+
   // A stale client sending a non-uuid must not reach Postgres: `invalid input syntax for type uuid`
   // is 22P02, which the error handler turns into a 500 on what is meant to be a silent no-op.
   it("drops ids that are not uuids instead of handing them to Postgres", async () => {
@@ -749,6 +846,15 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
     await expect(acknowledgeTaskAssignments(tdb, ALICE, ["not-a-uuid", uid("1")])).resolves.toBe(1);
     await expect(acknowledgeTaskAssignments(tdb, ALICE, ["", "  "])).resolves.toBe(0);
     await expect(acknowledgeTaskAssignments(tdb, ALICE, [])).resolves.toBe(0);
+  });
+
+  it("does not acknowledge a bare task id that lacks the displayed assignment version", async () => {
+    await seed([{ id: uid("1"), priority: "normal" }]);
+
+    // An older tab knows the id but not which assignment the person was shown. Accepting this fallback
+    // would reintroduce the hand-away-and-back race the version field closes.
+    await expect(acknowledgeTaskAssignmentsService(tdb, ALICE, [uid("1")])).resolves.toBe(0);
+    expect(await ackRowCount(uid("1"), ALICE)).toBe(0);
   });
 
   it("records the acknowledgement against the CALLER, so a reassignment pops for the new assignee", async () => {

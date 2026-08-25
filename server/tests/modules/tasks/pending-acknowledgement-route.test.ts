@@ -95,6 +95,7 @@ describe("F6 task routes — reachable through the real router", () => {
   it("passes the service payload through verbatim — rows, total and newTotal", async () => {
     const row = {
       id: "t1",
+      assignmentVersion: "2026-08-25T12:34:56.123456Z",
       title: "Call back",
       priority: "urgent",
       dueDate: null,
@@ -109,19 +110,27 @@ describe("F6 task routes — reachable through the real router", () => {
     expect(response.body).toEqual({ tasks: [row], total: 9, newTotal: 3 });
   });
 
-  it("acknowledges through POST /acknowledge and answers 204 with no body", async () => {
+  it("forwards each displayed assignment version through POST /acknowledge and answers 204 with no body", async () => {
     taskServiceMocks.acknowledgeTaskAssignments.mockResolvedValue(2);
 
     const response = await request(createTestApp())
       .post("/api/tasks/acknowledge")
-      .send({ taskIds: ["a", "b"] });
+      .send({
+        assignments: [
+          { taskId: "a", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
+          { taskId: "b", assignmentVersion: "2026-08-25T12:34:57.123456Z" },
+        ],
+      });
 
     expect(response.status).toBe(204);
     expect(response.text).toBe("");
     expect(taskServiceMocks.acknowledgeTaskAssignments).toHaveBeenCalledWith(
       expect.anything(),
       CALLER,
-      ["a", "b"]
+      [
+        { taskId: "a", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
+        { taskId: "b", assignmentVersion: "2026-08-25T12:34:57.123456Z" },
+      ]
     );
   });
 
@@ -129,8 +138,8 @@ describe("F6 task routes — reachable through the real router", () => {
     const app = createTestApp();
 
     expect((await request(app).post("/api/tasks/acknowledge").send({})).status).toBe(204);
-    expect((await request(app).post("/api/tasks/acknowledge").send({ taskIds: [] })).status).toBe(204);
-    expect((await request(app).post("/api/tasks/acknowledge").send({ taskIds: "nope" })).status).toBe(204);
+    expect((await request(app).post("/api/tasks/acknowledge").send({ assignments: [] })).status).toBe(204);
+    expect((await request(app).post("/api/tasks/acknowledge").send({ assignments: "nope" })).status).toBe(204);
   });
 
   // An uncommitted tenant transaction leaks a pool connection rather than failing a response, so it is
@@ -154,7 +163,7 @@ describe("F6 task routes — reachable through the real router", () => {
     expect(taskServiceMocks.getPendingAssignmentTasks).toHaveBeenCalledTimes(1);
     expect(commitTransaction).toHaveBeenCalledTimes(1);
 
-    await request(app).post("/api/tasks/acknowledge").send({ taskIds: [] }).expect(204);
+    await request(app).post("/api/tasks/acknowledge").send({ assignments: [] }).expect(204);
     expect(taskServiceMocks.acknowledgeTaskAssignments).toHaveBeenCalledTimes(1);
     expect(commitTransaction).toHaveBeenCalledTimes(2);
   });

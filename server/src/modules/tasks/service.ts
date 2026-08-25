@@ -1286,6 +1286,14 @@ export const PENDING_ASSIGNMENT_MODAL_LIMIT = 5;
 
 export type PendingAssignmentTask = {
   id: string;
+  /**
+   * Opaque, lossless rendering of assigned_at for the assignment this modal displayed.
+   *
+   * JavaScript Dates lose Postgres microseconds, so returning assignedAt as a Date and posting it back
+   * would make an equality check fail for perfectly current assignments. This UTC text form retains all
+   * six fractional digits and is accepted only as an optimistic-concurrency version by /acknowledge.
+   */
+  assignmentVersion: string;
   title: string;
   priority: string;
   dueDate: string | null;
@@ -1340,6 +1348,7 @@ export async function getPendingAssignmentTasks(
   const result = await tenantDb.execute(sql`
     SELECT
       ${tasks.id}                AS id,
+      to_char(${tasks.assignedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS assignment_version,
       ${tasks.title}             AS title,
       ${tasks.priority}::text    AS priority,
       ${tasks.dueDate}::text     AS due_date,
@@ -1360,6 +1369,7 @@ export async function getPendingAssignmentTasks(
   return {
     tasks: rows.map((row) => ({
       id: String(row.id),
+      assignmentVersion: String(row.assignment_version),
       title: String(row.title),
       priority: String(row.priority),
       dueDate: (row.due_date as string | null) ?? null,
@@ -1374,40 +1384,80 @@ export async function getPendingAssignmentTasks(
 /** A task id we are willing to hand to Postgres. Anything else is dropped before it can raise 22P02. */
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** The only lossless timestamp representation this endpoint issues and accepts as an assignment version. */
+const ASSIGNMENT_VERSION_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
+type AssignmentAcknowledgementCandidate = {
+  taskId: string;
+  assignmentVersion: string;
+};
+
+/** Keep the exact server-issued assigned_at version in SQL rather than round-tripping through JS Date. */
+const assignmentVersionSql = sql<string>`to_char(${tasks.assignedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
 /**
- * Record that `userId` has been shown these assignments. Returns how many ids were actually theirs.
+ * Record that `userId` has been shown these assignments. Returns how many displayed assignments were
+ * still theirs at the exact assignment version the modal rendered.
  *
- * OWNERSHIP IS RE-DERIVED SERVER-SIDE, never trusted from the payload — acknowledging is a write
- * against another person's accountability record, so a client must not be able to mark somebody else's
- * assignment as seen. Ids that fail the check are dropped SILENTLY rather than 403'd: the modal posts
- * whatever it last rendered, so a stale client that has since had a task reassigned away would
- * otherwise wedge itself against an error it cannot act on, and re-show the same dialog forever.
+ * OWNERSHIP AND THE DISPLAYED ASSIGNMENT VERSION ARE RE-DERIVED SERVER-SIDE, never trusted from the
+ * payload. A task can leave Alice and come back before she closes an old modal; checking only its id and
+ * current owner would acknowledge the NEW handoff with the OLD modal. The qualifying rows are locked
+ * through the request's tenant transaction, so no reassignment can land between the version check and
+ * upsert. Stale rows are dropped SILENTLY rather than 403'd: the modal posts whatever it last rendered,
+ * and a stale modal should close then reappear on the next login with the current assignment.
  *
  * Non-uuid ids are filtered before the query, not caught after it: `invalid input syntax for type uuid`
  * is a 22P02 that surfaces as a 500 on a path whose entire contract is to fail quietly.
  *
- * ON CONFLICT DO NOTHING is the real idempotency guarantee — a double click, a StrictMode double-invoke
- * and a retried request all collapse to the one row the unique constraint allows. The client-side guard
- * is a courtesy on top of it, not the mechanism.
+ * ON CONFLICT UPDATE is the idempotency guarantee — a double click, a StrictMode double-invoke and a
+ * retried request still leave one row, while a task handed away and back can replace its old acknowledgement
+ * with one that answers the current assignment. `NOW()` is deliberately the database clock: it is compared
+ * to assigned_at in PostgreSQL, so an application-machine clock must never be allowed to trail it.
  */
 export async function acknowledgeTaskAssignments(
   tenantDb: TenantDb,
   userId: string,
-  taskIds: unknown
+  assignments: unknown
 ): Promise<number> {
-  const candidates = Array.from(
-    new Set(
-      (Array.isArray(taskIds) ? taskIds : [])
-        .filter((id): id is string => typeof id === "string" && UUID_SHAPE.test(id.trim()))
-        .map((id) => id.trim())
-    )
-  );
+  const candidates: AssignmentAcknowledgementCandidate[] = [];
+  const seen = new Set<string>();
+  for (const value of Array.isArray(assignments) ? assignments : []) {
+    if (!value || typeof value !== "object") continue;
+    const taskId = (value as Record<string, unknown>).taskId;
+    const assignmentVersion = (value as Record<string, unknown>).assignmentVersion;
+    if (
+      typeof taskId !== "string" ||
+      typeof assignmentVersion !== "string" ||
+      !UUID_SHAPE.test(taskId.trim()) ||
+      !ASSIGNMENT_VERSION_SHAPE.test(assignmentVersion)
+    ) {
+      continue;
+    }
+    const normalizedTaskId = taskId.trim();
+    const key = `${normalizedTaskId}:${assignmentVersion}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ taskId: normalizedTaskId, assignmentVersion });
+  }
   if (candidates.length === 0) return 0;
 
+  // This runs inside the tenant middleware's BEGIN/COMMIT transaction. FOR UPDATE retains each row lock
+  // through the following upsert and the route's commit, so another assignment PATCH cannot slip a new
+  // assigned_at between the test below and the acknowledgement write.
   const owned = await tenantDb
     .select({ id: tasks.id })
     .from(tasks)
-    .where(and(inArray(tasks.id, candidates), eq(tasks.assignedTo, userId)));
+    .where(
+      and(
+        eq(tasks.assignedTo, userId),
+        or(
+          ...candidates.map(({ taskId, assignmentVersion }) =>
+            and(eq(tasks.id, taskId), sql`${assignmentVersionSql} = ${assignmentVersion}`)
+          )
+        )
+      )
+    )
+    .for("update");
   if (owned.length === 0) return 0;
 
   await tenantDb
@@ -1421,7 +1471,7 @@ export async function acknowledgeTaskAssignments(
     // rewrites the same instant.
     .onConflictDoUpdate({
       target: [taskAssignmentAcknowledgements.taskId, taskAssignmentAcknowledgements.userId],
-      set: { acknowledgedAt: new Date() },
+      set: { acknowledgedAt: sql`NOW()` },
     });
 
   return owned.length;

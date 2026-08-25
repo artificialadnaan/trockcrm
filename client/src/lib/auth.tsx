@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import type { ReactNode } from "react";
 import { api, clearCsrfTokenOverride } from "./api";
+import { clearTaskAssignmentModalShownTasks } from "./task-assignment-modal-shown";
 
 type Role = "admin" | "director" | "sales_manager" | "rep" | "construction";
 
@@ -84,7 +85,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Only an affirmative web-auth action starts a new modal session. `fetchUser` runs on boot and on
   // refreshUser(), so advancing this from every setUser would turn an ordinary F5 into a fresh login
   // and re-open urgent repeats forever.
-  const beginAssignmentModalSession = useCallback(() => {
+  const beginAssignmentModalSession = useCallback((userId: string) => {
+    // This clear MUST be synchronous and happen before login() / localLogin() returns. AuthEntryScreen
+    // follows a successful `returnTo` with window.location.replace(), which destroys this provider before
+    // the modal can consume its in-memory reset token. Leaving the previous shown-set in sessionStorage
+    // would make that full-page navigation recreate it and suppress the first modal of the new login.
+    // fetchUser()/refreshUser() never call this: restoring a cookie on F5 is not another login.
+    clearTaskAssignmentModalShownTasks(userId);
     setAssignmentModalSession((current) => ({ token: current.token + 1, resetPending: true }));
   }, []);
 
@@ -114,7 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { email, returnTo },
     });
-    beginAssignmentModalSession();
+    beginAssignmentModalSession(data.user.id);
     if (!data.returnTo) setUser(data.user);
     return { returnTo: data.returnTo };
   };
@@ -124,7 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { email, password, returnTo },
     });
-    beginAssignmentModalSession();
+    beginAssignmentModalSession(data.user.id);
     setUser(data.user);
     return { returnTo: data.returnTo, mustChangePassword: Boolean(data.user.mustChangePassword) };
   };
@@ -134,7 +141,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { currentPassword, newPassword },
     });
-    beginAssignmentModalSession();
+    beginAssignmentModalSession(data.user.id);
     setUser(data.user);
   };
 

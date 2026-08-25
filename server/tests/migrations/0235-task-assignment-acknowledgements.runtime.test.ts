@@ -18,13 +18,12 @@
 //      but the FK is also what stops an ack row for a task in another office.
 //
 // THREE offices, deliberately. office_dallas is ALSO written by the literal tenant block at the foot of
-// the migration, so it comes out correct even if the tenant loop is broken -- and a two-office fixture
-// (dallas + one) still passes with the loop clamped to a single schema, because between them the loop's
-// one schema and the block's one schema cover both. A third office has no second source: only the loop
-// can give it the table, the constraint and the index.
-import { beforeEach, describe, expect, it } from "vitest";
+// the migration, so it comes out correct even if the runner step is broken. A third office has no second
+// source: only the per-office step can give it the table, the constraint and the index.
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
+import { runTaskAssignmentAcknowledgementsMigration } from "../../src/migrations/task-assignment-acknowledgements.js";
 
 const MIGRATION = "0235_task_assignment_acknowledgements";
 const TABLE = "task_assignment_acknowledgements";
@@ -37,6 +36,14 @@ const ALICE = "11111111-1111-1111-1111-111111111111";
 const BOB = "22222222-2222-2222-2222-222222222222";
 
 let pg: PGlite;
+
+/** Matches runner.ts's 0235 path: existing offices first, then the provisioner-only SQL template. */
+async function applyMigration() {
+  await runTaskAssignmentAcknowledgementsMigration(
+    pg as unknown as Parameters<typeof runTaskAssignmentAcknowledgementsMigration>[0]
+  );
+  await pg.exec(migrationSql(MIGRATION));
+}
 
 /** The minimum shape 0235 needs: a tenant `tasks` table with the columns the seed reads. */
 async function seedOffices(schemas: readonly string[]) {
@@ -97,7 +104,7 @@ beforeEach(async () => {
 describe("migration 0235 — task assignment acknowledgements", () => {
   it("creates the table in EVERY office schema, not just the first", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyMigration();
 
     for (const schema of OFFICES) {
       expect(await tableExists(schema, TABLE), schema).toBe(true);
@@ -106,7 +113,7 @@ describe("migration 0235 — task assignment acknowledgements", () => {
 
   it("builds the (user_id, acknowledged_at) index in EVERY office schema", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyMigration();
 
     for (const schema of OFFICES) {
       const result = await pg.query<{ indexdef: string }>(
@@ -123,7 +130,7 @@ describe("migration 0235 — task assignment acknowledgements", () => {
   it("enforces one ack row per (task, user) in EVERY office schema, via ON CONFLICT", async () => {
     await seedOffices(OFFICES);
     for (const schema of OFFICES) await seedTasks(schema);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyMigration();
 
     for (const schema of OFFICES) {
       // The seed already acked task ...001 for ALICE. A second write must collapse, not raise, and
@@ -165,7 +172,7 @@ describe("migration 0235 — task assignment acknowledgements", () => {
   it("seeds an ack row for every NON-TERMINAL task that already exists, in EVERY office schema", async () => {
     await seedOffices(OFFICES);
     for (const schema of OFFICES) await seedTasks(schema);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyMigration();
 
     for (const schema of OFFICES) {
       const acked = await pg.query<{ task_id: string; user_id: string }>(
@@ -187,7 +194,7 @@ describe("migration 0235 — task assignment acknowledgements", () => {
   it("cascades ack rows away when the task is deleted, in EVERY office schema", async () => {
     await seedOffices(OFFICES);
     for (const schema of OFFICES) await seedTasks(schema);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyMigration();
 
     for (const schema of OFFICES) {
       await pg.exec(`DELETE FROM ${schema}.tasks WHERE id = 'aaaaaaaa-0000-0000-0000-000000000001'`);
@@ -202,13 +209,13 @@ describe("migration 0235 — task assignment acknowledgements", () => {
   it("is idempotent — a second run neither errors nor duplicates the seed", async () => {
     await seedOffices(OFFICES);
     for (const schema of OFFICES) await seedTasks(schema);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyMigration();
 
     // A task created BETWEEN the two runs must not be retro-acked by the replay either... except that
     // the replay cannot tell it apart from history, so it will be. What matters is that the replay is
     // safe: no error, no duplicate rows. (The runner never replays an applied migration; this covers a
     // hand re-run against a restored dump.)
-    await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
+    await expect(applyMigration()).resolves.toBeUndefined();
 
     for (const schema of OFFICES) {
       const rows = await pg.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${schema}.${TABLE}`);
@@ -250,8 +257,42 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     await seedOffices(OFFICES);
     await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_halfbuilt;`);
 
-    await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
+    await expect(applyMigration()).resolves.toBeUndefined();
     expect(await tableExists("office_halfbuilt", TABLE)).toBe(false);
     expect(await tableExists("office_houston", TABLE)).toBe(true);
+  });
+
+  it("keeps the lock-taking existing-office work out of the SQL file and commits each office before the next", async () => {
+    const source = migrationSql(MIGRATION);
+    // Mutating the old DO loop back into the file would return to runner.ts's one implicit migration
+    // transaction. The PGlite behaviour tests above cannot observe locks; this source assertion makes
+    // the boundary explicit while the recording client below proves the replacement's transaction shape.
+    expect(source).not.toMatch(/\bDO\s+\$tenant\$/i);
+
+    const statements: string[] = [];
+    const query = vi.fn(async (text: string) => {
+      statements.push(text.trim());
+      if (text.includes("information_schema.schemata")) {
+        return { rows: [{ schema_name: "office_dallas" }, { schema_name: "office_atlanta" }] };
+      }
+      if (text.includes("information_schema.tables") || text.includes("information_schema.columns")) {
+        return { rows: [{ n: 1 }] };
+      }
+      return { rows: [] };
+    });
+
+    await runTaskAssignmentAcknowledgementsMigration({ query } as never);
+
+    const kind = (statement: string) => {
+      if (statement === "BEGIN" || statement === "COMMIT") return statement;
+      if (/^CREATE TABLE/i.test(statement)) return "CREATE TABLE";
+      if (/^CREATE INDEX/i.test(statement)) return "CREATE INDEX";
+      if (/^INSERT INTO/i.test(statement)) return "SEED";
+      return null;
+    };
+    expect(statements.map(kind).filter(Boolean)).toEqual([
+      "BEGIN", "CREATE TABLE", "CREATE INDEX", "SEED", "COMMIT",
+      "BEGIN", "CREATE TABLE", "CREATE INDEX", "SEED", "COMMIT",
+    ]);
   });
 });

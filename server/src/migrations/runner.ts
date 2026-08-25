@@ -39,6 +39,10 @@ import {
   TASKS_ASSIGNED_AT_BACKFILL_MIGRATION,
   runTasksAssignedAtBackfill,
 } from "./tasks-assigned-at-backfill.js";
+import {
+  TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION,
+  runTaskAssignmentAcknowledgementsMigration,
+} from "./task-assignment-acknowledgements.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -126,6 +130,15 @@ async function runMigrations(): Promise<void> {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
         await runTasksAssignedAtBackfill(client);
+      } else if (file === TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION) {
+        // 0235 creates a table with a foreign key to `tasks`, creates its index, then seeds from
+        // `tasks`. All three can lock the hot task table. Doing the old DO loop inside this SQL file
+        // held every earlier office's lock until the last office finished; the shared step commits each
+        // office before beginning the next. Run it before the file because 0235 adds no prerequisite
+        // tasks column. The remaining tenant block in the file is only the provisioner template.
+        await runTaskAssignmentAcknowledgementsMigration(client);
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
       } else if (file === TASK_SOURCE_INDEX_MIGRATION) {
         // Same reason again: `tasks` is written by the rules engine, the email queue, two crons, deal
         // reassignment and every person using the New Task form, so a plain CREATE INDEX inside the

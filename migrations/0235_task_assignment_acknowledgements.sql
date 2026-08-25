@@ -52,60 +52,15 @@
 -- referenced by any other tenant table in this codebase either (tasks.assigned_to is a bare uuid); a
 -- deactivated user's ack rows are harmless because the query is scoped to the caller.
 
--- Existing tenants: create the table, index it, and seed it in every office_* schema.
-DO $tenant$
-DECLARE
-  schema_name text;
-BEGIN
-  FOR schema_name IN
-    SELECT nspname
-    FROM pg_namespace
-    WHERE nspname LIKE 'office\_%' ESCAPE '\'
-    ORDER BY nspname
-  LOOP
-    -- Skip a partially-provisioned office schema that has no tasks table yet, rather than aborting this
-    -- migration (and every other tenant with it) for one incomplete schema. The FK below would fail on
-    -- such a schema, so this guard is load-bearing, not defensive decoration.
-    IF to_regclass(format('%I.tasks', schema_name)) IS NULL THEN
-      CONTINUE;
-    END IF;
-
-    EXECUTE format(
-      $sql$
-        CREATE TABLE IF NOT EXISTS %1$I.task_assignment_acknowledgements (
-          id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          task_id         uuid NOT NULL REFERENCES %1$I.tasks(id) ON DELETE CASCADE,
-          user_id         uuid NOT NULL,
-          acknowledged_at timestamptz NOT NULL DEFAULT now(),
-          CONSTRAINT task_assignment_ack_uq UNIQUE (task_id, user_id)
-        );
-      $sql$,
-      schema_name
-    );
-
-    EXECUTE format(
-      $sql$
-        CREATE INDEX IF NOT EXISTS task_assignment_ack_user_idx
-          ON %1$I.task_assignment_acknowledgements (user_id, acknowledged_at DESC);
-      $sql$,
-      schema_name
-    );
-
-    -- THE SEED. See the header. ON CONFLICT DO NOTHING makes a re-run against a restored dump a no-op
-    -- rather than a unique violation, and keeps a hand replay from resetting acknowledged_at on rows a
-    -- person has genuinely acknowledged since.
-    EXECUTE format(
-      $sql$
-        INSERT INTO %1$I.task_assignment_acknowledgements (task_id, user_id, acknowledged_at)
-        SELECT id, assigned_to, now()
-          FROM %1$I.tasks
-         WHERE status NOT IN ('completed', 'dismissed')
-        ON CONFLICT (task_id, user_id) DO NOTHING;
-      $sql$,
-      schema_name
-    );
-  END LOOP;
-END $tenant$;
+-- Existing tenants are intentionally NOT handled in this file. runner.ts dispatches 0235 to
+-- server/src/migrations/task-assignment-acknowledgements.ts, which uses the shared per-office
+-- transactional mechanism: CREATE TABLE (with its FK lock), CREATE INDEX, and the historical seed each
+-- run for one office and COMMIT before the next begins. A DO loop here would make runner.ts send all of
+-- that work as one implicit transaction and hold the first office's tasks lock while it touches every
+-- later office — exactly the deploy-wide write stall this migration must avoid.
+--
+-- Keep the existing-office work OUT of this file. The marked block below is retained only because the
+-- office provisioner clones it for schemas created after this deploy.
 
 -- New tenants: the office provisioner clones the marked block below (office_dallas -> new schema). No
 -- seed there -- a freshly provisioned office has no assignment history to mark as already-seen.

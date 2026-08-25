@@ -32,6 +32,7 @@ import { TaskAssignmentModal, MAX_FETCH_ATTEMPTS as MAX_ATTEMPTS } from "./task-
 
 type PendingTask = {
   id: string;
+  assignmentVersion: string;
   title: string;
   priority: string;
   dueDate: string | null;
@@ -42,6 +43,7 @@ type PendingTask = {
 function task(overrides: Partial<PendingTask> = {}): PendingTask {
   return {
     id: overrides.id ?? "task-1",
+    assignmentVersion: overrides.assignmentVersion ?? "2026-08-25T12:34:56.123456Z",
     title: overrides.title ?? "Walk the Henderson roof",
     priority: overrides.priority ?? "normal",
     dueDate: overrides.dueDate ?? null,
@@ -67,6 +69,12 @@ function setPending(tasks: PendingTask[], total = tasks.length, newTotal?: numbe
 
 function acknowledgeCalls() {
   return apiMock.mock.calls.filter(([path]) => path === "/tasks/acknowledge");
+}
+
+function acknowledgedTaskIds(call: unknown[]) {
+  return (call[1] as { json: { assignments: Array<{ taskId: string; assignmentVersion: string }> } })
+    .json.assignments
+    .map(({ taskId }) => taskId);
 }
 
 let container: HTMLDivElement;
@@ -361,7 +369,12 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
     expect(acknowledgeCalls()).toHaveLength(1);
     expect(acknowledgeCalls()[0]![1]).toMatchObject({
       method: "POST",
-      json: { taskIds: ["t1", "t2"] },
+      json: {
+        assignments: [
+          { taskId: "t1", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
+          { taskId: "t2", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
+        ],
+      },
     });
     expect(dialog()).toBeNull();
   });
@@ -376,7 +389,9 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
     await settle();
 
     expect(acknowledgeCalls()).toHaveLength(1);
-    expect(acknowledgeCalls()[0]![1]).toMatchObject({ json: { taskIds: ["t1"] } });
+    expect(acknowledgeCalls()[0]![1]).toMatchObject({
+      json: { assignments: [{ taskId: "t1", assignmentVersion: "2026-08-25T12:34:56.123456Z" }] },
+    });
   });
 
   it("acknowledges AND navigates on View all tasks", async () => {
@@ -887,9 +902,7 @@ describe("TaskAssignmentModal — once per office, per login", () => {
     await changeOfficeTo("office-b");
     await changeOfficeTo("office-a");
 
-    const acknowledged = acknowledgeCalls().flatMap(
-      (call) => (call[1] as { json: { taskIds: string[] } }).json.taskIds
-    );
+    const acknowledged = acknowledgeCalls().flatMap(acknowledgedTaskIds);
     expect(acknowledged).toEqual(rendered);
     expect(acknowledged, "the crowded-out task was marked seen without being shown").not.toContain("a6");
   });
@@ -1064,13 +1077,13 @@ describe("TaskAssignmentModal — office scope", () => {
     await click(buttonLabelled("Close"));
 
     for (const call of acknowledgeCalls()) {
-      const ids = (call[1] as { json: { taskIds: string[] } }).json.taskIds;
+      const ids = acknowledgedTaskIds(call);
       const office = officeHeaderOf(call);
       const carriesOfficeAIds = ids.some((id) => id === "a1" || id === "a2");
       expect(carriesOfficeAIds && office !== "office-a", `${ids.join(",")} posted to ${office}`).toBe(false);
     }
     expect(acknowledgeCalls()).toHaveLength(1);
-    expect((acknowledgeCalls()[0]![1] as { json: { taskIds: string[] } }).json.taskIds).toEqual(["b1"]);
+    expect(acknowledgedTaskIds(acknowledgeCalls()[0]!)).toEqual(["b1"]);
     expect(officeHeaderOf(acknowledgeCalls()[0])).toBe("office-b");
   });
 
@@ -1081,7 +1094,7 @@ describe("TaskAssignmentModal — office scope", () => {
     await click(buttonLabelled("Close"));
 
     expect(officeHeaderOf(acknowledgeCalls()[0])).toBe("office-a");
-    expect((acknowledgeCalls()[0]![1] as { json: { taskIds: string[] } }).json.taskIds).toEqual(["a1"]);
+    expect(acknowledgedTaskIds(acknowledgeCalls()[0]!)).toEqual(["a1"]);
   });
 
   it("carries the office scope through to the tasks page", async () => {

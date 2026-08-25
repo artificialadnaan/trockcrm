@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import {
+  clearTaskAssignmentModalShownTasks,
+  taskAssignmentModalShownStorageKey,
+} from "@/lib/task-assignment-modal-shown";
 import { useOfficeScopeId, useOfficeScopedHref } from "@/hooks/use-office-scope";
 import { Button } from "@/components/ui/button";
 import {
@@ -171,12 +175,10 @@ export const MAX_FETCH_ATTEMPTS = 2;
  * load. Keyed per office as well, so the record stays meaningful without assuming task ids never repeat
  * across tenant schemas.
  */
-const SHOWN_STORAGE_PREFIX = "trock:task-assignment-modal:shown:";
-
 /** Scoped to the person. The session-invalidation path bounces to /login WITHOUT clearing storage, so
  *  a second user signing in on the same tab must not inherit the first one's suppressions. */
 function shownStorageKey(userId: string) {
-  return `${SHOWN_STORAGE_PREFIX}${userId}`;
+  return taskAssignmentModalShownStorageKey(userId);
 }
 
 function shownTaskKey(officeId: string, taskId: string) {
@@ -213,11 +215,7 @@ function persistShownTasks(userId: string, keys: Set<string>) {
  * interruption record; acknowledgements remain server-side and untouched.
  */
 function clearShownTasks(userId: string) {
-  try {
-    window.sessionStorage.removeItem(shownStorageKey(userId));
-  } catch {
-    // Storage unavailable already falls back to the in-memory set.
-  }
+  clearTaskAssignmentModalShownTasks(userId);
 }
 
 /**
@@ -448,7 +446,7 @@ export function TaskAssignmentModal() {
       // ever relaxed. The alternative is correctness that depends entirely on a condition twenty
       // lines away.
       void acknowledgeTaskAssignments(
-        fetchState.tasks.map((task) => task.id),
+        fetchState.tasks.map(({ id, assignmentVersion }) => ({ id, assignmentVersion })),
         fetchState.office
       ).catch(() => {
         // A failed acknowledgement costs one repeat of this modal. Trapping the user inside a dialog
