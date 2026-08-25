@@ -701,13 +701,30 @@ describe("TaskAssignmentModal — once per office, per login", () => {
     await changeOfficeTo("office-a");
 
     expect(dialog(), "the same repeats, a second time, in one login").toBeNull();
-    // It DOES ask office A again, and that is deliberate rather than an oversight: the answer may have
-    // changed since, and a new assignment arriving while the person was in office B has to be able to
-    // surface. What is suppressed is the second INTERRUPTION, not the second question — which is why
-    // the guard sits on opening the dialog and not on issuing the request.
-    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(2);
-    // ...and nothing was acknowledged a second time, because nothing was shown a second time.
+    // Nothing was acknowledged a second time either, because nothing was shown a second time.
     expect(acknowledgeCalls()).toHaveLength(1);
+    // Deliberately NO assertion here about whether office A was re-fetched. It is, and that belongs to
+    // the refetch-on-office-change property, which has its own test below. Asserting it here as well
+    // coupled this test to that guard: breaking the office arm made THIS test red, which reads as
+    // "the once-per-login guard is broken" when the truth is that the request was never issued.
+  });
+
+  // The other half, kept separate for that reason. What is suppressed is the second INTERRUPTION, not
+  // the second question — the answer may have changed, and a new assignment arriving while the person
+  // was in office B has to be able to surface, which is why the guard sits on opening the dialog
+  // rather than on issuing the request.
+  it("still ASKS the office again on return, even though it will not interrupt", async () => {
+    setPendingByOffice({
+      "office-a": { tasks: [repeat({ id: "a1" })] },
+      "office-b": { tasks: [] },
+    });
+    await render(true, { officeId: "office-a" });
+    await click(buttonLabelled("Close"));
+
+    await changeOfficeTo("office-b");
+    await changeOfficeTo("office-a");
+
+    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(2);
   });
 
   it("still interrupts for an office it has NOT shown yet", async () => {
