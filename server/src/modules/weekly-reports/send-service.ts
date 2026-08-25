@@ -773,19 +773,22 @@ export async function createWeeklyReportCorrection(
   }
 
   const weekOf = toIsoDate(reportRow.week_of)!;
-  // The highest version for this week, taken under the report lock we already hold on the source row.
-  // MAX rather than `source.version + 1`: correcting v1 twice would otherwise collide with the live v2 on
-  // weekly_reports_project_week_version_uidx and surface as a raw 23505.
-  const latest = await client.query(
-    `SELECT COALESCE(MAX(version), 0) AS version
+  // Keep the two version questions separate. A newer LIVE correction means this source must not make
+  // another one, while a deleted correction is still part of the week's immutable history and its number
+  // must never be reused. The partial unique index only protects live rows, so using its predicate for
+  // allocation would otherwise create two historical v2s after an unsent v2 is deleted.
+  const versions = await client.query(
+    `SELECT COALESCE(MAX(version), 0) AS historical_version,
+            COALESCE(MAX(CASE WHEN is_active THEN version END), 0) AS active_version
        FROM weekly_reports
-      WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date AND is_active`,
+      WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date`,
     [reportRow.weekly_report_project_id, weekOf],
   );
-  const latestVersion = Number(latest.rows[0]?.version ?? 0);
+  const latestHistoricalVersion = Number(versions.rows[0]?.historical_version ?? 0);
+  const latestActiveVersion = Number(versions.rows[0]?.active_version ?? 0);
   const sourceVersion = Number(reportRow.version ?? 1);
 
-  // REFUSED when a newer version already exists, which is the difference between one correction and a
+  // REFUSED when a newer LIVE version already exists, which is the difference between one correction and a
   // pile of them. History offers "Send correction" on any sent row that is not yet superseded, and a row
   // is only superseded when its replacement is SENT — so a PM who drafts a v2 and comes back to the same
   // v1 row is offered the button again and gets a v3. Both land `approved`, sending v2 supersedes only v1,
@@ -794,14 +797,14 @@ export async function createWeeklyReportCorrection(
   // because the live row is v3.
   //
   // Refusing names the version to work on instead, which is what the PM actually wants.
-  if (latestVersion > sourceVersion) {
+  if (latestActiveVersion > sourceVersion) {
     throw new AppError(
       409,
-      `Version ${latestVersion} of this week's report already exists — finish and send that one instead ` +
+      `Version ${latestActiveVersion} of this week's report already exists — finish and send that one instead ` +
         "of starting another correction",
     );
   }
-  const nextVersion = latestVersion + 1;
+  const nextVersion = latestHistoricalVersion + 1;
 
   const inserted = await client.query(
     `INSERT INTO weekly_reports (

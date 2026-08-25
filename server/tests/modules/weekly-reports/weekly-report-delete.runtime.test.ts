@@ -47,7 +47,10 @@ import {
   updateWeeklyReportContent,
 } from "../../../src/modules/weekly-reports/reports-service.js";
 import { getWeeklyReportDashboard } from "../../../src/modules/weekly-reports/dashboard-service.js";
-import { buildWeeklyReportSendDraft } from "../../../src/modules/weekly-reports/send-service.js";
+import {
+  buildWeeklyReportSendDraft,
+  createWeeklyReportCorrection,
+} from "../../../src/modules/weekly-reports/send-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const OFFICE = U("00001");
@@ -867,6 +870,31 @@ describe("creating a report after one has been deleted", () => {
     );
     expect(created).toBe(true);
     expect(report.id).not.toBe(reportId);
+  });
+
+  it("allocates a new correction version above a deleted unsent correction", async () => {
+    // A correction is approved but does not supersede v1 until it is sent, so leadership may delete an
+    // abandoned v2. That deletion must not let the next correction reuse v2: version labels are the
+    // week's history, including inactive rows.
+    const project = await seedProject();
+    const v1 = await seedDraft(project.id);
+    await setStatus(v1, "sent");
+
+    const v2 = await createWeeklyReportCorrection(db, v1, DIRECTOR_ACTOR);
+    expect(v2.version).toBe(2);
+    await deleteWeeklyReport(db, v2.id, ADMIN_ACTOR, { reason: "Abandoned correction" });
+    expect(await isActive(v2.id)).toBe(false);
+
+    const v3 = await createWeeklyReportCorrection(db, v1, DIRECTOR_ACTOR);
+    expect(v3.version).toBe(3);
+
+    const versions = await pg.query<{ version: number }>(
+      `SELECT version FROM office_dallas.weekly_reports
+        WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date
+        ORDER BY version`,
+      [project.id, WEEK_OF],
+    );
+    expect(versions.rows.map((row) => Number(row.version))).toEqual([1, 2, 3]);
   });
 
   it("refiles above a removed delivered version, so the client still receives a correction", async () => {
