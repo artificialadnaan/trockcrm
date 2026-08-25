@@ -1153,7 +1153,27 @@ describe("DealsListSection", () => {
 
     expect(html).toContain("Bid due");
     expect(html).toContain("Jul 3, 2026"); // Uses the authoritative list projection, not the raw snapshot.
+    expect(html).toContain("Bid due: Jul 3, 2026"); // The mobile list card keeps the same deadline visible.
     expect(html).toContain("Aug 15"); // The existing expected-execution / Close column remains separate.
+  });
+
+  it("does not revive a stale raw deadline when the authoritative list date was cleared", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          bidDueDate: "2026-08-01T00:00:00.000Z",
+          resolvedBidDueDate: null,
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).not.toContain("Aug 1, 2026");
   });
 
   it("sorts the bid due column soonest first, then reverses it from its header arrow", () => {
@@ -1446,7 +1466,7 @@ describe("DealsListSection", () => {
     // There are TWO export paths on this component — buildFilterBarCsvRows (covered in
     // deals-list-csv-export.test.ts) and this LEGACY inline one. They must not diverge, or which
     // columns accounting gets depends on which surface they exported from.
-    it("includes the Scope Title column on the LEGACY export path too", async () => {
+    it("includes the Scope Title and Bid Due Date columns on the LEGACY export path too", async () => {
       const csvParts: string[] = [];
       const OriginalBlob = globalThis.Blob;
       const originalCreate = URL.createObjectURL;
@@ -1458,7 +1478,7 @@ describe("DealsListSection", () => {
         }
       } as unknown as typeof Blob;
       mocks.apiMock.mockResolvedValue({
-        deals: [makeDeal({ scopeTitle: "Balcony Repair" })],
+        deals: [makeDeal({ scopeTitle: "Balcony Repair", resolvedBidDueDate: "2026-07-03" })],
         pagination: { totalPages: 1 },
       });
       const { container, cleanup } = await renderDom({ enableExport: true, lockedOwnerId: "rep-1" });
@@ -1480,9 +1500,11 @@ describe("DealsListSection", () => {
           "Stage",
           "Days",
           "Value",
+          "Bid Due Date",
           "Last Touch",
         ]);
         expect(firstRow.split(",")[1]).toBe("Balcony Repair");
+        expect(firstRow.split(",")[7]).toBe("2026-07-03");
       } finally {
         globalThis.Blob = OriginalBlob;
         Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
