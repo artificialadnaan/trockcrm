@@ -184,6 +184,27 @@ export function TaskAssignmentModal() {
    * office change changes the office, so both produce a new key and both proceed.
    */
   const requestRef = useRef<{ id: number; key: string | null }>({ id: 0, key: null });
+
+  /**
+   * Offices whose modal has ACTUALLY BEEN PUT ON SCREEN during this login.
+   *
+   * Deliberately NOT part of fetchState. That answers "what am I currently showing"; this answers "what
+   * have I already shown", and they are different questions with different lifetimes — fetchState is
+   * replaced every time the office changes, which is exactly when this must survive. Asking one
+   * variable both questions is the shape that produced the latch chain this file has already been
+   * through three times.
+   *
+   * WHY IT IS NEEDED AT ALL: urgent, high and overdue assignments stay eligible after acknowledgement
+   * by design — that is the repeat rule. So for a cross-office user, A → B → A re-fetches A, the
+   * repeats are still eligible, and the same interrupting dialog opens a second time in one login.
+   * Eligibility is the server's answer about a TASK and it is correct; "already shown" is a client fact
+   * about this SESSION, and it has to live somewhere other than the thing that decides eligibility.
+   *
+   * ⚠️ ADDED TO WHERE THE DIALOG OPENS, never where the response arrives. A response that came back
+   * empty, failed, or lost a race put nothing in front of anybody, and marking those as shown would
+   * suppress an office the user has genuinely never seen.
+   */
+  const shownOfficesRef = useRef<Set<string>>(new Set());
   const acknowledgedRef = useRef(false);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
@@ -212,6 +233,10 @@ export function TaskAssignmentModal() {
   const needsFetch =
     shouldFetch &&
     requestOfficeId !== null &&
+    // Already interrupted them once for this office this login. Not a cache — the answer may well have
+    // changed — but re-asking could only produce the same repeats a second time, and the one thing this
+    // dialog cannot afford is to become something people dismiss without reading.
+    !shownOfficesRef.current.has(requestOfficeId) &&
     (fetchState.office !== requestOfficeId ||
       fetchState.status === "idle" ||
       (fetchState.status === "error" && fetchState.attempts < MAX_FETCH_ATTEMPTS));
@@ -257,7 +282,14 @@ export function TaskAssignmentModal() {
         // queries against a moving table, and a task completed between them lands here. Assigned from
         // the result rather than only set to true, so an office whose answer is "nothing" closes a
         // modal the previous office had opened instead of rendering itself empty.
-        setOpen(result.tasks.length > 0);
+        const opening = result.tasks.length > 0;
+        // The office is recorded as shown HERE, at the point the dialog actually opens, and nowhere
+        // else. An empty list opens nothing, so it is not shown; the same is true of the error path
+        // below and of any response that fails the id check above. Recording it from the mere arrival
+        // of a response — or from the result set, which carries only the first five of what may be
+        // more — would mark work as seen that nobody ever laid eyes on.
+        if (opening) shownOfficesRef.current.add(office);
+        setOpen(opening);
       })
       .catch(() => {
         if (id !== requestRef.current.id) return;

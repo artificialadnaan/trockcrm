@@ -557,6 +557,151 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
   });
 });
 
+/**
+ * Per-office canned answers, resolving immediately. For tests about WHICH office gets asked and what
+ * comes back, where the interleaving is not the subject.
+ */
+function setPendingByOffice(
+  byOffice: Record<string, { tasks: PendingTask[]; total?: number } | "fail">
+) {
+  apiMock.mockImplementation(async (path: string, options?: { headers?: Record<string, string> }) => {
+    if (path === "/tasks/acknowledge") return undefined;
+    if (path !== "/tasks/pending-acknowledgement") throw new Error(`unexpected api call: ${path}`);
+    const office = options?.headers?.["x-office-id"] ?? "(none)";
+    const answer = byOffice[office];
+    if (!answer) throw new Error(`no canned answer for ${office}`);
+    if (answer === "fail") throw new Error("network is down");
+    return {
+      tasks: answer.tasks,
+      total: answer.total ?? answer.tasks.length,
+      newTotal: answer.tasks.filter((t) => t.isNew).length,
+    };
+  });
+}
+
+describe("TaskAssignmentModal — once per office, per login", () => {
+  // Urgent, high and overdue assignments stay eligible after acknowledgement — that is the repeat rule
+  // and it is correct. But eligibility is a SERVER answer about a task, and "I have already
+  // interrupted this person" is a CLIENT fact about this session, so for a cross-office user A -> B ->
+  // A re-fetches A, finds the same repeats still eligible, and opens the same dialog a second time in
+  // one login. The two facts live in different places for the same reason every other round on this
+  // file did: fetchState answers what is being shown NOW, and it is replaced on every office change,
+  // which is precisely when "already shown" has to survive.
+
+  it("does not interrupt twice for the same office in one login", async () => {
+    setPendingByOffice({
+      "office-a": { tasks: [repeat({ id: "a1", title: "Dallas roof walk" })] },
+      "office-b": { tasks: [] },
+    });
+    await render(true, { officeId: "office-a" });
+    expect(dialog()!.textContent).toContain("Dallas roof walk");
+    await click(buttonLabelled("Close"));
+
+    await changeOfficeTo("office-b");
+    await changeOfficeTo("office-a");
+
+    expect(dialog(), "the same repeats, a second time, in one login").toBeNull();
+    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(1);
+  });
+
+  it("still interrupts for an office it has NOT shown yet", async () => {
+    setPendingByOffice({
+      "office-a": { tasks: [repeat({ id: "a1" })] },
+      "office-b": { tasks: [task({ id: "b1", title: "Atlanta punch list" })] },
+    });
+    await render(true, { officeId: "office-a" });
+    await click(buttonLabelled("Close"));
+
+    await changeOfficeTo("office-b");
+
+    expect(dialog()!.textContent).toContain("Atlanta punch list");
+  });
+
+  // "Shown" must mean the dialog went on screen, not that a response arrived. Each of the next three
+  // put nothing in front of anybody, so each office must remain askable.
+  it("does not count an office whose list came back EMPTY as shown", async () => {
+    setPendingByOffice({ "office-a": { tasks: [] }, "office-b": { tasks: [] } });
+    await render(true, { officeId: "office-a" });
+    expect(dialog()).toBeNull();
+
+    await changeOfficeTo("office-b");
+    setPendingByOffice({
+      "office-a": { tasks: [task({ id: "a1", title: "Arrived later" })] },
+      "office-b": { tasks: [] },
+    });
+    await changeOfficeTo("office-a");
+
+    expect(dialog()!.textContent).toContain("Arrived later");
+  });
+
+  it("does not count an office whose fetch FAILED as shown", async () => {
+    setPendingByOffice({ "office-a": "fail", "office-b": { tasks: [] } });
+    await render(true, { officeId: "office-a" });
+    expect(dialog()).toBeNull();
+
+    await changeOfficeTo("office-b");
+    setPendingByOffice({
+      "office-a": { tasks: [task({ id: "a1", title: "Worked this time" })] },
+      "office-b": { tasks: [] },
+    });
+    await changeOfficeTo("office-a");
+
+    expect(dialog()!.textContent).toContain("Worked this time");
+  });
+
+  it("does not count a SUPERSEDED response as shown", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    await changeOfficeTo("office-b");
+    // Office A answers after it was abandoned: discarded, and it showed nobody anything.
+    await fetches.resolveFor("office-a", [task({ id: "a1", title: "Discarded" })]);
+    await fetches.resolveFor("office-b", []);
+
+    await changeOfficeTo("office-a");
+    await fetches.resolveFor("office-a", [task({ id: "a2", title: "Actually shown" })]);
+
+    expect(dialog()!.textContent).toContain("Actually shown");
+  });
+
+  // ⚠️ THE ONE THAT COULD UNDO THE STARVATION FIX FROM BEHIND.
+  //
+  // The server returns five rows and a total. A sixth ELIGIBLE task was never sent, never rendered and
+  // never seen — and it is exactly the kind of row the unseen-first ordering exists to get in front of
+  // somebody. If "shown" were ever taken to mean "was in the result set" or, worse, if the client
+  // acknowledged anything beyond what it rendered, that sixth task would be marked as dealt with
+  // without a person ever laying eyes on it. It would then never appear again, and the P1 this branch
+  // fixed would be back through a door nobody was watching.
+  it("never acknowledges an eligible task it did not render", async () => {
+    const rendered = ["a1", "a2", "a3", "a4", "a5"];
+    setPendingByOffice({
+      // Five rendered out of six eligible: one unseen at the front, four repeats, one crowded out.
+      "office-a": {
+        tasks: [
+          task({ id: "a1" }),
+          repeat({ id: "a2" }),
+          repeat({ id: "a3" }),
+          repeat({ id: "a4" }),
+          repeat({ id: "a5" }),
+        ],
+        total: 6,
+      },
+      "office-b": { tasks: [] },
+    });
+    await render(true, { officeId: "office-a" });
+    expect(dialog()!.textContent).toContain("1 more");
+
+    await click(buttonLabelled("Close"));
+    await changeOfficeTo("office-b");
+    await changeOfficeTo("office-a");
+
+    const acknowledged = acknowledgeCalls().flatMap(
+      (call) => (call[1] as { json: { taskIds: string[] } }).json.taskIds
+    );
+    expect(acknowledged).toEqual(rendered);
+    expect(acknowledged, "the crowded-out task was marked seen without being shown").not.toContain("a6");
+  });
+});
+
 describe("TaskAssignmentModal — a failed fetch is not an answer", () => {
   // ROUND THREE OF THE SAME DEFECT, and the reason the lifecycle is a state machine now rather than a
   // pile of refs. "Not started", "in flight", "failed" and "succeeded" are four outcomes; a boolean
