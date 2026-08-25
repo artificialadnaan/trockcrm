@@ -34,14 +34,15 @@
 -- distinguished.
 --
 -- ⚠️ THE BACKFILL IS NOT IN THIS FILE, AND CANNOT BE.
--- It lives in server/src/migrations/tasks-assigned-at-backfill.ts, which the runner calls immediately
--- after executing this file. runner.ts sends each .sql as ONE client.query(), so a DO block looping
--- every office holds the first office's locks until the LAST office finishes — and the backfill has to
--- DISABLE set_tasks_updated_at and audit_tasks around itself (see that file for why), which takes a
--- lock conflicting with every task write. Inside this file that would block task creation and edits
--- across ALL tenants during API startup. Per-office transactions are not expressible in a migration
--- file at all, so this is not something the SQL can be rearranged to fix. 0233 hit the same wall and
--- the mechanism reused here is the one that PR settled on.
+-- See server/src/migrations/per-office-step.ts for the rule and the mechanism, and
+-- server/src/migrations/tasks-assigned-at-backfill.ts for this migration's configuration of it. In
+-- short: runner.ts sends each .sql as ONE client.query(), so a DO block looping every office holds the
+-- first office's locks until the LAST office finishes — and this backfill has to DISABLE
+-- set_tasks_updated_at and audit_tasks around itself, which takes a lock conflicting with every task
+-- write. Inside this file that would block task creation and edits across ALL tenants during API
+-- startup. Per-office transactions are not expressible in a migration file at all, so it is not
+-- something the SQL can be rearranged to fix. 0233 hit the same wall first; this is the same mechanism
+-- with a second caller, not a second mechanism.
 --
 -- What remains below is the ADD COLUMN, which is metadata-only in PG11+ and effectively instant, and
 -- which has to stay here regardless: the office provisioner replays the marked block for schemas

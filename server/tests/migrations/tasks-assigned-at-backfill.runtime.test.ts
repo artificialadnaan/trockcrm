@@ -1,25 +1,26 @@
-// The 0239 assigned_at backfill, which is a RUNNER STEP rather than SQL in the migration file.
+// The 0239 assigned_at backfill: its CONFIGURATION, and the fact that it is wired to the shared
+// per-office mechanism.
 //
-// WHY IT IS A STEP. Identical reasoning to the 0233 classification backfill next door, on the same
-// table and the same two triggers: the backfill has to disable set_tasks_updated_at and audit_tasks
-// around itself, and `ALTER TABLE ... DISABLE TRIGGER` takes a lock that conflicts with task writes.
-// runner.ts sends each .sql file as ONE client.query(sql) — one implicit transaction — so a DO block
-// doing this per office would hold the first office's lock until the LAST office finished, blocking
-// task writes across every tenant during API startup. Per-tenant transactions are not expressible
-// inside a migration file, so the work moved here, where each office gets its own transaction.
+// WHAT THIS SUITE OWNS. tasks-assigned-at-backfill.ts is configuration — a table, a required column,
+// two triggers and one statement — handed to runPerOfficeTransactionalStep. So what is proved here is
+// that the configuration is RIGHT: the dating goes in the safe direction, updated_at survives, no audit
+// rows are written, and an office that never received the column is skipped rather than erroring.
 //
-// WHAT THIS SUITE CAN AND CANNOT PROVE. PGlite is a single in-process connection, so it cannot observe
-// lock contention or true concurrency — a test claiming to prove "no blocking" would be a guard that
-// cannot fire, and none is written here. What IS proved: the dating is correct and in the safe
-// direction, updated_at survives it, and — via a recording client — the statement sequence really does
-// open and COMMIT one transaction PER OFFICE, closing each before the next is touched. That boundary is
-// the actual fix, and it is observable without observing locks.
+// WHAT IT DOES NOT OWN. The mechanism itself — transaction per office, trigger restore order, rollback
+// on failure, the schema-name guard, the ordering error — belongs to per-office-step.ts and is covered
+// by per-office-step.runtime.test.ts against a deliberately different table. Re-testing it here would
+// be a second copy of somebody else's guarantee, which drifts the moment theirs changes. The one
+// structural assertion kept below is the WIRING: that this step really does go through that mechanism
+// and not around it, which no test of theirs can show.
+//
+// THREE offices, because office_dallas is also written by the literal tenant block at the foot of the
+// migration file and so comes out correct even with the loop broken. A third has no second source.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
 import {
   runTasksAssignedAtBackfill,
-  buildAssignedAtBackfillStatement,
+  TASKS_ASSIGNED_AT_BACKFILL_STEP,
   ASSIGNED_AT_SUSPENDED_TRIGGERS,
 } from "../../src/migrations/tasks-assigned-at-backfill.js";
 
@@ -180,20 +181,30 @@ describe("tasks.assigned_at backfill — what it writes", () => {
     await expect(runTasksAssignedAtBackfill(asClient())).resolves.toBeUndefined();
   });
 
-  it("refuses a schema name that is not a well-formed office schema", () => {
-    for (const bad of ["public", "office_dallas; DROP TABLE tasks", 'office_"dallas', "office_Dallas"]) {
-      expect(() => buildAssignedAtBackfillStatement(bad), bad).toThrow(/Invalid office schema name/);
-    }
+  // Configuration, asserted as configuration. These four values are what the shared mechanism is
+  // driven by, and each is a different way to be silently wrong: the wrong table locks the wrong
+  // thing, the wrong requiredColumn turns the ordering guard into a no-op, a missing trigger corrupts
+  // "Last touch" unrecoverably.
+  it("is configured against the tasks table, its own column, and both triggers", () => {
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.table).toBe("tasks");
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.requiredColumn).toBe("assigned_at");
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.suspendTriggers).toEqual([
+      "set_tasks_updated_at",
+      "audit_tasks",
+    ]);
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.label).toContain("0239");
   });
 });
 
-describe("tasks.assigned_at backfill — one transaction PER OFFICE", () => {
+describe("tasks.assigned_at backfill — wired to the shared mechanism", () => {
   /**
    * A client that records the statement SEQUENCE without executing it.
    *
-   * PGlite is one in-process connection and cannot show lock contention, but the sequence is exactly
-   * what distinguishes "a transaction per office" from "one transaction for all of them", and that
-   * distinction is the fix.
+   * This is the ONE structural assertion this suite keeps. per-office-step.runtime.test.ts already
+   * proves the mechanism commits per office; what it cannot prove is that THIS step goes through it
+   * rather than around it. A future edit that reintroduced a hand-rolled loop here would leave every
+   * behavioural test above green — the rows would still come out right — while restoring the
+   * cross-tenant lock hold the whole restructure was for.
    */
   function recordingClient(schemas: string[]) {
     const statements: string[] = [];
@@ -219,22 +230,7 @@ describe("tasks.assigned_at backfill — one transaction PER OFFICE", () => {
     return null;
   };
 
-  it("opens and commits a transaction around EACH office", async () => {
-    const { client, statements } = recordingClient(["office_dallas", "office_atlanta"]);
-
-    await runTasksAssignedAtBackfill(client);
-
-    const shape = statements.map(kind).filter(Boolean);
-    // Two identical, closed cycles — not one BEGIN wrapping everything.
-    expect(shape).toEqual([
-      "BEGIN", "DISABLE", "DISABLE", "UPDATE", "ENABLE", "ENABLE", "COMMIT",
-      "BEGIN", "DISABLE", "DISABLE", "UPDATE", "ENABLE", "ENABLE", "COMMIT",
-    ]);
-  });
-
-  // The property that actually releases the locks: office N's COMMIT must precede office N+1's BEGIN.
-  // A single transaction spanning every office is precisely what this forbids.
-  it("commits each office BEFORE touching the next", async () => {
+  it("opens and commits one transaction per office, never one spanning them", async () => {
     const { client, statements } = recordingClient([...OFFICES]);
 
     await runTasksAssignedAtBackfill(client);
@@ -247,52 +243,41 @@ describe("tasks.assigned_at backfill — one transaction PER OFFICE", () => {
     for (const s of shape) {
       if (s === "BEGIN") open += 1;
       if (s === "COMMIT") open -= 1;
-      // Never two transactions open at once, i.e. never one spanning offices.
+      // Two open at once would mean one transaction spanning offices — the thing this is all for.
       expect(open, `after ${s}: ${shape.join(",")}`).toBeLessThanOrEqual(1);
       expect(open).toBeGreaterThanOrEqual(0);
     }
     expect(open).toBe(0);
   });
 
-  it("names each office's own schema in its statements", async () => {
+  it("runs its own UPDATE, against each office's own schema, inside those transactions", async () => {
     const { client, statements } = recordingClient(["office_dallas", "office_atlanta"]);
 
     await runTasksAssignedAtBackfill(client);
 
     expect(statements.some((s) => s.includes('"office_dallas".tasks'))).toBe(true);
     expect(statements.some((s) => s.includes('"office_atlanta".tasks'))).toBe(true);
+    expect(statements.filter((s) => s.startsWith("UPDATE")).every((s) => s.includes("assigned_at"))).toBe(
+      true
+    );
   });
 
-  it("disables and re-enables the triggers in mirrored order, inside the transaction", async () => {
+  it("suspends and restores both triggers in mirrored order", async () => {
     const { client, statements } = recordingClient(["office_dallas"]);
 
     await runTasksAssignedAtBackfill(client);
 
     const triggers = statements
       .filter((s) => s.includes("TRIGGER"))
-      .map((s) => `${s.includes("DISABLE") ? "off" : "on"}:${ASSIGNED_AT_SUSPENDED_TRIGGERS.find((t) => s.includes(t))}`);
+      .map(
+        (s) =>
+          `${s.includes("DISABLE") ? "off" : "on"}:${ASSIGNED_AT_SUSPENDED_TRIGGERS.find((t) => s.includes(t))}`
+      );
     expect(triggers).toEqual([
       "off:set_tasks_updated_at",
       "off:audit_tasks",
       "on:audit_tasks",
       "on:set_tasks_updated_at",
     ]);
-  });
-
-  it("rolls back the office it failed on rather than leaving a transaction open", async () => {
-    const statements: string[] = [];
-    const query = vi.fn(async (sql: string) => {
-      statements.push(sql.trim());
-      if (sql.includes("information_schema.schemata")) return { rows: [{ schema_name: "office_dallas" }] };
-      if (sql.includes("information_schema.columns") || sql.includes("information_schema.tables")) {
-        return { rows: [{ n: 1 }] };
-      }
-      if (sql.includes("DISABLE TRIGGER audit_tasks")) throw new Error("boom");
-      return { rows: [] };
-    });
-
-    await expect(runTasksAssignedAtBackfill({ query } as never)).rejects.toThrow("boom");
-    expect(statements).toContain("ROLLBACK");
-    expect(statements).not.toContain("COMMIT");
   });
 });
