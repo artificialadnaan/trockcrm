@@ -229,22 +229,34 @@ describe("migration 0234 — task_comments and the closed-loop columns", () => {
     // Both rows are inserted inside ONE transaction. Under now() they are byte-identical; under
     // clock_timestamp() they are not — which is the entire distinction, and it cannot be read off a
     // catalog default string with any confidence.
+    // The pg_sleep is load-bearing, not padding. PGlite's clock_timestamp() advances only in whole
+    // milliseconds — its microsecond field is always 000 — so two adjacent inserts routinely land on the
+    // SAME value and this test failed intermittently without it. That is a limit of the harness's clock,
+    // not of the column: real Postgres separates them by microseconds. Sleeping past one tick makes the
+    // distinction observable here while keeping the assertion behavioural — under now() both rows still
+    // carry the transaction start time no matter how long the transaction runs, which is the whole point.
     await pg.exec(`
       BEGIN;
       INSERT INTO office_dallas.task_comments (task_id, author_id, body) VALUES ('${TASK}', '${ASSIGNEE}', 'first');
+      SELECT pg_sleep(0.005);
       INSERT INTO office_dallas.task_comments (task_id, author_id, body) VALUES ('${TASK}', '${ASSIGNEE}', 'second');
       COMMIT;
     `);
 
-    const rows = await pg.query<{ body: string; created_at: Date }>(
-      `SELECT body, created_at FROM office_dallas.task_comments ORDER BY body`
+    // Compared in SQL, deliberately. `clock_timestamp()` separates these by MICROseconds, and a JS Date
+    // only carries milliseconds — so reading them back and comparing `.getTime()` asks whether two inserts
+    // landed in different milliseconds, which they often do not. That version of this test failed when the
+    // machine was FAST, which is the tell: it was measuring the reader's resolution, not the writer's.
+    const distinct = await pg.query<{ stamps: number; rows: number }>(
+      `SELECT count(DISTINCT created_at)::int AS stamps, count(*)::int AS rows
+         FROM office_dallas.task_comments`
     );
-    expect(rows.rows).toHaveLength(2);
-    const [first, second] = rows.rows;
+    expect(distinct.rows[0]!.rows).toBe(2);
     expect(
-      first!.created_at.getTime(),
-      "two inserts in one transaction must not share a timestamp"
-    ).not.toBe(second!.created_at.getTime());
+      distinct.rows[0]!.stamps,
+      "two inserts in one transaction must not share a timestamp — under now() both rows carry the " +
+        "transaction start time and this collapses to 1"
+    ).toBe(2);
   });
 
   // C9: author_id mirrors tasks.created_by, which HAS a FK. Without one, a comment can name a user
