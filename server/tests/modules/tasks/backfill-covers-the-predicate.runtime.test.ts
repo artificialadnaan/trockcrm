@@ -24,10 +24,10 @@ import { tasks } from "@trock-crm/shared/schema";
 import { getPendingAssignmentTasks } from "../../../src/modules/tasks/service.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { migrationSql } from "../../helpers/migration-sql.js";
+import { runTaskAssignmentAcknowledgementsMigration } from "../../../src/migrations/task-assignment-acknowledgements.js";
 import { runTasksAssignedAtBackfill } from "../../../src/migrations/tasks-assigned-at-backfill.js";
 
 const SCHEMA = "office_dallas";
-const MIGRATIONS = ["0235_task_assignment_acknowledgements", "0239_tasks_assigned_at"] as const;
 
 const uid = (n: string) => `00000000-0000-0000-0000-${n.padStart(12, "0")}`;
 const ALICE = uid("a1");
@@ -91,12 +91,20 @@ beforeAll(async () => {
     );
   }
 
-  // Both migrations, from disk, in the order the runner applies them — INCLUDING 0239's runner step.
-  // The step is not optional decoration: 0239's file only adds the column, so skipping it would leave
-  // every pre-existing row dated now() by the column default, which is the exact post-dating that makes
-  // 0235's seeded acknowledgements stale. Running the migrations without it would prove nothing about
-  // what actually deploys.
-  for (const migration of MIGRATIONS) await pg.exec(migrationSql(migration));
+  // Both migrations in the exact order runner.ts applies them — INCLUDING BOTH runner steps. The 0235
+  // SQL file deliberately contains only the office-provisioner template; existing offices get their
+  // table and historical seed from its per-office step. Omitting that step would exercise a table with
+  // no historical acknowledgements, which is not a deployable 0235 state at all.
+  await runTaskAssignmentAcknowledgementsMigration(
+    pg as unknown as Parameters<typeof runTaskAssignmentAcknowledgementsMigration>[0]
+  );
+  await pg.exec(migrationSql("0235_task_assignment_acknowledgements"));
+
+  // 0239's step is likewise not optional decoration: its file only adds the column, so skipping it
+  // would leave every pre-existing row dated now() by the default, post-date 0235's seed, and make
+  // every historical acknowledgement stale. Running without it would prove nothing about the deployed
+  // sequence.
+  await pg.exec(migrationSql("0239_tasks_assigned_at"));
   await runTasksAssignedAtBackfill(pg as unknown as Parameters<typeof runTasksAssignedAtBackfill>[0]);
 
   await pg.exec(`SET search_path = ${SCHEMA}, public;`);
