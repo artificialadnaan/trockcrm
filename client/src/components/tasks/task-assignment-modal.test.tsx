@@ -26,6 +26,8 @@ vi.mock("react-router-dom", async () => {
 const authMock = vi.fn();
 vi.mock("@/lib/auth", () => ({ useAuth: () => authMock() }));
 
+const consumeAssignmentModalSessionResetMock = vi.fn();
+
 import { TaskAssignmentModal, MAX_FETCH_ATTEMPTS as MAX_ATTEMPTS } from "./task-assignment-modal";
 
 type PendingTask = {
@@ -103,7 +105,15 @@ async function render(
     officeId,
     activeOfficeId,
     userId = "u1",
-  }: { officeId?: string | null; activeOfficeId?: string; userId?: string } = {}
+    assignmentModalSession = 0,
+    assignmentModalSessionResetPending = false,
+  }: {
+    officeId?: string | null;
+    activeOfficeId?: string;
+    userId?: string;
+    assignmentModalSession?: number;
+    assignmentModalSessionResetPending?: boolean;
+  } = {}
 ) {
   currentOfficeId = officeId ?? null;
   authMock.mockReturnValue({
@@ -118,6 +128,9 @@ async function render(
             // activeOfficeId, so a boot on ?officeId=X gets a flag that describes X.
             activeOfficeId: activeOfficeId ?? officeId ?? HOME_OFFICE,
           },
+    assignmentModalSession,
+    assignmentModalSessionResetPending,
+    consumeAssignmentModalSessionReset: consumeAssignmentModalSessionResetMock,
   });
   const entry = officeId ? `/?officeId=${encodeURIComponent(officeId)}` : "/";
   await act(async () => {
@@ -135,7 +148,15 @@ async function render(
  * What a page refresh does to this component: the whole tree is thrown away and rebuilt, so every ref
  * and every piece of state goes with it. sessionStorage does not.
  */
-async function reload({ userId }: { userId?: string } = {}) {
+async function reload({
+  userId,
+  assignmentModalSession,
+  assignmentModalSessionResetPending,
+}: {
+  userId?: string;
+  assignmentModalSession?: number;
+  assignmentModalSessionResetPending?: boolean;
+} = {}) {
   const officeId = currentOfficeId;
   if (root) {
     await act(async () => {
@@ -147,7 +168,7 @@ async function reload({ userId }: { userId?: string } = {}) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  await render(true, { officeId, userId });
+  await render(true, { officeId, userId, assignmentModalSession, assignmentModalSessionResetPending });
 }
 
 async function changeOfficeTo(officeId: string) {
@@ -201,6 +222,7 @@ beforeEach(() => {
   apiMock.mockReset();
   navigateMock.mockReset();
   authMock.mockReset();
+  consumeAssignmentModalSessionResetMock.mockReset();
   container = document.createElement("div");
   document.body.innerHTML = "";
   document.body.appendChild(container);
@@ -633,6 +655,21 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
     await reload();
 
     expect(dialog(), "the same repeat, again, on every F5").toBeNull();
+  });
+
+  it("starts fresh when the same person completes a new explicit login", async () => {
+    setPendingByOffice({ "office-a": { tasks: [repeat({ id: "a1", title: "Dallas roof walk" })] } });
+    await render(true, { officeId: "office-a" });
+    await click(buttonLabelled("Close"));
+
+    // Session invalidation can send this person back through the login form without calling logout(),
+    // so the old shown-set is still in sessionStorage. An actual successful login is a new session and
+    // must clear it; treating every /auth/me boot that way would break the F5 assertion immediately above.
+    await reload({ assignmentModalSession: 1, assignmentModalSessionResetPending: true });
+
+    expect(dialog(), "a same-user re-login inherited the previous login's suppression").not.toBeNull();
+    expect(dialog()!.textContent).toContain("Dallas roof walk");
+    expect(consumeAssignmentModalSessionResetMock).toHaveBeenCalledWith(1);
   });
 
   it("does interrupt after a reload if something NEW has arrived since", async () => {

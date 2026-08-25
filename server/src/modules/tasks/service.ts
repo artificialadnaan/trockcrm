@@ -1127,23 +1127,20 @@ export async function updateTask(
   if (input.remindAt !== undefined) updates.remindAt = input.remindAt ? new Date(input.remindAt) : null;
   if (input.assignedTo !== undefined) {
     updates.assignedTo = input.assignedTo;
-    // THE ACTOR becomes the assigner -- but only when the assignment actually MOVES. A PATCH that
-    // re-sends the same assignee is not a reassignment, and re-stamping on it would quietly transfer
-    // "who is waiting on this" to whoever last touched the task. This is the same identity the
-    // assignment email names as the assigner, so the mail and the reply loop now agree.
-    if (input.assignedTo !== existing.assignedTo) {
-      updates.lastAssignedBy = userId;
-    }
-  }
-
-  // A CHANGE OF HANDS IS AN EVENT, and this is the only place it is recorded. Stamped only when the
-  // assignee actually moves — a title edit is not a reassignment, and re-stamping on every PATCH would
-  // invalidate the new assignee's acknowledgement every time anybody touched the row, which is the
-  // login modal repeating forever. Migration 0239 explains what reads it: an acknowledgement counts
-  // only when it is at least as recent as the assignment it answers, so without this stamp a task
-  // handed back to a prior assignee stays covered by the acknowledgement they gave the first time.
-  if (input.assignedTo !== undefined && input.assignedTo !== existing.assignedTo) {
-    updates.assignedAt = new Date();
+    // A CHANGE OF HANDS IS AN EVENT, and this is the only place it is recorded. The comparisons have
+    // to happen INSIDE this UPDATE rather than against `existing`: another PATCH can move the task
+    // between that permission/status read and this write. In that race, a stale comparison can either
+    // invent a new assignment (invalidating a valid acknowledgement), miss a real hand-back, or transfer
+    // the reply loop's assigner to somebody who only touched an already-current assignment. The database
+    // sees the row this statement actually writes, so both fields move only when that assignee moves.
+    updates.lastAssignedBy = sql`CASE
+      WHEN ${tasks.assignedTo} IS DISTINCT FROM ${input.assignedTo} THEN ${userId}
+      ELSE ${tasks.lastAssignedBy}
+    END`;
+    updates.assignedAt = sql`CASE
+      WHEN ${tasks.assignedTo} IS DISTINCT FROM ${input.assignedTo} THEN NOW()
+      ELSE ${tasks.assignedAt}
+    END`;
   }
 
   if (Object.keys(updates).length === 0) return existing;

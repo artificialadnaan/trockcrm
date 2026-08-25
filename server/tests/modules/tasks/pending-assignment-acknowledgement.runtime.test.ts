@@ -119,6 +119,32 @@ async function reassign(taskId: string, toUserId: string) {
   ]);
 }
 
+/**
+ * PGlite has one connection, so it cannot produce two true concurrent transactions. This wrapper
+ * creates the production window faithfully: `updateTask` first reads the old row, then immediately
+ * before its OWN generated UPDATE reaches PGlite another committed writer mutates that row. The
+ * assertion below verifies the wrapper actually fired, so a changed SQL shape cannot turn this into a
+ * pre-call fixture that proves nothing about the read/write gap.
+ */
+function tenantDbWithTaskUpdateInterleave(beforeUpdate: () => Promise<void>) {
+  let interleaved = false;
+  const client = {
+    query: async (...args: Parameters<PGlite["query"]>) => {
+      const [text] = args;
+      if (!interleaved && typeof text === "string" && /^update "tasks"(?:\s|$)/i.test(text)) {
+        interleaved = true;
+        await beforeUpdate();
+      }
+      return pg.query(...args);
+    },
+  } as unknown as PGlite;
+
+  return {
+    tenantDb: drizzle(client),
+    didInterleave: () => interleaved,
+  };
+}
+
 async function ackRowCount(taskId: string, userId: string) {
   const result = await pg.query<{ n: number }>(
     `SELECT COUNT(*)::int AS n FROM task_assignment_acknowledgements WHERE task_id = $1 AND user_id = $2`,
@@ -385,6 +411,44 @@ describe("an acknowledgement answers ONE assignment, not a task forever", () => 
     await updateTask(tdb, uid("1"), { title: "Corrected title" }, "admin", CARLA);
 
     expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+  });
+
+  it("does not invent a new assignment when an interleaving PATCH already chose the requested assignee", async () => {
+    const taskId = uid("1");
+    await seed([{ id: taskId, assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+
+    // The other editor gets Alice -> Bob committed before this request's final UPDATE. Bob then sees
+    // and acknowledges that REAL assignment. Our request read Alice first and also asks for Bob, so a
+    // stale JS comparison would stamp again and make Bob's valid acknowledgement look stale.
+    const concurrentAssignmentAt = new Date(Date.now() - 90 * 60 * 1000);
+    const concurrentAcknowledgementAt = new Date(Date.now() - 60 * 60 * 1000);
+    const { tenantDb, didInterleave } = tenantDbWithTaskUpdateInterleave(async () => {
+      await pg.query(
+        `UPDATE public.tasks
+            SET assigned_to = $2::uuid, assigned_at = $3::timestamptz
+          WHERE id = $1::uuid`,
+        [taskId, BOB, concurrentAssignmentAt.toISOString()]
+      );
+      await pg.query(
+        `INSERT INTO public.task_assignment_acknowledgements (task_id, user_id, acknowledged_at)
+         VALUES ($1::uuid, $2::uuid, $3::timestamptz)`,
+        [taskId, BOB, concurrentAcknowledgementAt.toISOString()]
+      );
+    });
+
+    await updateTask(tenantDb as any, taskId, { assignedTo: BOB }, "admin", CARLA);
+
+    expect(didInterleave(), "the concurrent mutation must land after updateTask's read").toBe(true);
+    expect((await getPendingAssignmentTasks(tdb, BOB)).tasks).toEqual([]);
+
+    const stamp = await pg.query<{ acknowledgement_still_answers: boolean }>(
+      `SELECT a.acknowledged_at >= t.assigned_at AS acknowledgement_still_answers
+         FROM public.tasks t
+         JOIN public.task_assignment_acknowledgements a ON a.task_id = t.id AND a.user_id = $2::uuid
+        WHERE t.id = $1::uuid`,
+      [taskId, BOB]
+    );
+    expect(stamp.rows[0]?.acknowledgement_still_answers).toBe(true);
   });
 
   it("does not resurrect an assignment for somebody it was taken AWAY from", async () => {

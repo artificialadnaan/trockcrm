@@ -208,6 +208,19 @@ function persistShownTasks(userId: string, keys: Set<string>) {
 }
 
 /**
+ * A successful interactive sign-in is a NEW login even if the previous cookie died without running
+ * logout(), which is the path that leaves sessionStorage behind. This clears only the temporary
+ * interruption record; acknowledgements remain server-side and untouched.
+ */
+function clearShownTasks(userId: string) {
+  try {
+    window.sessionStorage.removeItem(shownStorageKey(userId));
+  } catch {
+    // Storage unavailable already falls back to the in-memory set.
+  }
+}
+
+/**
  * The new-assignment popup: what landed on you while you were away.
  *
  * MOUNTED ONCE, ROUTE-INDEPENDENT, inside AuthGate and OUTSIDE its <Suspense> boundary. Outside,
@@ -226,7 +239,12 @@ function persistShownTasks(userId: string, keys: Set<string>) {
  * the actual idempotency guarantee.
  */
 export function TaskAssignmentModal() {
-  const { user } = useAuth();
+  const {
+    user,
+    assignmentModalSession,
+    assignmentModalSessionResetPending,
+    consumeAssignmentModalSessionReset,
+  } = useAuth();
   const navigate = useNavigate();
   const officeScopeId = useOfficeScopeId();
   const scopedHref = useOfficeScopedHref();
@@ -256,9 +274,12 @@ export function TaskAssignmentModal() {
    * produced the latch chain this file has already been through three times.
    *
    * Re-hydrated when the user changes, so a second person signing in on the same tab starts clean.
+   * An explicit successful login also gets its own AuthProvider token, which resets only this shown
+   * set. `/auth/me` deliberately does not advance that token: a reload remains the same login.
    */
-  const shownTasksRef = useRef<{ userId: string | null; keys: Set<string> }>({
+  const shownTasksRef = useRef<{ userId: string | null; session: number; keys: Set<string> }>({
     userId: null,
+    session: 0,
     keys: new Set(),
   });
   const acknowledgedRef = useRef(false);
@@ -270,13 +291,40 @@ export function TaskAssignmentModal() {
   // arrives, resolved here so it can be PINNED on the request instead of left ambient.
   const requestOfficeId = officeScopeId ?? user?.officeId ?? null;
 
-  // Hydrated during render, and re-hydrated whenever the person changes. Mutating a ref here rather
-  // than in an effect is deliberate: `needsFetch` and the open decision below both read it in the same
-  // pass, and an effect would leave one render seeing an empty set — which is one dialog nobody wanted.
+  // Hydrated during render, and re-hydrated whenever the person or their explicit-login session
+  // changes. Mutating a ref here rather than in an effect is deliberate: `needsFetch` and the open
+  // decision below both read it in the same pass, and an effect would leave one render seeing an empty
+  // set — which is one dialog nobody wanted. A pending reset belongs to an actual successful login;
+  // a `/auth/me` refresh leaves the token unchanged and therefore rehydrates the persisted shown set.
   const shownUserId = user?.id ?? null;
-  if (shownUserId !== null && shownTasksRef.current.userId !== shownUserId) {
-    shownTasksRef.current = { userId: shownUserId, keys: new Set(readShownTasks(shownUserId)) };
+  const hasNewModalSession = shownTasksRef.current.session !== assignmentModalSession;
+  if (
+    shownUserId !== null &&
+    (shownTasksRef.current.userId !== shownUserId || hasNewModalSession)
+  ) {
+    const resetShownTasks = assignmentModalSessionResetPending && hasNewModalSession;
+    if (resetShownTasks) clearShownTasks(shownUserId);
+    shownTasksRef.current = {
+      userId: shownUserId,
+      session: assignmentModalSession,
+      keys: resetShownTasks ? new Set() : new Set(readShownTasks(shownUserId)),
+    };
   }
+
+  // The pending bit lives in AuthProvider rather than this component so a public-route transition
+  // cannot make a later remount re-apply an old login reset. It is consumed only after this render has
+  // synchronously installed the empty set above; otherwise a fetch could see the prior suppression for
+  // one frame and silently skip the very modal the new login is meant to show.
+  useEffect(() => {
+    if (shownUserId !== null && assignmentModalSessionResetPending) {
+      consumeAssignmentModalSessionReset(assignmentModalSession);
+    }
+  }, [
+    assignmentModalSession,
+    assignmentModalSessionResetPending,
+    consumeAssignmentModalSessionReset,
+    shownUserId,
+  ]);
 
   // The office the server computed `hasPendingTaskAssignments` under. authMiddleware promotes
   // x-office-id into activeOfficeId, so a boot on ?officeId=X yields a flag that describes X.
