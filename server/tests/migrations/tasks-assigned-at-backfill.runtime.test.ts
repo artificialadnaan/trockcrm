@@ -44,6 +44,7 @@ async function seedOffices(schemas: readonly string[]) {
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $fn$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $fn$ LANGUAGE plpgsql;
 
+    CREATE TABLE IF NOT EXISTS public.offices (slug text PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS public.audit_log_probe (id bigserial PRIMARY KEY, action text NOT NULL);
     CREATE OR REPLACE FUNCTION audit_trigger_probe()
     RETURNS TRIGGER AS $fn$
@@ -58,6 +59,7 @@ async function seedOffices(schemas: readonly string[]) {
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         title varchar(500) NOT NULL,
         assigned_to uuid,
+        source text NOT NULL DEFAULT 'manual',
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       );

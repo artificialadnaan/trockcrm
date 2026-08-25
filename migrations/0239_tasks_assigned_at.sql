@@ -42,10 +42,12 @@
 --   * it can omit last_assigned_by while its UPDATE actually moves the row, leaving the prior actor;
 --   * it can supply last_assigned_by while its UPDATE is an assigned_to no-op, inventing an actor move.
 -- Tenant middleware already exposes the authenticated actor as transaction-local app.current_user_id.
--- The second trigger below fills that actor only when a REAL move omitted it, preserves an explicit
--- actor, and restores the old actor on an actual no-op. It inspects the row through JSON because a
--- clean install runs 0239 before 0240 adds the column; no writes are served between startup migrations,
--- and the same guard becomes active as soon as 0240 (or the atomic office provisioner) adds it.
+-- That GUC is NOT proof of a person, though: the inbound-email worker sets it to the task recipient
+-- while refreshing automated rules-engine tasks. The second trigger therefore uses it only to repair
+-- a REAL move on a manual task, preserves an explicit actor, and restores the old actor on every actual
+-- no-op (including automated rows). It inspects the row through JSON because a clean install runs 0239
+-- before 0240 adds the column; no writes are served between startup migrations, and the same guard
+-- becomes active as soon as 0240 (or the atomic office provisioner) adds it.
 --
 -- THE BACKFILL USES created_at, NOT now(), AND THAT DIRECTION IS DELIBERATE. History does not record
 -- when a task changed hands, so any value is a guess; created_at is the earliest defensible one. Being
@@ -118,8 +120,10 @@ BEGIN
   END IF;
 
   -- An explicit actor from either API generation is authoritative. The session actor only repairs the
-  -- stale-pre-read case where a real database change arrived with the old actor copied through.
+  -- stale-pre-read shape on a HUMAN task. The rules engine also leaves the old actor copied through,
+  -- but its rows are source='automated' and its worker GUC names the recipient, not an assigner.
   IF (new_row -> 'last_assigned_by') IS NOT DISTINCT FROM (old_row -> 'last_assigned_by')
+     AND (new_row ->> 'source') = 'manual'
      AND actor_user_id IS NOT NULL THEN
     NEW := jsonb_populate_record(
       NEW,
@@ -130,6 +134,88 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
+
+-- A rolling deploy has TWO provisioners. The upgraded API replays this file's tenant block, but an old
+-- #1107 API container has 0240 and not 0239 baked into its image. Without a durable fence, that old
+-- container can commit a brand-new office after the migration's schema scan; the 0239 ledger is then
+-- present, so no later boot ever revisits the missing column or triggers.
+--
+-- Install the fence BEFORE scanning existing offices. CREATE TRIGGER takes a lock on public.offices:
+-- an old provisioning transaction that inserted before this statement must commit before installation
+-- can finish, and the scan below then sees and stages its now-visible schema. An insert that starts after
+-- installation receives this deferred event. It fires only at COMMIT, after the legacy provisioner has
+-- created tasks and replayed 0240, but before the incomplete office becomes visible.
+CREATE OR REPLACE FUNCTION public.repair_tasks_assigned_at_after_office_provision()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $office_tasks$
+DECLARE
+  schema_name text := 'office_' || NEW.slug;
+  tasks_relation regclass;
+BEGIN
+  -- createOffice accepts exactly this slug grammar. Fail closed because this trigger is attached to the
+  -- table rather than only to that call site: consuming a malformed event would strand a ledger-hidden
+  -- office. format(%I) still quotes the validated identifier before every dynamic statement below.
+  IF NEW.slug IS NULL OR NEW.slug !~ '^[a-z][a-z0-9_]*$' THEN
+    RAISE EXCEPTION 'Cannot provision tasks.assigned_at for invalid office slug "%"', NEW.slug;
+  END IF;
+
+  tasks_relation := to_regclass(format('%I.tasks', schema_name));
+  IF tasks_relation IS NULL THEN
+    RAISE EXCEPTION 'Office "%" was committed before its tasks table was provisioned', NEW.slug;
+  END IF;
+
+  -- Use the SAME staged shape as the existing-office path: nullable first, then a default and both
+  -- compatibility triggers. The old provisioner normally leaves this table empty, but the NULL-only
+  -- created_at fill makes the fence converge correctly even if a future provisioner seeds tasks in its
+  -- own still-uncommitted transaction. Suspend the two ordinary row triggers so that defensive fill
+  -- cannot manufacture a user-visible audit entry or rewrite the contacts "Last touch" timestamp.
+  EXECUTE format(
+    'ALTER TABLE %1$I.tasks
+       ADD COLUMN IF NOT EXISTS assigned_at timestamptz;
+     ALTER TABLE %1$I.tasks
+       ALTER COLUMN assigned_at SET DEFAULT now()',
+    schema_name
+  );
+
+  EXECUTE format('DROP TRIGGER IF EXISTS stamp_tasks_assigned_at ON %I.tasks', schema_name);
+  EXECUTE format(
+    'CREATE TRIGGER stamp_tasks_assigned_at
+       BEFORE UPDATE OF assigned_to ON %I.tasks
+       FOR EACH ROW
+       WHEN (OLD.assigned_to IS DISTINCT FROM NEW.assigned_to)
+       EXECUTE FUNCTION public.stamp_task_assigned_at()',
+    schema_name
+  );
+
+  EXECUTE format('DROP TRIGGER IF EXISTS stabilize_tasks_assignment_actor ON %I.tasks', schema_name);
+  EXECUTE format(
+    'CREATE TRIGGER stabilize_tasks_assignment_actor
+       BEFORE UPDATE OF assigned_to ON %I.tasks
+       FOR EACH ROW
+       EXECUTE FUNCTION public.stabilize_task_assignment_actor()',
+    schema_name
+  );
+
+  EXECUTE format('ALTER TABLE %I.tasks DISABLE TRIGGER set_tasks_updated_at', schema_name);
+  EXECUTE format('ALTER TABLE %I.tasks DISABLE TRIGGER audit_tasks', schema_name);
+  EXECUTE format(
+    'UPDATE %I.tasks SET assigned_at = created_at WHERE assigned_at IS NULL',
+    schema_name
+  );
+  EXECUTE format('ALTER TABLE %I.tasks ALTER COLUMN assigned_at SET NOT NULL', schema_name);
+  EXECUTE format('ALTER TABLE %I.tasks ENABLE TRIGGER audit_tasks', schema_name);
+  EXECUTE format('ALTER TABLE %I.tasks ENABLE TRIGGER set_tasks_updated_at', schema_name);
+
+  RETURN NULL;
+END $office_tasks$;
+
+DROP TRIGGER IF EXISTS tasks_assigned_at_on_office_provision ON public.offices;
+CREATE CONSTRAINT TRIGGER tasks_assigned_at_on_office_provision
+AFTER INSERT ON public.offices
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION public.repair_tasks_assigned_at_after_office_provision();
 
 -- Existing tenants: add the column in every office_* schema. Dating the existing rows from their
 -- creation happens in the runner step afterwards, per office.

@@ -18,6 +18,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
+import { runTasksAssignedAtBackfill } from "../../src/migrations/tasks-assigned-at-backfill.js";
 
 const MIGRATION = "0239_tasks_assigned_at";
 const OFFICES = ["office_dallas", "office_atlanta", "office_houston"] as const;
@@ -37,6 +38,7 @@ async function seedOffices(schemas: readonly string[]) {
     BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
     $fn$ LANGUAGE plpgsql;
 
+    CREATE TABLE IF NOT EXISTS public.offices (slug text PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS public.audit_log_probe (id bigserial PRIMARY KEY, action text NOT NULL);
 
     CREATE OR REPLACE FUNCTION audit_trigger_probe() RETURNS TRIGGER AS $fn$
@@ -51,6 +53,7 @@ async function seedOffices(schemas: readonly string[]) {
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         title varchar(500) NOT NULL,
         assigned_to uuid,
+        source text NOT NULL DEFAULT 'manual',
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       );
@@ -66,6 +69,38 @@ async function seedOffices(schemas: readonly string[]) {
     await pg.exec(`DELETE FROM public.audit_log_probe;`);
   }
 }
+
+/**
+ * The tenant shape an API image with #1107/0240 but without #1108/0239 provisions.
+ *
+ * Kept in SQL next to the race tests so the missing capability is visible: last_assigned_by exists,
+ * assigned_at does not. The ordinary 0001 row triggers are present because the repair must suspend
+ * them around its defensive created_at fill rather than corrupting audit/Last-touch evidence.
+ */
+function legacyProvisionSql(slug: string) {
+  const schema = `office_${slug}`;
+
+  return `
+    CREATE SCHEMA ${schema};
+    CREATE TABLE ${schema}.tasks (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      title varchar(500) NOT NULL,
+      assigned_to uuid,
+      source text NOT NULL DEFAULT 'automated',
+      last_assigned_by uuid,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TRIGGER set_tasks_updated_at
+      BEFORE UPDATE ON ${schema}.tasks FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    CREATE TRIGGER audit_tasks
+      AFTER INSERT OR UPDATE OR DELETE ON ${schema}.tasks
+      FOR EACH ROW EXECUTE FUNCTION audit_trigger_probe();
+  `;
+}
+
+const asBackfillClient = () =>
+  pg as unknown as Parameters<typeof runTasksAssignedAtBackfill>[0];
 
 beforeEach(async () => {
   pg = new PGlite();
@@ -134,6 +169,136 @@ describe("migration 0239 — tasks.assigned_at", () => {
     }
   });
 
+  it("installs a deferred provisioning fence BEFORE the existing-office scan", () => {
+    const source = migrationSql(MIGRATION);
+    const guard = source.indexOf("CREATE CONSTRAINT TRIGGER tasks_assigned_at_on_office_provision");
+    const scan = source.indexOf("DO $tenant$");
+
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(source.slice(guard, scan)).toContain("AFTER INSERT ON public.offices");
+    expect(source.slice(guard, scan)).toContain("DEFERRABLE INITIALLY DEFERRED");
+    expect(guard, "the scan can miss a legacy provisioner that committed while guard DDL waited").toBeLessThan(scan);
+  });
+
+  it("repairs a legacy #1107 provisioner at COMMIT, then converges with the runner scan", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(migrationSql(MIGRATION));
+
+    // The INSERT is intentionally first, matching createOffice. If the constraint trigger becomes
+    // immediate, it fires here before `tasks` exists and this transaction fails. The old image then
+    // provisions through 0240 (last_assigned_by exists) but never sees the new 0239 file.
+    await pg.exec(`
+      BEGIN;
+      INSERT INTO public.offices (slug) VALUES ('tulsa');
+      ${legacyProvisionSql("tulsa")}
+      COMMIT;
+    `);
+
+    const repaired = await pg.query<{
+      isNullable: string;
+      hasDefault: boolean;
+      stampTriggers: number;
+      actorTriggers: number;
+    }>(`
+      SELECT
+        c.is_nullable AS "isNullable",
+        c.column_default IS NOT NULL AS "hasDefault",
+        (SELECT COUNT(*)::int FROM pg_trigger
+          WHERE tgrelid = 'office_tulsa.tasks'::regclass
+            AND tgname = 'stamp_tasks_assigned_at' AND NOT tgisinternal) AS "stampTriggers",
+        (SELECT COUNT(*)::int FROM pg_trigger
+          WHERE tgrelid = 'office_tulsa.tasks'::regclass
+            AND tgname = 'stabilize_tasks_assignment_actor' AND NOT tgisinternal) AS "actorTriggers"
+      FROM information_schema.columns c
+      WHERE c.table_schema = 'office_tulsa'
+       AND c.table_name = 'tasks'
+       AND c.column_name = 'assigned_at'
+    `);
+    expect(repaired.rows[0]).toMatchObject({
+      isNullable: "NO",
+      hasDefault: true,
+      stampTriggers: 1,
+      actorTriggers: 1,
+    });
+
+    // This office committed after the SQL file's scan and before the ordinary per-office step. Traffic
+    // can reach it in that gap, so exercise the old worker's INSERT shape before the helper discovers it.
+    // The guard's default must make it self-creation-shaped immediately; the helper must then skip the
+    // non-NULL version without firing ordinary row triggers.
+    await pg.exec(`
+      INSERT INTO office_tulsa.tasks (title, assigned_to)
+      VALUES ('legacy worker task', '${USER_A}');
+    `);
+    const inserted = await pg.query<{ version: string; updatedAt: string; sameAsCreated: boolean }>(
+      `SELECT assigned_at::text AS version,
+              updated_at::text AS "updatedAt",
+              assigned_at = created_at AS "sameAsCreated"
+         FROM office_tulsa.tasks`
+    );
+    expect(inserted.rows[0]?.sameAsCreated).toBe(true);
+    await pg.exec(`DELETE FROM public.audit_log_probe`);
+
+    await expect(runTasksAssignedAtBackfill(asBackfillClient())).resolves.toBeUndefined();
+    const converged = await pg.query<{ version: string; updatedAt: string; auditRows: number }>(`
+      SELECT assigned_at::text AS version,
+             updated_at::text AS "updatedAt",
+             (SELECT COUNT(*)::int FROM public.audit_log_probe) AS "auditRows"
+        FROM office_tulsa.tasks
+    `);
+    expect(converged.rows[0]).toMatchObject({
+      version: inserted.rows[0]?.version,
+      updatedAt: inserted.rows[0]?.updatedAt,
+      auditRows: 0,
+    });
+
+    // The email worker binds app.current_user_id to the RECIPIENT while its rules engine updates an
+    // automated task. That value must never become the human assigner merely because the writer leaves
+    // last_assigned_by unchanged. assigned_at still advances: the assignment itself is real.
+    await pg.exec(`SELECT set_config('app.current_user_id', '${USER_C}', false)`);
+    const before = await pg.query<{ version: string }>(
+      `SELECT assigned_at::text AS version FROM office_tulsa.tasks`
+    );
+    await pg.exec(`UPDATE office_tulsa.tasks SET assigned_to = '${USER_B}'`);
+    const machineMove = await pg.query<{ actor: string | null; newer: boolean; version: string }>(
+      `SELECT last_assigned_by AS actor,
+              assigned_at > $1::timestamptz AS newer,
+              assigned_at::text AS version
+         FROM office_tulsa.tasks`,
+      [before.rows[0]?.version]
+    );
+    expect(machineMove.rows[0]?.actor).toBeNull();
+    expect(machineMove.rows[0]?.newer).toBe(true);
+
+    // No-op restoration remains source-agnostic. A stale legacy shape that supplies an actor for an
+    // already-current assignee cannot transfer the reply loop, even on an automated row.
+    await pg.exec(`
+      UPDATE office_tulsa.tasks
+         SET assigned_to = '${USER_B}', last_assigned_by = '${USER_A}'
+    `);
+    const machineNoOp = await pg.query<{ actor: string | null; version: string }>(
+      `SELECT last_assigned_by AS actor, assigned_at::text AS version FROM office_tulsa.tasks`
+    );
+    expect(machineNoOp.rows[0]?.actor).toBeNull();
+    expect(machineNoOp.rows[0]?.version).toBe(machineMove.rows[0]?.version);
+  });
+
+  it("fails closed when constraints are forced before a tenant tasks table exists", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(migrationSql(MIGRATION));
+
+    await pg.exec("BEGIN");
+    await pg.exec(`INSERT INTO public.offices (slug) VALUES ('too_early')`);
+    await expect(pg.exec("SET CONSTRAINTS ALL IMMEDIATE")).rejects.toThrow(
+      /before its tasks table was provisioned/
+    );
+    await pg.exec("ROLLBACK");
+
+    const visible = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM public.offices WHERE slug = 'too_early'`
+    );
+    expect(visible.rows[0]?.n).toBe(0);
+  });
+
   // AN ALLOWLIST, NOT A DENYLIST — mirroring 0233's guard, and for the reason that one was rewritten.
   // A denylist names the statements seen to be dangerous so far; a bare `ADD CONSTRAINT ... CHECK`
   // walked past 0233's first version while doing exactly what it forbade. So the question is inverted:
@@ -143,11 +308,20 @@ describe("migration 0239 — tasks.assigned_at", () => {
   //
   // ADD COLUMN is nullable and metadata-only. SET DEFAULT now() affects only later inserts, so existing
   // rows remain NULL for the runner while old-image inserts are safe immediately.
+  const crossTenantAndProvisionerSource = () => {
+    const source = migrationSql(MIGRATION);
+    const scanStart = source.indexOf("DO $tenant$");
+    const scanEnd = source.indexOf("END $tenant$;", scanStart) + "END $tenant$;".length;
+    const markerStart = source.indexOf("-- TENANT_SCHEMA_START");
+    const markerEnd = source.indexOf("-- TENANT_SCHEMA_END", markerStart);
+    return `${source.slice(scanStart, scanEnd)}\n${source.slice(markerStart, markerEnd)}`;
+  };
+
   const alterTableActions = () => {
     const actions: string[] = [];
     const re = /ALTER\s+TABLE\s+[^\s]+\s+([\s\S]*?);/gi;
     let match: RegExpExecArray | null;
-    while ((match = re.exec(migrationSql(MIGRATION))) !== null) {
+    while ((match = re.exec(crossTenantAndProvisionerSource())) !== null) {
       actions.push(match[1].replace(/\s+/g, " ").trim());
     }
     return actions;
@@ -191,11 +365,11 @@ describe("migration 0239 — tasks.assigned_at", () => {
     expect(result.rows[0]?.atthasmissing, "the staged column unexpectedly carries a missing default").toBe(false);
   });
 
-  // THE BACKFILL MUST NOT COME BACK. Restoring it would restore the cross-tenant lock hold this PR
-  // moved it out to avoid, and it would read as a perfectly ordinary DO block in review. Kept as
-  // explicit negatives alongside the allowlist because each names its own reason on failure.
-  it("runs no UPDATE and never suspends row triggers — both belong to the runner step", async () => {
-    const source = migrationSql(MIGRATION)
+  // THE CROSS-TENANT BACKFILL MUST NOT COME BACK. The deferred guard is deliberately allowed to fill
+  // one still-uncommitted tenant; this assertion isolates the deployment scan and provisioner marker,
+  // where an UPDATE or trigger suspension would hold locks across existing offices again.
+  it("keeps UPDATE and row-trigger suspension out of the cross-tenant scan", async () => {
+    const source = crossTenantAndProvisionerSource()
       .split("\n")
       .filter((line) => !line.trimStart().startsWith("--"))
       .join("\n");
@@ -263,6 +437,14 @@ describe("migration 0239 — tasks.assigned_at", () => {
     await seedOffices(["office_tulsa"]);
     await pg.exec(`DELETE FROM office_tulsa.tasks`);
     await pg.exec(block.replace(/office_dallas/g, "office_tulsa"));
+    // At a real upgraded createOffice commit, the permanent public.offices fence sees this already-
+    // provisioned shape after the marker ran. Fire that event too: its staged repair must be idempotent
+    // with the current provisioner, not merely able to rescue the legacy one above.
+    await pg.exec(`
+      BEGIN;
+      INSERT INTO public.offices (slug) VALUES ('tulsa');
+      COMMIT;
+    `);
 
     const result = await pg.query<{ n: number; isNullable: string; hasDefault: boolean }>(
       `SELECT

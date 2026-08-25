@@ -56,6 +56,7 @@ beforeAll(async () => {
   // migration's own tenant loop finds it exactly as it would in production.
   await pg.exec(tenantSchemaSql(SCHEMA, [tasks]));
   await pg.exec(`
+    CREATE TABLE IF NOT EXISTS public.offices (slug text PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS public.users (id uuid PRIMARY KEY, display_name varchar(255));
     INSERT INTO public.users (id, display_name) VALUES ('${BOB}', 'Adam Shaw'), ('${ALICE}', 'Alice Rep');
 
