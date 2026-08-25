@@ -706,7 +706,19 @@ function rendersAsNormalText(attribute: {
   return false;
 }
 
+// Memoised across the suite. The sweep TS-parses every .tsx under client/src — roughly a thousand files —
+// and four tests below need the same answer. Recomputing it per test spent that cost four times over and
+// put each run against vitest's 5s default, which is close enough to the budget that a loaded CI runner
+// tips it over: the guard then fails for want of a machine, not for want of contrast. A guard that reddens
+// at random is one people learn to re-run rather than read.
+//
+// Safe to cache because the sweep is a pure function of files on disk, and nothing in this suite writes to
+// them. It is per-run, not persisted, so a mutation to a source file is still picked up on the next run —
+// which is what the mutation testing this guard was built with depends on.
+let sweepCache: string[] | null = null;
+
 function smallSlate400Sites(): string[] {
+  if (sweepCache) return sweepCache;
   const found: string[] = [];
   const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -725,10 +737,19 @@ function smallSlate400Sites(): string[] {
     }
   };
   walk(CLIENT_SRC);
+  sweepCache = found;
   return found;
 }
 
-describe("muted text does not get quieter", () => {
+// The first test through pays for the whole sweep — ~3s locally on an idle machine, against vitest's 5s
+// default. Memoising took the suite from four sweeps to one, but 60% of the budget is still not a margin:
+// a CI runner under load tips it, and the guard then fails for want of a machine rather than for want of
+// contrast. Given the choice between a fast guard that reddens at random and a slow one that means what it
+// says, take the slow one — a flaky guard gets re-run rather than read, which is how a real finding gets
+// waved through.
+const SWEEP_TIMEOUT_MS = 30_000;
+
+describe("muted text does not get quieter", { timeout: SWEEP_TIMEOUT_MS }, () => {
   it("finds the sites at all — an empty sweep would make the ratchet meaningless", () => {
     // The standing failure of a counting guard: the scan breaks, everything reports zero, and it reads as
     // an improvement. A floor matters as much as a ceiling.
