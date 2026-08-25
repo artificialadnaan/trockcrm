@@ -188,6 +188,53 @@ describe("task.replied", () => {
     expect(String(insertCall()![1]![3])).toHaveLength(500);
   });
 
+  // notifications.title is VARCHAR(500). Prefixing the replier onto a near-limit task title pushes the
+  // composed string past it, Postgres rejects the INSERT, and because this runs inside a DURABLE job
+  // the failure is not a lost bell row -- it burns the retry budget and eventually dead-letters, while
+  // the comment and the email both already succeeded. A failure in the LEAST important of the three
+  // channels consuming the budget that exists for the important ones.
+  it("caps the composed title at the column width", async () => {
+    mockOffice("dallas");
+
+    await handleTaskRepliedEvent(
+      {
+        taskId: TASK,
+        taskTitle: "T".repeat(600),
+        assignerId: ASSIGNER,
+        authorName: "Derek Barr",
+        replyBody: "hi",
+      },
+      "office-1"
+    );
+
+    const title = String(insertCall()![1]![2]);
+    expect(title.length).toBeLessThanOrEqual(500);
+    // ...and it still says who replied, which is the part that carries the meaning.
+    expect(title.startsWith("Derek Barr replied to: ")).toBe(true);
+  });
+
+  it("leaves a title that already fits completely alone", async () => {
+    mockOffice("dallas");
+    await handleTaskRepliedEvent(
+      { taskId: TASK, taskTitle: "Send the roof photos", assignerId: ASSIGNER, authorName: "Derek Barr" },
+      "office-1"
+    );
+    expect(insertCall()![1]![2]).toBe("Derek Barr replied to: Send the roof photos");
+  });
+
+  // The assignment side composes a title the same way and has the same ceiling.
+  it("caps the assignment title too", async () => {
+    mockOffice("dallas");
+    await handleTaskAssignedEvent(
+      { taskId: TASK, assignedTo: ASSIGNEE, title: "T".repeat(600) },
+      "office-1"
+    );
+    const [, params] = insertCall()!;
+    expect(String(params![2]).length).toBeLessThanOrEqual(500);
+    // body is TEXT, not VARCHAR(500) -- it is not capped, and must not be truncated by accident.
+    expect(String(params![3]).length).toBe(600);
+  });
+
   it("falls back to a neutral replier when no display name is recorded", async () => {
     mockOffice("dallas");
     await handleTaskRepliedEvent(

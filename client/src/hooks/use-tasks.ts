@@ -59,6 +59,17 @@ export interface Task {
   assignerAckAt?: string | null;
   /** Replies made since `assignerAckAt`. Server-computed — never derived from a loaded page. */
   unreadReplyCount?: number;
+  /**
+   * May THIS viewer close this task? The SERVER's verdict, carried on every task projection.
+   *
+   * Not re-derived here on purpose: task visibility and close authority are different rules -- the
+   * list only scopes reps, so construction and field_contractor users are handed every task in the
+   * office -- and a second copy of the authority rule in the browser is how the two drift apart.
+   *
+   * `undefined` means an API that predates the field; treated as ALLOWED so a deploy window does not
+   * disable every control. The server still refuses what it refuses.
+   */
+  canClose?: boolean;
 }
 
 /**

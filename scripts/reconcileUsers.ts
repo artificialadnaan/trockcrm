@@ -611,6 +611,16 @@ async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUse
     );
     for (const row of leads.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_lead", entityType: `${schemaName}.lead`, entityId: row.id, email, before: fromUserId, after: toUserId, details: row.name ?? "" });
 
+    // `last_assigned_by` is DELIBERATELY not touched here. A merge moves the ASSIGNEE because an
+    // account is being retired; it is not somebody deciding to hand the work over, and whoever last
+    // assigned the task is still the person waiting on a reply to it. Both alternatives are worse:
+    // setting the merge target makes the new assignee their own assigner, so every reply they write
+    // becomes a self-reply the loop notifies nobody about; setting NULL reads as "never reassigned"
+    // and silently re-points the loop at created_by. If the identity being merged away is itself an
+    // assigner, the loop already reports assigner_inactive and declines to mail them.
+    // (Transferring the assigner role on merge is a defensible follow-up — it is just not what a
+    // reassignment of the ASSIGNEE means.) Proven by execution in
+    // server/tests/scripts/reconcile-users-task-assigner.runtime.test.ts.
     const tasks = await client.query(
       `UPDATE ${schemaName}.tasks SET assigned_to = $2, updated_at = NOW() WHERE assigned_to = $1 RETURNING id, title, status`,
       [fromUserId, toUserId]

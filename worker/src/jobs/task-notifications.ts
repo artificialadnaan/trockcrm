@@ -26,6 +26,25 @@ import { resolveOfficeSchema, type OfficeSchemaPool } from "./office-schema.js";
 
 type WorkerPool = OfficeSchemaPool;
 
+/**
+ * `notifications.title` is VARCHAR(500) (0001_initial). Every title here is COMPOSED -- a fixed
+ * prefix plus a user-supplied task title, which is itself VARCHAR(500) -- so the sum can exceed the
+ * column even though neither part does.
+ *
+ * That matters more than a truncated string, because this runs inside a DURABLE job: an over-long
+ * title does not lose a bell row, it fails the INSERT, burns a retry, and eventually dead-letters the
+ * job -- after the comment and the email have already succeeded. The least important of the three
+ * channels would be consuming the retry budget that exists for the important ones.
+ *
+ * The ellipsis is inside the budget, so the result is always <= the limit.
+ */
+const NOTIFICATION_TITLE_MAX = 500;
+
+function capNotificationTitle(title: string) {
+  if (title.length <= NOTIFICATION_TITLE_MAX) return title;
+  return `${title.slice(0, NOTIFICATION_TITLE_MAX - 1)}\u2026`;
+}
+
 async function insertNotification(
   workerPool: WorkerPool,
   schemaName: string,
@@ -82,7 +101,7 @@ export async function handleTaskAssignedEvent(payload: any, officeId: string | n
   await insertNotification(workerPool as WorkerPool, resolved.schemaName, {
     userId: payload.assignedTo,
     type: "task_assigned",
-    title: `New task assigned: ${payload.title}`,
+    title: capNotificationTitle(`New task assigned: ${payload.title}`),
     body: payload.title,
     link: taskNotificationLink(payload.taskId, resolved.officeId),
   });
@@ -114,7 +133,7 @@ export async function handleTaskRepliedEvent(payload: any, officeId: string | nu
   await insertNotification(workerPool as WorkerPool, resolved.schemaName, {
     userId: payload.assignerId,
     type: "task_replied",
-    title: `${replier} replied to: ${payload.taskTitle ?? "a task"}`,
+    title: capNotificationTitle(`${replier} replied to: ${payload.taskTitle ?? "a task"}`),
     // The reply text itself, so the bell says what was said rather than only that something was.
     // notifications.body is TEXT, but the popover renders it inline — a wall of text there is its own
     // failure, so it is capped and the full thread is one click away.

@@ -37,6 +37,7 @@ const ASSIGNER = uid("a2");
 const STRANGER = uid("a3");
 const ADMIN = uid("a4");
 const MACHINE_TASK = uid("f1");
+const DEAL = uid("d1");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -74,6 +75,9 @@ beforeAll(async () => {
     INSERT INTO users (id, display_name) VALUES
       ('${ASSIGNEE}','Assignee'), ('${ASSIGNER}','Assigner'),
       ('${STRANGER}','Stranger'), ('${ADMIN}','Admin');
+    -- getProjectTasks requires an ACTIVE deal carrying a procore_project_id.
+    INSERT INTO deals (id, name, procore_project_id, assigned_rep_id)
+    VALUES ('${DEAL}', 'Roof job', 'pc-1', '${ASSIGNEE}');
   `);
   tdb = drizzle(pg);
 }, 30000);
@@ -164,6 +168,80 @@ describe("a rep can reach a task they ASSIGNED, not just one assigned to them", 
     const { getTasks } = await import("../../../src/modules/tasks/service.js");
     const result = await getTasks(tdb, {}, "rep", ASSIGNER);
     expect(result.tasks.map((t: { id: string }) => t.id)).not.toContain(CASE);
+  });
+});
+
+// THE GUARD MADE DEAD CONTROLS. `getTasks` only scopes REPS, so a construction user is handed every
+// task in the office -- and the row then renders a completion checkbox and the edit dialog offers
+// Dismiss, both of which now 403. "Offered, then refused" is worse than the permissive behaviour it
+// replaced: the button looks like every other button and simply never works.
+//
+// The client cannot re-derive this. Visibility and close authority are two different rules, and a
+// second copy of the second one in the browser is how they drift. The projection carries the server's
+// own verdict.
+describe("close authority is exposed on every task projection", () => {
+  it("getTasks marks rows the caller may and may not close", async () => {
+    const { getTasks } = await import("../../../src/modules/tasks/service.js");
+
+    const asStranger = await getTasks(tdb, {}, "construction", STRANGER);
+    const row = asStranger.tasks.find((t: { id: string }) => t.id === CASE);
+    expect(row, "construction users are still handed the row").toBeDefined();
+    expect((row as { canClose?: boolean }).canClose).toBe(false);
+
+    // Only the roles the LIST actually hands this row to. A rep who merely ASSIGNED the task is
+    // deliberately not one of them -- getTasks scopes reps to `assigned_to`, and their assigned-out
+    // work surfaces in the separate "Needs your attention" bucket instead.
+    for (const [role, id] of [["rep", ASSIGNEE], ["admin", ADMIN]] as const) {
+      const result = await getTasks(tdb, {}, role, id);
+      const mine = result.tasks.find((t: { id: string }) => t.id === CASE);
+      expect(mine, `${role}/${id} should be handed the row`).toBeDefined();
+      expect((mine as { canClose?: boolean }).canClose, `${role}/${id}`).toBe(true);
+    }
+
+    // ...and the assigner's own bucket carries the verdict too, since it renders the same row.
+    const { getTasksAwaitingMe } = await import("../../../src/modules/tasks/closed-loop-service.js");
+    void getTasksAwaitingMe;
+  });
+
+  it("getTaskById carries the same verdict", async () => {
+    const { getTaskById } = await import("../../../src/modules/tasks/service.js");
+    expect((await getTaskById(tdb, CASE, "construction", STRANGER))?.canClose).toBe(false);
+    expect((await getTaskById(tdb, CASE, "rep", ASSIGNEE))?.canClose).toBe(true);
+  });
+
+  it("getProjectTasks carries it too — the Procore surface has the same buttons", async () => {
+    const { getProjectTasks } = await import("../../../src/modules/tasks/service.js");
+    await pg.exec(`UPDATE tasks SET deal_id = '${DEAL}' WHERE id = '${CASE}'`);
+
+    const rows = await getProjectTasks(tdb, DEAL, "construction", STRANGER);
+    const row = rows.find((t: { id: string }) => t.id === CASE);
+    expect((row as { canClose?: boolean })?.canClose).toBe(false);
+  });
+
+  // The verdict must agree with what the write path actually does, or it is just a second opinion.
+  it("agrees with completeTask for every role/actor pair", async () => {
+    const { getTaskById, completeTask } = await import("../../../src/modules/tasks/service.js");
+
+    for (const [role, id] of [
+      ["construction", STRANGER], ["rep", STRANGER], ["field_contractor", STRANGER],
+      ["rep", ASSIGNEE], ["rep", ASSIGNER], ["admin", ADMIN], ["director", ADMIN],
+    ] as const) {
+      await seedTask(CASE);
+      let claimed: boolean | undefined;
+      try {
+        claimed = (await getTaskById(tdb, CASE, role, id))?.canClose;
+      } catch {
+        claimed = false; // cannot even see it, so certainly cannot close it
+      }
+
+      let actual = true;
+      try {
+        await completeTask(tdb, CASE, role, id);
+      } catch {
+        actual = false;
+      }
+      expect(claimed, `${role}/${id}`).toBe(actual);
+    }
   });
 });
 

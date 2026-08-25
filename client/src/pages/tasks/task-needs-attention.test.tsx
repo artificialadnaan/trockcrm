@@ -274,6 +274,62 @@ describe("triage context is preserved", () => {
   });
 });
 
+// EVERY close control gated on the SERVER's verdict, not just the drawer's.
+//
+// `getTasks` only scopes REPS, so a construction or field_contractor user is handed every task in the
+// office. Their rows kept rendering a completion checkbox that the close-authority guard now 403s.
+// "Offered, then refused" is worse than the permissive behaviour it replaced: the control looks like
+// every working one and never succeeds. The verdict is not re-derived here -- visibility and close
+// authority are different rules, and a browser copy of the second is how they drift.
+describe("close controls follow the server's verdict", () => {
+  function withOverdue(row: Record<string, unknown>) {
+    apiMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/tasks/awaiting-me")) return { tasks: [] };
+      if (url.startsWith("/tasks/counts")) return EMPTY_COUNTS;
+      if (url.includes("section=overdue")) {
+        return {
+          tasks: [taskFixture({ id: "own-1", title: "Gated task", ...row })],
+          pagination: { page: 1, limit: 100, total: 1, totalPages: 1 },
+        };
+      }
+      return EMPTY_LIST;
+    });
+  }
+
+  const completeButton = () =>
+    container.querySelector<HTMLButtonElement>('button[aria-label="Complete Gated task"]');
+
+  it("enables the completion checkbox when the server says the viewer may close", async () => {
+    withOverdue({ canClose: true });
+    renderPage();
+    await flush();
+    expect(completeButton()!.disabled).toBe(false);
+  });
+
+  it("DISABLES it when the server says they may not", async () => {
+    withOverdue({ canClose: false });
+    renderPage();
+    await flush();
+    expect(completeButton()!.disabled).toBe(true);
+  });
+
+  it("says why, rather than looking broken", async () => {
+    withOverdue({ canClose: false });
+    renderPage();
+    await flush();
+    expect(completeButton()!.getAttribute("title")).toMatch(/assign|admin/i);
+  });
+
+  // An API that predates the field returns no `canClose`. Treating undefined as "not allowed" would
+  // disable every row during the deploy window; the server remains the one that decides.
+  it("stays enabled when the field is absent", async () => {
+    withOverdue({});
+    renderPage();
+    await flush();
+    expect(completeButton()!.disabled).toBe(false);
+  });
+});
+
 describe("/tasks/:taskId", () => {
   // C7: this route rendered one TaskRow in a "Linked task" banner. Both of the feature's emails
   // deep-link here, so it has to be the detail surface.

@@ -89,6 +89,9 @@ type LoopTaskRow = {
   originRule: string | null;
   assignedTo: string;
   createdBy: string | null;
+  /** WHO last handed this task over; NULL until it is reassigned. Resolved against createdBy — see
+   *  resolveTaskAssignerId. */
+  lastAssignedBy: string | null;
   lastReplyAt: Date | null;
   assignerAckAt: Date | null;
 };
@@ -271,11 +274,32 @@ async function loadLoopTask(
  * on the payload rather than silently rerouted to an office admin: mailing somebody a reply to a task
  * they never assigned is a different wrong answer, not a fix.
  */
+/**
+ * WHO IS WAITING ON THIS TASK.
+ *
+ * `last_assigned_by` when the task has changed hands, `created_by` otherwise — because until it does,
+ * the person who created it IS the person who assigned it. The distinction is the whole point:
+ * PATCH /tasks/:id moves the assignment and mails the CURRENT requester as the assigner while
+ * `created_by` never moves, so delivering to `created_by` sent the new assignee's reply to whoever
+ * originally typed the task — and on a machine-created task, to nobody, despite a human assignment
+ * email having just gone out.
+ *
+ * One definition, used by delivery, acknowledgement authority and the awaiting-me scope alike, and
+ * mirrored EXACTLY by 0240's expression index. If this resolution and that index ever disagree the
+ * bucket silently stops using the index.
+ */
+export function resolveTaskAssignerId(
+  task: { lastAssignedBy: string | null; createdBy: string | null }
+): string | null {
+  return task.lastAssignedBy ?? task.createdBy;
+}
+
 export async function getTaskLoopDescriptor(
   tenantDb: TenantDb,
-  task: { createdBy: string | null }
+  task: { lastAssignedBy: string | null; createdBy: string | null }
 ): Promise<TaskLoopDescriptor> {
-  if (!task.createdBy) {
+  const assignerId = resolveTaskAssignerId(task);
+  if (!assignerId) {
     return {
       assignerId: null,
       assignerName: null,
@@ -288,13 +312,13 @@ export async function getTaskLoopDescriptor(
   const [assigner] = await tenantDb
     .select({ id: users.id, displayName: users.displayName, isActive: users.isActive })
     .from(users)
-    .where(eq(users.id, task.createdBy))
+    .where(eq(users.id, assignerId))
     .limit(1);
 
   // A missing row is treated exactly like an inactive one: there is nobody to notify either way.
   const isActive = Boolean(assigner?.isActive);
   return {
-    assignerId: task.createdBy,
+    assignerId,
     assignerName: assigner?.displayName ?? null,
     assignerIsActive: isActive,
     notifiesAssigner: isActive,
@@ -491,6 +515,7 @@ export interface AwaitingMeTask {
   assignedTo: string;
   assignedToName: string | null;
   createdBy: string | null;
+  lastAssignedBy: string | null;
   dealId: string | null;
   dealName: string | null;
   dealIsChangeOrder: boolean | null;
@@ -565,6 +590,7 @@ export async function getTasksAwaitingMe(
       assignedTo: tasks.assignedTo,
       assignedToName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`,
       createdBy: tasks.createdBy,
+      lastAssignedBy: tasks.lastAssignedBy,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -594,7 +620,11 @@ export async function getTasksAwaitingMe(
     .leftJoin(deals, eq(tasks.dealId, deals.id))
     .where(
       and(
-        eq(tasks.createdBy, userId),
+        // Scoped by the RESOLVED assigner, expression and all: a task reassigned away from you stops
+        // being yours to chase, and one you handed out becomes yours even though you never created
+        // it. Written as the same COALESCE 0240's index is built on -- a mismatch here would quietly
+        // stop the bucket using that index.
+        sql`COALESCE(${tasks.lastAssignedBy}, ${tasks.createdBy}) = ${userId}`,
         // Same demo-row exclusion as every other task projection: a filter here but not there would
         // make this bucket and the list disagree by the office's demo-row count.
         sql`COALESCE(${tasks.isTestData}, false) = false`,
@@ -785,7 +815,8 @@ export async function ackTaskReplies(
   // fact about a specific person: "Adam has read the reply". An admin acknowledging on Adam's behalf
   // would take the task out of Adam's bucket without Adam ever seeing it, which is the exact failure
   // the bucket exists to prevent.
-  if (!task.createdBy || task.createdBy !== userId) {
+  const assignerId = resolveTaskAssignerId(task);
+  if (!assignerId || assignerId !== userId) {
     throw new AppError(403, "Only the person who assigned this task can acknowledge its replies");
   }
 

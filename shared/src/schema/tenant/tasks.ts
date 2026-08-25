@@ -72,6 +72,23 @@ export const tasks = pgTable(
      * the read-modify-write race where a reply landing mid-ack is marked seen forever.
      */
     assignerAckAt: timestamp("assigner_ack_at", { withTimezone: true }),
+    /**
+     * WHO last handed this task to somebody (migration 0240).
+     *
+     * NULL means it has NEVER been reassigned — in which case the assigner is `createdBy`, because
+     * until a task changes hands the person who created it is the person who assigned it. Readers
+     * resolve `COALESCE(lastAssignedBy, createdBy)`; nothing reads this column bare.
+     *
+     * Three columns on this table answer three different questions, and they are spelled out here
+     * because `created_by` / `origin_rule` / `type` each half-answering "where did this come from" is
+     * why 0233 existed:
+     *     createdBy        who typed it into existence. Never moves.
+     *     assignedAt       WHEN it last changed hands (0239, feat/task-assignment-modal).
+     *     lastAssignedBy   WHO last handed it over.
+     * Written at the same sites as `assignedAt` so the pair cannot disagree about whether an
+     * assignment happened.
+     */
+    lastAssignedBy: uuid("last_assigned_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -94,10 +111,11 @@ export const tasks = pgTable(
     // runner's pre-step builds it CONCURRENTLY so API boot never blocks task writes on it.
     index("tasks_assigned_source_status_idx").on(table.assignedTo, table.source, table.status, table.dueDate),
     // Serves /tasks/awaiting-me: "tasks I assigned that have a reply I have not acknowledged".
-    // Source-of-truth marker; migration 0234 builds it per-office PARTIAL on the unacked condition
-    // (last_reply_at IS NOT NULL AND (assigner_ack_at IS NULL OR assigner_ack_at < last_reply_at)),
-    // so the predicate is answered BY the index rather than filtered after it. Drizzle's index()
-    // cannot express that predicate here, hence the divergence -- 0234's SQL is authoritative.
-    index("tasks_creator_awaiting_ack_idx").on(table.createdBy, table.lastReplyAt),
+    // Scoped by the RESOLVED assigner -- see lastAssignedBy above. Source-of-truth marker; migration 0240
+    // builds it per-office over the COALESCE(last_assigned_by, created_by) EXPRESSION and PARTIAL on
+    // the unacked condition, so both the resolution and the predicate are answered BY the index rather
+    // than filtered after it. Drizzle's index() can express neither, hence the divergence -- 0240's
+    // SQL is authoritative. 0234's creator-scoped index is dropped there.
+    index("tasks_assigner_awaiting_ack_idx").on(table.lastAssignedBy, table.lastReplyAt),
   ]
 );

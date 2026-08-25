@@ -238,6 +238,9 @@ function TaskRow({
   };
 
   const unreadReplies = showUnreadReplies ? task.unreadReplyCount ?? 0 : 0;
+  // The SERVER's verdict. `undefined` (an API predating the field) stays permissive so a deploy
+  // window cannot disable every row; the server refuses what it refuses either way.
+  const mayClose = task.canClose !== false;
 
   return (
     <>
@@ -249,10 +252,12 @@ function TaskRow({
       >
         <button
           type="button"
-          disabled={locked || isDone}
+          disabled={locked || isDone || !mayClose}
           onClick={complete}
           onKeyDown={stopRowKeyDownPropagation}
           aria-label={`Complete ${taskTitle}`}
+          // Named, not merely greyed: a disabled control with no explanation reads as a bug.
+          title={mayClose ? undefined : "Only the assignee, the person who assigned this task, or an admin can close it"}
           className={cn(
             "mt-1 flex h-6 w-6 items-center justify-center rounded border-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
             isDone ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-300 text-slate-300 hover:border-emerald-600 hover:text-emerald-600"

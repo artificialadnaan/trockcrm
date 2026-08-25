@@ -336,6 +336,12 @@ describe("what the UI is allowed to claim", () => {
   // completeTask only moves pending/in_progress/waiting_on/blocked, and the transition table has no
   // scheduled -> completed edge. Offering the button anyway produces a misleading "already completed
   // or dismissed" error on every click.
+  it("hides Mark complete when the server says the viewer may not close the task", () => {
+    setComments([]);
+    render({ task: { ...task, canClose: false } as any });
+    expect(container.textContent).not.toContain("Mark complete");
+  });
+
   it("offers Mark complete only for statuses the API will actually accept", () => {
     for (const status of ["pending", "in_progress", "waiting_on", "blocked"]) {
       setComments([]);

@@ -73,16 +73,16 @@ async function seedTasks() {
     DELETE FROM task_comments;
     DELETE FROM tasks;
 
-    INSERT INTO tasks (id, title, type, priority, status, assigned_to, created_by, source, origin_rule) VALUES
-      ('${TASK}',          'Send the roof photos', 'manual','normal','pending',  '${ASSIGNEE}', '${ASSIGNER}', 'manual',    NULL),
-      ('${DONE_TASK}',     'Closed then answered', 'manual','normal','completed','${ASSIGNEE}', '${ASSIGNER}', 'manual',    NULL),
-      ('${MACHINE_TASK}',  'Deal has stalled',     'system','normal','pending',  '${ASSIGNEE}', NULL,          'automated', 'deal_stalled'),
-      ('${DEPARTED_TASK}', 'Chase the permit',     'manual','normal','pending',  '${ASSIGNEE}', '${DEPARTED}', 'manual',    NULL),
-      ('${OTHER_TASK}',    'Not mine to watch',    'manual','normal','pending',  '${ASSIGNEE}', '${STRANGER}', 'manual',    NULL),
+    INSERT INTO tasks (id, title, type, priority, status, assigned_to, created_by, last_assigned_by, source, origin_rule) VALUES
+      ('${TASK}',          'Send the roof photos', 'manual','normal','pending',  '${ASSIGNEE}', '${ASSIGNER}', NULL, 'manual',    NULL),
+      ('${DONE_TASK}',     'Closed then answered', 'manual','normal','completed','${ASSIGNEE}', '${ASSIGNER}', NULL, 'manual',    NULL),
+      ('${MACHINE_TASK}',  'Deal has stalled',     'system','normal','pending',  '${ASSIGNEE}', NULL,          NULL,          'automated', 'deal_stalled'),
+      ('${DEPARTED_TASK}', 'Chase the permit',     'manual','normal','pending',  '${ASSIGNEE}', '${DEPARTED}', NULL, 'manual',    NULL),
+      ('${OTHER_TASK}',    'Not mine to watch',    'manual','normal','pending',  '${ASSIGNEE}', '${STRANGER}', NULL, 'manual',    NULL),
       -- Assigned to and created by the SAME person: the only shape in which the author IS the
       -- assignee AND the assigner at once, and therefore the only one that reaches the self-reply
       -- skip. Every other fixture short-circuits on "the author is not the assignee" before it.
-      ('${SELF_TASK}',     'My own reminder',      'manual','normal','pending',  '${ASSIGNEE}', '${ASSIGNEE}', 'manual',    NULL);
+      ('${SELF_TASK}',     'My own reminder',      'manual','normal','pending',  '${ASSIGNEE}', '${ASSIGNEE}', NULL, 'manual',    NULL);
   `);
 }
 
@@ -311,7 +311,128 @@ describe("the reply notification outbox", () => {
   });
 });
 
+// WHO IS WAITING ON THIS TASK once it has changed hands.
+//
+// `created_by` answers "who typed this into existence" and never moves. PATCH /tasks/:id moves
+// `assigned_to` and sends an assignment email naming the CURRENT requester as the assigner -- so
+// before this, the new assignee replied and it went to whoever originally created the task. On a
+// machine-created task (created_by IS NULL) it went to nobody at all, despite a human assignment
+// email having just gone out.
+describe("a task that has changed hands", () => {
+  it("delivers the reply to the person who ASSIGNED it, not the one who created it", async () => {
+    // STRANGER hands ASSIGNER's task to the assignee.
+    await pg.exec(`UPDATE tasks SET last_assigned_by = '${STRANGER}' WHERE id = '${TASK}'`);
+
+    await postTaskComment(tdb, TASK, { body: "on it", ...POST }, "rep", ASSIGNEE);
+
+    const jobs = await replyJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].assignerId, "the current assigner, not the creator").toBe(STRANGER);
+    expect(jobs[0].assignerId).not.toBe(ASSIGNER);
+  });
+
+  it("moves the task into the NEW assigner's bucket and out of the creator's", async () => {
+    await pg.exec(`UPDATE tasks SET last_assigned_by = '${STRANGER}' WHERE id = '${TASK}'`);
+    await replyAt(TASK, ASSIGNEE, "r1", "2026-05-01T10:00:00Z");
+
+    expect((await getTasksAwaitingMe(tdb, STRANGER)).map((t) => t.id)).toContain(TASK);
+    expect((await getTasksAwaitingMe(tdb, ASSIGNER)).map((t) => t.id)).not.toContain(TASK);
+  });
+
+  it("lets the NEW assigner acknowledge, and refuses the original creator", async () => {
+    await pg.exec(`UPDATE tasks SET last_assigned_by = '${STRANGER}' WHERE id = '${TASK}'`);
+    await replyAt(TASK, ASSIGNEE, "r1", "2026-05-01T10:00:00Z");
+
+    await expect(
+      ackTaskReplies(tdb, TASK, new Date("2026-05-01T10:00:00Z"), "rep", ASSIGNER)
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    const result = await ackTaskReplies(tdb, TASK, new Date("2026-05-01T10:00:00Z"), "rep", STRANGER);
+    expect(result.acknowledged).toBe(true);
+  });
+
+  // The case the old model could not express at all: a human hands out a task the SYSTEM created, so
+  // there is now somebody waiting on it even though created_by is still NULL.
+  it("gives a machine-created task a live loop once a human assigns it", async () => {
+    const before = await listTaskComments(tdb, MACHINE_TASK, "rep", ASSIGNEE);
+    expect(before.loop.notifiesAssigner).toBe(false);
+    expect(before.loop.reason).toBe("no_assigner");
+
+    await pg.exec(`UPDATE tasks SET last_assigned_by = '${ASSIGNER}' WHERE id = '${MACHINE_TASK}'`);
+
+    const after = await listTaskComments(tdb, MACHINE_TASK, "rep", ASSIGNEE);
+    expect(after.loop).toMatchObject({ assignerId: ASSIGNER, notifiesAssigner: true, reason: "ok" });
+
+    await postTaskComment(tdb, MACHINE_TASK, { body: "looking", ...POST }, "rep", ASSIGNEE);
+    const jobs = await replyJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].assignerId).toBe(ASSIGNER);
+  });
+
+  // The FALLBACK, which is the other half of the resolution and the reason no backfill was needed:
+  // a task that has never changed hands still delivers to the person who created it.
+  it("delivers to the creator while the task has never been reassigned", async () => {
+    const row = await pg.query<{ last_assigned_by: string | null }>(
+      `SELECT last_assigned_by FROM tasks WHERE id = '${TASK}'`
+    );
+    expect(row.rows[0]!.last_assigned_by, "fixture must be un-reassigned").toBeNull();
+
+    await postTaskComment(tdb, TASK, { body: "on it", ...POST }, "rep", ASSIGNEE);
+
+    const jobs = await replyJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].assignerId).toBe(ASSIGNER);
+  });
+});
+
+// The write sites. A column nothing stamps is a column that is always NULL.
+describe("who gets recorded as the assigner", () => {
+  // Creation writes NOTHING here: created_by already IS the assigner, and readers resolve
+  // COALESCE(last_assigned_by, created_by). Stamping it at creation would make "never reassigned"
+  // indistinguishable from "reassigned back to the creator" — the state this column exists to tell
+  // apart — so the NULL is load-bearing.
+  it("createTask leaves last_assigned_by NULL and still resolves the creator as the assigner", async () => {
+    const { createTask } = await import("../../../src/modules/tasks/service.js");
+    const created = await createTask(tdb, {
+      title: "Call the roofer", type: "manual", assignedTo: ASSIGNEE, createdBy: ASSIGNER,
+    });
+    expect(created.lastAssignedBy).toBeNull();
+
+    const { loop } = await listTaskComments(tdb, created.id, "rep", ASSIGNER);
+    expect(loop.assignerId).toBe(ASSIGNER);
+    expect(loop.notifiesAssigner).toBe(true);
+  });
+
+  // THE REASSIGNMENT. The ACTOR performing the PATCH becomes the assigner -- which is the same
+  // person the assignment email already names, so the mail and the loop finally agree.
+  it("updateTask re-stamps the assigner to the ACTOR when the assignment moves", async () => {
+    const { updateTask } = await import("../../../src/modules/tasks/service.js");
+    const updated = await updateTask(
+      tdb, TASK, { assignedTo: STRANGER }, "admin", DEPARTED
+    );
+    expect(updated.assignedTo).toBe(STRANGER);
+    expect(updated.lastAssignedBy, "the actor, not the previous assigner").toBe(DEPARTED);
+    // created_by is untouched -- it still answers "who typed this into existence".
+    expect(updated.createdBy).toBe(ASSIGNER);
+  });
+
+  it("leaves the assigner alone on an edit that does not move the assignment", async () => {
+    const { updateTask } = await import("../../../src/modules/tasks/service.js");
+    const updated = await updateTask(tdb, TASK, { title: "Renamed" }, "admin", DEPARTED);
+    expect(updated.lastAssignedBy).toBeNull();
+  });
+
+  // A PATCH that names the SAME assignee is not a reassignment, and must not quietly transfer who is
+  // waiting on the task to whoever happened to touch it.
+  it("leaves the assigner alone when the assignment is re-sent unchanged", async () => {
+    const { updateTask } = await import("../../../src/modules/tasks/service.js");
+    const updated = await updateTask(tdb, TASK, { assignedTo: ASSIGNEE }, "admin", DEPARTED);
+    expect(updated.lastAssignedBy).toBeNull();
+  });
+});
+
 describe("acknowledgement", () => {
+
   it("403s anyone who is not the assigner — including an admin", async () => {
     await replyAt(TASK, ASSIGNEE, "r1", "2026-05-01T10:00:00Z");
 

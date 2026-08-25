@@ -287,7 +287,14 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
                       Mark In Progress
                     </Button>
                   ) : null}
-                  {canTransitionTask(task.status, "dismissed") && (
+                  {/*
+                    Dismiss is TERMINAL, so it is gated on the server's close-authority verdict as
+                    well as on the transition table. Without this a construction user -- handed every
+                    task in the office, because the list only scopes reps -- gets a normal-looking
+                    Dismiss that 403s. The other transitions here are non-terminal and stay open:
+                    "somebody else picked this up" was never the accountability concern.
+                  */}
+                  {canTransitionTask(task.status, "dismissed") && task.canClose !== false && (
                     <Button
                       type="button"
                       variant="ghost"

@@ -505,6 +505,7 @@ export async function getTasks(
       assignedTo: tasks.assignedTo,
       assignedToName,
       createdBy: tasks.createdBy,
+      lastAssignedBy: tasks.lastAssignedBy,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -534,7 +535,9 @@ export async function getTasks(
   const total = Number(countResult[0]?.count ?? 0);
 
   return {
-    tasks: taskRows,
+    // The server's own verdict on each row, so the list's completion checkbox and the edit dialog's
+    // Dismiss can be gated rather than offered-then-refused.
+    tasks: taskRows.map((row) => ({ ...row, canClose: canUserCloseTask(row, userRole, userId) })),
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 }
@@ -592,7 +595,7 @@ export async function getProjectTasks(
   };
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
 
-  return tenantDb
+  const projectRows = await tenantDb
     .select({
       id: tasks.id,
       title: tasks.title,
@@ -604,6 +607,7 @@ export async function getProjectTasks(
       assignedTo: tasks.assignedTo,
       assignedToName,
       createdBy: tasks.createdBy,
+      lastAssignedBy: tasks.lastAssignedBy,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -627,6 +631,10 @@ export async function getProjectTasks(
     .leftJoin(deals, eq(tasks.dealId, deals.id))
     .where(and(eq(tasks.dealId, dealId), excludeTestTasks()))
     .orderBy(desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate), asc(tasks.title));
+
+  // The Procore project surface renders the same completion controls as the tasks list, so it needs
+  // the same verdict.
+  return projectRows.map((row) => ({ ...row, canClose: canUserCloseTask(row, userRole, userId) }));
 }
 
 /**
@@ -742,15 +750,21 @@ export async function getTaskCounts(
  * separate "Needs your attention" bucket (/tasks/awaiting-me), which is scoped to `created_by = me`.
  */
 function assertTaskVisible(
-  task: { assignedTo: string; createdBy?: string | null } | null,
+  task: { assignedTo: string; createdBy?: string | null; lastAssignedBy?: string | null } | null,
   userRole: string,
   userId: string
 ) {
   if (!task || userRole !== "rep") return;
   if (task.assignedTo === userId) return;
-  // `createdBy` is NULL on every rules-engine and AI-disconnect task, so the truthiness test matters:
-  // a NULL assigner must never match a caller, whatever their id is.
+  // Both identities, because they diverge the moment a task changes hands: `createdBy` is who typed
+  // it into existence and `assignedBy` is who currently has somebody working on it. A rep who was
+  // handed a task to distribute must be able to reach it even though they did not create it, and the
+  // original creator does not lose sight of their own task when it is passed on.
+  //
+  // Both are NULL on machine-generated work, so the truthiness tests matter: a NULL must never match
+  // a caller, whatever their id is.
   if (task.createdBy && task.createdBy === userId) return;
+  if (task.lastAssignedBy && task.lastAssignedBy === userId) return;
   throw new AppError(403, "You can only view tasks assigned to you or by you");
 }
 
@@ -788,15 +802,22 @@ export interface TaskCloseOptions {
 
 /** Shared predicate behind both "may close" and "may comment" — one definition, two error messages. */
 function isTaskParticipant(
-  task: { assignedTo: string; createdBy?: string | null },
+  task: { assignedTo: string; createdBy?: string | null; lastAssignedBy?: string | null },
   userRole: string,
   userId: string
 ) {
   if ((TASK_CLOSE_ELEVATED_ROLES as readonly string[]).includes(userRole)) return true;
   if (task.assignedTo === userId) return true;
-  // `x === null` is false for every real user id, but spelling the null check out keeps a future
-  // `userId` of undefined/null from ever matching a NULL assigner.
-  return Boolean(task.createdBy) && task.createdBy === userId;
+  // BOTH the creator and the current assigner are stakeholders in closing a task, and after a
+  // reassignment they are different people. Deliberately wider than reply DELIVERY, which must pick
+  // exactly ONE recipient and therefore uses `assignedBy` alone: accepting the work is something
+  // either party can legitimately do, whereas mailing the reply to both would be noise and mailing it
+  // to the wrong one is the defect this whole column exists to fix.
+  //
+  // `x === null` is false for every real user id, but spelling the null checks out keeps a future
+  // `userId` of undefined/null from ever matching a NULL.
+  if (Boolean(task.createdBy) && task.createdBy === userId) return true;
+  return Boolean(task.lastAssignedBy) && task.lastAssignedBy === userId;
 }
 
 /**
@@ -824,6 +845,24 @@ export function assertTaskCloseAuthority(
     403,
     "Only the assignee, the person who assigned this task, or an admin can close it"
   );
+}
+
+/**
+ * The close-authority rule as a BOOLEAN, for the read path.
+ *
+ * Every task projection carries it so the client can gate its close controls on the server's own
+ * verdict instead of re-deriving the rule. That matters because visibility and close authority are
+ * different rules -- `getTasks` only scopes REPS, so a construction user is handed every task in the
+ * office -- and a second copy of the authority rule in the browser is how the two drift. Derived from
+ * the SAME predicate the write path asserts on, so the answer cannot disagree with what happens on
+ * submit.
+ */
+export function canUserCloseTask(
+  task: { assignedTo: string; createdBy?: string | null; lastAssignedBy?: string | null },
+  userRole: string,
+  userId: string
+) {
+  return isTaskParticipant(task, userRole, userId);
 }
 
 /** WHO MAY SPEAK ON A TASK. Same participant set as closing it, deliberately a separate assertion so
@@ -901,6 +940,7 @@ export async function getTaskById(
       assignedTo: tasks.assignedTo,
       assignedToName,
       createdBy: tasks.createdBy,
+      lastAssignedBy: tasks.lastAssignedBy,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -928,7 +968,7 @@ export async function getTaskById(
   const task = (result[0] ?? null) as any;
   if (!task) return null;
   assertTaskVisible(task, userRole, userId);
-  return task;
+  return { ...task, canClose: canUserCloseTask(task, userRole, userId) };
 }
 
 /**
@@ -954,6 +994,10 @@ export async function createTask(tenantDb: TenantDb, input: CreateTaskInput) {
       status: "pending",
       assignedTo: input.assignedTo,
       createdBy: input.createdBy ?? null,
+      // NO lastAssignedBy here, deliberately: until a task changes hands the creator IS the assigner,
+      // and readers resolve COALESCE(lastAssignedBy, createdBy). Writing createdBy into a second
+      // column at creation would make "never reassigned" indistinguishable from "reassigned back to
+      // the creator", and it is the state this column exists to tell apart.
       dealId: input.dealId ?? null,
       contactId: input.contactId ?? null,
       emailId: input.emailId ?? null,
@@ -1035,7 +1079,16 @@ export async function updateTask(
   if (input.dueDate !== undefined) updates.dueDate = input.dueDate;
   if (input.dueTime !== undefined) updates.dueTime = input.dueTime;
   if (input.remindAt !== undefined) updates.remindAt = input.remindAt ? new Date(input.remindAt) : null;
-  if (input.assignedTo !== undefined) updates.assignedTo = input.assignedTo;
+  if (input.assignedTo !== undefined) {
+    updates.assignedTo = input.assignedTo;
+    // THE ACTOR becomes the assigner -- but only when the assignment actually MOVES. A PATCH that
+    // re-sends the same assignee is not a reassignment, and re-stamping on it would quietly transfer
+    // "who is waiting on this" to whoever last touched the task. This is the same identity the
+    // assignment email names as the assigner, so the mail and the reply loop now agree.
+    if (input.assignedTo !== existing.assignedTo) {
+      updates.lastAssignedBy = userId;
+    }
+  }
 
   if (Object.keys(updates).length === 0) return existing;
 

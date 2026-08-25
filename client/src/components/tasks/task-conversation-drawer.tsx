@@ -179,7 +179,9 @@ export function TaskConversationDrawer({
 
   const isAssigner = Boolean(task.createdBy) && task.createdBy === currentUserId;
   const isDone = isTerminalTaskStatus(task.status);
-  const canComplete = COMPLETABLE_STATUSES.has(task.status);
+  // Both halves: a status the API will accept AND the server's verdict that THIS viewer may close it.
+  // Either one alone leaves a button that looks live and 403s.
+  const canComplete = COMPLETABLE_STATUSES.has(task.status) && task.canClose !== false;
   const projectContext = getTaskProjectContext(task);
   const notice = loopNotice(loop);
 
