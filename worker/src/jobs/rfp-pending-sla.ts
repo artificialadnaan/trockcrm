@@ -2,7 +2,7 @@ import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 // Reuse #611's frontend-URL + branded-template primitives (trockcrm.com base + hosted logo), same as the
 // RFP-decline email, so this SLA email matches the look and links to the right host.
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 // Leadership recipients (Takashi + Adam Shaw) — the SAME source of truth the RFP-decline email and the
 // server override-review gate use (RFP_REJECTION_EMAIL_RECIPIENTS), so the notified set never drifts.
 import { resolveRfpReviewerEmails } from "@trock-crm/shared/lib/rfpReviewerEmails";

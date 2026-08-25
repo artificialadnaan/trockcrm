@@ -949,15 +949,15 @@ describe("when the alert cannot be sent", () => {
     // claimed" assertion passes either way.
     //
     // The throw is injected at the module boundary the sweep genuinely composes through — the branded
-    // shell and the detail table live in `weekly-report-reminders.ts`, a separate module with its own
-    // reasons to change. Every throw path in there is guarded today, which is what makes this latent
-    // rather than live; a guard has to hold before it is needed.
+    // shell and the detail table live in `lib/branded-email.ts`, a separate module with its own reasons to
+    // change. Every throw path in there is guarded today, which is what makes this latent rather than
+    // live; a guard has to hold before it is needed.
     await seedSend({ sentAt: STALLED_AT });
 
     vi.resetModules();
-    vi.doMock("../../src/jobs/weekly-report-reminders.js", async () => {
-      const actual = await vi.importActual<typeof import("../../src/jobs/weekly-report-reminders.js")>(
-        "../../src/jobs/weekly-report-reminders.js",
+    vi.doMock("../../src/lib/branded-email.js", async () => {
+      const actual = await vi.importActual<typeof import("../../src/lib/branded-email.js")>(
+        "../../src/lib/branded-email.js",
       );
       return {
         ...actual,
@@ -987,7 +987,7 @@ describe("when the alert cannot be sent", () => {
       expect((await reportRow()).send_stall_alerted_at).toBeNull();
       expect(logs.error.some((line) => line.includes("claims released"))).toBe(true);
     } finally {
-      vi.doUnmock("../../src/jobs/weekly-report-reminders.js");
+      vi.doUnmock("../../src/lib/branded-email.js");
       vi.resetModules();
     }
   });

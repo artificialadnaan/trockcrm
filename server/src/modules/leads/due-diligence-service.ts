@@ -27,6 +27,7 @@ import type {
   ExistingCustomerSignal,
   LeadDueDiligenceDetectionSignal,
 } from "@trock-crm/shared/types";
+import { notificationRecipientGroupByKey } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -109,23 +110,115 @@ function resolveSalesRepName(value: unknown) {
   return normalizedDisplayName(value) ?? "Not available";
 }
 
-export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GROUP_KEY) {
-  const rows = await tenantDb
+export interface NotificationRecipientOptions {
+  /**
+   * Resolve an EMPTY assignment list to every active admin and director instead of to nobody.
+   *
+   * An option rather than the `key !== "lead_due_diligence"` short-circuit this used to carry. That
+   * comparison read as "only DD has a fallback" and behaved as "only DD gets past this return at all": a
+   * second key with no assignments fell out with `[]`, and the callers below treat an empty recipient list
+   * as a thing to log and move on from, not as an error. The notification simply never arrived.
+   */
+  fallbackToAdminsAndDirectors?: boolean;
+}
+
+export interface NotificationRecipientResolution {
+  /** Who the mail actually goes to — the assignments, or the fallback when they are empty. */
+  recipients: Array<{ userId: string; email: string; displayName: string }>;
+  /**
+   * EVERY row in `notification_recipient_assignments` for this group — never the fallback, and never
+   * narrowed to who happens to be deliverable today. Deactivated members are included on purpose.
+   *
+   * Two distinctions live here, and both were bugs before they were rules:
+   *
+   * 1. NOT THE FALLBACK. The admin page pre-ticks what it is told is assigned. Handed the fallback under
+   *    this name it ticks every admin and director, and the next Save — including a stray one while
+   *    configuring a different group — writes them in as real rows. The fallback then never fires again,
+   *    so a director hired next year silently stops receiving DD and the list still looks correct.
+   *
+   * 2. NOT FILTERED BY `is_active`. The write path filters, because that governs what may be CREATED. A
+   *    read filtered the same way answers a different question than the one asked, and hides a
+   *    deactivated assignee from the only person who can remove it.
+   */
+  assignedUserIds: string[];
+  /**
+   * Assigned users who have since been DEACTIVATED. Non-empty means this group needs an admin's attention.
+   *
+   * These are why the fallback below counts assignment ROWS rather than deliverable recipients. The
+   * assignment read used to filter on `users.isActive` in SQL, so a group whose every assignee had left
+   * came back as zero rows — and zero rows is precisely the condition that widens to admins and directors.
+   * Offboarding the assigned DD approver would have mailed a working approve/decline link to the entire
+   * leadership team, on a path that authenticates by token alone and records `decided_by` NULL.
+   *
+   * An empty result from a FILTERED read is not "nothing is configured", and only the second may widen.
+   */
+  inactiveAssignedUserIds: string[];
+  /**
+   * Whether a `notification_recipient_groups` row exists for this key at all.
+   *
+   * Group rows are created lazily, when an admin first opens the page. Without this, a job reading a key
+   * nobody has visited gets exactly the same empty array as a key an admin deliberately emptied, and those
+   * two want different log lines — "not configured yet" against "configured to nobody".
+   */
+  groupExists: boolean;
+  fallbackApplied: boolean;
+}
+
+/** Who a notification group's mail goes to, with the provenance a caller needs to log a real message. */
+export async function resolveNotificationRecipients(
+  tenantDb: TenantDb,
+  key: string,
+  options: NotificationRecipientOptions = {},
+): Promise<NotificationRecipientResolution> {
+  const [groupRow] = await tenantDb
+    .select({ id: notificationRecipientGroups.id })
+    .from(notificationRecipientGroups)
+    .where(eq(notificationRecipientGroups.key, key))
+    .limit(1);
+
+  // Deliberately NOT filtered on `users.isActive` — see `inactiveAssignedUserIds`. The active/inactive
+  // split has to happen HERE, in the open, because the two mean different things: one is who to mail, the
+  // other is whether this group is configured at all.
+  const assignmentRows = await tenantDb
     .select({
       userId: users.id,
       email: users.email,
       displayName: users.displayName,
+      isActive: users.isActive,
     })
     .from(notificationRecipientGroups)
     .innerJoin(notificationRecipientAssignments, eq(notificationRecipientAssignments.groupId, notificationRecipientGroups.id))
     .innerJoin(users, eq(users.id, notificationRecipientAssignments.userId))
-    .where(and(eq(notificationRecipientGroups.key, key), eq(users.isActive, true)));
+    .where(eq(notificationRecipientGroups.key, key));
 
-  if (rows.length > 0 || key !== GROUP_KEY) {
-    return rows;
+  // THE WRITE PATH FILTERS, THE READ PATH DOES NOT. `updateNotificationRecipientAssignments` refuses to
+  // ADD a deactivated user — that is about what may be created. This is about what is true, and the two
+  // must not be confused: `recipients` is narrowed to who can actually be mailed, while `assignedUserIds`
+  // reports the membership as it stands, deactivated members included.
+  //
+  // Narrowing the membership here would hide a deactivated assignee from the admin page, which pre-ticks
+  // from this list — so the person who could take the bad assignment off would not be shown that it exists.
+  // That is the removal lockout again, one layer up in the read.
+  const deliverable = assignmentRows
+    .filter((row) => row.isActive)
+    .map(({ userId, email, displayName }) => ({ userId, email, displayName }));
+  const assignedUserIds = assignmentRows.map((row) => row.userId);
+  const inactiveAssignedUserIds = assignmentRows.filter((row) => !row.isActive).map((row) => row.userId);
+  const groupExists = Boolean(groupRow);
+
+  // "Is anything assigned?", not "is anything deliverable?". A group whose every assignee has left is
+  // MISCONFIGURED, and the honest answer is an empty recipient list somebody has to notice — never a
+  // silent promotion of the whole leadership team into an approval role nobody granted them.
+  //
+  // This only bites where a fallback is enabled, which today is `lead_due_diligence` alone. The two newer
+  // keys have `fallbackToAdminsAndDirectors: false`, so an inactive-only assignment there already resolves
+  // to `[]` and the consuming job fails loudly — the correct outcome. Anyone turning a fallback ON for a
+  // new group is opting into this distinction and needs to have read it.
+  if (assignmentRows.length > 0 || !options.fallbackToAdminsAndDirectors) {
+    return { recipients: deliverable, assignedUserIds, inactiveAssignedUserIds, groupExists, fallbackApplied: false };
   }
 
-  return tenantDb
+  const fallback = await tenantDb
     .select({
       userId: users.id,
       email: users.email,
@@ -133,6 +226,23 @@ export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GR
     })
     .from(users)
     .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
+
+  return { recipients: fallback, assignedUserIds, inactiveAssignedUserIds, groupExists, fallbackApplied: true };
+}
+
+/** Key-agnostic. The array form, for the send paths that only care who to mail. */
+export async function getNotificationRecipients(
+  tenantDb: TenantDb,
+  key: string,
+  options: NotificationRecipientOptions = {},
+) {
+  const resolution = await resolveNotificationRecipients(tenantDb, key, options);
+  return resolution.recipients;
+}
+
+/** The DD call sites' name for the above. The fallback stays on for this key and only this key. */
+export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GROUP_KEY) {
+  return getNotificationRecipients(tenantDb, key, { fallbackToAdminsAndDirectors: key === GROUP_KEY });
 }
 
 async function getLeadSummary(tenantDb: TenantDb, leadId: string) {
@@ -902,15 +1012,11 @@ export async function decideDueDiligenceByToken(input: {
   }
 }
 
-const WELL_KNOWN_GROUPS: Record<string, { name: string; description: string }> = {
-  [GROUP_KEY]: {
-    name: "Lead Due Diligence",
-    description: "Recipients who receive new-customer lead due diligence approval requests.",
-  },
-};
-
 async function ensureWellKnownGroup(tenantDb: TenantDb, key: string) {
-  const known = WELL_KNOWN_GROUPS[key];
+  // NOTIFICATION_RECIPIENT_GROUPS in `shared` is the registry — it is what the admin page renders sections
+  // from, so a key that page can offer is by construction a key this can create. The record that used to
+  // sit here held one entry, which made every other key a 404 no admin could clear.
+  const known = notificationRecipientGroupByKey(key);
   if (!known) return null;
   const [row] = await tenantDb
     .insert(notificationRecipientGroups)
@@ -939,8 +1045,12 @@ export async function getNotificationRecipientGroup(tenantDb: TenantDb, key: str
   if (!group) {
     throw new AppError(404, "Notification recipient group not found");
   }
-  const recipients = await getLeadDueDiligenceRecipients(tenantDb, key);
-  return { group, recipients };
+  const { recipients, assignedUserIds, fallbackApplied } = await resolveNotificationRecipients(tenantDb, key, {
+    fallbackToAdminsAndDirectors: notificationRecipientGroupByKey(key)?.fallbackToAdminsAndDirectors ?? false,
+  });
+  // `assignedUserIds` and `fallbackApplied` travel separately from `recipients` so the page can SHOW who
+  // would be mailed today without pre-ticking people nobody chose. See NotificationRecipientResolution.
+  return { group, recipients, assignedUserIds, fallbackApplied };
 }
 
 export async function updateNotificationRecipientAssignments(tenantDb: TenantDb, key: string, userIds: string[]) {
@@ -957,18 +1067,85 @@ export async function updateNotificationRecipientAssignments(tenantDb: TenantDb,
   const uniqueUserIds = [...new Set(userIds)];
 
   if (uniqueUserIds.length > 0) {
+    // WHAT THE GATES BELOW JUDGE: the CHANGE, not the resulting set.
+    //
+    // Applying a membership rule to every submitted id makes it impossible to leave a state that has
+    // drifted out of policy — a recipient assigned as a director, later moved to rep, is re-submitted on
+    // every save because the page holds the current membership, and the save is refused on their presence.
+    // The admin who opened the page to REMOVE them cannot, and the only route out is the one thing the
+    // rule forbids. A rule that blocks the exit is worse than no rule, because the bad state becomes
+    // permanent. Additions are where a membership rule belongs; removals are always allowed, and are most
+    // needed exactly when the current state is wrong.
+    const currentAssignments = await tenantDb
+      .select({ userId: notificationRecipientAssignments.userId })
+      .from(notificationRecipientAssignments)
+      .where(eq(notificationRecipientAssignments.groupId, group.id));
+    const alreadyAssigned = new Set(currentAssignments.map((row) => row.userId));
+    const addedUserIds = uniqueUserIds.filter((userId) => !alreadyAssigned.has(userId));
+
     const existingUsers = await tenantDb
-      .select({ id: users.id })
+      .select({ id: users.id, role: users.role, isActive: users.isActive })
       .from(users)
       .where(inArray(users.id, uniqueUserIds));
-    const existingIds = new Set(existingUsers.map((user) => user.id));
-    const missingIds = uniqueUserIds.filter((userId) => !existingIds.has(userId));
+    const userById = new Map(existingUsers.map((user) => [user.id, user]));
+    const missingIds = uniqueUserIds.filter((userId) => !userById.has(userId));
 
     if (missingIds.length > 0) {
       throw new AppError(
         400,
         `Invalid user ID(s): ${missingIds.join(", ")}. These users do not exist in the system.`
       );
+    }
+
+    // A DEACTIVATED assignee is not merely a wasted mailbox. It resolves to zero deliverable recipients,
+    // which for a group with a fallback used to be indistinguishable from "nobody is assigned" — so the
+    // exact widening the role gate below exists to prevent arrived by the back door, triggered by nothing
+    // more sinister than offboarding the assigned approver. `resolveNotificationRecipients` no longer
+    // conflates the two; this stops the state being created through the page in the first place.
+    //
+    // Every group, not only the role-gated ones: assigning somebody who cannot receive mail is a mistake
+    // wherever it happens, and the two keys without `assignableRoles` never reach the check below.
+    //
+    // THE RACE, AND WHY IT IS NOT LOCKED. This reads `is_active` and then writes, so a user deactivated
+    // between the two lands an inactive assignment anyway. That is deliberately left open, because the
+    // damage it could do is already closed somewhere else and a lock here would not close it:
+    //
+    //   • the widening — the dangerous outcome — is prevented in `resolveNotificationRecipients`, which
+    //     counts assignment ROWS rather than deliverable ones, so an inactive-only group resolves to an
+    //     empty recipient list rather than to every admin and director;
+    //   • no mail reaches a deactivated mailbox, because `recipients` is filtered;
+    //   • the row is VISIBLE (`assignedUserIds` is unfiltered) and removable (the gates judge additions,
+    //     not the resulting set), so an admin can clear it without help.
+    //
+    // What is left when this check loses the race is an untidy row that mails nobody and can be deleted
+    // from the page — not a privilege anyone gained. Closing it properly would need the deactivation path
+    // to lock these rows too, since `SELECT ... FOR UPDATE` here excludes nothing that does not cooperate;
+    // that is a change to user deactivation, not to this function, and it buys a tidier row rather than a
+    // safer one. Revisit only alongside a group whose fallback makes an empty list dangerous.
+    const deactivatedIds = addedUserIds.filter((userId) => userById.get(userId)?.isActive === false);
+    if (deactivatedIds.length > 0) {
+      throw new AppError(
+        400,
+        `User ID(s) ${deactivatedIds.join(", ")} are deactivated and cannot receive notifications.`
+      );
+    }
+
+    // Enforced HERE and not only in the picker, because the picker is a suggestion and this is the door.
+    // For a group whose membership is a permission rather than a subscription — DD hands out a decision
+    // token that authenticates on its own — a filtered checkbox list is not a control, it is a hint.
+    const assignableRoles = notificationRecipientGroupByKey(key)?.assignableRoles;
+    if (assignableRoles) {
+      const disallowedIds = addedUserIds.filter((userId) => {
+        const role = userById.get(userId)?.role;
+        return role !== undefined && !assignableRoles.includes(role);
+      });
+
+      if (disallowedIds.length > 0) {
+        throw new AppError(
+          400,
+          `User ID(s) ${disallowedIds.join(", ")} cannot be assigned to "${key}". Allowed roles: ${assignableRoles.join(", ")}.`
+        );
+      }
     }
   }
 

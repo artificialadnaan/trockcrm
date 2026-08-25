@@ -1,5 +1,6 @@
 import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 
 export const PROJECT_NUMBER_FIRST_SET_JOB = "project_number_first_set_email";
 export const PROJECT_NUMBER_FIRST_SET_AUDIT_PROCESS = "project_number_first_set";
@@ -380,19 +381,6 @@ export function resolveProjectNumberEmailCcRecipient(env: NodeJS.ProcessEnv): st
   const configured = normalizeText(env.PROJECT_NUMBER_EMAIL_CC);
   if (configured) return configured;
   return isDevFallbackRecipientContext(env) ? DEFAULT_NON_PROD_PROJECT_NUMBER_EMAIL_CC : null;
-}
-
-// Production CRM frontend. trockcrm.com is the public custom domain on the Frontend service
-// (the railway-generated crm.trockconstruction.com is NOT the address operators use). FRONTEND_URL
-// overrides this when set; the worker leaves it unset, so this default is what every link renders.
-export const DEFAULT_FRONTEND_URL = "https://trockcrm.com";
-
-// Hosted in client/public/ → served by the Frontend service at the domain root (e.g. serve dist -s,
-// same as /logo.png and /favicon.png). White-background PNG so it renders predictably on Outlook chrome.
-export const TROCK_LOGO_EMAIL_URL = "https://trockcrm.com/trock-logo-email.png";
-
-export function resolveFrontendUrl(env: NodeJS.ProcessEnv): string {
-  return normalizeText(env.FRONTEND_URL) ?? DEFAULT_FRONTEND_URL;
 }
 
 export function buildProjectNumberFirstSetEmail(input: {

@@ -229,7 +229,11 @@ function createTenantDb(options: {
       chain.innerJoin = vi.fn(() => chain);
       chain.leftJoin = vi.fn(() => chain);
       chain.where = vi.fn(() => {
-        if (selection === "recipients") return Promise.resolve(state.recipients);
+        // `isActive` defaulted in: these fixtures represent active assignees, and the resolver now
+        // partitions on the flag instead of relying on the query to have filtered it out.
+        if (selection === "recipients") {
+          return Promise.resolve(state.recipients.map((row) => ({ isActive: true, ...row })));
+        }
         chain.limit = vi.fn(async () => {
           if (selection === "leadStage") {
             return [state.lead];
@@ -277,11 +281,17 @@ function createRecipientAssignmentDb(options: {
   };
 
   function recipients() {
+    // Mirrors the query, which no longer filters on isActive — `resolveNotificationRecipients` partitions
+    // the rows itself so that "assigned but undeliverable" stops looking like "nothing assigned".
     return state.assignments
       .map((userId) => state.users.find((user) => user.id === userId))
       .filter((user): user is { id: string; email: string; displayName: string; isActive?: boolean } => Boolean(user))
-      .filter((user) => user.isActive !== false)
-      .map((user) => ({ userId: user.id, email: user.email, displayName: user.displayName }));
+      .map((user) => ({
+        userId: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        isActive: user.isActive !== false,
+      }));
   }
 
   function adminDirectorRecipients() {
@@ -320,7 +330,18 @@ function createRecipientAssignmentDb(options: {
         innerJoin: vi.fn(() => chain),
         where: vi.fn(() => {
           if (selectedTable === users && selectedFields && "id" in selectedFields) {
-            return Promise.resolve(state.users.map((user) => ({ id: user.id })));
+            // `role` and `isActive` come back too now: updateNotificationRecipientAssignments gates on both.
+            return Promise.resolve(
+              state.users.map((user) => ({
+                id: user.id,
+                role: user.role ?? "admin",
+                isActive: user.isActive !== false,
+              }))
+            );
+          }
+          if (selectedTable === notificationRecipientAssignments) {
+            // The gate reads current membership so it can judge the CHANGE rather than the whole set.
+            return Promise.resolve(state.assignments.map((userId) => ({ userId })));
           }
           if (selectedTable === notificationRecipientGroups && selectedFields && "email" in selectedFields) {
             return Promise.resolve(recipients());

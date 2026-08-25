@@ -17,7 +17,7 @@ import {
   type WeeklyReportEmailParts,
   type WeeklyReportSenderContact,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
-import { TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 
 // Deliver one weekly report to its client: render the PDF, attach it, send it, and record the outcome.
 //

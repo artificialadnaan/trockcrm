@@ -5,7 +5,7 @@ import {
 } from "../lib/system-email.js";
 import { getObjectBuffer } from "../lib/r2-client.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScorecardEmails";
 import { resolveCorrectiveActionApprovers } from "@trock-crm/shared/lib/correctiveActionApprovers";
 import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
