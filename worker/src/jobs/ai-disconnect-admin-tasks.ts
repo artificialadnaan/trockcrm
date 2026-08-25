@@ -158,8 +158,8 @@ export async function runAiDisconnectAdminTaskGeneration(): Promise<void> {
           }
           await client.query(
             `INSERT INTO ${schemaName}.tasks
-               (title, description, type, priority, status, assigned_to, office_id, origin_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
+               (title, description, type, priority, status, assigned_to, office_id, origin_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, source)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, 'automated')
              RETURNING id`,
             [
               title,

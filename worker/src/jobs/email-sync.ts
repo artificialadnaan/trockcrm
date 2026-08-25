@@ -1283,8 +1283,8 @@ async function createClassificationTaskRaw(
       input.candidateDealNames.length > 0 ? input.candidateDealNames.join(", ") : "No clear deal candidate";
     await client.query(
       `INSERT INTO ${schemaName}.tasks
-         (title, description, type, priority, status, assigned_to, created_by, office_id, origin_rule, source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id, email_id, due_date, due_time, remind_at)
-       VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, 'email_assignment_queue', 'email_assignment_queue', 'email.received', $6, $7, $8, NULL, $9, $10, NULL, NULL, NULL)`,
+         (title, description, type, priority, status, assigned_to, created_by, office_id, origin_rule, source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id, email_id, due_date, due_time, remind_at, source)
+       VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, 'email_assignment_queue', 'email_assignment_queue', 'email.received', $6, $7, $8, NULL, $9, $10, NULL, NULL, NULL, 'automated')`,
       [
         title,
         `Review email assignment for ${input.contactName}${input.companyName ? ` at ${input.companyName}` : ""}. Candidate deals: ${dealNames}.`,
