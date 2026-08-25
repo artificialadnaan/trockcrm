@@ -255,6 +255,42 @@ describe("the dead-loop notice", () => {
   });
 });
 
+// AFTER A REASSIGNMENT the assigner is no longer the creator. The server resolves it as
+// `lastAssignedBy ?? createdBy` and hands the answer over as `loop.assignerId`; the drawer must USE
+// that rather than comparing `createdBy` itself. Getting it wrong is not cosmetic in either
+// direction: the NEW assigner opens the task from "Needs your attention" and never sends the
+// acknowledgement that clears it, so it sits in their bucket forever, while the ORIGINAL creator is
+// shown an unread badge and repeatedly fires an acknowledgement the server 403s.
+describe("a task that has changed hands", () => {
+  const REASSIGNED = { ...task, createdBy: "user-original" };
+  const handedTo = { ...liveLoop, assignerId: "user-newassigner", assignerName: "New Assigner" };
+
+  it("treats the CURRENT assigner as the assigner, though they did not create it", async () => {
+    setComments([comment()], { loop: handedTo });
+    await act(async () => { render({ task: REASSIGNED as any, currentUserId: "user-newassigner" }); });
+
+    expect(mocks.ackTaskRepliesMock).toHaveBeenCalledWith("task-1", "2026-05-01T10:00:00.000Z");
+    expect(container.textContent).toContain("1 new reply");
+  });
+
+  it("does NOT treat the original creator as the assigner once it has been handed on", async () => {
+    setComments([comment()], { loop: handedTo });
+    await act(async () => { render({ task: REASSIGNED as any, currentUserId: "user-original" }); });
+
+    // No acknowledgement the server would reject...
+    expect(mocks.ackTaskRepliesMock).not.toHaveBeenCalled();
+    // ...and no unread badge for somebody who is not waiting on it.
+    expect(container.textContent).not.toContain("new reply");
+  });
+
+  // The resolution is the SERVER's. Re-deriving it here from `createdBy` is what produced the defect.
+  it("follows loop.assignerId rather than the task's createdBy", async () => {
+    setComments([comment()], { loop: { ...liveLoop, assignerId: ASSIGNEE } });
+    await act(async () => { render({ task: REASSIGNED as any, currentUserId: ASSIGNEE }); });
+    expect(mocks.ackTaskRepliesMock).toHaveBeenCalled();
+  });
+});
+
 describe("acknowledgement", () => {
   // THE ONE THAT MATTERS: the RENDERED timestamp, not now().
   it("acknowledges up to the newest RENDERED reply", async () => {

@@ -177,7 +177,20 @@ export function TaskConversationDrawer({
     refetch: refetchTimeline,
   } = useTaskTimeline(task.id);
 
-  const isAssigner = Boolean(task.createdBy) && task.createdBy === currentUserId;
+  /**
+   * Am I the person waiting on this task?
+   *
+   * FROM THE SERVER, not re-derived. `loop.assignerId` is `resolveTaskAssignerId(task)` — the same
+   * `lastAssignedBy ?? createdBy` rule that decides reply delivery, acknowledgement authority and the
+   * "Needs your attention" scope. Comparing `createdBy` here instead was a second copy of that rule,
+   * and it drifted the moment a task changed hands: the NEW assigner opened the task and never sent
+   * the acknowledgement that clears it from their bucket, while the ORIGINAL creator was shown an
+   * unread badge and kept firing an acknowledgement the server 403s.
+   *
+   * `loop` is null until the thread lands, which reads as "not the assigner" — the safe direction,
+   * and moot anyway because an acknowledgement additionally requires rendered comments.
+   */
+  const isAssigner = Boolean(loop?.assignerId) && loop?.assignerId === currentUserId;
   const isDone = isTerminalTaskStatus(task.status);
   // Both halves: a status the API will accept AND the server's verdict that THIS viewer may close it.
   // Either one alone leaves a button that looks live and 403s.

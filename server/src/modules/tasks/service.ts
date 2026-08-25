@@ -749,7 +749,7 @@ export async function getTaskCounts(
  * reps, so a rep's task list still shows only their own work. Tasks they assigned surface in the
  * separate "Needs your attention" bucket (/tasks/awaiting-me), which is scoped to `created_by = me`.
  */
-function assertTaskVisible(
+export function assertTaskVisible(
   task: { assignedTo: string; createdBy?: string | null; lastAssignedBy?: string | null } | null,
   userRole: string,
   userId: string
@@ -810,9 +810,9 @@ function isTaskParticipant(
   if (task.assignedTo === userId) return true;
   // BOTH the creator and the current assigner are stakeholders in closing a task, and after a
   // reassignment they are different people. Deliberately wider than reply DELIVERY, which must pick
-  // exactly ONE recipient and therefore uses `assignedBy` alone: accepting the work is something
-  // either party can legitimately do, whereas mailing the reply to both would be noise and mailing it
-  // to the wrong one is the defect this whole column exists to fix.
+  // exactly ONE recipient and therefore uses the RESOLVED assigner alone: accepting the work is
+  // something either party can legitimately do, whereas mailing the reply to both would be noise and
+  // mailing it to the wrong one is the defect this whole column exists to fix.
   //
   // `x === null` is false for every real user id, but spelling the null checks out keeps a future
   // `userId` of undefined/null from ever matching a NULL.

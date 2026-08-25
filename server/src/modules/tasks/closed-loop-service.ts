@@ -11,7 +11,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, jobQueue, taskComments, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { assertTaskCommentAuthority, getTaskRowById } from "./service.js";
+import { assertTaskCommentAuthority, assertTaskVisible, getTaskRowById } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -261,6 +261,43 @@ async function loadLoopTask(
 ): Promise<LoopTaskRow> {
   const task = (await getTaskRowById(tenantDb, taskId, userRole, userId)) as LoopTaskRow | null;
   if (!task) throw new AppError(404, "Task not found");
+  return task;
+}
+
+/**
+ * The same load, under a ROW LOCK — for the write path only.
+ *
+ * `postTaskComment` makes four decisions from one task row: whether the author may comment, whether
+ * their comment is a REPLY (author === assignee), the stamp on `last_reply_at`, and who the reply is
+ * delivered to. Under READ COMMITTED a reassignment committing between an unlocked read and those
+ * decisions makes them disagree with each other — a former assignee passes the stale authority check,
+ * their comment is classified as a reply and raises the task in the NEW assigner's bucket, and the
+ * notification, built from the same stale row, is delivered to the FORMER assigner. Each step is
+ * individually correct and the result is incoherent.
+ *
+ * FOR UPDATE makes the reassignment's own UPDATE queue behind this transaction, so all four decisions
+ * are made against one version of the row. Deliberately NOT used by the read paths: a thread or a
+ * timeline has nothing to serialise against, and locking rows to render them would be a write-blocking
+ * lock taken on every page view.
+ */
+export async function loadLoopTaskForUpdate(
+  tenantDb: TenantDb,
+  taskId: string,
+  userRole: string,
+  userId: string
+): Promise<LoopTaskRow> {
+  const rows = await tenantDb
+    .select()
+    .from(tasks)
+    .where(eq(tasks.id, taskId))
+    .limit(1)
+    .for("update");
+
+  const task = (rows[0] ?? null) as LoopTaskRow | null;
+  if (!task) throw new AppError(404, "Task not found");
+  // The visibility rule applies to the locked row exactly as it does to an unlocked read; taking the
+  // lock must not become a way around it.
+  assertTaskVisible(task, userRole, userId);
   return task;
 }
 
@@ -678,7 +715,9 @@ export async function postTaskComment(
 
   // NOT via loadLoopTask's visibility rule alone: viewing a task and speaking on it are different
   // permissions, and an admin/director who can see everything is explicitly allowed to speak.
-  const task = await loadLoopTask(tenantDb, taskId, userRole, userId);
+  // LOCKED. Authority, reply classification, the last_reply_at stamp and the recipient are all
+  // decided from this one row — see loadLoopTaskForUpdate for what happens when they are not.
+  const task = await loadLoopTaskForUpdate(tenantDb, taskId, userRole, userId);
   assertTaskCommentAuthority(task, userRole, userId);
   // Deliberately NO completed/dismissed guard. updateTask's "no edits after completion" rule is about
   // task FIELDS; a comment is not a field edit, and "it was closed and then they answered" is a real
