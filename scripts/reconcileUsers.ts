@@ -611,18 +611,39 @@ async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUse
     );
     for (const row of leads.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_lead", entityType: `${schemaName}.lead`, entityId: row.id, email, before: fromUserId, after: toUserId, details: row.name ?? "" });
 
-    // `last_assigned_by` is DELIBERATELY not touched here. A merge moves the ASSIGNEE because an
-    // account is being retired; it is not somebody deciding to hand the work over, and whoever last
-    // assigned the task is still the person waiting on a reply to it. Both alternatives are worse:
-    // setting the merge target makes the new assignee their own assigner, so every reply they write
-    // becomes a self-reply the loop notifies nobody about; setting NULL reads as "never reassigned"
-    // and silently re-points the loop at created_by. If the identity being merged away is itself an
-    // assigner, the loop already reports assigner_inactive and declines to mail them.
-    // (Transferring the assigner role on merge is a defensible follow-up — it is just not what a
-    // reassignment of the ASSIGNEE means.) Proven by execution in
-    // server/tests/scripts/reconcile-users-task-assigner.runtime.test.ts.
+    // A merge has TWO independent task identities to reconcile. Moving only assigned_to leaves a
+    // source user who ASSIGNED work to somebody else as `COALESCE(last_assigned_by, created_by)`.
+    // Once that source is deactivated, replies intentionally skip their inactive assigner forever.
+    // Transfer that resolved assigner to the replacement, but preserve created_by: it is permanent
+    // historical attribution, not a routing pointer.
+    //
+    // Do this separately from assignee reassignment so the audit record does not claim a task moved
+    // when only its reply recipient changed. `IS DISTINCT FROM` also makes a task already assigned to
+    // the replacement a deliberate self-assignment: the replacement is both assignee and current
+    // assigner, so a reply records normally but never emails the author themself.
+    const assignerLoops = await client.query(
+      `UPDATE ${schemaName}.tasks
+          SET last_assigned_by = $2, updated_at = NOW()
+        WHERE assigned_to IS DISTINCT FROM $1
+          AND COALESCE(last_assigned_by, created_by) = $1
+      RETURNING id, title, status`,
+      [fromUserId, toUserId]
+    );
+    for (const row of assignerLoops.rows) auditRows.push({ timestamp: nowIso(), step, action: "transfer_task_assigner", entityType: `${schemaName}.task`, entityId: row.id, email, before: fromUserId, after: toUserId, details: `${row.status}:${row.title ?? ""}` });
+
+    // If the retiring user is also the assignee, move that ownership. A source-resolved assigner on
+    // the same row follows the replacement too; that is the genuine replacement self-assignment case
+    // above, whereas an unrelated previous assigner remains the person waiting on the reply.
     const tasks = await client.query(
-      `UPDATE ${schemaName}.tasks SET assigned_to = $2, updated_at = NOW() WHERE assigned_to = $1 RETURNING id, title, status`,
+      `UPDATE ${schemaName}.tasks
+          SET assigned_to = $2,
+              last_assigned_by = CASE
+                WHEN COALESCE(last_assigned_by, created_by) = $1 THEN $2
+                ELSE last_assigned_by
+              END,
+              updated_at = NOW()
+        WHERE assigned_to = $1
+      RETURNING id, title, status`,
       [fromUserId, toUserId]
     );
     for (const row of tasks.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_task", entityType: `${schemaName}.task`, entityId: row.id, email, before: fromUserId, after: toUserId, details: `${row.status}:${row.title ?? ""}` });

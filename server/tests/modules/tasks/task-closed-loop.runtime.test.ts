@@ -151,6 +151,37 @@ describe("posting a comment", () => {
     expect(result.comment.kind).toBe("reply");
   });
 
+  it("carries an existing microsecond reply timestamp exactly through the rendered acknowledgement boundary", async () => {
+    // This is a state an older deployment can already contain: clock_timestamp() wrote the comment at
+    // microsecond precision, while the old Date -> ISO response rounded it down before the browser
+    // sent it back. Do not manufacture a future-only fixture; prove the stored historical row can be
+    // acknowledged without reappearing.
+    await replyAt(TASK, ASSIGNEE, "precise reply", "2026-05-01T10:00:00.123456Z");
+
+    const { comments } = await listTaskComments(tdb, TASK, "rep", ASSIGNER);
+    expect(comments[0]!.createdAt).toBe("2026-05-01T10:00:00.123456Z");
+
+    const acknowledged = await ackTaskReplies(
+      tdb, TASK, comments[0]!.createdAt, "rep", ASSIGNER
+    );
+    expect(acknowledged.acknowledged).toBe(true);
+    expect((await getTasksAwaitingMe(tdb, ASSIGNER)).map((row) => row.id)).not.toContain(TASK);
+  });
+
+  it("does not collapse two replies that share a displayed millisecond", async () => {
+    await replyAt(TASK, ASSIGNEE, "first precise reply", "2026-05-01T10:00:00.123100Z");
+    await replyAt(TASK, ASSIGNEE, "second precise reply", "2026-05-01T10:00:00.123900Z");
+
+    const { comments } = await listTaskComments(tdb, TASK, "rep", ASSIGNER);
+    expect(comments.map((comment) => comment.createdAt)).toEqual([
+      "2026-05-01T10:00:00.123100Z",
+      "2026-05-01T10:00:00.123900Z",
+    ]);
+
+    await ackTaskReplies(tdb, TASK, comments[1]!.createdAt, "rep", ASSIGNER);
+    expect((await getTasksAwaitingMe(tdb, ASSIGNER)).map((row) => row.id)).not.toContain(TASK);
+  });
+
   it("does NOT stamp last_reply_at when the ASSIGNER comments on their own task", async () => {
     const result = await postTaskComment(
       tdb, TASK, { body: "Any update?", ...POST }, "rep", ASSIGNER
@@ -602,6 +633,33 @@ describe("/tasks/awaiting-me", () => {
       status: "pending",
       source: "manual",
     });
+  });
+
+  it("does not silently hide the 51st unacknowledged task", async () => {
+    // Seed the same paired task/comment state postTaskComment produces, rather than a bare
+    // last_reply_at the service can never create. The 51st row is only reachable if this actionable
+    // queue is not truncated as a recent-activity sample.
+    const ids = Array.from({ length: 51 }, (_, index) => uid(String(100 + index)));
+    const taskValues = ids.map((id, index) =>
+      `('${id}', 'Attention ${index + 1}', 'manual', 'normal', 'pending', '${ASSIGNEE}', '${ASSIGNER}', NULL, 'manual', NULL)`
+    ).join(",");
+    const commentValues = ids.map((id, index) =>
+      `('${id}', '${ASSIGNEE}', 'Reply ${index + 1}', 'reply', '2026-05-01T10:00:00Z')`
+    ).join(",");
+
+    await pg.exec(`
+      INSERT INTO tasks (id, title, type, priority, status, assigned_to, created_by, last_assigned_by, source, origin_rule)
+      VALUES ${taskValues};
+      INSERT INTO task_comments (task_id, author_id, body, kind, created_at)
+      VALUES ${commentValues};
+      UPDATE tasks
+         SET last_reply_at = '2026-05-01T10:00:00Z', last_reply_by = '${ASSIGNEE}'
+       WHERE id IN (${ids.map((id) => `'${id}'`).join(",")});
+    `);
+
+    const rows = await getTasksAwaitingMe(tdb, ASSIGNER);
+    expect(rows).toHaveLength(51);
+    expect(rows.map((row) => row.id)).toContain(ids[50]);
   });
 
   it("excludes seeded demo rows, like every other task projection", async () => {

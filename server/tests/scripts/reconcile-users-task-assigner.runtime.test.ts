@@ -1,23 +1,10 @@
-// REAL-SQL proof for what a USER MERGE does to a task's assigner.
+// REAL-SQL proof for the two task identities a USER MERGE must reconcile.
 //
-// EXECUTED, NOT GREPPED. The sibling branch caught exactly this on the same function: a substring
-// assertion over the SQL text passes against a statement that never runs, so the only way to know
-// what a merge does to `last_assigned_by` is to run it and read the row back.
-//
-// THE DECISION THIS PINS. `reassignOwnerRecords` moves `assigned_to` from a user being merged away to
-// the merge target — so the task changes hands, and the sibling's `assigned_at` is re-stamped. The
-// question is what `last_assigned_by` becomes, and both obvious answers are wrong:
-//
-//   * the merge target — it is the new ASSIGNEE. Making them their own assigner means every reply
-//     they write is a self-reply, which the loop deliberately does not notify anyone about, so the
-//     loop would go silently dead on precisely the tasks a merge just touched.
-//   * NULL — that reads as "never reassigned", which resolves the assigner back to `created_by`. On a
-//     task that HAD been reassigned this silently re-points the loop at the original creator, which
-//     is the defect the column was added to fix.
-//
-// So it is left ALONE: an account merge is not somebody deciding to hand work over. Whoever last
-// assigned the task is still the person waiting on it, and if that identity is the one being merged
-// away the loop already reports `assigner_inactive` and declines to mail them.
+// `assigned_to` says who owns the work. `COALESCE(last_assigned_by, created_by)` says who receives an
+// assignee's reply. A source account can be only the second identity — it assigned work to somebody
+// else — so a merge that moves only assigned_to leaves replies targeting a deactivated user forever.
+// Execute the script's own UPDATE clauses: source-text assertions alone have previously passed against
+// a statement that was never run.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
@@ -27,28 +14,33 @@ const uid = (n: string) => `00000000-0000-0000-0000-${n.padStart(12, "0")}`;
 
 const MERGED_AWAY = uid("a1");
 const MERGE_TARGET = uid("a2");
-const ASSIGNER = uid("a3");
-const CREATOR = uid("a4");
+const ASSIGNEE = uid("a3");
+const PRIOR_ASSIGNER = uid("a4");
+const HISTORICAL_CREATOR = uid("a5");
 
-const REASSIGNED_TASK = uid("b1"); // has changed hands: last_assigned_by is set
-const VIRGIN_TASK = uid("b2"); // never reassigned: last_assigned_by is NULL
+const ASSIGNED_OUT_FROM_CREATOR = uid("b1");
+const ASSIGNED_OUT_FROM_REASSIGNMENT = uid("b2");
+const INCOMING_FROM_ANOTHER_ASSIGNER = uid("b3");
+const REPLACEMENT_SELF_ASSIGNMENT = uid("b4");
 
 let pg: PGlite;
 
-/**
- * The task UPDATE `reassignOwnerRecords` runs, taken from the script itself so this suite cannot pass
- * against a statement the script no longer contains.
- */
-function taskReassignSql(): string {
+type TaskUpdate = { setClause: string; whereClause: string };
+
+/** The two task UPDATEs in reassignOwnerRecords, extracted from the actual script under test. */
+function taskMergeUpdates(): TaskUpdate[] {
   const source = readFileSync(
     join(process.cwd(), "..", "scripts", "reconcileUsers.ts"),
     "utf-8"
   );
-  const match = source.match(
-    /UPDATE \$\{schemaName\}\.tasks SET ([^`]*?) WHERE assigned_to = \$1 RETURNING/
-  );
-  if (!match) throw new Error("reassignOwnerRecords' task UPDATE not found — has it been renamed?");
-  return match[1]!.trim();
+  const updates = [...source.matchAll(
+    /UPDATE \$\{schemaName\}\.tasks\s+SET\s+([\s\S]*?)\s+WHERE\s+([\s\S]*?)\s+RETURNING id, title, status/g
+  )].map((match) => ({ setClause: match[1]!.trim(), whereClause: match[2]!.trim() }));
+
+  if (updates.length !== 2) {
+    throw new Error(`Expected the two task merge UPDATEs, found ${updates.length}`);
+  }
+  return updates;
 }
 
 beforeAll(async () => {
@@ -56,7 +48,6 @@ beforeAll(async () => {
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(`
     CREATE SCHEMA office_dallas;
-    CREATE TABLE public_users (id uuid PRIMARY KEY);
     CREATE TABLE office_dallas.tasks (
       id uuid PRIMARY KEY,
       title varchar(500) NOT NULL,
@@ -75,55 +66,82 @@ beforeEach(async () => {
   await pg.exec(`
     DELETE FROM office_dallas.tasks;
     INSERT INTO office_dallas.tasks (id, title, assigned_to, created_by, last_assigned_by) VALUES
-      ('${REASSIGNED_TASK}', 'Handed over once', '${MERGED_AWAY}', '${CREATOR}', '${ASSIGNER}'),
-      ('${VIRGIN_TASK}',     'Never reassigned', '${MERGED_AWAY}', '${CREATOR}', NULL);
+      -- Source created this task for another person, so created_by is the resolved assigner.
+      ('${ASSIGNED_OUT_FROM_CREATOR}', 'Source assigned this out', '${ASSIGNEE}', '${MERGED_AWAY}', NULL),
+      -- Same outcome when the source was recorded as a later reassigner instead of the creator.
+      ('${ASSIGNED_OUT_FROM_REASSIGNMENT}', 'Source reassigned this out', '${ASSIGNEE}', '${HISTORICAL_CREATOR}', '${MERGED_AWAY}'),
+      -- Source only owns this one; a different person remains the reply recipient after reassignment.
+      ('${INCOMING_FROM_ANOTHER_ASSIGNER}', 'Incoming work', '${MERGED_AWAY}', '${HISTORICAL_CREATOR}', '${PRIOR_ASSIGNER}'),
+      -- Replacement takes both sides of a source self-assignment. It is intentionally self-addressed.
+      ('${REPLACEMENT_SELF_ASSIGNMENT}', 'Source self assignment', '${MERGED_AWAY}', '${MERGED_AWAY}', NULL);
   `);
 });
 
 async function runMerge() {
-  // The script's own SET clause, against the merge pair.
-  await pg.exec(
-    `UPDATE office_dallas.tasks SET ${taskReassignSql()
+  for (const { setClause, whereClause } of taskMergeUpdates()) {
+    const bind = (clause: string) => clause
+      .replace(/\$1/g, `'${MERGED_AWAY}'`)
       .replace(/\$2/g, `'${MERGE_TARGET}'`)
-      .replace(/NOW\(\)/g, "NOW()")} WHERE assigned_to = '${MERGED_AWAY}'`
-  );
+      .replace(/NOW\(\)/g, "NOW()");
+    await pg.exec(`UPDATE office_dallas.tasks SET ${bind(setClause)} WHERE ${bind(whereClause)}`);
+  }
 }
 
 async function taskRow(id: string) {
-  const r = await pg.query<{ assigned_to: string; last_assigned_by: string | null }>(
-    `SELECT assigned_to, last_assigned_by FROM office_dallas.tasks WHERE id = $1`, [id]
+  const result = await pg.query<{
+    assigned_to: string;
+    created_by: string | null;
+    last_assigned_by: string | null;
+  }>(
+    `SELECT assigned_to, created_by, last_assigned_by FROM office_dallas.tasks WHERE id = $1`, [id]
   );
-  return r.rows[0]!;
+  return result.rows[0]!;
 }
 
-describe("a user merge and the task assigner", () => {
-  it("moves the ASSIGNEE to the merge target", async () => {
-    await runMerge();
-    expect((await taskRow(REASSIGNED_TASK)).assigned_to).toBe(MERGE_TARGET);
-    expect((await taskRow(VIRGIN_TASK)).assigned_to).toBe(MERGE_TARGET);
-  });
-
-  // THE ONE THAT MATTERS.
-  it("leaves last_assigned_by ALONE — a merge is not somebody handing work over", async () => {
+describe("a user merge and task reply loops", () => {
+  it("transfers the source's resolved assigner role on tasks they assigned to somebody else", async () => {
     await runMerge();
 
-    const reassigned = await taskRow(REASSIGNED_TASK);
-    expect(reassigned.last_assigned_by, "the prior assigner is still the one waiting").toBe(ASSIGNER);
-    // NOT the merge target: that is the new assignee, and making them their own assigner turns every
-    // reply into a self-reply the loop deliberately notifies nobody about.
-    expect(reassigned.last_assigned_by).not.toBe(MERGE_TARGET);
-    // NOT NULL either: that reads as "never reassigned" and silently re-points the loop at created_by.
-    expect(reassigned.last_assigned_by).not.toBeNull();
+    for (const id of [ASSIGNED_OUT_FROM_CREATOR, ASSIGNED_OUT_FROM_REASSIGNMENT]) {
+      const row = await taskRow(id);
+      expect(row.assigned_to, "the existing assignee keeps the work").toBe(ASSIGNEE);
+      expect(row.last_assigned_by, "the active replacement receives future replies").toBe(MERGE_TARGET);
+    }
   });
 
-  it("leaves a never-reassigned task NULL, so it still resolves to its creator", async () => {
+  it("preserves created_by as historical attribution while transferring a creator-resolved loop", async () => {
     await runMerge();
-    expect((await taskRow(VIRGIN_TASK)).last_assigned_by).toBeNull();
+    const row = await taskRow(ASSIGNED_OUT_FROM_CREATOR);
+
+    expect(row.created_by, "who originally created the task never changes").toBe(MERGED_AWAY);
+    expect(row.last_assigned_by, "routing moves without rewriting history").toBe(MERGE_TARGET);
   });
 
-  // Executed rather than asserted on text: this is the statement the script actually runs, and if it
-  // ever starts naming last_assigned_by the tests above change meaning without changing wording.
-  it("does not mention last_assigned_by in the statement at all", () => {
-    expect(taskReassignSql()).not.toContain("last_assigned_by");
+  it("moves a retiring assignee without stealing a different active assigner's loop", async () => {
+    await runMerge();
+    const row = await taskRow(INCOMING_FROM_ANOTHER_ASSIGNER);
+
+    expect(row.assigned_to).toBe(MERGE_TARGET);
+    expect(row.last_assigned_by).toBe(PRIOR_ASSIGNER);
+    expect(row.created_by).toBe(HISTORICAL_CREATOR);
+  });
+
+  it("makes a replacement self-assignment explicit instead of leaving its resolved assigner inactive", async () => {
+    await runMerge();
+    const row = await taskRow(REPLACEMENT_SELF_ASSIGNMENT);
+
+    expect(row.assigned_to).toBe(MERGE_TARGET);
+    expect(row.last_assigned_by).toBe(MERGE_TARGET);
+    // The old account remains the historical creator even though the replacement is now both sides
+    // of this task. The loop's normal self-reply suppression handles that intentionally.
+    expect(row.created_by).toBe(MERGED_AWAY);
+  });
+
+  it("keeps separate UPDATEs for assigner-only transfers and assignee ownership moves", () => {
+    const updates = taskMergeUpdates();
+    expect(updates[0]!.whereClause).toContain("COALESCE(last_assigned_by, created_by) = $1");
+    expect(updates[0]!.whereClause).toContain("IS DISTINCT FROM $1");
+    expect(updates[1]!.whereClause).toBe("assigned_to = $1");
+    expect(updates[1]!.setClause).toContain("last_assigned_by = CASE");
   });
 });

@@ -73,6 +73,16 @@ function comment(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -115,6 +125,15 @@ function click(selector: string) {
   if (!element) throw new Error(`no element for ${selector}`);
   act(() => {
     element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
+function typeDraft(value: string) {
+  const textarea = container.querySelector<HTMLTextAreaElement>("#task-reply-composer")!;
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+    setter.call(textarea, value);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
 
@@ -215,6 +234,47 @@ describe("the composer", () => {
     });
     expect(mocks.postTaskCommentMock).toHaveBeenCalledWith("task-1", "done");
   });
+
+  it("does not let a completed reply for A clear or refetch B after the drawer switches tasks", async () => {
+    const postA = deferred<{ comment: unknown; loop: unknown }>();
+    const refetchCommentsA = vi.fn();
+    const refetchTimelineA = vi.fn();
+    const refetchCommentsB = vi.fn();
+    const refetchTimelineB = vi.fn();
+    const onChanged = vi.fn();
+    mocks.postTaskCommentMock.mockReturnValueOnce(postA.promise);
+    setComments([], { refetch: refetchCommentsA });
+    mocks.useTaskTimelineMock.mockReturnValue({
+      entries: [], loading: false, error: null, refetch: refetchTimelineA,
+    });
+
+    render({ onChanged });
+    typeDraft("Reply for A");
+    act(() => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(mocks.postTaskCommentMock).toHaveBeenCalledWith("task-1", "Reply for A");
+
+    const taskB = { ...task, id: "task-2", title: "Review permit", assignedTo: ASSIGNEE };
+    setComments([], { refetch: refetchCommentsB });
+    mocks.useTaskTimelineMock.mockReturnValue({
+      entries: [], loading: false, error: null, refetch: refetchTimelineB,
+    });
+    render({ task: taskB, onChanged });
+    typeDraft("Keep this B draft");
+
+    await act(async () => {
+      postA.resolve({ comment: comment(), loop: liveLoop });
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector<HTMLTextAreaElement>("#task-reply-composer")!.value).toBe("Keep this B draft");
+    expect(refetchCommentsA).not.toHaveBeenCalled();
+    expect(refetchTimelineA).not.toHaveBeenCalled();
+    expect(refetchCommentsB).not.toHaveBeenCalled();
+    expect(refetchTimelineB).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
 });
 
 // C6 — the loop is dead for every rules-engine and AI-disconnect task, and for a departed assigner.
@@ -313,6 +373,16 @@ describe("acknowledgement", () => {
     ]);
     await act(async () => { render(); });
     expect(mocks.ackTaskRepliesMock).toHaveBeenCalledWith("task-1", "2026-05-01T10:00:00.000Z");
+  });
+
+  it("acknowledges the later exact timestamp when two replies share one displayed millisecond", async () => {
+    setComments([
+      comment({ id: "c1", createdAt: "2026-05-01T10:00:00.123100Z" }),
+      comment({ id: "c2", createdAt: "2026-05-01T10:00:00.123900Z" }),
+    ]);
+    await act(async () => { render(); });
+
+    expect(mocks.ackTaskRepliesMock).toHaveBeenCalledWith("task-1", "2026-05-01T10:00:00.123900Z");
   });
 
   // The acknowledgement is a statement about a specific person; the ASSIGNEE opening their own task

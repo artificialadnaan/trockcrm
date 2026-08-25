@@ -1,6 +1,7 @@
 /**
  * In-app notifications for the task loop: `task.assigned` (existing, moved here) and `task.replied`
- * (new). Both write a row into the recipient's office `notifications` table and emit PG NOTIFY.
+ * (new). Assignment rows live with the event; reply rows live in the recipient's readable notification
+ * tenant while their deep link retains the task's event office. Both emit PG NOTIFY.
  *
  * ⚠️ THE NOTIFY DOES NOT CURRENTLY REACH A LISTENER, and this file must not claim otherwise. The only
  * `LISTEN crm_events` in the repository is worker/src/listener.ts, whose callback logs; the server's
@@ -120,17 +121,17 @@ export async function handleTaskRepliedEvent(payload: any, officeId: string | nu
   if (!payload?.assignerId || !payload?.taskId) return;
 
   const { pool: workerPool } = await import("../db.js");
-  // The EVENT's office, not the assigner's home office. The reply, the task and the notifications the
-  // assigner actually reads all live in the tenant the comment was written into; resolving from
-  // public.users would file the row in a schema they never look at.
-  const resolved = await resolveOfficeSchema(workerPool as WorkerPool, officeId, payload.assignerId);
-  if (!resolved) return;
+  // Notifications are read from the recipient's active/home tenant, which can differ from the office
+  // holding the task. Store the bell row where the assigner can actually see it, but keep the EVENT
+  // office on the link below so opening the notification still resolves the cross-office task.
+  const recipientStore = await resolveOfficeSchema(workerPool as WorkerPool, null, payload.assignerId);
+  if (!recipientStore) return;
 
   const replier = typeof payload.authorName === "string" && payload.authorName.trim().length > 0
     ? payload.authorName.trim()
     : "The assignee";
 
-  await insertNotification(workerPool as WorkerPool, resolved.schemaName, {
+  await insertNotification(workerPool as WorkerPool, recipientStore.schemaName, {
     userId: payload.assignerId,
     type: "task_replied",
     title: capNotificationTitle(`${replier} replied to: ${payload.taskTitle ?? "a task"}`),
@@ -138,6 +139,7 @@ export async function handleTaskRepliedEvent(payload: any, officeId: string | nu
     // notifications.body is TEXT, but the popover renders it inline — a wall of text there is its own
     // failure, so it is capped and the full thread is one click away.
     body: typeof payload.replyBody === "string" ? payload.replyBody.slice(0, 500) : null,
-    link: taskNotificationLink(payload.taskId, resolved.officeId),
+    // Legacy jobs have no event office; their recipient store is the only safe fallback.
+    link: taskNotificationLink(payload.taskId, officeId ?? recipientStore.officeId),
   });
 }

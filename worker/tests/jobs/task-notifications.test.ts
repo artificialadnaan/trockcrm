@@ -251,22 +251,16 @@ describe("task.replied", () => {
   });
 
   // ---------------------------------------------------------------------------------------------
-  // THE TENANT THE ROW LANDS IN.
+  // THE TENANT THE BELL READS FROM VS. THE TENANT THE TASK LIVES IN.
   //
-  // `public.users` is GLOBAL while `notifications` and `tasks` are PER-OFFICE, so "the recipient's
-  // home office" and "the office this task lives in" are two different questions that happen to have
-  // the same answer in a single-office deployment. Resolving the schema from public.users.office_id
-  // answers the wrong one: the row lands outside the tenant where notification reads happen and where
-  // the linked task actually is, so the recipient never sees it — and a row is written into a schema
-  // it does not belong to.
-  //
-  // The event carries the right answer. queue.ts:711 passes job.office_id into every handler, the
-  // enqueuer sets it from the writer's ACTIVE office, and task.completed (task-completed.ts:79-88)
-  // already resolves this way. These two handlers were the outliers.
+  // `public.users` is GLOBAL while notifications and tasks are PER-OFFICE. The notification popover
+  // queries the reader's active/home tenant, so a cross-office reply row stored only in the task
+  // tenant is invisible to its recipient. The task office remains essential, but it belongs in the
+  // deep link rather than in the recipient's notification store.
   // ---------------------------------------------------------------------------------------------
 
-  it("writes the reply notification to the EVENT's office, not the recipient's home office", async () => {
-    // The recipient lives in office-1; the task and the reply are in office-2.
+  it("stores a cross-office reply in the assigner's home notification tenant and keeps the task office in its link", async () => {
+    // The recipient reads office-1; the task and reply are in office-2.
     mockOffices({ "office-1": "dallas", "office-2": "atlanta" }, "office-1");
 
     await handleTaskRepliedEvent(
@@ -274,12 +268,13 @@ describe("task.replied", () => {
       "office-2"
     );
 
-    const [sql] = insertCall()!;
-    expect(sql).toContain("office_atlanta.notifications");
-    expect(sql).not.toContain("office_dallas");
+    const [sql, params] = insertCall()!;
+    expect(sql).toContain("office_dallas.notifications");
+    expect(sql).not.toContain("office_atlanta");
+    expect(params![4]).toBe(`/tasks/${TASK}?officeId=office-2`);
   });
 
-  it("does not consult public.users at all when the event names its office", async () => {
+  it("resolves the reply recipient's notification store even when the task office is known", async () => {
     mockOffices({ "office-1": "dallas", "office-2": "atlanta" }, "office-1");
 
     await handleTaskRepliedEvent(
@@ -287,15 +282,15 @@ describe("task.replied", () => {
       "office-2"
     );
 
-    // A home-office lookup that still runs is a fallback waiting to be preferred again by accident.
+    // This lookup is load-bearing: it selects the schema the bell's reader actually queries.
     expect(
       queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("FROM public.users"))
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  // The fallback stays, but strictly as a fallback: a domain_event row enqueued before office_id was
-  // populated still has to deliver somewhere sane rather than silently dropping.
-  it("falls back to the recipient's home office ONLY when the event names none", async () => {
+  // Legacy domain_event rows have no office_id. The recipient store remains correct and also supplies
+  // the only safe link context available for those old rows.
+  it("uses the recipient's home office as link context only when the event names none", async () => {
     mockOffices({ "office-1": "dallas", "office-2": "atlanta" }, "office-1");
 
     await handleTaskRepliedEvent(

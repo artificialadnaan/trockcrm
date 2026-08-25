@@ -228,7 +228,8 @@ export async function transitionTaskStatus(
   // line /transition closes a task without ever entering completeTask — the bypass that made a guard
   // on completeTask alone decorative. Non-terminal moves stay open to anyone who can see the task:
   // "somebody else picked this up" was never the accountability concern.
-  if (TERMINAL_STATUSES.includes(input.nextStatus)) {
+  const isTerminalTransition = TERMINAL_STATUSES.includes(input.nextStatus);
+  if (isTerminalTransition) {
     assertTaskCloseAuthority(existing, userRole, userId);
   }
 
@@ -297,8 +298,20 @@ export async function transitionTaskStatus(
   const result = await tenantDb
     .update(tasks)
     .set(updates)
-    .where(eq(tasks.id, taskId))
+    .where(
+      and(
+        eq(tasks.id, taskId),
+        isTerminalTransition ? terminalTaskCloseAuthorityCondition(userRole, userId) : undefined
+      )
+    )
     .returning();
+
+  if (result.length === 0) {
+    throw new AppError(
+      409,
+      isTerminalTransition ? "Task changed before it could be closed" : "Task changed before it could be updated"
+    );
+  }
 
   const updatedTask = result[0];
   if (resolvedAt) {
@@ -828,7 +841,7 @@ function isTaskParticipant(
  * additionally writes a suppression window that stops the rules engine ever raising the task again).
  */
 export function assertTaskCloseAuthority(
-  task: { assignedTo: string; createdBy?: string | null },
+  task: { assignedTo: string; createdBy?: string | null; lastAssignedBy?: string | null },
   userRole: string,
   userId: string,
   options: TaskCloseOptions = {}
@@ -844,6 +857,28 @@ export function assertTaskCloseAuthority(
   throw new AppError(
     403,
     "Only the assignee, the person who assigned this task, or an admin can close it"
+  );
+}
+
+/**
+ * The same authority rule, expressed against the row the terminal UPDATE actually changes.
+ *
+ * The initial read above is still needed for visibility and useful errors, but it is only a snapshot:
+ * a reassignment can commit after that read and before the write. System actors and elevated roles
+ * have explicit global authority; ordinary callers must still be a participant at write time.
+ */
+function terminalTaskCloseAuthorityCondition(
+  userRole: string,
+  userId: string,
+  options: TaskCloseOptions = {}
+): SQL | undefined {
+  if (options.systemActor !== undefined) return undefined;
+  if ((TASK_CLOSE_ELEVATED_ROLES as readonly string[]).includes(userRole)) return undefined;
+
+  return or(
+    eq(tasks.assignedTo, userId),
+    eq(tasks.createdBy, userId),
+    eq(tasks.lastAssignedBy, userId)
   );
 }
 
@@ -1129,7 +1164,13 @@ export async function completeTask(
       waitingOn: null,
       blockedBy: null,
     } as any)
-    .where(and(eq(tasks.id, taskId), inArray(tasks.status as any, ["pending", "in_progress", "waiting_on", "blocked"] as any)))
+    .where(
+      and(
+        eq(tasks.id, taskId),
+        inArray(tasks.status as any, ["pending", "in_progress", "waiting_on", "blocked"] as any),
+        terminalTaskCloseAuthorityCondition(userRole, userId, options)
+      )
+    )
     .returning();
 
   if (result.length === 0) {
@@ -1171,8 +1212,12 @@ export async function dismissTask(
       waitingOn: null,
       blockedBy: null,
     } as any)
-    .where(eq(tasks.id, taskId))
+    .where(and(eq(tasks.id, taskId), terminalTaskCloseAuthorityCondition(userRole, userId, options)))
     .returning();
+
+  if (result.length === 0) {
+    throw new AppError(409, "Task changed before it could be dismissed");
+  }
 
   await writeDismissalResolutionState(tenantDb, result[0], resolvedAt);
 

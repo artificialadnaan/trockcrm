@@ -353,7 +353,9 @@ router.post("/:id/ack", async (req, res, next) => {
     const result = await ackTaskReplies(
       req.tenantDb!,
       req.params.id,
-      seenUpToDate,
+      // Preserve the wire value: Date normalizes a PostgreSQL microsecond timestamp to milliseconds,
+      // which can acknowledge just before the reply the drawer actually rendered.
+      seenUpTo.trim(),
       req.user!.role,
       req.user!.id
     );

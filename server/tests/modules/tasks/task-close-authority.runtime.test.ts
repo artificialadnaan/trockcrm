@@ -63,6 +63,57 @@ async function statusOf(id: string) {
   return result.rows[0]?.status;
 }
 
+/**
+ * Stage a reassignment at the seam after a terminal path's authority read but before its UPDATE
+ * executes. A fixture reassigned before the call only proves the first check; this wraps the real
+ * Drizzle update builder so removing the write predicate lets the stale caller close the reassigned
+ * row and makes the test fail.
+ */
+function withReassignmentBeforeTerminalWrite(taskId: string) {
+  let reassignedAtWrite = false;
+
+  const wrapBuilder = (builder: any): any => new Proxy(builder, {
+    get(target, property) {
+      const value = target[property];
+      if (property === "returning") {
+        return (...args: unknown[]) => {
+          const returning = value.apply(target, args);
+          return new Proxy(returning, {
+            get(returningTarget, returningProperty) {
+              const returningValue = returningTarget[returningProperty];
+              if (returningProperty === "then") {
+                return async (...thenArgs: unknown[]) => {
+                  if (!reassignedAtWrite) {
+                    reassignedAtWrite = true;
+                    await pg.exec(`UPDATE tasks SET assigned_to = '${STRANGER}' WHERE id = '${taskId}'`);
+                  }
+                  return returningValue.apply(returningTarget, thenArgs);
+                };
+              }
+              return typeof returningValue === "function"
+                ? returningValue.bind(returningTarget)
+                : returningValue;
+            },
+          });
+        };
+      }
+      return typeof value === "function"
+        ? (...args: unknown[]) => wrapBuilder(value.apply(target, args))
+        : value;
+    },
+  });
+
+  const tenantDb = new Proxy(tdb, {
+    get(target, property) {
+      const value = target[property];
+      if (property !== "update") return typeof value === "function" ? value.bind(target) : value;
+      return (...args: unknown[]) => wrapBuilder(value.apply(target, args));
+    },
+  });
+
+  return { tenantDb, wasInterleaved: () => reassignedAtWrite };
+}
+
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`SET TimeZone='UTC';`);
@@ -322,6 +373,25 @@ describe("POST /:id/transition — the bypass", () => {
       transitionTaskStatus(tdb, CASE, { nextStatus: "completed" }, "rep", ASSIGNER)
     ).resolves.toBeDefined();
     expect(await statusOf(CASE)).toBe("completed");
+  });
+});
+
+// The initial assertion is a snapshot. These are real interleavings, not pre-reassigned fixtures:
+// former assignee Derek is still authorised when each call starts, then the task moves to Stranger at
+// the exact terminal UPDATE seam. Every terminal path must repeat participant authority in its WHERE.
+describe("terminal close authority is revalidated at write time", () => {
+  it.each([
+    ["complete", (db: any) => completeTask(db, CASE, "rep", ASSIGNEE)],
+    ["dismiss", (db: any) => dismissTask(db, CASE, "rep", ASSIGNEE)],
+    ["transition to completed", (db: any) => transitionTaskStatus(db, CASE, { nextStatus: "completed" }, "rep", ASSIGNEE)],
+    ["transition to dismissed", (db: any) => transitionTaskStatus(db, CASE, { nextStatus: "dismissed" }, "rep", ASSIGNEE)],
+  ])("does not let the former assignee %s after a reassignment", async (_path, close) => {
+    const { tenantDb, wasInterleaved } = withReassignmentBeforeTerminalWrite(CASE);
+
+    await expect(close(tenantDb)).rejects.toMatchObject({ statusCode: expect.any(Number) });
+
+    expect(wasInterleaved(), "the reassignment must occur at the terminal write seam").toBe(true);
+    expect(await statusOf(CASE)).toBe("pending");
   });
 });
 

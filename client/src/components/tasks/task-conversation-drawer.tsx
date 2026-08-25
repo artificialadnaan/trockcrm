@@ -160,6 +160,9 @@ export function TaskConversationDrawer({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [closing, setClosing] = useState(false);
+  // A drawer instance survives task switches. Async work begun for A must never continue mutating B
+  // after the list reuses this component for a different task.
+  const taskGenerationRef = useRef(0);
 
   const {
     comments,
@@ -209,8 +212,11 @@ export function TaskConversationDrawer({
   //     same second is not rare.
   const ackedRef = useRef<string | null>(null);
   useEffect(() => {
+    taskGenerationRef.current += 1;
     setTab("conversation");
     setDraft("");
+    // A send for the previous task must not leave the newly opened task's composer disabled.
+    setSending(false);
     ackedRef.current = null;
   }, [task.id]);
 
@@ -237,7 +243,10 @@ export function TaskConversationDrawer({
       // The hook's request-id guard discards a late RESPONSE; it cannot un-commit state already set.
       if (comment.taskId !== task.id) continue;
       if (comment.kind !== "reply") continue;
-      if (!newest || new Date(comment.createdAt).getTime() > new Date(newest).getTime()) {
+      // The API preserves the database timestamp's microseconds for acknowledgement. Date only keeps
+      // milliseconds, so `>=` intentionally takes the later row from the server's created_at/id order
+      // when two replies share one displayed millisecond.
+      if (!newest || new Date(comment.createdAt).getTime() >= new Date(newest).getTime()) {
         newest = comment.createdAt;
       }
     }
@@ -270,18 +279,26 @@ export function TaskConversationDrawer({
     const body = draft.trim();
     if (!body || sending) return;
 
+    const taskId = task.id;
+    const taskGeneration = taskGenerationRef.current;
     setSending(true);
     try {
-      await postTaskComment(task.id, body);
+      await postTaskComment(taskId, body);
+      // The request did succeed for its original task, but its continuation is no longer allowed to
+      // clear the new draft or refetch the old thread after the drawer has moved to another task.
+      if (taskGeneration !== taskGenerationRef.current) return;
       setDraft("");
       await refetchComments();
+      if (taskGeneration !== taskGenerationRef.current) return;
       await refetchTimeline();
+      if (taskGeneration !== taskGenerationRef.current) return;
       onChanged();
     } catch (error) {
+      if (taskGeneration !== taskGenerationRef.current) return;
       console.error("[tasks] reply failed", error);
       toast.error(error instanceof Error ? error.message : "Failed to post your reply");
     } finally {
-      setSending(false);
+      if (taskGeneration === taskGenerationRef.current) setSending(false);
     }
   };
 

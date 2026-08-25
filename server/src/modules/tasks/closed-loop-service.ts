@@ -18,9 +18,18 @@ type TenantDb = NodePgDatabase<typeof schema>;
 /** A single comment body cannot be unbounded — the reply text is embedded verbatim in an email. */
 export const TASK_COMMENT_MAX_LENGTH = 10_000;
 
-/** Newest-first read caps. Both surfaces are "recent activity", not an archive. */
+/** The timeline is recent activity, not an archive; the attention queue remains complete and actionable. */
 const TIMELINE_LIMIT = 200;
-const AWAITING_ME_LIMIT = 50;
+
+/**
+ * JavaScript Date truncates PostgreSQL's microseconds. A comment timestamp is later sent back as the
+ * acknowledgement boundary, so this expression deliberately preserves the exact database value over
+ * the API instead of allowing Date -> ISO conversion to silently round it down.
+ */
+const taskCommentCreatedAtIso = sql<string>`to_char(
+  ${taskComments.createdAt} AT TIME ZONE 'UTC',
+  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+)`;
 
 export interface TaskCommentRecord {
   id: string;
@@ -430,7 +439,16 @@ export async function listTaskComments(
       authorName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${taskComments.authorId})`,
       body: taskComments.body,
       kind: taskComments.kind,
-      createdAt: taskComments.createdAt,
+      createdAt: taskCommentCreatedAtIso,
+      // Do this comparison in PostgreSQL's precision. Converting both sides to Date here can make a
+      // .123100 reply and a .123900 acknowledgement look equal to the browser while they are not.
+      isUnread: sql<boolean>`
+        ${taskComments.kind} = 'reply'
+        AND ${taskComments.createdAt} > COALESCE(
+          (SELECT assigner_ack_at FROM tasks WHERE id = ${taskId}::uuid),
+          '-infinity'::timestamptz
+        )
+      `,
     })
     .from(taskComments)
     .where(eq(taskComments.taskId, taskId))
@@ -438,11 +456,7 @@ export async function listTaskComments(
     // LAST one it rendered.
     .orderBy(asc(taskComments.createdAt), asc(taskComments.id));
 
-  const ackAt = task.assignerAckAt ? new Date(task.assignerAckAt).getTime() : null;
-  const unreadReplyCount = rows.filter(
-    (row) =>
-      row.kind === "reply" && (ackAt === null || new Date(row.createdAt as any).getTime() > ackAt)
-  ).length;
+  const unreadReplyCount = rows.filter((row) => Boolean(row.isUnread)).length;
 
   return {
     task,
@@ -453,7 +467,7 @@ export async function listTaskComments(
       authorName: row.authorName,
       body: row.body,
       kind: row.kind,
-      createdAt: new Date(row.createdAt as any).toISOString(),
+      createdAt: row.createdAt,
     })),
     loop: await getTaskLoopDescriptor(tenantDb, task),
     unreadReplyCount,
@@ -582,7 +596,7 @@ export async function getTaskTimeline(
       authorName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${taskComments.authorId})`,
       body: taskComments.body,
       kind: taskComments.kind,
-      createdAt: taskComments.createdAt,
+      createdAt: taskCommentCreatedAtIso,
     })
     .from(taskComments)
     .where(eq(taskComments.taskId, taskId))
@@ -598,7 +612,7 @@ export async function getTaskTimeline(
     entries.push({
       id: `comment:${row.id}`,
       kind: "comment",
-      occurredAt: new Date(row.createdAt as any).toISOString(),
+      occurredAt: row.createdAt,
       actorId: row.authorId,
       actorLabel,
       actorType,
@@ -668,8 +682,7 @@ export interface AwaitingMeTask {
  */
 export async function getTasksAwaitingMe(
   tenantDb: TenantDb,
-  userId: string,
-  limit = AWAITING_ME_LIMIT
+  userId: string
 ): Promise<AwaitingMeTask[]> {
   const taskColumns = tasks as typeof tasks & {
     scheduledFor: typeof tasks.dueDate;
@@ -745,8 +758,9 @@ export async function getTasksAwaitingMe(
         sql`(${tasks.assignerAckAt} IS NULL OR ${tasks.assignerAckAt} < ${tasks.lastReplyAt})`
       )
     )
-    .orderBy(desc(tasks.lastReplyAt), desc(tasks.id))
-    .limit(limit);
+    // This is an actionable queue, not a recent-activity sample. A silent cap makes older replies
+    // undiscoverable, so return the complete attention set until this endpoint grows real pagination.
+    .orderBy(desc(tasks.lastReplyAt), desc(tasks.id));
 
   return rows.map((row) => ({
     ...row,
@@ -808,9 +822,16 @@ export async function postTaskComment(
   const [inserted] = await tenantDb
     .insert(taskComments)
     .values({ taskId, authorId: userId, body, kind })
-    .returning();
+    .returning({
+      id: taskComments.id,
+      taskId: taskComments.taskId,
+      authorId: taskComments.authorId,
+      body: taskComments.body,
+      kind: taskComments.kind,
+      createdAt: taskCommentCreatedAtIso,
+    });
 
-  const createdAtIso = new Date(inserted.createdAt as any).toISOString();
+  const createdAtIso = inserted.createdAt;
 
   if (isAssigneeReply) {
     // MONOTONIC, and stamped with the COMMENT'S OWN created_at rather than a second now().
@@ -916,11 +937,12 @@ export async function postTaskComment(
 export async function ackTaskReplies(
   tenantDb: TenantDb,
   taskId: string,
-  seenUpTo: Date,
+  seenUpTo: Date | string,
   userRole: string,
   userId: string
 ): Promise<{ acknowledged: boolean; lastReplyAt: string | null; assignerAckAt: string | null }> {
-  if (!(seenUpTo instanceof Date) || Number.isNaN(seenUpTo.getTime())) {
+  const seenIso = seenUpTo instanceof Date ? seenUpTo.toISOString() : seenUpTo.trim();
+  if (!seenIso || Number.isNaN(new Date(seenIso).getTime())) {
     throw new AppError(400, "seenUpTo must be a valid timestamp");
   }
 
@@ -935,7 +957,6 @@ export async function ackTaskReplies(
     throw new AppError(403, "Only the person who assigned this task can acknowledge its replies");
   }
 
-  const seenIso = seenUpTo.toISOString();
   const result = await tenantDb.execute(sql`
     UPDATE tasks
        SET assigner_ack_at = GREATEST(COALESCE(assigner_ack_at, '-infinity'::timestamptz), ${seenIso}::timestamptz)
