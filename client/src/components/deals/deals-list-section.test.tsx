@@ -1134,6 +1134,55 @@ describe("DealsListSection", () => {
     ).toBeNull();
   });
 
+  it("renders the bid due date in its own column without replacing the expected execution date", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          bidDueDate: "2026-08-01T00:00:00.000Z",
+          resolvedBidDueDate: "2026-07-03",
+          expectedCloseDate: "2026-08-15",
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain("Bid due");
+    expect(html).toContain("Jul 3, 2026"); // Uses the authoritative list projection, not the raw snapshot.
+    expect(html).toContain("Aug 15"); // The existing expected-execution / Close column remains separate.
+  });
+
+  it("sorts the bid due column soonest first, then reverses it from its header arrow", () => {
+    const { container, unmount } = renderInteractive();
+    const bidDueHeader = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Bid due")
+    );
+    expect(bidDueHeader).toBeTruthy();
+
+    act(() => {
+      bidDueHeader!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    let lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall).toMatchObject({ sortBy: "bid_due_date", sortDir: "asc" });
+    expect(
+      Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Bid due"))?.textContent
+    ).toContain("↑");
+
+    act(() => {
+      Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent?.includes("Bid due"))!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall).toMatchObject({ sortBy: "bid_due_date", sortDir: "desc" });
+
+    unmount();
+  });
+
   it("defaults the list to newest and lets the user toggle oldest", () => {
     const { container, unmount } = renderInteractive({
       initialSort: { key: "name", dir: "asc" },
@@ -1211,7 +1260,7 @@ describe("DealsListSection", () => {
     });
 
     expect(html).toContain("overflow-x-auto");
-    expect(html).toContain("md:min-w-[44rem] lg:min-w-[58rem]");
+    expect(html).toContain("md:min-w-[44rem] lg:min-w-[66rem]");
     expect(html).toContain("md:w-[13.5rem] md:!px-2 lg:w-[15rem]");
     expect(html).toContain("hidden lg:table-cell lg:w-[11rem]");
     expect(html).toContain("md:w-[4rem] md:!px-2 lg:w-[7.5rem]");

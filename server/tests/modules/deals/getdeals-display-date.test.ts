@@ -28,6 +28,11 @@ function isPipelineStageConfigTable(table: unknown): boolean {
   return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
 }
 
+function isLeadsTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "leads";
+}
+
 // listDealStages() reads pipeline_stage_config on the REQUEST's tenant client now (through the global
 // pool it made one request hold two slots at once). Kept so importing db.js stays harmless.
 vi.mock("../../../src/db.js", () => {
@@ -46,6 +51,7 @@ const renderText = (value: unknown) => dialect.sqlToQuery(value as never).sql.to
 // dealRows query's `displayDate` expression (the count queries select {count}).
 function createTenantDbCapturingSelect() {
   const capturedSelects: Array<Record<string, unknown>> = [];
+  const capturedLeftJoinTables: unknown[] = [];
   // The stage-config read needs its own chain, and its projection must NOT be captured — the
   // assertions below look for the one select that carries `displayDate`.
   const stageChain: Record<string, unknown> = {};
@@ -55,7 +61,10 @@ function createTenantDbCapturingSelect() {
 
   const dataChain: Record<string, unknown> = {};
   dataChain.from = (table: unknown) => (isPipelineStageConfigTable(table) ? stageChain : dataChain);
-  dataChain.leftJoin = () => dataChain;
+  dataChain.leftJoin = (table: unknown) => {
+    capturedLeftJoinTables.push(table);
+    return dataChain;
+  };
   dataChain.where = () => dataChain;
   dataChain.orderBy = () => dataChain;
   dataChain.limit = () => dataChain;
@@ -67,11 +76,13 @@ function createTenantDbCapturingSelect() {
       return dataChain;
     },
   } as never;
-  return { db, capturedSelects };
+  return { db, capturedSelects, capturedLeftJoinTables };
 }
 
 const displayDateProjection = (selects: Array<Record<string, unknown>>) =>
   selects.find((p) => "displayDate" in p);
+const resolvedBidDueDateProjection = (selects: Array<Record<string, unknown>>) =>
+  selects.find((p) => "resolvedBidDueDate" in p);
 
 describe("getDeals — outcome-aware display_date projection (filter-axis == display-axis)", () => {
   it("projects displayDate as the outcome CASE (won_closed_date / lost_at / stage_entered_at), classified by the same Won/Lost stage ids, when a date window is set", async () => {
@@ -114,5 +125,48 @@ describe("getDeals — outcome-aware display_date projection (filter-axis == dis
     // The display CASE classifies on stage_id IN (...) exactly like the filter's
     // outcome scope — both built from the resolved won/lost stage ids.
     expect(displaySql).toContain('"stage_id" in');
+  });
+
+  it("projects the authoritative bid due date with lead precedence and joins the source lead", async () => {
+    const previous = process.env.BID_BOARD_DUE_DATE_READBACK;
+    delete process.env.BID_BOARD_DUE_DATE_READBACK;
+    try {
+      const { db, capturedSelects, capturedLeftJoinTables } = createTenantDbCapturingSelect();
+      const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+      await getDeals(db, { sortBy: "bid_due_date", scope: "all" }, "director", "director-1");
+
+      const projection = resolvedBidDueDateProjection(capturedSelects);
+      expect(projection).toBeDefined();
+      const sql = renderText(projection!.resolvedBidDueDate);
+      expect(sql).toContain("case");
+      expect(sql).toContain('"leads"."id" is not null');
+      expect(sql).toContain("bid_due_date");
+      expect(sql).toContain("at time zone 'utc'");
+      expect(capturedLeftJoinTables.some(isLeadsTable)).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      else process.env.BID_BOARD_DUE_DATE_READBACK = previous;
+    }
+  });
+
+  it("adds the Bid Board override only when the readback flag is enabled", async () => {
+    const previous = process.env.BID_BOARD_DUE_DATE_READBACK;
+    process.env.BID_BOARD_DUE_DATE_READBACK = "true";
+    try {
+      const { db, capturedSelects } = createTenantDbCapturingSelect();
+      const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+      await getDeals(db, { sortBy: "bid_due_date", scope: "all" }, "director", "director-1");
+
+      const projection = resolvedBidDueDateProjection(capturedSelects);
+      const sql = renderText(projection!.resolvedBidDueDate);
+      expect(sql).toContain("bid_board_detached_at");
+      expect(sql).toContain("bid_due_date_from_bid_board_at");
+      expect(sql).toContain("bid_due_date_bid_board_project_number");
+    } finally {
+      if (previous === undefined) delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      else process.env.BID_BOARD_DUE_DATE_READBACK = previous;
+    }
   });
 });

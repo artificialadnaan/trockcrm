@@ -41,6 +41,7 @@ import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
+import { formatBidDueDate } from "@/pages/deals/bid-due-date-banner";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions, type FilterBarDateControl } from "@/components/filters/filter-bar";
 import {
@@ -66,7 +67,7 @@ const EXPORT_PAGE_SIZE = 500;
 const DEFAULT_SORT_STATE = { key: "created_at", dir: "desc" } satisfies DealListSortState;
 const EMPTY_STAGE_SLUGS: string[] = [];
 
-type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at";
+type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at" | "bid_due_date";
 export type DealListSortState = {
   key: SortKey | "expected_close_date" | "contract_signed_date" | "display_date";
   dir: "asc" | "desc";
@@ -1039,15 +1040,18 @@ export function DealsListSection({
   const activeSort: { key: string | undefined; dir: "asc" | "desc" | undefined } = filterBarMode
     ? { key: urlFilters.sortBy, dir: urlFilters.sortDir }
     : { key: sort.key, dir: sort.dir };
-  const updateSort = (key: DealListSortState["key"]) => {
+  const updateSort = (key: DealListSortState["key"], initialDir: "asc" | "desc" = "desc") => {
     if (filterBarMode) {
-      const dir = urlFilters.sortBy === key && urlFilters.sortDir === "desc" ? "asc" : "desc";
+      const dir =
+        urlFilters.sortBy === key
+          ? urlFilters.sortDir === "desc" ? "asc" : "desc"
+          : initialDir;
       setFilters({ sortBy: key, sortDir: dir });
       return;
     }
     setSort((current) => ({
       key,
-      dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
+      dir: current.key === key ? (current.dir === "desc" ? "asc" : "desc") : initialDir,
     }));
   };
 
@@ -1148,11 +1152,15 @@ export function DealsListSection({
     triggerCsvDownload(rows, "deals-list.csv");
   };
 
-  const sortHeader = (key: DealListSortState["key"], label: string) => (
+  const sortHeader = (
+    key: DealListSortState["key"],
+    label: string,
+    initialDir: "asc" | "desc" = "desc"
+  ) => (
     <button
       type="button"
       className="inline-flex items-center gap-1 font-black uppercase tracking-[0.16em] text-slate-500 hover:text-brand-red"
-      onClick={() => updateSort(key)}
+      onClick={() => updateSort(key, initialDir)}
     >
       {label}
       {activeSort.key === key ? <span>{activeSort.dir === "asc" ? "↑" : "↓"}</span> : null}
@@ -1261,6 +1269,20 @@ export function DealsListSection({
           compact
           className="inline-flex justify-end whitespace-nowrap font-black tabular-nums text-slate-950"
         />
+      ),
+    },
+    {
+      key: "bidDueDate",
+      // The bid deadline is distinct from the existing Date/Close (expected-execution or outcome) axis.
+      // It is intentionally a header sort too: the first click is earliest first, which matches the
+      // operational question this column answers (what needs a bid next?).
+      header: sortHeader("bid_due_date", "Bid due", "asc"),
+      headClassName: "md:w-[7rem] md:!px-2 md:text-right lg:w-[7.5rem] lg:!px-3",
+      cellClassName: "md:w-[7rem] md:!px-2 md:text-right lg:w-[7.5rem] lg:!px-3",
+      render: (deal) => (
+        <span className="inline-flex justify-end whitespace-nowrap text-sm font-medium text-slate-600">
+          {formatBidDueDate(deal.resolvedBidDueDate ?? deal.bidDueDate) ?? "--"}
+        </span>
       ),
     },
     {
@@ -1605,7 +1627,7 @@ export function DealsListSection({
               <PipelineStageTable
                 rows={deals}
                 columns={tableColumns}
-                tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[58rem] xl:min-w-0"
+                tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[66rem]"
                 showPagination={false}
                 pagination={{
                   page: pagination.page,

@@ -14,6 +14,8 @@ export const DEAL_LIST_SORT_OPTIONS: FilterBarSortOption[] = [
   { label: "Recently updated", sortBy: "updated_at", sortDir: "desc" },
   { label: "Value (high → low)", sortBy: "awarded_amount", sortDir: "desc" },
   { label: "Days in stage", sortBy: "stage_entered_at", sortDir: "asc" },
+  { label: "Bid due (soonest first)", sortBy: "bid_due_date", sortDir: "asc" },
+  { label: "Bid due (latest first)", sortBy: "bid_due_date", sortDir: "desc" },
 ];
 
 /**
