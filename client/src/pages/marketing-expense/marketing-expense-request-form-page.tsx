@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { uploadFile } from "@/hooks/use-files";
+import { useOfficeScopedHref } from "@/hooks/use-office-scope";
 import { isApiError } from "@/lib/api";
 import {
   createMarketingExpenseRequest,
@@ -106,6 +107,7 @@ const PAYMENT_METHOD_ITEMS = [
 
 export function MarketingExpenseRequestFormPage() {
   const navigate = useNavigate();
+  const scopedHref = useOfficeScopedHref();
   const [form, setForm] = useState<MarketingExpenseRequestPayload>(EMPTY_FORM);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -123,6 +125,10 @@ export function MarketingExpenseRequestFormPage() {
   const locked = createdDraft !== null;
   // Survives a failed submit so the retry reuses the draft instead of minting a second request number.
   const draftIdRef = useRef<string | null>(null);
+  // Minted before the first create call, rather than after it resolves. If the server commits a draft and
+  // the response is lost, the next press carries this same id and the server returns that draft instead of
+  // creating an indistinguishable second request.
+  const clientRequestIdRef = useRef<string | null>(null);
   // The attachments that have NOT yet landed. A file is removed only once its upload has succeeded, so a
   // retry resumes at the one that failed instead of skipping it.
   const outstandingFilesRef = useRef<Array<{ file: File; clientUploadId: string }>>([]);
@@ -174,7 +180,9 @@ export function MarketingExpenseRequestFormPage() {
     setError(null);
     try {
       if (!draftIdRef.current) {
-        const draft = await createMarketingExpenseRequest(form);
+        const clientRequestId = clientRequestIdRef.current ?? crypto.randomUUID();
+        clientRequestIdRef.current = clientRequestId;
+        const draft = await createMarketingExpenseRequest({ ...form, clientRequestId });
         draftIdRef.current = draft.id;
         // One key per file, minted ONCE and reused by every retry of that file.
         outstandingFilesRef.current = attachments.map((file) => ({
@@ -211,7 +219,7 @@ export function MarketingExpenseRequestFormPage() {
 
       const submitted = await submitMarketingExpenseRequest(draftIdRef.current);
       toast.success(`Request ${submitted.requestNumber} submitted for approval`);
-      navigate("/marketing-expense-requests");
+      navigate(scopedHref("/marketing-expense-requests"));
     } catch (err) {
       // The submit committed and only its RESPONSE was lost: the retry is told "already submitted", which
       // is the truth and is a success from here. Reporting it as a failure is how somebody files the same
@@ -219,7 +227,7 @@ export function MarketingExpenseRequestFormPage() {
       // is a real failure and must keep reading as one.
       if (isApiError(err) && err.status === 409 && err.code === MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE) {
         toast.success("This request was already submitted");
-        navigate("/marketing-expense-requests");
+        navigate(scopedHref("/marketing-expense-requests"));
         return;
       }
       const message = err instanceof Error ? err.message : "Could not submit the request.";

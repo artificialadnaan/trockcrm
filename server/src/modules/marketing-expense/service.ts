@@ -33,6 +33,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { isPostgresCalendarDate } from "../../lib/pg-timestamp.js";
+import { latestActiveVersionCondition } from "../files/photo-timeline-filters.js";
 import { getNotificationRecipients } from "../leads/due-diligence-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -65,6 +66,7 @@ const MAX_REQUEST_NUMBER = 10 ** REQUEST_NUMBER_DIGITS - 1;
  */
 const REQUEST_NUMBER_ATTEMPTS = 3;
 const MINIMUM_DENIAL_REASON_LENGTH = 10;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const COST_COLUMNS = [
   ["costAdvertising", "cost_advertising"],
@@ -78,6 +80,8 @@ const COST_COLUMNS = [
 ] as const;
 
 export interface MarketingExpenseRequestInput {
+  /** A browser-minted UUID used as the eventual request id for an idempotent draft create. */
+  clientRequestId?: unknown;
   requestedByName?: unknown;
   department?: unknown;
   neededBy?: unknown;
@@ -120,6 +124,19 @@ function requiredText(value: unknown, label: string): string {
   const trimmed = optionalText(value);
   if (!trimmed) throw new AppError(400, `${label} is required.`);
   return trimmed;
+}
+
+/**
+ * Older clients did not send a creation key, so omission remains valid. A supplied key is the request's
+ * primary key rather than a second, migration-backed column: the existing UUID uniqueness constraint is
+ * the durable concurrency backstop for "create committed, response lost" retries.
+ */
+function optionalClientRequestId(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !UUID_PATTERN.test(value.trim())) {
+    throw new AppError(400, "clientRequestId must be a valid UUID.");
+  }
+  return value.trim().toLowerCase();
 }
 
 /**
@@ -231,11 +248,42 @@ export async function allocateRequestNumber(tenantDb: TenantDb, tenantSchema: st
 
 // ─── create ──────────────────────────────────────────────────────────────────
 
+/**
+ * Return a previous create ONLY to its original submitter. Looking it up before validating the replay's
+ * body is intentional: the original draft is the authoritative payload once the key has committed, and
+ * re-validating a browser's changed/replayed fields cannot turn a completed create into a second row.
+ */
+async function replayClientCreatedRequest(
+  tenantDb: TenantDb,
+  clientRequestId: string,
+  userId: string,
+): Promise<MarketingExpenseRequestDetail | null> {
+  const [existing] = await tenantDb
+    .select({ id: marketingExpenseRequests.id, submittedBy: marketingExpenseRequests.submittedBy })
+    .from(marketingExpenseRequests)
+    .where(eq(marketingExpenseRequests.id, clientRequestId))
+    .limit(1);
+  if (!existing) return null;
+  if (existing.submittedBy !== userId) {
+    // Do not reveal whether another user's UUID matched; the key is only a replay capability for its owner.
+    throw new AppError(409, "This request creation key is already in use.");
+  }
+  return loadDetail(tenantDb, existing.id);
+}
+
 export async function createMarketingExpenseRequest(
   tenantDb: TenantDb,
   args: { tenantSchema: string; userId: string; input: MarketingExpenseRequestInput },
 ): Promise<MarketingExpenseRequestDetail> {
   const { tenantSchema, userId, input } = args;
+  const clientRequestId = optionalClientRequestId(input.clientRequestId);
+
+  // This is before normalising the draft fields because an ambiguous retry may carry a changed browser
+  // form. The committed draft, not those uncommitted edits, is what must be resumed.
+  if (clientRequestId) {
+    const replay = await replayClientCreatedRequest(tenantDb, clientRequestId, userId);
+    if (replay) return replay;
+  }
 
   const requestedByName = requiredText(input.requestedByName, "Requested by (name)");
   const vendorEvent = requiredText(input.vendorEvent, "Vendor / event");
@@ -286,15 +334,20 @@ export async function createMarketingExpenseRequest(
   for (let attempt = 0; attempt < REQUEST_NUMBER_ATTEMPTS; attempt += 1) {
     const requestNumber = await allocateRequestNumber(tenantDb, tenantSchema);
     // ON CONFLICT DO NOTHING rather than catching a 23505: inside the tenant transaction a thrown unique
-    // violation poisons every subsequent statement (25P02), so the retry could not run. An empty RETURNING
-    // is the collision signal, and it leaves the transaction usable.
+    // violation poisons every subsequent statement (25P02), so the retry could not run. This deliberately
+    // covers BOTH the per-office request number and the browser-minted primary key; after an ambiguous
+    // concurrent create, the latter is re-read below and returns the original draft.
     const [row] = await tenantDb
       .insert(marketingExpenseRequests)
-      .values({ ...values, requestNumber })
-      .onConflictDoNothing({ target: marketingExpenseRequests.requestNumber })
+      .values({ ...values, requestNumber, ...(clientRequestId ? { id: clientRequestId } : {}) })
+      .onConflictDoNothing()
       .returning({ id: marketingExpenseRequests.id });
     if (row) {
       return loadDetail(tenantDb, row.id);
+    }
+    if (clientRequestId) {
+      const replay = await replayClientCreatedRequest(tenantDb, clientRequestId, userId);
+      if (replay) return replay;
     }
   }
 
@@ -893,7 +946,16 @@ async function loadDetail(tenantDb: TenantDb, requestId: string): Promise<Market
       createdAt: files.createdAt,
     })
     .from(files)
-    .where(and(eq(files.marketingExpenseRequestId, requestId), eq(files.isActive, true)))
+    .where(
+      and(
+        eq(files.marketingExpenseRequestId, requestId),
+        eq(files.isActive, true),
+        // `uploadNewVersion` leaves earlier rows active and files every version against the ROOT. The
+        // canonical family predicate keeps an approver from seeing an obsolete quote as a separate
+        // document, including a v2 that was later replaced by v3.
+        latestActiveVersionCondition(),
+      ),
+    )
     .orderBy(asc(files.createdAt));
 
   const approvals: MarketingExpenseApprovalRow[] = approvalRows.map((approval) => ({

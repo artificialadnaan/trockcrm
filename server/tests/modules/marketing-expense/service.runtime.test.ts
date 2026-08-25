@@ -154,6 +154,8 @@ beforeAll(async () => {
       change_order_id uuid,
       display_name varchar(500) NOT NULL DEFAULT 'doc.pdf',
       file_size_bytes bigint NOT NULL DEFAULT 1,
+      parent_file_id uuid,
+      version integer NOT NULL DEFAULT 1,
       is_active boolean NOT NULL DEFAULT true,
       created_at timestamptz NOT NULL DEFAULT NOW()
     );
@@ -354,6 +356,16 @@ describe("required fields", () => {
     await expect(createDraft({ attachmentKinds: ["receipts"] as never })).rejects.toMatchObject({ statusCode: 400,
     });
   });
+
+  it("rejects a malformed client request id before it reaches UUID storage", async () => {
+    await expect(
+      createMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA,
+        userId: SUBMITTER,
+        input: { ...VALID_INPUT, clientRequestId: "not-a-uuid" },
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
 });
 
 describe("request_number allocation", () => {
@@ -407,6 +419,44 @@ describe("request_number allocation", () => {
     await pg.exec(`UPDATE public.marketing_expense_request_sequences SET last_number = 0`);
     const retried = await createDraft();
     expect(retried.requestNumber).toBe("MER-0002");
+  });
+
+  it("replays an ambiguous create with the same browser-minted request id", async () => {
+    // The initial POST committed but the browser never received its response. Repeating the creation key
+    // must return that exact draft—not allocate a second request number or leave a duplicate on My Requests.
+    const clientRequestId = U("501");
+    const first = await createMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA,
+      userId: SUBMITTER,
+      input: { ...VALID_INPUT, clientRequestId },
+    });
+    const replayed = await createMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA,
+      userId: SUBMITTER,
+      input: { ...VALID_INPUT, clientRequestId },
+    });
+
+    expect(first.id).toBe(clientRequestId);
+    expect(replayed.id).toBe(first.id);
+    expect(replayed.requestNumber).toBe("MER-0001");
+    const afterReplay = await createDraft();
+    expect(afterReplay.requestNumber).toBe("MER-0002");
+  });
+
+  it("does not turn another submitter's creation key into a read capability", async () => {
+    const clientRequestId = U("502");
+    await createMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA,
+      userId: SUBMITTER,
+      input: { ...VALID_INPUT, clientRequestId },
+    });
+    await expect(
+      createMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA,
+        userId: OTHER_REP,
+        input: { ...VALID_INPUT, clientRequestId },
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
   });
 });
 
@@ -1077,6 +1127,30 @@ describe("visibility", () => {
       user: { id: SUBMITTER, role: "rep" },
     });
     expect(detail.attachments).toEqual([]);
+  });
+
+  it("shows only the latest active version of a supporting document", async () => {
+    // Version uploads keep earlier file rows active and attach every member to the root. Rendering both
+    // makes an approver choose between a superseded quote and its replacement with no version cue.
+    const draft = await createAndSubmit();
+    const rootId = U("601");
+    const latestId = U("602");
+    await pg.exec(`
+      INSERT INTO ${SCHEMA}.files
+        (id, marketing_expense_request_id, display_name, file_size_bytes, version)
+      VALUES ('${rootId}', '${draft.id}', 'old-quote.pdf', 4096, 1);
+      INSERT INTO ${SCHEMA}.files
+        (id, marketing_expense_request_id, display_name, file_size_bytes, parent_file_id, version)
+      VALUES ('${latestId}', '${draft.id}', 'revised-quote.pdf', 8192, '${rootId}', 2);
+    `);
+
+    const detail = await getMarketingExpenseRequest(tenantDb, {
+      requestId: draft.id,
+      user: { id: APPROVER, role: "director" },
+    });
+    expect(detail.attachments).toEqual([
+      expect.objectContaining({ id: latestId, displayName: "revised-quote.pdf", fileSizeBytes: 8192 }),
+    ]);
   });
 });
 

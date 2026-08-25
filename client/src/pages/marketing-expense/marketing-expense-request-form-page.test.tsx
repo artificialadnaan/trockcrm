@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   uploadFile: vi.fn(),
   isApiError: vi.fn(() => false),
   navigate: vi.fn(),
+  scopedHref: vi.fn((href: string) => href),
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
 
@@ -31,6 +32,7 @@ vi.mock("@/hooks/use-marketing-expense-requests", () => ({
 }));
 
 vi.mock("@/hooks/use-files", () => ({ uploadFile: mocks.uploadFile }));
+vi.mock("@/hooks/use-office-scope", () => ({ useOfficeScopedHref: () => mocks.scopedHref }));
 vi.mock("@/lib/api", () => ({ isApiError: mocks.isApiError }));
 
 let container: HTMLDivElement;
@@ -42,6 +44,7 @@ beforeEach(() => {
   mocks.submitMarketingExpenseRequest.mockResolvedValue({ id: "req-1", requestNumber: "MER-0001" });
   mocks.uploadFile.mockResolvedValue({ id: "file-1" });
   mocks.isApiError.mockReturnValue(false);
+  mocks.scopedHref.mockImplementation((href: string) => href);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -334,6 +337,24 @@ describe("the submit sequence", () => {
     expect(mocks.createMarketingExpenseRequest).toHaveBeenCalledTimes(1);
   });
 
+  it("reuses one creation key when the draft committed but its response was lost", async () => {
+    // `draftIdRef` cannot be populated without a response. The key must therefore exist BEFORE the call,
+    // survive its rejection, and make the next request identify the same durable draft to the server.
+    mocks.createMarketingExpenseRequest
+      .mockRejectedValueOnce(new Error("connection closed after commit"))
+      .mockResolvedValueOnce({ id: "req-1", requestNumber: "MER-0001" });
+    await renderPage();
+    await fillValid();
+    await submit();
+    await submit();
+
+    const first = mocks.createMarketingExpenseRequest.mock.calls[0]?.[0];
+    const second = mocks.createMarketingExpenseRequest.mock.calls[1]?.[0];
+    expect(first.clientRequestId).toBeTruthy();
+    expect(second.clientRequestId).toBe(first.clientRequestId);
+    expect(mocks.submitMarketingExpenseRequest).toHaveBeenCalledWith("req-1");
+  });
+
   it("LOCKS the custom cost labels too, not just their amounts", async () => {
     // The two "Other (describe)" boxes were the one pair the locking change missed. Editing a label after
     // the draft exists shows the new text but submits the persisted one — the same silent divergence the
@@ -434,6 +455,29 @@ describe("the submit sequence", () => {
     await fillValid();
     await submit();
     expect(mocks.navigate).toHaveBeenCalledWith("/marketing-expense-requests");
+  });
+
+  it("preserves the selected office after a successful submit", async () => {
+    mocks.scopedHref.mockImplementation((href: string) => `${href}?officeId=office-atlanta`);
+    await renderPage();
+    await fillValid();
+    await submit();
+    expect(mocks.navigate).toHaveBeenCalledWith("/marketing-expense-requests?officeId=office-atlanta");
+  });
+
+  it("preserves the selected office when recovering an already-submitted response", async () => {
+    mocks.scopedHref.mockImplementation((href: string) => `${href}?officeId=office-atlanta`);
+    mocks.isApiError.mockReturnValue(true);
+    mocks.submitMarketingExpenseRequest.mockRejectedValueOnce(
+      Object.assign(new Error("This request has already been submitted."), {
+        status: 409,
+        code: "ALREADY_SUBMITTED",
+      }),
+    );
+    await renderPage();
+    await fillValid();
+    await submit();
+    expect(mocks.navigate).toHaveBeenCalledWith("/marketing-expense-requests?officeId=office-atlanta");
   });
 
   it("keeps the draft and offers a RETRY when the submit fails, instead of creating a second row", async () => {

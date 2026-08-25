@@ -12,6 +12,8 @@ import type {
 export type MarketingExpenseQueueStatus = Exclude<MarketingExpenseStatus, "draft">;
 
 export interface MarketingExpenseRequestPayload {
+  /** Browser-minted request id. Reusing it turns an ambiguous create retry into the original draft. */
+  clientRequestId?: string;
   requestedByName: string;
   department: string;
   neededBy: string;
