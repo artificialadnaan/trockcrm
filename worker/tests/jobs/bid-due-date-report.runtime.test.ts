@@ -88,8 +88,15 @@ beforeAll(async () => {
       office_id uuid NOT NULL,
       UNIQUE (user_id, office_id)
     );
+    CREATE TABLE ${SCHEMA}.leads (
+      id uuid PRIMARY KEY,
+      -- A plain DATE, unlike deals.bid_due_date which is a timestamptz at UTC midnight. The two need
+      -- DIFFERENT casts, and getting that wrong shifts a day on exactly the rows this precedence governs.
+      bid_due_date date
+    );
     CREATE TABLE ${SCHEMA}.deals (
       id uuid PRIMARY KEY,
+      source_lead_id uuid,
       name text NOT NULL,
       deal_number text,
       project_number text,
@@ -172,6 +179,19 @@ beforeAll(async () => {
       -- REALIZED + FAR OUT: proves the terminal leg of the effective-on-hold predicate. Won in the CRM,
       -- with a horizon date ~200 days out. Without the stage_id terminal guard the far-out leg auto-parks it.
       ('${U("c1")}', 'Won And Far Out', 'DFW-1-17', '24-170', '${WON}', '${REP_HELMS}', ${d("2027-03-15")}, '2027-03-15', NULL, 100000, true, false, false, false);
+
+    INSERT INTO ${SCHEMA}.leads (id, bid_due_date) VALUES
+      ('${U("1a1")}', '2026-09-06'),   -- the lead owns a date the deal snapshot never received
+      ('${U("1a2")}', '2026-09-07'),   -- the lead's date supersedes a stale snapshot
+      ('${U("1a3")}', NULL);           -- the lead's date was CLEARED; the stale snapshot must not resurrect it
+
+    INSERT INTO ${SCHEMA}.deals (id, name, deal_number, project_number, stage_id, assigned_rep_id, source_lead_id, bid_due_date, expected_close_date, bid_estimate, is_active, is_test_data, is_change_order, on_hold) VALUES
+      ('${U("1b1")}', 'Lead Owns Date', 'DFW-1-30', '24-180', '${ESTIMATING}', '${REP_HELMS}', '${U("1a1")}', NULL, '2026-12-01', 400000, true, false, false, false),
+      ('${U("1b2")}', 'Lead Overrides Snapshot', 'DFW-1-31', '24-181', '${ESTIMATING}', '${REP_HELMS}', '${U("1a2")}', ${d("2026-08-30")}, '2026-12-01', 410000, true, false, false, false),
+      ('${U("1b3")}', 'Lead Cleared Date', 'DFW-1-32', '24-182', '${ESTIMATING}', '${REP_HELMS}', '${U("1a3")}', ${d("2026-09-08")}, '2026-09-30', 420000, true, false, false, false),
+      -- source_lead_id pointing at a lead row that is not there: the server's hasSourceLead is
+      -- Boolean(the loaded ROW), not "the column is set", so this one falls back to the deal column.
+      ('${U("1b4")}', 'Orphan Lead Ref', 'DFW-1-33', '24-183', '${ESTIMATING}', '${REP_HELMS}', '${U("1c9")}', ${d("2026-09-09")}, '2026-12-01', 430000, true, false, false, false);
 
     UPDATE ${SCHEMA}.deals SET dd_estimate = 900000, bid_board_total_sales = 100000
       WHERE name = 'DD Beats Board';
@@ -341,6 +361,9 @@ describe("sectionBidDueDateReportRows", () => {
       "DD Beats Board",
       "Cedar Park Retail",
       "Awarded Beats All",
+      "Lead Owns Date",
+      "Lead Overrides Snapshot",
+      "Orphan Lead Ref",
       "Mirrored Bidding",
     ]);
   });
@@ -398,8 +421,81 @@ describe("countEstimatingDealsMissingBidDueDate", () => {
     // 91% of deals carry no bid due date, so a short list reads as "nothing due". The count only
     // reconciles with the report if it is drawn from the same population — 'No Bid Date, Test' is
     // excluded here for exactly the reason it would be excluded from the list.
-    const count = await countEstimatingDealsMissingBidDueDate(query, { tenantSchema: SCHEMA });
-    expect(count).toBe(2);
+    const count = await countEstimatingDealsMissingBidDueDate(query, {
+      tenantSchema: SCHEMA,
+      weekOf: TODAY,
+    });
+    // No Bid Date A, No Bid Date B, and 'Lead Cleared Date' — whose deal column still holds a stale
+    // snapshot but whose LEAD, which owns the field, has none.
+    expect(count).toBe(3);
+  });
+
+  it("measures the hold horizon against the REPORT WEEK, not against whenever the query runs", async () => {
+    // The count's population applies the far-out hold rule, whose 90-day boundary has to move with the
+    // week being reported on. All three null-bid-date deals carry a late-September close target: far-out
+    // relative to a June report week, near-term relative to August. An anchor left on now() answers the
+    // same for both, which is precisely how Wednesday's footer and Thursday's catch-up drift apart.
+    //
+    // Written as a COMPARISON between two report weeks rather than against today's date, so it keeps
+    // discriminating as the calendar moves.
+    const june = await countEstimatingDealsMissingBidDueDate(query, {
+      tenantSchema: SCHEMA,
+      weekOf: "2026-06-03",
+    });
+    const august = await countEstimatingDealsMissingBidDueDate(query, {
+      tenantSchema: SCHEMA,
+      weekOf: TODAY,
+    });
+    expect(june).toBe(0);
+    expect(august).toBe(3);
+  });
+});
+
+describe("the EFFECTIVE bid due date — the lead owns this field, the deal column is a snapshot", () => {
+  // resolveDealBidDueDate returns the SOURCE LEAD's date for a lead-backed deal, and that branch is NOT
+  // flag-gated — BID_BOARD_DUE_DATE_READBACK only decides whether the Bid Board mirror may outrank the
+  // lead. So with the flag off (its default, and prod today) the canonical read is already lead-first,
+  // and DEAL_FIELD_OWNERSHIP.bidDueDate === "lead" says why: the deal column is a compatibility snapshot.
+  //
+  // An earlier round of this branch read the raw column and justified it as "one date, one source". The
+  // premise was wrong — the divergence is not flag-gated — and the cost is not cosmetic: a lead-backed
+  // deal whose snapshot never received the write-through is dropped from the report AND counted in the
+  // footer as having no bid date, which is precisely the deal the report exists to surface.
+  it("uses the LEAD's date when the deal snapshot is NULL — the row is included, not dropped", async () => {
+    // This row's expected_close_date is DELIBERATELY 97 days out. In the estimating stage the hold horizon
+    // IS the bid due date, so a horizon still reading the NULL snapshot falls back to that close target,
+    // trips the 90-day far-out leg, and auto-parks a bid the LEAD says is due in eleven days — dropping it
+    // from the list and counting it in the footer as having no bid date. Feeding the EFFECTIVE date into
+    // the horizon is what keeps it here.
+    const row = (await reportRows()).find((r) => r.name === "Lead Owns Date");
+    expect(row).toBeDefined();
+    expect(row?.bidDueOn).toBe("2026-09-06");
+  });
+
+  it("prefers the LEAD's date over a stale deal snapshot", async () => {
+    const row = (await reportRows()).find((r) => r.name === "Lead Overrides Snapshot");
+    expect(row?.bidDueOn).toBe("2026-09-07");
+    expect(row?.bidDueOn).not.toBe("2026-08-30");
+  });
+
+  it("treats a CLEARED lead date as no date, rather than falling back to the snapshot", async () => {
+    // A CASE, never a COALESCE. The resolver returns the lead's value even when it is NULL; coalescing to
+    // the deal column would resurrect a deadline somebody deliberately removed.
+    expect(names(await reportRows())).not.toContain("Lead Cleared Date");
+  });
+
+  it("falls back to the deal column when the source lead ROW is missing", async () => {
+    // The server keys on Boolean(the loaded lead row), not on the column being set.
+    const row = (await reportRows()).find((r) => r.name === "Orphan Lead Ref");
+    expect(row?.bidDueOn).toBe("2026-09-09");
+  });
+
+  it("casts each column correctly — leads.bid_due_date is a DATE, deals.bid_due_date a UTC-midnight timestamptz", async () => {
+    // The session is America/Chicago. A bare ::date on the deal column shifts a day; an AT TIME ZONE 'UTC'
+    // applied to the lead's plain DATE would be a type error or a second shift. Both are exercised here.
+    const rows = await reportRows();
+    expect(rows.find((r) => r.name === "Cedar Park Retail")?.bidDueOn).toBe("2026-09-04");
+    expect(rows.find((r) => r.name === "Lead Owns Date")?.bidDueOn).toBe("2026-09-06");
   });
 });
 

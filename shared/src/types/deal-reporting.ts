@@ -137,16 +137,21 @@ export function genuineEstimatingStageSqlPredicate(identifierPath?: string): str
  * rather than hand-rolling the CASE/COALESCE a second time and quietly disagreeing with the app. The
  * predicate below remains the thing to reach for when you only need the verdict.
  */
-export function holdHorizonDateSql(identifierPath?: string): string {
+export function holdHorizonDateSql(identifierPath?: string, bidDueDateSql?: string): string {
   // Validated HERE as well as in closeTargetFarOutSqlPredicate now that this is a public entry point —
   // the alias reaches raw SQL either way, so the guard has to sit on every door, not just the old one.
   if (identifierPath && !SQL_IDENTIFIER_PATH.test(identifierPath)) {
     throw new Error(`Invalid hold horizon SQL identifier: ${identifierPath}`);
   }
   const column = (name: string) => (identifierPath ? `${identifierPath}.${name}` : name);
+  // The bid-due-date expression is overridable so a caller that has already resolved the EFFECTIVE date
+  // (e.g. lead-first, per DEAL_FIELD_OWNERSHIP) measures the horizon against the same date it reports on.
+  // Default unchanged: the deal column, UTC-normalized. Callers passing an override own its cast — a plain
+  // DATE must NOT be re-read AT TIME ZONE 'UTC'.
+  const bidDue = bidDueDateSql ?? `(${column("bid_due_date")} AT TIME ZONE 'UTC')::date`;
   return (
     `CASE WHEN ${genuineEstimatingStageSqlPredicate(identifierPath)} ` +
-    `THEN COALESCE((${column("bid_due_date")} AT TIME ZONE 'UTC')::date, ${column("expected_close_date")}) ` +
+    `THEN COALESCE(${bidDue}, ${column("expected_close_date")}) ` +
     `ELSE ${column("expected_close_date")} END`
   );
 }
@@ -160,20 +165,46 @@ export function holdHorizonDateSql(identifierPath?: string): string {
  * builder; consumed via `sql.raw`. The stored `on_hold` flag is the OTHER, always-applies leg (see
  * effectiveOnHoldSqlPredicate).
  */
-export function closeTargetFarOutSqlPredicate(identifierPath?: string): string {
+export function closeTargetFarOutSqlPredicate(
+  identifierPath?: string,
+  options: { asOfDate?: string | null; bidDueDateSql?: string } = {}
+): string {
   if (identifierPath && !SQL_IDENTIFIER_PATH.test(identifierPath)) {
     throw new Error(`Invalid effective on-hold SQL identifier: ${identifierPath}`);
   }
+  const today = ctTodaySql(options.asOfDate);
   // The horizon expression is emitted twice rather than aliased once — this is a pure string builder with
   // no CTE/LATERAL to hang a name on. The `IS NOT NULL` leg is NOT redundant with the comparison: callers
   // negate this predicate (`NOT (...)` in the deals "active" status filter), and under three-valued logic
   // `NOT (NULL > x)` is NULL (row dropped) while `NOT (NULL IS NOT NULL AND ...)` is TRUE (row kept). A
   // deal with no horizon date must read as ACTIVE, not vanish.
-  const horizonDate = holdHorizonDateSql(identifierPath);
+  const horizonDate = holdHorizonDateSql(identifierPath, options.bidDueDateSql);
   return (
     `(${horizonDate}) IS NOT NULL AND ` +
-    `(${horizonDate}) > ${CT_TODAY_SQL} + INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`
+    `(${horizonDate}) > ${today} + INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`
   );
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The CT "today" the far-out horizon is measured from — `now()` by default, or a caller-supplied DAY.
+ *
+ * The override exists for a report that must reproduce a PARTICULAR run rather than describe this instant.
+ * The bid-due-date report's Thursday catch-up is exactly that: with the boundary on `now()`, a
+ * null-bid-date estimating deal whose close target sits 91 days after the report's Wednesday is auto-parked
+ * on Wednesday and not on Thursday, so the footer's reconciliation count changes between a run and the
+ * catch-up that is supposed to reproduce it.
+ *
+ * A validated ISO day is interpolated rather than bound, because these builders emit standalone predicate
+ * TEXT with no parameter list of their own; the format check is what keeps that safe.
+ */
+function ctTodaySql(asOfDate?: string | null): string {
+  if (asOfDate == null) return CT_TODAY_SQL;
+  if (!ISO_DATE.test(asOfDate)) {
+    throw new Error(`Invalid as-of date (expected YYYY-MM-DD): ${asOfDate}`);
+  }
+  return `DATE '${asOfDate}'`;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -248,7 +279,8 @@ export function terminalDealStageIdSubselectSql(): string {
  */
 export function effectiveOnHoldConditionSqlPredicate(
   identifierPath = "deals",
-  terminalStageIdsSql: string | null = terminalDealStageIdSubselectSql()
+  terminalStageIdsSql: string | null = terminalDealStageIdSubselectSql(),
+  options: { asOfDate?: string | null; bidDueDateSql?: string } = {}
 ): string {
   // closeTargetFarOutSqlPredicate validates too, but the stage-id and mirror columns below are built
   // here — the guard has to sit on every door that reaches raw SQL, not just the oldest one.
@@ -263,6 +295,7 @@ export function effectiveOnHoldConditionSqlPredicate(
     `COALESCE(${identifierPath}.bid_board_stage_slug, '') NOT IN (${TERMINAL_STAGE_SLUG_SQL_LIST})`
   );
   const stored = `COALESCE(${identifierPath}.on_hold, false) = true`;
-  const farOutForOpen = `${guards.join(" AND ")} AND (${closeTargetFarOutSqlPredicate(identifierPath)})`;
+  const farOutForOpen =
+    `${guards.join(" AND ")} AND (${closeTargetFarOutSqlPredicate(identifierPath, options)})`;
   return `(${stored} OR (${farOutForOpen}))`;
 }

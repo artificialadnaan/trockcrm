@@ -201,7 +201,21 @@ function daysBetween(from: string, to: string): number {
  * DIFFERS DELIBERATELY from `/reports/operations/estimator-pipeline`, which excludes no on-hold deals at
  * all. That page is an inventory; this is a to-do list, and a bid on a parked project is not a to-do.
  */
-function reportPopulationSql(): string {
+/**
+ * WHERE THE `weekOf` ANCHOR IS LOAD-BEARING, since one of the two callers cannot observe it.
+ *
+ * In the ROW query every row has a non-NULL effective bid due date inside [weekOf-90, weekOf+30], and in
+ * the estimating stage the hold horizon IS that date — so the horizon can never exceed ANY anchor plus 90
+ * days and the far-out leg cannot fire. Swapping the anchor there is provably inert; no test can catch it.
+ *
+ * In the COUNT query it is the opposite: those rows have NO effective bid date, so the horizon falls back
+ * to `expected_close_date`, which is unbounded — and the 90-day boundary then moves with the anchor. That
+ * is the one that makes Wednesday's footer and Thursday's catch-up disagree, and it is pinned by a test.
+ *
+ * Both callers pass it anyway, so there is ONE population definition rather than two variants that could
+ * drift. Do not "simplify" it out of the row query on the grounds that it changes nothing there.
+ */
+function reportPopulationSql(weekOf: string): string {
   return `
       ${genuineEstimatingStageSqlPredicate("d")}
       AND d.is_active = true
@@ -209,31 +223,60 @@ function reportPopulationSql(): string {
       AND COALESCE(d.is_change_order, false) = false
       AND psc.is_terminal = false
       AND NOT (${bidBoardTerminalSqlPredicate("d")})
-      AND NOT (${effectiveOnHoldConditionSqlPredicate("d")})`;
+      AND NOT (${effectiveOnHoldConditionSqlPredicate("d", undefined, {
+        asOfDate: weekOf,
+        // THE HOLD HORIZON MUST SEE THE SAME DATE THE REPORT DOES. In the estimating stage the horizon IS
+        // the bid due date, so leaving it on the deal snapshot auto-parks exactly the deals this report
+        // exists to surface: a lead-backed deal whose snapshot is NULL falls back to expected_close_date,
+        // and a close target more than 90 days out then parks a bid that the LEAD says is due in a
+        // fortnight. The row vanishes from the list and is counted in the footer as having no bid date.
+        bidDueDateSql: BID_DUE_ON_SQL,
+      })})`;
 }
 
 function reportFromSql(schema: string): string {
+  // The leads join is part of the POPULATION, not a display nicety: the effective bid due date, and
+  // therefore the NULL check that decides membership, reads through it.
   return `
      FROM ${schema}.deals d
-     JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id`;
+     JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+     LEFT JOIN ${schema}.leads l ON l.id = d.source_lead_id`;
 }
 
 /**
- * ONE DATE, ONE SOURCE — `deals.bid_due_date`, read `AT TIME ZONE 'UTC'` — for the window, the sort and the
- * display alike.
+ * THE EFFECTIVE BID DUE DATE — one expression, driving the NULL check, the window, the sort AND the
+ * display, so no two of them can disagree.
  *
- * `bid_due_date` is a timestamptz stored at UTC midnight (migration 0132). A bare `::date` resolves in the
- * SESSION timezone; prod runs Etc/UTC today, but a pooler or a `SET TIME ZONE` would shift the calendar day
- * by one — which on this report means a row sorting between the wrong two neighbours, or a bid due today
+ * THE LEAD OWNS THIS FIELD. `DEAL_FIELD_OWNERSHIP.bidDueDate === "lead"`, and `resolveDealBidDueDate`
+ * returns the SOURCE LEAD's value for any lead-backed deal — `deals.bid_due_date` is a compatibility
+ * snapshot that the write-through may never have reached. An earlier draft read the raw column and
+ * defended it as "one date, one source"; that was one date from the WRONG source, on a premise that does
+ * not hold. The lead branch is NOT gated by BID_BOARD_DUE_DATE_READBACK — that flag only decides whether a
+ * landed Bid Board date may outrank the LEAD — so lead-first is the canonical read today, flag off, which
+ * is prod's default.
+ *
+ * The cost of getting it wrong was not cosmetic. A lead-backed deal whose snapshot is NULL was dropped
+ * from the report AND counted in the footer as "no bid due date set" — the exact deal this report exists
+ * to surface, described as the opposite.
+ *
+ * A CASE, NEVER A COALESCE. When the lead exists and its date is NULL the resolver returns NULL; coalescing
+ * to the deal column would resurrect a deadline somebody deliberately cleared. And the branch keys on the
+ * lead ROW (`l.id IS NOT NULL`), not on `d.source_lead_id` being set, because the server's `hasSourceLead`
+ * is `Boolean(the loaded row)` — a dangling reference falls back to the deal column.
+ *
+ * TWO COLUMNS, TWO CASTS. `leads.bid_due_date` is a plain DATE; `deals.bid_due_date` is a timestamptz at
+ * UTC midnight (migration 0132) and MUST be read `AT TIME ZONE 'UTC'` before `::date`, or the session
+ * timezone shifts the calendar day — a row sorting between the wrong two neighbours, or a bid due today
  * filed under Overdue.
  *
- * `resolveDealBidDueDateForRead`'s precedence (Bid-Board-landed column > source lead > deal column, behind
- * BID_BOARD_DUE_DATE_READBACK) is DELIBERATELY NOT ported. It is server-only, as is the flag reader, and
- * porting it to the display layer alone — the only layer a worker could cheaply reach it from — is how a
- * report renders "Sep 30" between two August rows, or files a row under Overdue that is not overdue. If the
- * readback ever becomes the canonical read, it belongs in this SQL as a CASE, driving all three at once.
+ * NOT PORTED, deliberately: the flag-ON branch, where a Bid-Board-landed date outranks the lead. It turns
+ * on a provenance SIGNAL (the 0225 stamp, project identity, detach state, calendar-day currency) that is
+ * far more than a COALESCE, and the flag is off. `assertBidDueDateReadbackOff` below is what stops that
+ * staying true silently.
  */
-const BID_DUE_ON_SQL = "(d.bid_due_date AT TIME ZONE 'UTC')::date";
+const BID_DUE_ON_SQL =
+  "CASE WHEN l.id IS NOT NULL THEN l.bid_due_date " +
+  "ELSE (d.bid_due_date AT TIME ZONE 'UTC')::date END";
 
 export async function findBidDueDateReportRows(
   query: PgQuery,
@@ -282,8 +325,8 @@ export async function findBidDueDateReportRows(
             u.display_name AS rep_name
        ${reportFromSql(schema)}
        LEFT JOIN public.users u ON u.id = d.assigned_rep_id
-      WHERE ${reportPopulationSql()}
-        AND d.bid_due_date IS NOT NULL
+      WHERE ${reportPopulationSql(input.weekOf)}
+        AND (${BID_DUE_ON_SQL}) IS NOT NULL
         AND ${BID_DUE_ON_SQL} >= $1::date - $2::int
         AND ${BID_DUE_ON_SQL} <= $1::date + $3::int
       ORDER BY ${BID_DUE_ON_SQL} ASC, d.name ASC`,
@@ -311,14 +354,14 @@ export async function findBidDueDateReportRows(
  */
 export async function countEstimatingDealsMissingBidDueDate(
   query: PgQuery,
-  input: { tenantSchema: string }
+  input: { tenantSchema: string; weekOf: string }
 ): Promise<number> {
   const schema = assertSafeSchema(input.tenantSchema);
   const result = await query(
     `SELECT COUNT(*)::int AS missing_count
        ${reportFromSql(schema)}
-      WHERE ${reportPopulationSql()}
-        AND d.bid_due_date IS NULL`
+      WHERE ${reportPopulationSql(input.weekOf)}
+        AND (${BID_DUE_ON_SQL}) IS NULL`
   );
   return Number(result.rows[0]?.missing_count ?? 0);
 }
@@ -507,6 +550,15 @@ function renderSectionHtml(section: BidDueDateReportSection, deliveryDate: strin
 
 export interface BidDueDateReportEmailInput {
   /**
+   * The office this report is about.
+   *
+   * Named in the subject AND the body because per-office recipient scoping means a cross-office reader
+   * legitimately receives one message per office they can see. Identical subjects with no office anywhere
+   * in the body leave the CTA's `officeId` query parameter as the only way to tell them apart, and a
+   * forwarded body has no subject at all.
+   */
+  officeName: string;
+  /**
    * THE CONTENT ANCHOR — the Wednesday this report is FOR. Decides the SQL window, the sectioning, the
    * subject and the receipt key, so the Thursday catch-up contains exactly what the run it replaces would
    * have contained.
@@ -532,7 +584,7 @@ export interface BidDueDateReportEmailInput {
 
 export function buildBidDueDateReportEmail(input: BidDueDateReportEmailInput) {
   const lookback = input.overdueLookbackDays ?? BID_DUE_REPORT_OVERDUE_LOOKBACK_DAYS;
-  const subject = `Bid due dates — week of ${formatShortDate(input.weekOf)}`;
+  const subject = `Bid due dates — ${input.officeName} — week of ${formatShortDate(input.weekOf)}`;
 
   // THE PREHEADER IS DERIVED FROM THE SECTIONS, never counted separately.
   //
@@ -566,7 +618,10 @@ export function buildBidDueDateReportEmail(input: BidDueDateReportEmailInput) {
     preheader = `${projects(overdueCount + upcomingCount)} in estimating: ${overdueCount} overdue, ${upcomingCount} due ${upcomingPhrase}.`;
   }
 
-  const footerLines: string[] = [`Overdue covers the last ${lookback} days.`];
+  const footerLines: string[] = [
+    `Office: ${input.officeName}.`,
+    `Overdue covers the last ${lookback} days.`,
+  ];
   if (input.missingBidDateCount > 0) {
     footerLines.push(
       `${input.missingBidDateCount} estimating ${input.missingBidDateCount === 1 ? "deal has" : "deals have"} no bid due date set and ${input.missingBidDateCount === 1 ? "is" : "are"} not listed.`
@@ -717,6 +772,7 @@ export async function runBidDueDateReport(
           ccRecipients,
           weekOf,
           deliveryDate: todayCt,
+          officeName: normalizeText(office.name) ?? slug,
           frontendUrl: resolveFrontendUrl(env),
         });
       } catch (err) {
@@ -759,6 +815,7 @@ async function sendOfficeReport(input: {
   ccRecipients: string[];
   weekOf: string;
   deliveryDate: string;
+  officeName: string;
   frontendUrl: string;
 }): Promise<void> {
   const { query, logger, tenantSchema, weekOf } = input;
@@ -794,12 +851,16 @@ async function sendOfficeReport(input: {
   }
 
   const rows = await findBidDueDateReportRows(query, { tenantSchema, weekOf });
-  const missingBidDateCount = await countEstimatingDealsMissingBidDueDate(query, { tenantSchema });
+  const missingBidDateCount = await countEstimatingDealsMissingBidDueDate(query, {
+    tenantSchema,
+    weekOf,
+  });
   const sections = sectionBidDueDateReportRows(rows, weekOf);
 
   const email = buildBidDueDateReportEmail({
     weekOf,
     deliveryDate: input.deliveryDate,
+    officeName: input.officeName,
     sections,
     missingBidDateCount,
     ctaUrl: await resolveEstimatingCtaUrl(query, input.frontendUrl, input.officeId),
@@ -917,7 +978,10 @@ async function resolveEstimatingCtaUrl(
   );
   const stageId = normalizeText(stage.rows[0]?.id ?? null);
   if (!stageId) {
-    return `${base}/deals${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`;
+    // scope=all SURVIVES THE FALLBACK. /deals defaults a rep to scope=mine exactly as the stage page does,
+    // and the configured estimator owns no deals — so dropping it here reproduces the empty-board failure
+    // in the degraded path, on the very run where something has already gone wrong.
+    return `${base}/deals?scope=all${officeParam}`;
   }
   return `${base}/deals/stages/${encodeURIComponent(stageId)}?scope=all${officeParam}`;
 }

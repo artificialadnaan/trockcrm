@@ -196,6 +196,33 @@ describe("worker-reachable string twins of the standard deal exclusions", () => 
     expect(openOnly).toContain(`COALESCE(d.bid_board_stage_slug, '') NOT IN (${TERMINAL_SLUG_SQL_LIST})`);
   });
 
+  it("measures the far-out horizon against a caller-supplied DAY when one is given", () => {
+    // For a report that must reproduce a particular run rather than describe this instant.
+    expect(closeTargetFarOutSqlPredicate("d", { asOfDate: "2026-08-26" })).toContain(
+      "DATE '2026-08-26' + INTERVAL '90 days'"
+    );
+    expect(closeTargetFarOutSqlPredicate("d")).toContain(
+      "(now() AT TIME ZONE 'America/Chicago')::date + INTERVAL '90 days'"
+    );
+    expect(effectiveOnHoldConditionSqlPredicate("d", null, { asOfDate: "2026-08-26" })).toContain(
+      "DATE '2026-08-26'"
+    );
+    // Interpolated, not bound — so the format is the guard.
+    expect(() => closeTargetFarOutSqlPredicate("d", { asOfDate: "26-08-2026" })).toThrow();
+    expect(() => closeTargetFarOutSqlPredicate("d", { asOfDate: "2026-08-26'; DROP TABLE deals--" })).toThrow();
+  });
+
+  it("measures the horizon against a caller-supplied BID DUE DATE expression when one is given", () => {
+    // So a caller that has already resolved the EFFECTIVE date (lead-first) parks deals on the same date
+    // it reports them on. Default unchanged: the deal column, UTC-normalized.
+    const withOverride = closeTargetFarOutSqlPredicate("d", { bidDueDateSql: "l.bid_due_date" });
+    expect(withOverride).toContain("COALESCE(l.bid_due_date, d.expected_close_date)");
+    expect(withOverride).not.toContain("(d.bid_due_date AT TIME ZONE 'UTC')::date");
+    expect(closeTargetFarOutSqlPredicate("d")).toContain(
+      "COALESCE((d.bid_due_date AT TIME ZONE 'UTC')::date, d.expected_close_date)"
+    );
+  });
+
   it("validates the alias on every door", () => {
     expect(() => effectiveOnHoldConditionSqlPredicate("d; DROP TABLE deals")).toThrow();
     expect(() => genuineEstimatingStageSqlPredicate("d; DROP TABLE deals")).toThrow();

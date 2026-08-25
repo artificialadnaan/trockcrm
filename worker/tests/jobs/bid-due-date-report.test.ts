@@ -381,6 +381,21 @@ describe("runBidDueDateReport exactly-once", () => {
     expect(html).not.toContain("scope=mine");
   });
 
+  it("degrades to /deals but KEEPS scope=all — the fallback has the same empty-board trap", async () => {
+    // /deals defaults a rep to scope=mine exactly as the stage page does, and the configured estimator
+    // owns no deals. Dropping scope=all here reproduces the C5 failure in the degraded path, on the very
+    // run where something already went wrong.
+    const h = deps({ rows: [ROW] });
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("WHERE slug = 'estimating'")) return { rows: [], rowCount: 0 };
+      return h.query(sql, params);
+    });
+    await runBidDueDateReport({ ...h.deps, query });
+    const html = h.sendEmail.mock.calls[0][2];
+    expect(html).toContain("scope=all");
+    expect(html).not.toContain("scope=mine");
+  });
+
   it("degrades to /deals when the estimating stage id cannot be resolved", async () => {
     const h = deps({ rows: [ROW] });
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -389,7 +404,7 @@ describe("runBidDueDateReport exactly-once", () => {
     });
     await runBidDueDateReport({ ...h.deps, query });
     const html = h.sendEmail.mock.calls[0][2];
-    expect(html).toContain(`/deals?officeId=${OFFICE_ID}`);
+    expect(html).toContain(`/deals?scope=all&amp;officeId=${OFFICE_ID}`);
     expect(html).not.toContain("/deals/stages/");
   });
 
@@ -609,6 +624,7 @@ describe("buildBidDueDateReportEmail", () => {
     weekOf: "2026-08-26",
     // The two anchors COINCIDE on the normal Wednesday tick, which is why collapsing them looked correct.
     deliveryDate: "2026-08-26",
+    officeName: "DFW",
     sections: [
       {
         key: "overdue" as const,
@@ -646,8 +662,24 @@ describe("buildBidDueDateReportEmail", () => {
     overdueLookbackDays: 90,
   };
 
-  it("names the week in the subject", () => {
-    expect(buildBidDueDateReportEmail(base).subject).toBe("Bid due dates — week of Aug 26");
+  it("names the OFFICE and the week in the subject", () => {
+    // Per-office scoping means a cross-office recipient legitimately receives one message per office. With
+    // an identical subject and no office named in the body, the only way to tell them apart is to inspect
+    // the CTA's officeId query parameter.
+    expect(buildBidDueDateReportEmail(base).subject).toBe("Bid due dates — DFW — week of Aug 26");
+  });
+
+  it("names the office in the body too, not only the subject", () => {
+    // Subjects get truncated on a phone, and a forwarded body loses its subject entirely.
+    const email = buildBidDueDateReportEmail(base);
+    expect(email.html).toContain("DFW");
+    expect(email.text).toContain("DFW");
+  });
+
+  it("escapes the office name", () => {
+    const email = buildBidDueDateReportEmail({ ...base, officeName: "R&D <Test>" });
+    expect(email.html).toContain("R&amp;D &lt;Test&gt;");
+    expect(email.html).not.toContain("R&D <Test>");
   });
 
   // The preheader is the one line a phone shows before the body, so a false summary there is the most
@@ -673,7 +705,11 @@ describe("buildBidDueDateReportEmail", () => {
   it("keeps the plain 'next 30 days' sentence when nothing is overdue", () => {
     const email = buildBidDueDateReportEmail({ ...base, sections: [base.sections[1]] });
     expect(email.html).toMatch(/1 project in estimating with bid dates in the next 30 days/);
-    expect(email.html).not.toMatch(/overdue/);
+    // Scoped to the SUMMARY sentence: the footer legitimately explains the overdue lookback bound on every
+    // report. Asserting over the whole document only passed before because the footer happened to
+    // capitalise the word.
+    const preheader = /<p[^>]*>([^<]*in estimating[^<]*)<\/p>/.exec(email.html)?.[1] ?? "";
+    expect(preheader).not.toMatch(/overdue/i);
   });
 
   // The reconciliation rule: the preheader, the section headings and the footer are three statements about
