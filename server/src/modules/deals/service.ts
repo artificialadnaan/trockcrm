@@ -57,7 +57,7 @@ import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProje
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject, resolveProjectTypeCode } from "../../services/projectNumber.js";
-import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
+import { isBidBoardDueDateReadbackEnabled, isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 import {
   buildAliasedDealMineVisibilityCondition,
@@ -600,7 +600,7 @@ export interface DealFilters {
   createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
-  sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date" | "display_date";
+  sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date" | "display_date" | "bid_due_date";
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
@@ -1248,6 +1248,47 @@ function buildSortWithIdTieBreaker(column: SQLWrapper, dir: "asc" | "desc") {
     : [desc(column), desc(deals.id)] as const;
 }
 
+// PostgreSQL places NULLs first for DESC and last for ASC by default. A missing deadline should always
+// follow dated work regardless of direction, while preserving the list's stable id tie-breaker.
+function buildSortWithIdTieBreakerNullsLast(column: SQLWrapper, dir: "asc" | "desc") {
+  return [
+    asc(sql`CASE WHEN ${column} IS NULL THEN 1 ELSE 0 END`),
+    ...buildSortWithIdTieBreaker(column, dir),
+  ] as const;
+}
+
+/**
+ * SQL twin of resolveDealBidDueDateForRead for the list query. The selected value and ORDER BY share
+ * this exact expression, so a lead-backed deal cannot display one deadline and sort by a stale deal
+ * snapshot. The Bid Board signal remains feature-gated exactly like the detail resolver.
+ */
+function resolvedDealListBidDueDateSql() {
+  const dealBidDueDateDay = sql<string | null>`(${deals.bidDueDate} AT TIME ZONE 'UTC')::date`;
+  if (!isBidBoardDueDateReadbackEnabled()) {
+    // A present source-lead row owns the field even if its value is deliberately cleared (NULL).
+    return sql<string | null>`CASE
+      WHEN ${leads.id} IS NOT NULL THEN ${leads.bidDueDate}
+      ELSE ${dealBidDueDateDay}
+    END`;
+  }
+
+  // The Bid Board mirror is a signal only: the deal column wins over the source lead only after the
+  // synced value is proven current, attributed, attached, and on the same Bid Board project.
+  return sql<string | null>`CASE
+    WHEN ${deals.bidBoardDetachedAt} IS NULL
+      AND ${deals.bidDueDateFromBidBoardAt} IS NOT NULL
+      AND ${deals.bidDueDateBidBoardProjectNumber} IS NOT NULL
+      AND ${deals.bidBoardProjectNumber} IS NOT NULL
+      AND ${deals.bidDueDateBidBoardProjectNumber} = ${deals.bidBoardProjectNumber}
+      AND ${deals.bidBoardDueDate} IS NOT NULL
+      AND ${deals.bidDueDate} IS NOT NULL
+      AND ${dealBidDueDateDay} = ${deals.bidBoardDueDate}
+    THEN ${dealBidDueDateDay}
+    WHEN ${leads.id} IS NOT NULL THEN ${leads.bidDueDate}
+    ELSE ${dealBidDueDateDay}
+  END`;
+}
+
 function buildDealListOrder(
   filters: DealFilters,
   classification: {
@@ -1255,7 +1296,8 @@ function buildDealListOrder(
     estimatingStageIds: string[];
     lostStageIds: string[];
     stageEntryDateEnabled: boolean;
-  }
+  },
+  resolvedBidDueDate: SQLWrapper
 ) {
   // Primary tier: active, non-zero deals on top; on-hold and $0-value deals sink to
   // the bottom of the list (sort-only — the WHERE set is unchanged, so they still
@@ -1280,7 +1322,7 @@ function buildDealListOrder(
       aliasedTerminalDealBySlugSql("deals", "pipeline_stage_config.slug")
     )
   );
-  return [asc(tier), ...buildDealListColumnOrder(filters, classification)];
+  return [asc(tier), ...buildDealListColumnOrder(filters, classification, resolvedBidDueDate)];
 }
 
 function buildDealListColumnOrder(
@@ -1290,7 +1332,8 @@ function buildDealListColumnOrder(
     estimatingStageIds: string[];
     lostStageIds: string[];
     stageEntryDateEnabled: boolean;
-  }
+  },
+  resolvedBidDueDate: SQLWrapper
 ) {
   const { wonStageIds, estimatingStageIds, lostStageIds, stageEntryDateEnabled } = classification;
   switch (filters.sortBy) {
@@ -1322,6 +1365,11 @@ function buildDealListColumnOrder(
       return buildSortWithIdTieBreaker(deals.expectedCloseDate, filters.sortDir === "asc" ? "asc" : "desc");
     case "contract_signed_date":
       return buildSortWithIdTieBreaker(contractSignedDateForReporting, filters.sortDir === "asc" ? "asc" : "desc");
+    case "bid_due_date":
+      return buildSortWithIdTieBreakerNullsLast(
+        resolvedBidDueDate,
+        filters.sortDir === "asc" ? "asc" : "desc"
+      );
     case "updated_at":
       return buildSortWithIdTieBreaker(deals.updatedAt, filters.sortDir === "asc" ? "asc" : "desc");
     default:
@@ -2500,12 +2548,13 @@ export async function getDeals(
     : sql`coalesce(${deals.onHold}, false) = false`;
 
   // Sort
+  const resolvedBidDueDate = resolvedDealListBidDueDateSql();
   const sortOrder = buildDealListOrder(filters, {
     wonStageIds,
     estimatingStageIds,
     lostStageIds,
     stageEntryDateEnabled,
-  });
+  }, resolvedBidDueDate);
 
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".
@@ -2561,10 +2610,15 @@ export async function getDeals(
             columns: dealDateScopeColumns(),
           })
         : sql<string | null>`NULL`,
+      // A date-only authoritative deadline for the list's Bid due column. Keep the raw bidDueDate
+      // field intact for existing at-risk calculation / API compatibility; this additive projection is
+      // exclusively the display and ordering axis.
+      resolvedBidDueDate,
     })
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .leftJoin(leads, eq(leads.id, deals.sourceLeadId))
     .where(where)
     .orderBy(...sortOrder)
     .limit(limit)

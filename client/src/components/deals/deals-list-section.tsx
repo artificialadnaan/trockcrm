@@ -41,6 +41,7 @@ import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
+import { formatBidDueDate, toBidDueDateInputValue } from "@/pages/deals/bid-due-date-banner";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions, type FilterBarDateControl } from "@/components/filters/filter-bar";
 import {
@@ -66,7 +67,7 @@ const EXPORT_PAGE_SIZE = 500;
 const DEFAULT_SORT_STATE = { key: "created_at", dir: "desc" } satisfies DealListSortState;
 const EMPTY_STAGE_SLUGS: string[] = [];
 
-type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at";
+type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at" | "bid_due_date";
 export type DealListSortState = {
   key: SortKey | "expected_close_date" | "contract_signed_date" | "display_date";
   dir: "asc" | "desc";
@@ -232,6 +233,20 @@ function getDealPropertyLabel(deal: Deal) {
 
 export function getDealCloseDate(deal: Deal) {
   return deal.actualCloseDate ?? deal.expectedCloseDate ?? null;
+}
+
+/**
+ * List API responses include a resolved date whose explicit `null` means that a source-owned deadline
+ * was cleared. Older response shapes omit that additive field altogether, in which case the legacy deal
+ * value remains the best available fallback. Do not use `??` here: it would revive a stale snapshot after
+ * the authoritative resolver deliberately returned null.
+ */
+function getListBidDueDate(deal: Deal): string | null | undefined {
+  return deal.resolvedBidDueDate === undefined ? deal.bidDueDate : deal.resolvedBidDueDate;
+}
+
+function getListBidDueDateForCsv(deal: Deal): string {
+  return toBidDueDateInputValue(getListBidDueDate(deal));
 }
 
 /** Intersect two date bounds (YYYY-MM-DD, lexicographic = chronological). `laterDate` = the max-start
@@ -680,15 +695,15 @@ export async function fetchAllDealsForFilters(input: { filters: DealFilters; api
   };
 }
 
-/** CSV rows for the FilterBar-mode export. The Date column is the canonical outcome-aware
- *  getDealDisplayDate (filter-axis == display-axis) — matching the list's Date column, not the legacy
- *  "Last Touch" (lastActivityAt) axis. */
+/** CSV rows for the FilterBar-mode export. Bid Due Date and Date use the same authoritative values as
+ *  their corresponding list columns; Date is the canonical outcome-aware getDealDisplayDate
+ *  (filter-axis == display-axis), not the legacy "Last Touch" (lastActivityAt) axis. */
 export function buildFilterBarCsvRows(
   deals: Deal[],
   maps: { stageNameById: Map<string, string>; assigneeNameById: Map<string, string> }
 ): (string | number)[][] {
   return [
-    ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", "Date"],
+    ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", "Bid Due Date", "Date"],
     ...deals.map((deal) => [
       deal.name,
       // Accounting keys this into QuickBooks off the export, so a field they cannot export is half a
@@ -700,6 +715,7 @@ export function buildFilterBarCsvRows(
       deal.stageName ?? maps.stageNameById.get(deal.stageId) ?? "",
       effectiveStageAgeDays(deal),
       getEffectiveDealValue(deal),
+      getListBidDueDateForCsv(deal),
       getDealDisplayDate(deal) ?? "",
     ]),
   ];
@@ -1039,15 +1055,18 @@ export function DealsListSection({
   const activeSort: { key: string | undefined; dir: "asc" | "desc" | undefined } = filterBarMode
     ? { key: urlFilters.sortBy, dir: urlFilters.sortDir }
     : { key: sort.key, dir: sort.dir };
-  const updateSort = (key: DealListSortState["key"]) => {
+  const updateSort = (key: DealListSortState["key"], initialDir: "asc" | "desc" = "desc") => {
     if (filterBarMode) {
-      const dir = urlFilters.sortBy === key && urlFilters.sortDir === "desc" ? "asc" : "desc";
+      const dir =
+        urlFilters.sortBy === key
+          ? urlFilters.sortDir === "desc" ? "asc" : "desc"
+          : initialDir;
       setFilters({ sortBy: key, sortDir: dir });
       return;
     }
     setSort((current) => ({
       key,
-      dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
+      dir: current.key === key ? (current.dir === "desc" ? "asc" : "desc") : initialDir,
     }));
   };
 
@@ -1128,7 +1147,17 @@ export function DealsListSection({
     // so the export's date column must match it (not the legacy "Last Touch"/updated axis),
     // or the CSV won't reconcile with the drill-down it was exported from.
     const rows = [
-      ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", showOutcomeDate ? "Date" : "Last Touch"],
+      [
+        "Deal",
+        "Scope Title",
+        "Project Number",
+        "Owner",
+        "Stage",
+        "Days",
+        "Value",
+        "Bid Due Date",
+        showOutcomeDate ? "Date" : "Last Touch",
+      ],
       ...exportResult.deals.map((deal) => {
         const displayNumber = getDealDisplayNumber(deal);
         return [
@@ -1141,6 +1170,7 @@ export function DealsListSection({
           deal.stageName ?? stageNameById.get(deal.stageId) ?? "",
           effectiveStageAgeDays(deal),
           getEffectiveDealValue(deal),
+          getListBidDueDateForCsv(deal),
           showOutcomeDate ? getDealDisplayDate(deal) ?? "" : deal.lastActivityAt ?? deal.updatedAt,
         ];
       }),
@@ -1148,11 +1178,15 @@ export function DealsListSection({
     triggerCsvDownload(rows, "deals-list.csv");
   };
 
-  const sortHeader = (key: DealListSortState["key"], label: string) => (
+  const sortHeader = (
+    key: DealListSortState["key"],
+    label: string,
+    initialDir: "asc" | "desc" = "desc"
+  ) => (
     <button
       type="button"
       className="inline-flex items-center gap-1 font-black uppercase tracking-[0.16em] text-slate-500 hover:text-brand-red"
-      onClick={() => updateSort(key)}
+      onClick={() => updateSort(key, initialDir)}
     >
       {label}
       {activeSort.key === key ? <span>{activeSort.dir === "asc" ? "↑" : "↓"}</span> : null}
@@ -1261,6 +1295,20 @@ export function DealsListSection({
           compact
           className="inline-flex justify-end whitespace-nowrap font-black tabular-nums text-slate-950"
         />
+      ),
+    },
+    {
+      key: "bidDueDate",
+      // The bid deadline is distinct from the existing Date/Close (expected-execution or outcome) axis.
+      // It is intentionally a header sort too: the first click is earliest first, which matches the
+      // operational question this column answers (what needs a bid next?).
+      header: sortHeader("bid_due_date", "Bid due", "asc"),
+      headClassName: "md:w-[7rem] md:!px-2 md:text-right lg:w-[7.5rem] lg:!px-3",
+      cellClassName: "md:w-[7rem] md:!px-2 md:text-right lg:w-[7.5rem] lg:!px-3",
+      render: (deal) => (
+        <span className="inline-flex justify-end whitespace-nowrap text-sm font-medium text-slate-600">
+          {formatBidDueDate(getListBidDueDate(deal)) ?? "--"}
+        </span>
       ),
     },
     {
@@ -1509,6 +1557,7 @@ export function DealsListSection({
                 const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
                 const propertyLabel = getDealPropertyLabel(deal);
                 const stageLabel = deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage";
+                const bidDueDate = formatBidDueDate(getListBidDueDate(deal));
                 // The Scope column is `hidden lg:table-cell`, so at phone width the table is not what
                 // renders — this card is. Without it a title-only deal ("Panel Relocation") is invisible
                 // on a phone until it is opened or exported, which is most of how the list is read in
@@ -1585,11 +1634,16 @@ export function DealsListSection({
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
+                      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
                         <span className="inline-flex items-center gap-1 whitespace-nowrap">
                           <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
                           {formatShortDate(showOutcomeDate ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
                         </span>
+                        {bidDueDate ? (
+                          <span className="inline-flex items-center gap-1 whitespace-nowrap text-slate-600">
+                            Bid due: {bidDueDate}
+                          </span>
+                        ) : null}
                         <span className="inline-flex items-center gap-1 whitespace-nowrap text-right">
                           <Clock3 className="h-3.5 w-3.5 text-slate-400" />
                           {effectiveStageAgeDays(deal)}d SLA
@@ -1605,7 +1659,7 @@ export function DealsListSection({
               <PipelineStageTable
                 rows={deals}
                 columns={tableColumns}
-                tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[58rem] xl:min-w-0"
+                tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[66rem]"
                 showPagination={false}
                 pagination={{
                   page: pagination.page,

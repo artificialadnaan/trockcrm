@@ -320,6 +320,22 @@ describe("getDeals — FilterBar wiring", () => {
     expect(orderText).toContain("stage_entered_at"); // open rows by the entered-stage date
   });
 
+  it.each(["asc", "desc"] as const)("sortBy=bid_due_date orders the authoritative deadline with missing dates last (%s)", async (sortDir) => {
+    const { db, capturedOrderBys } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { sortBy: "bid_due_date", sortDir, scope: "all" }, "director", "director-1");
+
+    const finalOrder = capturedOrderBys[capturedOrderBys.length - 1]!;
+    const nullBucketText = renderText(finalOrder[1]);
+    const deadlineOrderText = renderText(finalOrder[2]);
+    expect(nullBucketText).toContain("bid_due_date");
+    expect(nullBucketText).toContain("then 1 else 0"); // the leading null bucket is always last
+    expect(deadlineOrderText).toContain("bid_due_date");
+    expect(deadlineOrderText).toContain('"leads"."id" is not null');
+    expect(deadlineOrderText).toContain("at time zone 'utc'");
+  });
+
   // The leading sort tier decides where a DEDUCTIVE change order (negative awarded_amount) lands, and
   // because it LEADS it decides that under every sort. Wiring only — that the list's tier is the
   // sign-aware one on every sort key including the value sort; the tier's own ordering behaviour is
@@ -340,6 +356,7 @@ describe("getDeals — FilterBar wiring", () => {
     "stage_entered_at",
     "expected_close_date",
     "contract_signed_date",
+    "bid_due_date",
   ] as const)(
     "sortBy=%s leads with the NON-ZERO tier, so a deductive CO is ordered by the column the user asked for",
     async (sortBy) => {

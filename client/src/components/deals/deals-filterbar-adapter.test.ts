@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyBoardVisibilityDefaults,
   buildDrilldownListFilterBar,
+  DEAL_LIST_SORT_OPTIONS,
   DRILLDOWN_FILTERBAR_PARAM_PREFIX,
   filterBarValueToDealFilters,
   getBoardVisibleStageScope,
@@ -93,6 +94,15 @@ describe("filterBarValueToDealFilters (FilterBar URL value -> useDeals DealFilte
     const result = filterBarValueToDealFilters({ status: "inactive" });
     expect("isActive" in result).toBe(false);
     expect(result).toEqual({ status: "inactive" });
+  });
+});
+
+describe("DEAL_LIST_SORT_OPTIONS", () => {
+  it("offers bid due date in both deadline orders", () => {
+    expect(DEAL_LIST_SORT_OPTIONS).toEqual(expect.arrayContaining([
+      { label: "Bid due (soonest first)", sortBy: "bid_due_date", sortDir: "asc" },
+      { label: "Bid due (latest first)", sortBy: "bid_due_date", sortDir: "desc" },
+    ]));
   });
 });
 

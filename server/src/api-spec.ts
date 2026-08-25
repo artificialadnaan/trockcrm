@@ -883,7 +883,7 @@ export const apiSpec = {
           { name: "regionId", in: "query", schema: { type: "string", format: "uuid" } },
           { name: "source", in: "query", schema: { type: "string" } },
           { name: "isActive", in: "query", schema: { type: "boolean", default: true }, description: "Set to false to include soft-deleted deals." },
-          { name: "sortBy", in: "query", schema: { type: "string", enum: ["name", "createdAt", "updatedAt", "awardedAmount", "bidEstimate", "stageEnteredAt"] } },
+          { name: "sortBy", in: "query", schema: { type: "string", enum: ["name", "created_at", "updated_at", "awarded_amount", "stage_entered_at", "expected_close_date", "contract_signed_date", "display_date", "bid_due_date"] } },
           { $ref: "#/components/parameters/SortDirParam" },
           { $ref: "#/components/parameters/PageParam" },
           { $ref: "#/components/parameters/LimitParam" },
