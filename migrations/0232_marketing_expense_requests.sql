@@ -111,7 +111,6 @@ ON CONFLICT (group_id, user_id) DO NOTHING;
 DO $tenant$
 DECLARE
   schema_name text;
-  assoc_predicate text;
 BEGIN
   FOR schema_name IN
     SELECT nspname
@@ -213,10 +212,17 @@ BEGIN
       schema_name
     );
 
-    -- files linkage. The join table the spec first called for could never have been populated: `files`
-    -- rejects a row that attaches to nothing, at the DB (files_association_check) AND in
-    -- files/service.ts:validateAssociations, so no file row for an expense request could exist to join TO.
-    -- The association is therefore a nullable FK column here, exactly as 0058 did for leads.
+    -- files linkage. The expense request owns its attachments directly through a nullable FK column,
+    -- exactly as 0058 did for leads.
+    --
+    -- Do not rebuild the historical files_association_check here. Field-photo capture intentionally
+    -- persists a targetless file before a user chooses where to file it; files/service.ts admits that
+    -- narrow flow with allowUnassigned, and field/photos-service later lists those pending rows. A table
+    -- CHECK requiring an association would contradict that supported state (including when added NOT
+    -- VALID, which still rejects every future targetless write). Ordinary file uploads remain guarded by
+    -- files/service.ts:validateAssociations. Migration 0241 removes any inherited historical CHECK one
+    -- office at a time; keeping that ACCESS EXCLUSIVE DDL out of this all-office DO loop avoids holding
+    -- one office's files lock while later offices are migrated.
     IF to_regclass(format('%I.files', schema_name)) IS NOT NULL THEN
       EXECUTE format(
         'ALTER TABLE %1$I.files ADD COLUMN IF NOT EXISTS marketing_expense_request_id UUID',
@@ -228,36 +234,14 @@ BEGIN
         WHERE conname = 'files_marketing_expense_request_id_fkey'
           AND conrelid = format('%I.files', schema_name)::regclass
       ) THEN
-        -- CASCADE, not SET NULL: SET NULL would UPDATE the row to having no association at all, which
-        -- files_association_check re-evaluates and rejects, turning any future request delete into a
-        -- 23514. Nothing deletes a request today, so this is inert either way — but only one of the two
-        -- is inert BY CONSTRUCTION.
+        -- CASCADE, not SET NULL: deleting a request must delete its private attachment rather than
+        -- silently reclassifying it as an unscoped file.
         EXECUTE format(
           'ALTER TABLE %1$I.files
              ADD CONSTRAINT files_marketing_expense_request_id_fkey
              FOREIGN KEY (marketing_expense_request_id)
              REFERENCES %1$I.marketing_expense_requests(id) ON DELETE CASCADE',
           schema_name
-        );
-      END IF;
-
-      -- Rebuild files_association_check with the new column ORed in. The predicate is BUILT from
-      -- information_schema rather than hardcoded because `lead_id` (0044/0058) has no marked block: an
-      -- office provisioned after 0058 genuinely has no lead_id column, and a hardcoded predicate naming it
-      -- would raise 42703 and abort this migration for every tenant.
-      SELECT string_agg(format('%I IS NOT NULL', c.column_name), ' OR ' ORDER BY c.column_name)
-        INTO assoc_predicate
-        FROM information_schema.columns c
-       WHERE c.table_schema = schema_name
-         AND c.table_name = 'files'
-         AND c.column_name IN ('deal_id', 'lead_id', 'contact_id', 'procore_project_id',
-                               'change_order_id', 'marketing_expense_request_id');
-
-      IF assoc_predicate IS NOT NULL THEN
-        EXECUTE format('ALTER TABLE %I.files DROP CONSTRAINT IF EXISTS files_association_check', schema_name);
-        EXECUTE format(
-          'ALTER TABLE %I.files ADD CONSTRAINT files_association_check CHECK (%s)',
-          schema_name, assoc_predicate
         );
       END IF;
 
@@ -357,8 +341,6 @@ CREATE INDEX IF NOT EXISTS marketing_expense_approvals_open_idx
 ALTER TABLE office_dallas.files ADD COLUMN IF NOT EXISTS marketing_expense_request_id UUID;
 
 DO $files$
-DECLARE
-  assoc_predicate text;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
@@ -371,23 +353,6 @@ BEGIN
       REFERENCES office_dallas.marketing_expense_requests(id) ON DELETE CASCADE;
   END IF;
 
-  -- Built from information_schema, not hardcoded: a freshly provisioned office has no lead_id column
-  -- (0044/0058 carry no marked block), and naming it here would raise 42703 mid-provisioning.
-  SELECT string_agg(format('%I IS NOT NULL', c.column_name), ' OR ' ORDER BY c.column_name)
-    INTO assoc_predicate
-    FROM information_schema.columns c
-   WHERE c.table_schema = 'office_dallas'
-     AND c.table_name = 'files'
-     AND c.column_name IN ('deal_id', 'lead_id', 'contact_id', 'procore_project_id',
-                           'change_order_id', 'marketing_expense_request_id');
-
-  IF assoc_predicate IS NOT NULL THEN
-    ALTER TABLE office_dallas.files DROP CONSTRAINT IF EXISTS files_association_check;
-    EXECUTE format(
-      'ALTER TABLE office_dallas.files ADD CONSTRAINT files_association_check CHECK (%s)',
-      assoc_predicate
-    );
-  END IF;
 END $files$;
 
 CREATE INDEX IF NOT EXISTS files_marketing_expense_request_idx

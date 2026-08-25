@@ -17,9 +17,11 @@
 // reason.
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { runFilesAssociationCheckRepair } from "../../../src/migrations/files-association-check-repair.js";
 import { migrationSql } from "../../helpers/migration-sql.js";
 
 const MIGRATION = migrationSql("0232_marketing_expense_requests");
+const REPAIR_MIGRATION = migrationSql("0241_files_association_check_repair");
 
 const FULL_OFFICES = ["office_dallas", "office_atlanta"];
 const PARTIAL_OFFICE = "office_partial";
@@ -29,8 +31,21 @@ const SUBMITTER = "00000000-0000-4000-8000-000000000002";
 
 let pg: PGlite;
 
-/** The `files` table as migration 0001's TENANT block creates it, plus 0044's lead_id. */
-function filesDdl(schema: string, withLeadId: boolean) {
+const LEGACY_UNASSOCIATED_FILE = "00000000-0000-4000-8000-0000000000f1";
+
+/**
+ * The `files` table as migration 0001's TENANT block creates it, plus 0044's lead_id.
+ *
+ * Current offices may hold legacy / burst-captured files with no association: field-photo capture creates
+ * that pending state deliberately. `withAssociationCheck` models 0001's historic constraint only where a
+ * test needs to prove 0241 removes it; fully migrated fixtures must not install it at all.
+ */
+function filesDdl(
+  schema: string,
+  withLeadId: boolean,
+  withLegacyUnassociatedFile = false,
+  withAssociationCheck = false,
+) {
   return `
     CREATE TABLE ${schema}.files (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -41,9 +56,14 @@ function filesDdl(schema: string, withLeadId: boolean) {
       change_order_id uuid,
       created_at timestamptz NOT NULL DEFAULT NOW()
     );
-    ALTER TABLE ${schema}.files ADD CONSTRAINT files_association_check
-      CHECK (deal_id IS NOT NULL${withLeadId ? " OR lead_id IS NOT NULL" : ""} OR contact_id IS NOT NULL
-             OR procore_project_id IS NOT NULL OR change_order_id IS NOT NULL);
+    ${withLegacyUnassociatedFile ? `
+      INSERT INTO ${schema}.files (id) VALUES ('${LEGACY_UNASSOCIATED_FILE}');
+    ` : ""}
+    ${withAssociationCheck ? `
+      ALTER TABLE ${schema}.files ADD CONSTRAINT files_association_check
+        CHECK (deal_id IS NOT NULL${withLeadId ? " OR lead_id IS NOT NULL" : ""} OR contact_id IS NOT NULL
+               OR procore_project_id IS NOT NULL OR change_order_id IS NOT NULL);
+    ` : ""}
   `;
 }
 
@@ -76,6 +96,14 @@ beforeAll(async () => {
     CREATE UNIQUE INDEX notification_recipient_assignments_group_user_uidx
       ON public.notification_recipient_assignments (group_id, user_id);
 
+    -- 0241 installs an AFTER INSERT constraint trigger here. The real database has this from 0001; the
+    -- migration fixture needs it too so the full runner SQL is exercised, not silently reduced to its
+    -- tenant marker.
+    CREATE TABLE public.offices (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      slug text NOT NULL UNIQUE
+    );
+
     INSERT INTO public.users (id, email, display_name, role) VALUES
       ('${TAKASHI}', 'tyamashita@trockgc.com', 'Takashi Yamashita', 'director'),
       ('${SUBMITTER}', 'rep@trockgc.com', 'Reggie Rep', 'rep');
@@ -85,7 +113,7 @@ beforeAll(async () => {
     await pg.exec(`
       CREATE SCHEMA ${office};
       CREATE TABLE ${office}.deals (id uuid PRIMARY KEY);
-      ${filesDdl(office, true)}
+      ${filesDdl(office, true, true)}
     `);
   }
 
@@ -105,6 +133,16 @@ afterAll(async () => {
 async function regclass(qualified: string): Promise<string | null> {
   const result = await pg.query<{ name: string | null }>(`SELECT to_regclass('${qualified}') AS name`);
   return result.rows[0]?.name ?? null;
+}
+
+async function hasFilesAssociationCheck(office: string): Promise<boolean> {
+  const result = await pg.query<{ count: number }>(`
+    SELECT count(*)::int AS count
+    FROM pg_constraint
+    WHERE conname = 'files_association_check'
+      AND conrelid = '${office}.files'::regclass
+  `);
+  return result.rows[0]?.count === 1;
 }
 
 /** A complete, valid request row. Callers override one field to prove one constraint. */
@@ -438,14 +476,29 @@ describe("0232 marketing expense requests — files attachment", () => {
         INSERT INTO office_dallas.files (marketing_expense_request_id) VALUES ('${REQUEST}')
       `),
     ).resolves.toBeDefined();
+    await expect(
+      pg.exec(`
+        INSERT INTO office_dallas.files (marketing_expense_request_id)
+        VALUES ('00000000-0000-4000-8000-0000000000ff')
+      `),
+    ).rejects.toThrow();
   });
 
-  // office_dallas is covered TWICE — by the DO-loop and, because the marked block is written literally
-  // against that schema name, by the TENANT block as well. So a bug in the loop's files handling is
-  // repaired by the block running after it, and an assertion on office_dallas alone proves nothing about
-  // the loop. office_atlanta is reached by the loop and by nothing else. (Found by mutation: deleting the
-  // new column from the LOOP's predicate list left all 32 assertions green.)
-  it("extends files_association_check in an office the DO-LOOP is the only thing that reaches", async () => {
+  it("keeps legacy pending captures intact and permits new targetless captures", async () => {
+    for (const office of FULL_OFFICES) {
+      const legacy = await pg.query<{ count: number }>(`
+        SELECT count(*)::int AS count FROM ${office}.files
+         WHERE id = '${LEGACY_UNASSOCIATED_FILE}'
+      `);
+      expect(legacy.rows[0]?.count).toBe(1);
+      expect(await hasFilesAssociationCheck(office)).toBe(false);
+      await expect(pg.exec(`INSERT INTO ${office}.files DEFAULT VALUES`)).resolves.toBeDefined();
+    }
+  });
+
+  // office_dallas is covered TWICE — by the DO-loop and by the literal marked block. office_atlanta is
+  // reached by the loop only, so it proves the loop did not silently leave the files linkage behind.
+  it("adds the marketing attachment linkage in an office the DO-LOOP alone reaches", async () => {
     const request = "00000000-0000-4000-8000-0000000000b2";
     await insertRequest("office_atlanta", { id: `'${request}'`, request_number: `'MER-0300'` });
     await expect(
@@ -453,11 +506,8 @@ describe("0232 marketing expense requests — files attachment", () => {
         INSERT INTO office_atlanta.files (marketing_expense_request_id) VALUES ('${request}')
       `),
     ).resolves.toBeDefined();
-    await expect(pg.exec(`INSERT INTO office_atlanta.files (deal_id) VALUES (NULL)`)).rejects.toThrow();
-  });
-
-  it("still rejects a file attached to nothing at all", async () => {
-    await expect(pg.exec(`INSERT INTO office_dallas.files (deal_id) VALUES (NULL)`)).rejects.toThrow();
+    expect(await hasFilesAssociationCheck("office_atlanta")).toBe(false);
+    await expect(pg.exec(`INSERT INTO office_atlanta.files DEFAULT VALUES`)).resolves.toBeDefined();
   });
 
   it("keeps every pre-existing association working", async () => {
@@ -475,18 +525,18 @@ describe("0232 marketing expense requests — files attachment", () => {
 // never does — and 0117 shipping with no marked block at all is precisely how that goes unnoticed. So this
 // block extracts the marker section exactly as the provisioner does and runs it against a schema that has
 // never seen the DO-loop.
-describe("0232 marketing expense requests — new-office provisioning block", () => {
+describe("0232/0241 marketing expense requests — new-office provisioning blocks", () => {
   const NEW_OFFICE = "office_newport";
 
-  function tenantBlock(schemaName: string): string {
+  function tenantBlock(migration: string, schemaName: string): string {
     const startMarker = "-- TENANT_SCHEMA_START";
     const endMarker = "-- TENANT_SCHEMA_END";
-    const startIdx = MIGRATION.indexOf(startMarker);
-    const endIdx = MIGRATION.indexOf(endMarker);
+    const startIdx = migration.indexOf(startMarker);
+    const endIdx = migration.indexOf(endMarker);
     if (startIdx === -1 || endIdx === -1) {
-      throw new Error("0232 has no -- TENANT_SCHEMA_START/END block: new offices would never get these tables");
+      throw new Error("migration has no -- TENANT_SCHEMA_START/END block: new offices would drift from existing ones");
     }
-    return MIGRATION.substring(startIdx + startMarker.length, endIdx)
+    return migration.substring(startIdx + startMarker.length, endIdx)
       .trim()
       .replace(/office_dallas/g, schemaName);
   }
@@ -497,9 +547,10 @@ describe("0232 marketing expense requests — new-office provisioning block", ()
     await pg.exec(`
       CREATE SCHEMA ${NEW_OFFICE};
       CREATE TABLE ${NEW_OFFICE}.deals (id uuid PRIMARY KEY);
-      ${filesDdl(NEW_OFFICE, false)}
+      ${filesDdl(NEW_OFFICE, false, false, true)}
     `);
-    await pg.exec(tenantBlock(NEW_OFFICE));
+    await pg.exec(tenantBlock(MIGRATION, NEW_OFFICE));
+    await pg.exec(tenantBlock(REPAIR_MIGRATION, NEW_OFFICE));
   });
 
   it("creates both tables for a newly provisioned office", async () => {
@@ -511,7 +562,7 @@ describe("0232 marketing expense requests — new-office provisioning block", ()
     );
   });
 
-  it("extends files_association_check without naming a column the new schema does not have", async () => {
+  it("removes 0001's historic check and accepts both marketing attachments and pending captures", async () => {
     await expect(
       insertRequest(NEW_OFFICE, { id: `'${"00000000-0000-4000-8000-0000000000c1"}'`, request_number: `'MER-0001'` }),
     ).resolves.toBeDefined();
@@ -521,10 +572,117 @@ describe("0232 marketing expense requests — new-office provisioning block", ()
         VALUES ('00000000-0000-4000-8000-0000000000c1')
       `),
     ).resolves.toBeDefined();
-    await expect(pg.exec(`INSERT INTO ${NEW_OFFICE}.files (deal_id) VALUES (NULL)`)).rejects.toThrow();
+    expect(await hasFilesAssociationCheck(NEW_OFFICE)).toBe(false);
+    await expect(pg.exec(`INSERT INTO ${NEW_OFFICE}.files DEFAULT VALUES`)).resolves.toBeDefined();
   });
 
-  it("is idempotent — provisioning replays the block and it must not raise", async () => {
-    await expect(pg.exec(tenantBlock(NEW_OFFICE))).resolves.toBeDefined();
+  it("is idempotent — provisioning replays both blocks and neither may raise", async () => {
+    await expect(pg.exec(tenantBlock(MIGRATION, NEW_OFFICE))).resolves.toBeDefined();
+    await expect(pg.exec(tenantBlock(REPAIR_MIGRATION, NEW_OFFICE))).resolves.toBeDefined();
+  });
+});
+
+describe("0232 retry + 0241 files association check repair sequence", () => {
+  const LEGACY_OFFICE = "office_recovery_dallas";
+  const RECORDED_OFFICE = "office_recovery_atlanta";
+  const LATE_OLD_API_OFFICE = "office_recovery_old_api";
+  const ASSOCIATED_FILE = "00000000-0000-4000-8000-0000000000f2";
+
+  beforeAll(async () => {
+    await pg.exec(`
+      -- This is the failed-0232 recovery shape: legacy targetless captures exist and no historical CHECK
+      -- is installed, so a rebuilt validated CHECK would abort the shipping migration.
+      CREATE SCHEMA ${LEGACY_OFFICE};
+      CREATE TABLE ${LEGACY_OFFICE}.deals (id uuid PRIMARY KEY);
+      ${filesDdl(LEGACY_OFFICE, true, true)}
+
+      -- This is the shape left by an already-successful old 0232: the column exists and its rebuilt CHECK
+      -- still rejects targetless captures. 0241 must converge it without rewriting its existing rows.
+      CREATE SCHEMA ${RECORDED_OFFICE};
+      CREATE TABLE ${RECORDED_OFFICE}.deals (id uuid PRIMARY KEY);
+      ${filesDdl(RECORDED_OFFICE, true, false, true)}
+      ALTER TABLE ${RECORDED_OFFICE}.files ADD COLUMN marketing_expense_request_id uuid;
+      ALTER TABLE ${RECORDED_OFFICE}.files DROP CONSTRAINT files_association_check;
+      ALTER TABLE ${RECORDED_OFFICE}.files ADD CONSTRAINT files_association_check
+        CHECK (deal_id IS NOT NULL OR lead_id IS NOT NULL OR contact_id IS NOT NULL
+          OR procore_project_id IS NOT NULL OR change_order_id IS NOT NULL
+          OR marketing_expense_request_id IS NOT NULL);
+      INSERT INTO ${RECORDED_OFFICE}.files (id, deal_id)
+        VALUES ('${ASSOCIATED_FILE}', gen_random_uuid());
+    `);
+
+    // The runner does these three operations in this order when it retries an unrecorded 0232 and reaches
+    // 0241. Execute the real files, not a hand-written approximation, so either half cannot silently drift.
+    await pg.exec(MIGRATION);
+    await runFilesAssociationCheckRepair(pg as never);
+    await pg.exec(REPAIR_MIGRATION);
+  });
+
+  it("converges legacy and already-successful office shapes without rewriting existing files", async () => {
+    for (const office of [LEGACY_OFFICE, RECORDED_OFFICE]) {
+      expect(await hasFilesAssociationCheck(office)).toBe(false);
+      await expect(pg.exec(`INSERT INTO ${office}.files DEFAULT VALUES`)).resolves.toBeDefined();
+    }
+
+    const legacy = await pg.query<{ count: number }>(`
+      SELECT count(*)::int AS count FROM ${LEGACY_OFFICE}.files
+      WHERE id = '${LEGACY_UNASSOCIATED_FILE}'
+    `);
+    expect(legacy.rows[0]?.count).toBe(1);
+
+    const associated = await pg.query<{ count: number }>(`
+      SELECT count(*)::int AS count FROM ${RECORDED_OFFICE}.files
+      WHERE id = '${ASSOCIATED_FILE}' AND deal_id IS NOT NULL
+    `);
+    expect(associated.rows[0]?.count).toBe(1);
+  });
+
+  it("repairs an office an old API provisions after 0241 is ledgered", async () => {
+    // An old API reads its migration files from its own image. It can therefore still replay the old 0232
+    // while a newly deployed runner has already recorded 0241. The deferred public.offices trigger must
+    // see the completed schema at COMMIT and remove the obsolete CHECK before the new office is visible.
+    await pg.exec(`
+      BEGIN;
+      INSERT INTO public.offices (slug) VALUES ('recovery_old_api');
+      CREATE SCHEMA ${LATE_OLD_API_OFFICE};
+      CREATE TABLE ${LATE_OLD_API_OFFICE}.deals (id uuid PRIMARY KEY);
+      ${filesDdl(LATE_OLD_API_OFFICE, true, false, true)}
+      ALTER TABLE ${LATE_OLD_API_OFFICE}.files
+        ADD CONSTRAINT files_unrelated_fixture_check CHECK (id IS NOT NULL);
+      COMMIT;
+    `);
+
+    expect(await hasFilesAssociationCheck(LATE_OLD_API_OFFICE)).toBe(false);
+    const unrelated = await pg.query<{ count: number }>(`
+      SELECT count(*)::int AS count
+      FROM pg_constraint
+      WHERE conname = 'files_unrelated_fixture_check'
+        AND conrelid = '${LATE_OLD_API_OFFICE}.files'::regclass
+    `);
+    expect(unrelated.rows[0]?.count).toBe(1);
+    await expect(pg.exec(`INSERT INTO ${LATE_OLD_API_OFFICE}.files DEFAULT VALUES`)).resolves.toBeDefined();
+  });
+
+  it("fails closed if a caller forces the deferred guard before provisioning files", async () => {
+    await pg.exec("BEGIN");
+    try {
+      await pg.exec("INSERT INTO public.offices (slug) VALUES ('recovery_forced_early')");
+      await expect(
+        pg.exec("SET CONSTRAINTS files_association_check_on_office_provision IMMEDIATE"),
+      ).rejects.toThrow('Office "recovery_forced_early" was committed before its files table was provisioned');
+    } finally {
+      await pg.exec("ROLLBACK").catch(() => undefined);
+    }
+
+    const office = await pg.query<{ count: number }>(`
+      SELECT count(*)::int AS count FROM public.offices WHERE slug = 'recovery_forced_early'
+    `);
+    expect(office.rows[0]?.count).toBe(0);
+  });
+
+  it("is idempotent — an already-correct office is not touched again", async () => {
+    await runFilesAssociationCheckRepair(pg as never);
+    await expect(pg.exec(REPAIR_MIGRATION)).resolves.toBeDefined();
+    expect(await hasFilesAssociationCheck(RECORDED_OFFICE)).toBe(false);
   });
 });

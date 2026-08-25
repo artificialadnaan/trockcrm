@@ -31,6 +31,10 @@ import {
   TASK_SOURCE_BACKFILL_MIGRATION,
   runTaskSourceBackfill,
 } from "./task-source-backfill.js";
+import {
+  FILES_ASSOCIATION_CHECK_REPAIR_MIGRATION,
+  runFilesAssociationCheckRepair,
+} from "./files-association-check-repair.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -132,6 +136,16 @@ async function runMigrations(): Promise<void> {
         await runBidBoardIngestIndexMigration(client);
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
+      } else if (file === FILES_ASSOCIATION_CHECK_REPAIR_MIGRATION) {
+        // Install the persistent deferred public.offices guard FIRST. Old API containers can have the
+        // previous 0232 baked into their image; CREATE TRIGGER serializes a transaction that already
+        // inserted public.offices, and an old container that inserts afterward receives the guard at its
+        // own COMMIT. Only then scan and repair existing offices one short transaction at a time. This
+        // ordering leaves no scan-to-ledger window in which an old container can permanently strand a new
+        // office with the obsolete CHECK; already-correct offices take no files-table lock at all.
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
+        await runFilesAssociationCheckRepair(client);
       } else {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
