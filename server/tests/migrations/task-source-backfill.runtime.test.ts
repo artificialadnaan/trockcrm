@@ -52,8 +52,14 @@ async function sourceCheckIsValidated(schema: string) {
   return result.rows[0].convalidated;
 }
 
-async function seedOffices(schemas: readonly string[], withoutOriginRule: readonly string[] = []) {
-  const schemasWithoutOriginRule = new Set(withoutOriginRule);
+interface TaskSchemaGaps {
+  withoutOriginRule?: readonly string[];
+  withoutEntitySnapshot?: readonly string[];
+}
+
+async function seedOffices(schemas: readonly string[], gaps: TaskSchemaGaps = {}) {
+  const schemasWithoutOriginRule = new Set(gaps.withoutOriginRule);
+  const schemasWithoutEntitySnapshot = new Set(gaps.withoutEntitySnapshot);
   await pg.exec(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $fn$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $fn$ LANGUAGE plpgsql;
@@ -70,6 +76,7 @@ async function seedOffices(schemas: readonly string[], withoutOriginRule: readon
   `);
   for (const schema of schemas) {
     const originRuleColumn = schemasWithoutOriginRule.has(schema) ? "" : "origin_rule varchar(120),";
+    const entitySnapshotColumn = schemasWithoutEntitySnapshot.has(schema) ? "" : "entity_snapshot jsonb,";
     await pg.exec(`
       CREATE SCHEMA IF NOT EXISTS ${schema};
       CREATE TABLE ${schema}.tasks (
@@ -82,7 +89,7 @@ async function seedOffices(schemas: readonly string[], withoutOriginRule: readon
         assigned_to uuid,
         created_by uuid,
         ${originRuleColumn}
-        entity_snapshot jsonb,
+        ${entitySnapshotColumn}
         contact_id uuid,
         due_date date,
         is_test_data boolean NOT NULL DEFAULT false,
@@ -278,19 +285,29 @@ describe("task source backfill — classification", () => {
     expect(await sourceOf("office_atlanta", "hand-typed")).toBe("manual");
   });
 
-  it("keeps unknown-provenance rows automated when an older office lacks origin_rule", async () => {
-    await seedOffices(["office_dallas", "office_legacy"], ["office_legacy"]);
+  it("keeps unknown-provenance rows automated when older offices lack classification capabilities", async () => {
+    await seedOffices(["office_dallas", "office_legacy", "office_snapshotless"], {
+      withoutOriginRule: ["office_legacy"],
+      withoutEntitySnapshot: ["office_legacy", "office_snapshotless"],
+    });
     await pg.exec(migrationSql(COLUMN_MIGRATION));
     await seedTaskShapes("office_dallas");
 
-    // This row looks hand-authored, but the old schema has no provenance column. Treating the missing
-    // column as NULL would silently misclassify it; 0233's safe default must remain intact instead.
+    // `office_legacy` is the historical production shape: both provenance columns are absent. The
+    // origin-rule-only variant proves that either capability missing is enough to skip direct SQL safely.
     await pg.exec(`
       INSERT INTO office_legacy.tasks (description, title, type, created_by)
       VALUES ('legacy-unknown-provenance', 'Call the client', 'manual', '${HUMAN}');
+      INSERT INTO office_snapshotless.tasks (description, title, type, created_by, origin_rule)
+      VALUES ('snapshotless-unknown-provenance', 'Call the client', 'manual', '${HUMAN}', NULL);
     `);
-    const before = await pg.query<{ xmin: string }>(
-      `SELECT xmin::text AS xmin FROM office_legacy.tasks WHERE description = 'legacy-unknown-provenance'`
+    const before = await pg.query<{ description: string; xmin: string }>(
+      `SELECT description, xmin::text AS xmin
+         FROM office_legacy.tasks
+        UNION ALL
+       SELECT description, xmin::text AS xmin
+         FROM office_snapshotless.tasks
+        ORDER BY description`
     );
 
     await expect(runTaskSourceBackfill(asClient())).resolves.toBeUndefined();
@@ -298,16 +315,24 @@ describe("task source backfill — classification", () => {
     // The same run still classifies offices where provenance is available.
     expect(await sourceOf("office_dallas", "hand-typed")).toBe("manual");
     expect(await sourceOf("office_legacy", "legacy-unknown-provenance")).toBe("automated");
-    const after = await pg.query<{ xmin: string }>(
-      `SELECT xmin::text AS xmin FROM office_legacy.tasks WHERE description = 'legacy-unknown-provenance'`
+    expect(await sourceOf("office_snapshotless", "snapshotless-unknown-provenance")).toBe("automated");
+    const after = await pg.query<{ description: string; xmin: string }>(
+      `SELECT description, xmin::text AS xmin
+         FROM office_legacy.tasks
+        UNION ALL
+       SELECT description, xmin::text AS xmin
+         FROM office_snapshotless.tasks
+        ORDER BY description`
     );
     // `automated` alone could mask an UPDATE that guessed and rewrote the row. The compatibility path
     // must leave opaque legacy data physically untouched, and stay safe on a retry.
-    expect(after.rows[0]?.xmin).toBe(before.rows[0]?.xmin);
+    expect(after.rows).toEqual(before.rows);
     await expect(runTaskSourceBackfill(asClient())).resolves.toBeUndefined();
     expect(await sourceOf("office_legacy", "legacy-unknown-provenance")).toBe("automated");
+    expect(await sourceOf("office_snapshotless", "snapshotless-unknown-provenance")).toBe("automated");
     // Backfill compatibility must not prevent the separate source CHECK validation pass.
     expect(await sourceCheckIsValidated("office_legacy")).toBe(true);
+    expect(await sourceCheckIsValidated("office_snapshotless")).toBe(true);
   });
 
   it("skips a schema that never received the column, instead of failing every other office", async () => {
