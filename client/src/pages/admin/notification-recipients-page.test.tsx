@@ -360,6 +360,87 @@ describe("NotificationRecipientsPage", () => {
     expect(mocks.updateNotificationRecipientGroup).toHaveBeenCalledWith(BID_KEY, ["rep-1"]);
   });
 
+  it("still renders an assignee who is no longer assignable, so they can be taken off", async () => {
+    // The other half of the server's diff-based gate. `rep-1` was assigned to DD as a director and has
+    // since moved to rep, so the role-filtered picker stops drawing them — while the page keeps submitting
+    // them, because they are still assigned. Without a checkbox there is no way to remove them, and the
+    // configuration is frozen wrong. Drawn, flagged, and untickable is the way out.
+    mocks.getNotificationRecipientGroup.mockImplementation(async (key: string) =>
+      key === DD_KEY
+        ? groupResponseFor(key, {
+            recipients: [{ userId: "rep-1", email: "rep@example.com", displayName: "Rep User" }],
+            assignedUserIds: ["rep-1"],
+          })
+        : groupResponseFor(key),
+    );
+
+    await renderPage();
+    await waitForLoaded();
+
+    const checkbox = checkboxFor(DD_KEY, "Rep User");
+    expect(checkbox, "an assigned-but-unassignable user must still be drawn").toBeTruthy();
+    expect(checkbox?.checked).toBe(true);
+    expect(sectionFor(DD_KEY)?.textContent).toMatch(/no longer assignable/i);
+
+    await act(async () => {
+      checkbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await clickSave(DD_KEY);
+
+    expect(mocks.updateNotificationRecipientGroup).toHaveBeenCalledWith(DD_KEY, []);
+  });
+
+  it("still renders a DEACTIVATED assignee, so an offboarded recipient can be taken off", async () => {
+    // The likelier lockout of the two. Offboarding the assigned approver leaves them ticked and undrawn,
+    // so every save resubmits them; with a set-based server check that is a page nobody can save.
+    mocks.getNotificationRecipientGroup.mockImplementation(async (key: string) =>
+      key === DD_KEY
+        ? groupResponseFor(key, {
+            recipients: [],
+            assignedUserIds: ["retired-1"],
+          })
+        : groupResponseFor(key),
+    );
+
+    await renderPage();
+    await waitForLoaded();
+
+    const checkbox = checkboxFor(DD_KEY, "Retired User");
+    expect(checkbox, "a deactivated assignee must still be drawn").toBeTruthy();
+    expect(checkbox?.checked).toBe(true);
+
+    await act(async () => {
+      checkbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await clickSave(DD_KEY);
+
+    expect(mocks.updateNotificationRecipientGroup).toHaveBeenCalledWith(DD_KEY, []);
+  });
+
+  it("keeps a tick made WHILE a save is in flight", async () => {
+    // Same family as the render-scoped snapshot fixed earlier: state captured at one moment, applied at a
+    // later one. The save response carries the server's membership and used to overwrite the selection
+    // wholesale, so anything ticked during the request vanished when it landed, with no error.
+    let resolveSave!: (value: unknown) => void;
+    mocks.updateNotificationRecipientGroup.mockReturnValueOnce(new Promise((resolve) => {
+      resolveSave = resolve;
+    }));
+    await renderPage();
+    await waitForLoaded();
+
+    await act(async () => {
+      saveButtonFor(BID_KEY)?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      checkboxFor(BID_KEY, "Rep User")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      resolveSave(groupResponseFor(BID_KEY));
+    });
+
+    expect(checkboxFor(BID_KEY, "Rep User")?.checked).toBe(true);
+  });
+
   it("shows success toast after save", async () => {
     await renderPage();
     await waitForLoaded();
@@ -367,6 +448,31 @@ describe("NotificationRecipientsPage", () => {
     await clickSave(DD_KEY);
 
     expect(mocks.toast.success).toHaveBeenCalledWith("Notification recipients updated");
+  });
+
+  it("shows who a group fell back to straight after it is emptied, without a reload", async () => {
+    // Emptying DD hands it back to every admin and director. The admin who just did that needs to see it
+    // NOW — the whole reason the warning copy was reversed — and only the response knows it happened.
+    mocks.updateNotificationRecipientGroup.mockResolvedValueOnce(
+      groupResponseFor(DD_KEY, {
+        recipients: [
+          { userId: "admin-1", email: "admin@example.com", displayName: "Admin User" },
+          { userId: "director-1", email: "director@example.com", displayName: "Director User" },
+        ],
+        assignedUserIds: [],
+        fallbackApplied: true,
+      }),
+    );
+    await renderPage();
+    await waitForLoaded();
+
+    await act(async () => {
+      checkboxFor(DD_KEY, "Director User")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await clickSave(DD_KEY);
+
+    expect(sectionFor(DD_KEY)?.textContent).toMatch(/no one is assigned/i);
+    expect(sectionFor(DD_KEY)?.textContent).toContain("admin@example.com");
   });
 
   it("shows error toast when save fails", async () => {

@@ -135,6 +135,18 @@ export interface NotificationRecipientResolution {
    */
   assignedUserIds: string[];
   /**
+   * Assigned users who have since been DEACTIVATED. Non-empty means this group needs an admin's attention.
+   *
+   * These are why the fallback below counts assignment ROWS rather than deliverable recipients. The
+   * assignment read used to filter on `users.isActive` in SQL, so a group whose every assignee had left
+   * came back as zero rows — and zero rows is precisely the condition that widens to admins and directors.
+   * Offboarding the assigned DD approver would have mailed a working approve/decline link to the entire
+   * leadership team, on a path that authenticates by token alone and records `decided_by` NULL.
+   *
+   * An empty result from a FILTERED read is not "nothing is configured", and only the second may widen.
+   */
+  inactiveAssignedUserIds: string[];
+  /**
    * Whether a `notification_recipient_groups` row exists for this key at all.
    *
    * Group rows are created lazily, when an admin first opens the page. Without this, a job reading a key
@@ -157,22 +169,38 @@ export async function resolveNotificationRecipients(
     .where(eq(notificationRecipientGroups.key, key))
     .limit(1);
 
-  const assigned = await tenantDb
+  // Deliberately NOT filtered on `users.isActive` — see `inactiveAssignedUserIds`. The active/inactive
+  // split has to happen HERE, in the open, because the two mean different things: one is who to mail, the
+  // other is whether this group is configured at all.
+  const assignmentRows = await tenantDb
     .select({
       userId: users.id,
       email: users.email,
       displayName: users.displayName,
+      isActive: users.isActive,
     })
     .from(notificationRecipientGroups)
     .innerJoin(notificationRecipientAssignments, eq(notificationRecipientAssignments.groupId, notificationRecipientGroups.id))
     .innerJoin(users, eq(users.id, notificationRecipientAssignments.userId))
-    .where(and(eq(notificationRecipientGroups.key, key), eq(users.isActive, true)));
+    .where(eq(notificationRecipientGroups.key, key));
 
-  const assignedUserIds = assigned.map((row) => row.userId);
+  const deliverable = assignmentRows
+    .filter((row) => row.isActive)
+    .map(({ userId, email, displayName }) => ({ userId, email, displayName }));
+  const assignedUserIds = deliverable.map((row) => row.userId);
+  const inactiveAssignedUserIds = assignmentRows.filter((row) => !row.isActive).map((row) => row.userId);
   const groupExists = Boolean(groupRow);
 
-  if (assigned.length > 0 || !options.fallbackToAdminsAndDirectors) {
-    return { recipients: assigned, assignedUserIds, groupExists, fallbackApplied: false };
+  // "Is anything assigned?", not "is anything deliverable?". A group whose every assignee has left is
+  // MISCONFIGURED, and the honest answer is an empty recipient list somebody has to notice — never a
+  // silent promotion of the whole leadership team into an approval role nobody granted them.
+  //
+  // This only bites where a fallback is enabled, which today is `lead_due_diligence` alone. The two newer
+  // keys have `fallbackToAdminsAndDirectors: false`, so an inactive-only assignment there already resolves
+  // to `[]` and the consuming job fails loudly — the correct outcome. Anyone turning a fallback ON for a
+  // new group is opting into this distinction and needs to have read it.
+  if (assignmentRows.length > 0 || !options.fallbackToAdminsAndDirectors) {
+    return { recipients: deliverable, assignedUserIds, inactiveAssignedUserIds, groupExists, fallbackApplied: false };
   }
 
   const fallback = await tenantDb
@@ -184,7 +212,7 @@ export async function resolveNotificationRecipients(
     .from(users)
     .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
 
-  return { recipients: fallback, assignedUserIds, groupExists, fallbackApplied: true };
+  return { recipients: fallback, assignedUserIds, inactiveAssignedUserIds, groupExists, fallbackApplied: true };
 }
 
 /** Key-agnostic. The array form, for the send paths that only care who to mail. */
@@ -1024,12 +1052,28 @@ export async function updateNotificationRecipientAssignments(tenantDb: TenantDb,
   const uniqueUserIds = [...new Set(userIds)];
 
   if (uniqueUserIds.length > 0) {
+    // WHAT THE GATES BELOW JUDGE: the CHANGE, not the resulting set.
+    //
+    // Applying a membership rule to every submitted id makes it impossible to leave a state that has
+    // drifted out of policy — a recipient assigned as a director, later moved to rep, is re-submitted on
+    // every save because the page holds the current membership, and the save is refused on their presence.
+    // The admin who opened the page to REMOVE them cannot, and the only route out is the one thing the
+    // rule forbids. A rule that blocks the exit is worse than no rule, because the bad state becomes
+    // permanent. Additions are where a membership rule belongs; removals are always allowed, and are most
+    // needed exactly when the current state is wrong.
+    const currentAssignments = await tenantDb
+      .select({ userId: notificationRecipientAssignments.userId })
+      .from(notificationRecipientAssignments)
+      .where(eq(notificationRecipientAssignments.groupId, group.id));
+    const alreadyAssigned = new Set(currentAssignments.map((row) => row.userId));
+    const addedUserIds = uniqueUserIds.filter((userId) => !alreadyAssigned.has(userId));
+
     const existingUsers = await tenantDb
-      .select({ id: users.id, role: users.role })
+      .select({ id: users.id, role: users.role, isActive: users.isActive })
       .from(users)
       .where(inArray(users.id, uniqueUserIds));
-    const roleByUserId = new Map(existingUsers.map((user) => [user.id, user.role]));
-    const missingIds = uniqueUserIds.filter((userId) => !roleByUserId.has(userId));
+    const userById = new Map(existingUsers.map((user) => [user.id, user]));
+    const missingIds = uniqueUserIds.filter((userId) => !userById.has(userId));
 
     if (missingIds.length > 0) {
       throw new AppError(
@@ -1038,13 +1082,29 @@ export async function updateNotificationRecipientAssignments(tenantDb: TenantDb,
       );
     }
 
+    // A DEACTIVATED assignee is not merely a wasted mailbox. It resolves to zero deliverable recipients,
+    // which for a group with a fallback used to be indistinguishable from "nobody is assigned" — so the
+    // exact widening the role gate below exists to prevent arrived by the back door, triggered by nothing
+    // more sinister than offboarding the assigned approver. `resolveNotificationRecipients` no longer
+    // conflates the two; this stops the state being created through the page in the first place.
+    //
+    // Every group, not only the role-gated ones: assigning somebody who cannot receive mail is a mistake
+    // wherever it happens, and the two keys without `assignableRoles` never reach the check below.
+    const deactivatedIds = addedUserIds.filter((userId) => userById.get(userId)?.isActive === false);
+    if (deactivatedIds.length > 0) {
+      throw new AppError(
+        400,
+        `User ID(s) ${deactivatedIds.join(", ")} are deactivated and cannot receive notifications.`
+      );
+    }
+
     // Enforced HERE and not only in the picker, because the picker is a suggestion and this is the door.
     // For a group whose membership is a permission rather than a subscription — DD hands out a decision
     // token that authenticates on its own — a filtered checkbox list is not a control, it is a hint.
     const assignableRoles = notificationRecipientGroupByKey(key)?.assignableRoles;
     if (assignableRoles) {
-      const disallowedIds = uniqueUserIds.filter((userId) => {
-        const role = roleByUserId.get(userId);
+      const disallowedIds = addedUserIds.filter((userId) => {
+        const role = userById.get(userId)?.role;
         return role !== undefined && !assignableRoles.includes(role);
       });
 

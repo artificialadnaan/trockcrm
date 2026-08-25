@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { notificationRecipientGroups, users } from "@trock-crm/shared/schema";
+import { notificationRecipientAssignments, notificationRecipientGroups, users } from "@trock-crm/shared/schema";
 import { NOTIFICATION_RECIPIENT_GROUPS } from "@trock-crm/shared/types";
 import {
   getNotificationRecipientGroup,
@@ -70,17 +70,28 @@ function buildTenantDb(options: {
           innerJoin: vi.fn(() => chain),
           where: vi.fn(() => {
             // The assignment read joins groups → assignments → users; the fallback reads users directly.
+            // NOT pre-filtered on isActive, mirroring the query: the resolver does that split itself now,
+            // because "no deliverable recipients" and "nothing assigned" have to stay distinguishable.
             if (selectedTable === notificationRecipientGroups && fields && "email" in fields) {
               return Promise.resolve(
                 state.people
-                  .filter((person) => state.assignedUserIds.includes(person.id) && person.isActive !== false)
-                  .map(toRecipient),
+                  .filter((person) => state.assignedUserIds.includes(person.id))
+                  .map((person) => ({ ...toRecipient(person), isActive: person.isActive !== false })),
               );
             }
-            // The assignment WRITE checks the named users exist and reads their role back for the gate.
+            // The assignment WRITE reads the CURRENT membership first, so the gates can be applied to the
+            // change rather than to the whole submitted set.
+            if (selectedTable === notificationRecipientAssignments) {
+              return Promise.resolve(state.assignedUserIds.map((userId) => ({ userId })));
+            }
+            // The assignment WRITE checks the named users exist and reads role + isActive back for the gates.
             if (selectedTable === users && fields && "id" in fields) {
               return Promise.resolve(
-                state.people.map((person) => ({ id: person.id, role: person.role })),
+                state.people.map((person) => ({
+                  id: person.id,
+                  role: person.role,
+                  isActive: person.isActive !== false,
+                })),
               );
             }
             if (selectedTable === users) {
@@ -118,6 +129,7 @@ const PEOPLE: Person[] = [
   { id: "director-1", email: "director@example.com", displayName: "Director", role: "director" },
   { id: "rep-1", email: "rep@example.com", displayName: "Rep", role: "rep" },
   { id: "inactive-admin", email: "inactive@example.com", displayName: "Inactive", role: "admin", isActive: false },
+  { id: "retired-rep", email: "retired@example.com", displayName: "Retired", role: "rep", isActive: false },
 ];
 
 describe("getNotificationRecipients", () => {
@@ -152,6 +164,48 @@ describe("getNotificationRecipients", () => {
     await expect(
       getNotificationRecipients(db, "bid_due_date_report", { fallbackToAdminsAndDirectors: true }),
     ).resolves.toEqual([{ userId: "rep-1", email: "rep@example.com", displayName: "Rep" }]);
+  });
+
+  it("does NOT widen to every admin and director when the only assignee has been deactivated", async () => {
+    // The sharp one. The assignment read filters on `users.isActive`, so an assignment to somebody who
+    // later leaves resolves to zero rows — and zero rows is the exact condition that fires the fallback.
+    // Offboarding the assigned approver would therefore mail a working approve/decline link to EVERY
+    // active admin and director, on a path where the token is the only authentication and `decided_by` is
+    // recorded NULL. An empty result from a FILTERED read is not "nothing is configured".
+    const { db } = buildTenantDb({ assignedUserIds: ["inactive-admin"], people: PEOPLE });
+
+    const resolution = await resolveNotificationRecipients(db, "lead_due_diligence", {
+      fallbackToAdminsAndDirectors: true,
+    });
+
+    expect(resolution.recipients).toEqual([]);
+    expect(resolution.fallbackApplied).toBe(false);
+    // Surfaced rather than swallowed: this group needs an admin, and saying so is the whole point.
+    expect(resolution.inactiveAssignedUserIds).toEqual(["inactive-admin"]);
+  });
+
+  it("still widens when the group genuinely has no assignment rows at all", async () => {
+    // The distinction that makes the guard above meaningful rather than a blanket disable.
+    const { db } = buildTenantDb({ assignedUserIds: [], people: PEOPLE });
+
+    const resolution = await resolveNotificationRecipients(db, "lead_due_diligence", {
+      fallbackToAdminsAndDirectors: true,
+    });
+
+    expect(resolution.recipients.map((recipient) => recipient.userId)).toEqual(["admin-1", "director-1"]);
+    expect(resolution.fallbackApplied).toBe(true);
+  });
+
+  it("mails the active assignees and reports the deactivated ones alongside them", async () => {
+    const { db } = buildTenantDb({ assignedUserIds: ["director-1", "inactive-admin"], people: PEOPLE });
+
+    const resolution = await resolveNotificationRecipients(db, "lead_due_diligence", {
+      fallbackToAdminsAndDirectors: true,
+    });
+
+    expect(resolution.recipients.map((recipient) => recipient.userId)).toEqual(["director-1"]);
+    expect(resolution.assignedUserIds).toEqual(["director-1"]);
+    expect(resolution.inactiveAssignedUserIds).toEqual(["inactive-admin"]);
   });
 });
 
@@ -199,6 +253,99 @@ describe("updateNotificationRecipientAssignments role gate", () => {
     await expect(
       updateNotificationRecipientAssignments(db, "lead_due_diligence", ["rep-1"]),
     ).rejects.toMatchObject({ message: expect.stringContaining("rep-1") });
+  });
+
+  it("refuses to assign a DEACTIVATED user, whatever their role", async () => {
+    // Not merely a wasted mailbox. An assignment nobody can deliver to resolves to zero active recipients,
+    // and for a group with a fallback that is indistinguishable from "nobody is assigned" — so the one
+    // thing this gate exists to prevent, a non-approver receiving approval links, arrives by the back door.
+    const { db, state } = buildTenantDb({ group: GROUP, assignedUserIds: ["admin-1"], people: PEOPLE });
+
+    await expect(
+      updateNotificationRecipientAssignments(db, "lead_due_diligence", ["inactive-admin"]),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("inactive-admin") });
+
+    expect(state.assignedUserIds).toEqual(["admin-1"]);
+  });
+
+  it("refuses a deactivated user on an unrestricted group too", async () => {
+    // No `assignableRoles` on this key, so the role gate never runs — the active check has to be its own.
+    const { db } = buildTenantDb({
+      group: { id: "g2", key: "bid_due_date_report", name: "Bid Due Date Report", description: "" },
+      assignedUserIds: [],
+      people: PEOPLE,
+    });
+
+    await expect(
+      updateNotificationRecipientAssignments(db, "bid_due_date_report", ["retired-rep"]),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("retired-rep") });
+  });
+
+  it("lets an admin REMOVE an assignee whose role has drifted out of policy", async () => {
+    // The mirror of the two refusals above. Validating the resulting SET rather than the CHANGE means a
+    // rule that blocks you from LEAVING a bad state, which is worse than no rule — the bad state becomes
+    // permanent. `rep-1` was assigned while they were a director; the admin is here to take them off.
+    const { db, state } = buildTenantDb({
+      group: GROUP,
+      assignedUserIds: ["director-1", "rep-1"],
+      people: PEOPLE,
+    });
+
+    await updateNotificationRecipientAssignments(db, "lead_due_diligence", ["director-1"]);
+
+    expect(state.assignedUserIds).toEqual(["director-1"]);
+  });
+
+  it("lets a drifted assignee be KEPT, so the page is savable at all", async () => {
+    // What the admin page actually submits: everything currently assigned, including the drifted entry it
+    // is about to let them untick. Rejecting this is the lockout — every save fails on their presence.
+    const { db, state } = buildTenantDb({
+      group: GROUP,
+      assignedUserIds: ["director-1", "rep-1"],
+      people: PEOPLE,
+    });
+
+    await updateNotificationRecipientAssignments(db, "lead_due_diligence", ["director-1", "rep-1"]);
+
+    expect(state.assignedUserIds).toEqual(["director-1", "rep-1"]);
+  });
+
+  it("still refuses to ADD a disallowed user who is not already assigned", async () => {
+    // The add path must keep biting, or the remove fix has simply deleted the rule.
+    const { db, state } = buildTenantDb({ group: GROUP, assignedUserIds: ["director-1"], people: PEOPLE });
+
+    await expect(
+      updateNotificationRecipientAssignments(db, "lead_due_diligence", ["director-1", "rep-1"]),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("rep-1") });
+
+    expect(state.assignedUserIds).toEqual(["director-1"]);
+  });
+
+  it("lets a DEACTIVATED assignee be KEPT, for the same reason as a drifted one", async () => {
+    // The is_active gate has the identical lockout shape as the role gate, and it is the likelier of the
+    // two: the page submits everyone currently assigned, so once an assignee is offboarded a set-based
+    // check refuses every save — including the one that would take them off.
+    const { db, state } = buildTenantDb({
+      group: GROUP,
+      assignedUserIds: ["director-1", "inactive-admin"],
+      people: PEOPLE,
+    });
+
+    await updateNotificationRecipientAssignments(db, "lead_due_diligence", ["director-1", "inactive-admin"]);
+
+    expect(state.assignedUserIds).toEqual(["director-1", "inactive-admin"]);
+  });
+
+  it("lets a DEACTIVATED assignee be removed as well", async () => {
+    const { db, state } = buildTenantDb({
+      group: GROUP,
+      assignedUserIds: ["director-1", "inactive-admin"],
+      people: PEOPLE,
+    });
+
+    await updateNotificationRecipientAssignments(db, "lead_due_diligence", ["director-1"]);
+
+    expect(state.assignedUserIds).toEqual(["director-1"]);
   });
 
   it("still accepts admins and directors for due diligence", async () => {
@@ -273,18 +420,28 @@ describe("the well-known group registry", () => {
   // The lazy upsert only fires when an admin opens the page. Until then a job reading the key sees an
   // empty list it cannot distinguish from a deliberately emptied one, so every registered key needs a row
   // that exists at deploy time. A fourth entry added with no migration fails here rather than in the field.
+  //
+  // Scanned rather than named: which FILE owns a given seed is not a fact worth asserting, and hardcoding
+  // one couples this to a migration number. These get renumbered — this file was 0232 until a stacked
+  // branch turned out to have claimed 0232 through 0237. All three strings must appear in the SAME file,
+  // so a name that drifted from the registry cannot be satisfied by some other migration mentioning it.
   it.each(NOTIFICATION_RECIPIENT_GROUPS.map((group) => [group.key, group] as const))(
     "seeds a %s group row in a migration, not only on first page view",
     (key, definition) => {
-      const seeds = ["0079_notification_recipient_groups.sql", "0232_notification_recipient_groups_registry.sql"]
-        .map((name) => fs.readFileSync(new URL(`../../../../migrations/${name}`, import.meta.url), "utf8"))
-        .join("\n");
+      const migrationsDir = new URL("../../../../migrations/", import.meta.url);
+      const seedingFiles = fs
+        .readdirSync(migrationsDir)
+        .filter((name) => name.endsWith(".sql"))
+        .map((name) => fs.readFileSync(new URL(name, migrationsDir), "utf8"))
+        .filter((sql) => sql.includes(`'${key}'`));
 
-      expect(seeds).toContain(`'${key}'`);
-      expect(seeds, `${key}'s seeded name has drifted from the registry`).toContain(`'${definition.name}'`);
-      expect(seeds, `${key}'s seeded description has drifted from the registry`).toContain(
-        `'${definition.description}'`,
-      );
+      expect(seedingFiles.length, `no migration seeds ${key}`).toBeGreaterThan(0);
+      expect(
+        seedingFiles.some(
+          (sql) => sql.includes(`'${definition.name}'`) && sql.includes(`'${definition.description}'`),
+        ),
+        `${key}'s seeded name/description have drifted from the registry`,
+      ).toBe(true);
     },
   );
 

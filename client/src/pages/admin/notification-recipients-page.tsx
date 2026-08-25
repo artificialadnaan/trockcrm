@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -47,9 +47,28 @@ function createInitialGroupState(): GroupState {
   };
 }
 
-function assignableUsersFor(definition: NotificationRecipientGroupDefinition, activeUsers: AdminUser[]) {
+/**
+ * Who this group can offer, plus anyone already on it that the filters would otherwise hide.
+ *
+ * The second half is not a nicety. A recipient assigned to due diligence as a director and later moved to
+ * rep — or simply offboarded — drops out of the list while remaining assigned, and the page keeps
+ * submitting them, because it submits the membership it was given. With no checkbox there is no way to
+ * take them off, so the configuration is frozen in exactly the state the rules exist to prevent. They are
+ * drawn, flagged, and can be unticked; the server permits the removal and still refuses to re-add them.
+ *
+ * Takes ALL users rather than the active ones for that reason: a deactivated assignee has to be reachable.
+ */
+function pickerRowsFor(
+  definition: NotificationRecipientGroupDefinition,
+  allUsers: AdminUser[],
+  selectedUserIds: Set<string>
+): Array<{ user: AdminUser; assignable: boolean }> {
   const allowed = definition.assignableRoles;
-  return allowed ? activeUsers.filter((user) => (allowed as readonly string[]).includes(user.role)) : activeUsers;
+  const isAssignable = (user: AdminUser) =>
+    user.isActive && (!allowed || (allowed as readonly string[]).includes(user.role));
+  return allUsers
+    .filter((user) => isAssignable(user) || selectedUserIds.has(user.id))
+    .map((user) => ({ user, assignable: isAssignable(user) }));
 }
 
 export function NotificationRecipientsPage() {
@@ -112,8 +131,6 @@ export function NotificationRecipientsPage() {
     };
   }, [loadGroup]);
 
-  const activeUsers = useMemo(() => users.filter((user) => user.isActive), [users]);
-
   const toggleRecipient = useCallback((key: string, userId: string, checked: boolean) => {
     // Computed INSIDE the updater. Reading `state.selectedUserIds` off the render closure works only
     // because React flushes discrete events one at a time, which is a fact about React, not about us.
@@ -142,9 +159,16 @@ export function NotificationRecipientsPage() {
     patchGroup(definition.key, { saving: true });
     try {
       const result = await updateNotificationRecipientGroup(definition.key, selectedUserIds);
+      // `recipients` and `fallbackApplied` are adopted from the response because only the server can know
+      // them — who is deliverable, and whether the group fell back. The SELECTION deliberately is not.
+      //
+      // The write persists exactly the ids that were sent, so re-adopting them changes nothing in the
+      // ordinary case and loses data in the one case where it differs: an admin ticking another name while
+      // the request is in flight had their edit silently reverted when the response landed. That is the
+      // same "captured at one moment, applied at a later one" shape as the render-scoped snapshot above,
+      // and the fix is to not do it rather than to detect it.
       patchGroup(definition.key, {
         recipients: result.recipients,
-        selectedUserIds: new Set(result.assignedUserIds),
         fallbackApplied: result.fallbackApplied,
         saving: false,
       });
@@ -213,7 +237,7 @@ export function NotificationRecipientsPage() {
                 <div className="mt-4 grid gap-2">
                   {/* TODO: Replace checkbox list with autocomplete picker when user count
                       exceeds ~50. Current pattern is fine for the existing T Rock team size. */}
-                  {assignableUsersFor(definition, activeUsers).map((user) => (
+                  {pickerRowsFor(definition, users, state.selectedUserIds).map(({ user, assignable }) => (
                     <label key={user.id} className="flex items-center gap-3 border p-3 text-sm">
                       <input
                         type="checkbox"
@@ -222,6 +246,9 @@ export function NotificationRecipientsPage() {
                       />
                       <span className="font-medium">{user.displayName}</span>
                       <span className="text-muted-foreground">{user.email}</span>
+                      {assignable ? null : (
+                        <span className="text-xs text-red-700">no longer assignable — untick to remove</span>
+                      )}
                       <span className="ml-auto text-xs uppercase text-muted-foreground">{user.role}</span>
                     </label>
                   ))}
