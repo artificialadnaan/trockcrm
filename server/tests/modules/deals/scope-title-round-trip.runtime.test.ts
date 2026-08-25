@@ -24,6 +24,7 @@ import {
   companies,
   dealHistory,
   deals,
+  leads,
   pipelineStageConfig,
   userOfficeAccess,
   users,
@@ -78,6 +79,8 @@ beforeAll(async () => {
       userOfficeAccess,
       pipelineStageConfig,
       companies,
+      // getDeals LEFT JOINs leads to resolve the effective bid-due date.
+      leads,
       deals,
       dealHistory,
       activities,
