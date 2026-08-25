@@ -33,6 +33,10 @@ import { getDealById } from "../deals/service.js";
 import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
 import {
+  assertMarketingExpenseAttachmentAccess,
+  assertMarketingExpenseRequestReadAccess,
+} from "../marketing-expense/service.js";
+import {
   getPhotoFeed,
   getNewPhotoCount,
   getPhotoFeedFacets,
@@ -151,6 +155,29 @@ async function assertLeadFileAccess(req: express.Request, leadId: string) {
   await assertLeadCollaboratorAccess(req.tenantDb!, leadId, req.user!);
 }
 
+/**
+ * Supporting documents on a marketing expense request. The rule lives in that module because it is about
+ * the REQUEST's lifecycle — the submitter only, and only while the decision is still outstanding — and
+ * this file has no business knowing what an expense request status means.
+ */
+async function assertMarketingExpenseFileAccess(req: express.Request, requestId: string) {
+  await assertMarketingExpenseAttachmentAccess(req.tenantDb!, requestId, req.user!.id);
+}
+
+/**
+ * READING an expense-request attachment. Gated on the parent request, at read time.
+ *
+ * A different rule from `assertMarketingExpenseFileAccess` on purpose: writing evidence is submitter-only
+ * and closes once a decision lands, but reading is submitter-or-approver and stays open — the approver has
+ * to be able to look at what they approved.
+ */
+async function assertMarketingExpenseFileReadAccess(req: express.Request, requestId: string) {
+  await assertMarketingExpenseRequestReadAccess(req.tenantDb!, requestId, {
+    id: req.user!.id,
+    role: req.user!.role,
+  });
+}
+
 // POST /api/files/upload-url — Step 1: request presigned URL
 router.post("/upload-url", async (req, res, next) => {
   try {
@@ -166,6 +193,7 @@ router.post("/upload-url", async (req, res, next) => {
       contactId,
       procoreProjectId,
       changeOrderId,
+      marketingExpenseRequestId,
       description,
       displayName,
       tags,
@@ -195,6 +223,9 @@ router.post("/upload-url", async (req, res, next) => {
     if (leadId) {
       await assertLeadFileAccess(req, leadId);
     }
+    if (marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, marketingExpenseRequestId);
+    }
 
     const result = await requestUploadUrl(
       req.tenantDb!,
@@ -212,6 +243,7 @@ router.post("/upload-url", async (req, res, next) => {
         contactId,
         procoreProjectId: procoreProjectId ? Number(procoreProjectId) : undefined,
         changeOrderId,
+        marketingExpenseRequestId,
         description,
         displayName: typeof displayName === "string" ? displayName : undefined,
         tags,
@@ -331,7 +363,8 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
 // POST /api/files/confirm-upload — Step 2: record file metadata after upload
 router.post("/confirm-upload", async (req, res, next) => {
   try {
-    const { uploadToken, takenAt, geoLat, geoLng, latitude, longitude, addressSource } = req.body;
+    const { uploadToken, takenAt, geoLat, geoLng, latitude, longitude, addressSource, clientUploadId } =
+      req.body;
 
     // Fix 2: Require upload token — all other metadata is server-trusted
     if (!uploadToken) {
@@ -352,6 +385,11 @@ router.post("/confirm-upload", async (req, res, next) => {
       latitude: latitude !== undefined ? Number(latitude) : undefined,
       longitude: longitude !== undefined ? Number(longitude) : undefined,
       addressSource,
+      // The upload queue's idempotency key. Read here because this handler destructures the body field by
+      // field — anything not named is silently dropped, which is how the web path came to send a stable key
+      // that never reached `files.client_upload_id`, leaving the dedup index nothing to match on. Typed
+      // check because the value goes into a varchar column and a caller controls it.
+      clientUploadId: typeof clientUploadId === "string" ? clientUploadId : undefined,
     });
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
@@ -383,6 +421,11 @@ router.patch("/:id/address", async (req, res, next) => {
     const fileId = req.params.id as string;
     const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
+
+    // Runs FIRST and outside the ladder — see the read paths for why first-match-wins is not safe here.
+    if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
+    }
 
     if (existing.dealId) {
       await assertDealFileAccess(req, existing.dealId);
@@ -437,9 +480,14 @@ router.post("/:id/new-version", async (req, res, next) => {
       throw new AppError(400, "originalFilename, mimeType, and fileSizeBytes are required.");
     }
 
-    // Fix 7: RBAC — load parent file and check deal access
+    // Fix 7: RBAC — load parent file and check its owning record's write access.
     const parentFile = await getFileById(req.tenantDb!, req.params.id);
     if (!parentFile) throw new AppError(404, "File not found");
+    // Runs before the ordinary deal/lead ladder. Request attachments are submitter-only and draft-only;
+    // an approver may be allowed to inspect one, but must never mint a replacement version.
+    if (parentFile.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, parentFile.marketingExpenseRequestId);
+    }
     if (parentFile.dealId) {
       await assertDealFileAccess(req, parentFile.dealId);
     }
@@ -825,6 +873,14 @@ router.get("/:id", async (req, res, next) => {
 
     // RBAC: if file has a dealId, verify the user has access to that deal.
     // Contact/project files are office-scoped so any tenant user can view.
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
+
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
@@ -845,6 +901,14 @@ router.get("/:id/download", async (req, res, next) => {
     if (!file) throw new AppError(404, "File not found");
 
     // RBAC: deal-scoped files require deal access check
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
+
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
@@ -901,7 +965,16 @@ router.get("/:id/audit-log", async (req, res, next) => {
   try {
     const file = await getFileByIdIncludingDeleted(req.tenantDb!, req.params.id);
     if (!file) throw new AppError(404, "File not found");
-    if (!isPhotoRecord(file)) throw new AppError(400, "Audit history is only available for photos.");
+
+    // Authorize BEFORE answering "is this a photo". The 400 below is a fact about a file the caller may
+    // have no right to know exists, and the ordering was only ever incidental.
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
 
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
@@ -910,6 +983,8 @@ router.get("/:id/audit-log", async (req, res, next) => {
     } else if (req.user!.role === "rep" && file.uploadedBy !== req.user!.id) {
       throw new AppError(403, "You can only view files you uploaded");
     }
+
+    if (!isPhotoRecord(file)) throw new AppError(400, "Audit history is only available for photos.");
 
     const events = await getPhotoAuditEvents(req.tenantDb!, file.id);
     await req.commitTransaction!();
@@ -925,6 +1000,14 @@ router.get("/:id/versions", async (req, res, next) => {
     // Fix 7: RBAC — load file and check deal access
     const file = await getFileById(req.tenantDb!, req.params.id);
     if (!file) throw new AppError(404, "File not found");
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
+
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
@@ -949,6 +1032,11 @@ router.patch("/:id", async (req, res, next) => {
     if (!existing) throw new AppError(404, "File not found");
 
     // RBAC: deal-scoped files require deal access check
+    // Runs FIRST and outside the ladder — see the read paths for why first-match-wins is not safe here.
+    if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
+    }
+
     if (existing.dealId) {
       await assertDealFileAccess(req, existing.dealId);
     } else if (existing.leadId) {
@@ -1043,6 +1131,13 @@ router.delete("/:id", requireAdmin, async (req, res, next) => {
     const fileId = req.params.id as string;
     const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
+    // Deletion is a write that depends on request status, so the same rule applies. `requireAdmin` limits
+    // WHO may do this; it says nothing about WHEN. Without this an admin could soft-delete a supporting
+    // document after the request was approved, and `loadDetail` selects only active files — so it would
+    // simply vanish from the record of what the approver was shown.
+    if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
+    }
     await assertDealLinkedFileMutationAllowed(req, existing, "delete");
 
     const deletedFile = await deleteFile(req.tenantDb!, fileId, req.user!.role, req.user!.id);

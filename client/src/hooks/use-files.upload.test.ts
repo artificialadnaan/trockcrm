@@ -265,3 +265,84 @@ describe("uploadFile", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+// THE IDEMPOTENCY KEY HAS TO REACH THE CONFIRM CALL.
+//
+// This is the same one-hop gap that let the original bug ship, one layer lower. The form's suite proves it
+// hands a stable key to `uploadFile`; the route's suite proves the server forwards what it receives. Between
+// them sat the request body built here, which nothing asserted — so deleting the field left both suites
+// green and the key never left the browser.
+describe("uploadFile idempotency key", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    MockXHR.instances = [];
+    document.cookie = "csrf_token=; Max-Age=0; path=/";
+  });
+
+  function stubTransport() {
+    document.cookie = "csrf_token=test-csrf-token; path=/";
+    vi.stubGlobal("XMLHttpRequest", MockXHR);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({
+          uploadUrl: "https://acct.r2.cloudflarestorage.com/bucket/key",
+          uploadToken: "upload-token",
+          r2Key: "office/marketing-expense-requests/req-1/proposals/quote.pdf",
+          expiresIn: 1800,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({ file: { id: "file-1" } }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("sends clientUploadId in the confirm-upload body", async () => {
+    const fetchMock = stubTransport();
+    await uploadFile({
+      file: new File(["quote"], "quote.pdf", { type: "application/pdf" }),
+      category: "proposal",
+      marketingExpenseRequestId: "req-1",
+      clientUploadId: "attachment-key-1",
+    });
+
+    const confirmCall = fetchMock.mock.calls.find(([url]) => url === "/api/files/confirm-upload");
+    expect(confirmCall).toBeTruthy();
+    expect(JSON.parse((confirmCall![1] as { body: string }).body)).toMatchObject({
+      uploadToken: "upload-token",
+      clientUploadId: "attachment-key-1",
+    });
+  });
+
+  it("also sends the expense request id on the presign, so the row is associated at all", async () => {
+    const fetchMock = stubTransport();
+    await uploadFile({
+      file: new File(["quote"], "quote.pdf", { type: "application/pdf" }),
+      category: "proposal",
+      marketingExpenseRequestId: "req-1",
+      clientUploadId: "attachment-key-1",
+    });
+    const presign = fetchMock.mock.calls.find(([url]) => url === "/api/files/upload-url");
+    expect(JSON.parse((presign![1] as { body: string }).body)).toMatchObject({
+      marketingExpenseRequestId: "req-1",
+    });
+  });
+
+  it("omits the key entirely for callers that do not use one", async () => {
+    const fetchMock = stubTransport();
+    await uploadFile({
+      file: new File(["x"], "roof.jpg", { type: "image/jpeg" }),
+      category: "photo",
+      dealId: "deal-1",
+    });
+    const confirmCall = fetchMock.mock.calls.find(([url]) => url === "/api/files/confirm-upload");
+    expect(JSON.parse((confirmCall![1] as { body: string }).body).clientUploadId).toBeUndefined();
+  });
+});

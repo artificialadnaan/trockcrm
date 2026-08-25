@@ -36,8 +36,9 @@ export interface NotificationRecipientGroupDefinition {
    */
   fallbackToAdminsAndDirectors: boolean;
   /**
-   * Which roles may be assigned to this group. Unset means every active user, which is the right default
-   * for a mailing list — the bid due date report goes to an estimator, whose role is `rep`.
+   * Which EFFECTIVE ROLEs in the selected office may be assigned to this group. Unset means every active
+   * user, which is the right default for a mailing list — the bid due date report goes to an estimator,
+   * whose role is `rep`.
    *
    * Set it when membership is a PERMISSION rather than a subscription. Lead due diligence is the case in
    * point: its recipients are mailed a decision token, and `decideDueDiligenceByToken` authenticates on
@@ -85,6 +86,14 @@ export const NOTIFICATION_RECIPIENT_GROUPS: readonly NotificationRecipientGroupD
     description: "Approves marketing and advertising expense requests.",
     emptyWarning: "Marketing and advertising expense requests will have no approver until one is added back.",
     fallbackToAdminsAndDirectors: false,
+    // A PERMISSION, by the rule above: this list decides who is asked to approve company spend, and the
+    // queue and decide endpoints admit effective admins and directors only. Left unset, an admin could tick a rep,
+    // who would then be mailed an approval request, follow the link and be refused — while the submitter
+    // was told it went through and the request sat pending with nobody able to act on it.
+    //
+    // This is the WRITE side. The resolver also filters recipients to roles that can decide, because this
+    // gate blocks new assignments and does not retroactively remove one made before it existed.
+    assignableRoles: ["admin", "director"],
   },
 ];
 

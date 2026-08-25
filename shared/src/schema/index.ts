@@ -81,6 +81,10 @@ export { bidBoardSyncRuns } from "./tenant/bid-board-sync-runs.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
 export { rfpVotes } from "./tenant/rfp-votes.js";
 export {
+  marketingExpenseRequests,
+  marketingExpenseRequestApprovals,
+} from "./tenant/marketing-expense-requests.js";
+export {
   estimateMarkets,
   estimateMarketZipMappings,
   estimateMarketFallbackGeographies,

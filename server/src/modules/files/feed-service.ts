@@ -5,6 +5,8 @@ import { PHOTO_CATEGORIES, PHOTO_CATEGORY_LABELS } from "@trock-crm/shared/types
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { isPostgresCalendarDate, isPostgresTzOffset } from "../../lib/pg-timestamp.js";
+// No cycle: service.ts does not import this module.
+import { excludeMarketingExpenseAttachments } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -161,6 +163,10 @@ function buildFeedPhotoConditions(filters: PhotoFeedFilters, options: FeedScopeO
     eq(files.isActive, true),
     // Superseded-version exclusion — see notSupersededSql above for why it is the cheap child-check.
     notSupersededSql,
+    // Expense-request attachments are private to their request. An image filed against one (a booth
+    // render, a signed quote photographed on a phone) is a photo by category and would otherwise appear
+    // in the office-wide feed, thumbnail and all.
+    excludeMarketingExpenseAttachments(),
   ];
 
   if (options.requireDeal) conditions.push(sql`${files.dealId} IS NOT NULL`);

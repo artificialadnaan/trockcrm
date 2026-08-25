@@ -13,6 +13,7 @@ import {
   notificationRecipientGroups,
   projectTypeConfig,
   properties,
+  userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
 import * as schema from "@trock-crm/shared/schema";
@@ -27,7 +28,7 @@ import type {
   ExistingCustomerSignal,
   LeadDueDiligenceDetectionSignal,
 } from "@trock-crm/shared/types";
-import { notificationRecipientGroupByKey } from "@trock-crm/shared/types";
+import { notificationRecipientGroupByKey, type UserRole } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -124,7 +125,7 @@ export interface NotificationRecipientOptions {
 
 export interface NotificationRecipientResolution {
   /** Who the mail actually goes to — the assignments, or the fallback when they are empty. */
-  recipients: Array<{ userId: string; email: string; displayName: string }>;
+  recipients: Array<{ userId: string; email: string; displayName: string; role: string }>;
   /**
    * EVERY row in `notification_recipient_assignments` for this group — never the fallback, and never
    * narrowed to who happens to be deliverable today. Deactivated members are included on purpose.
@@ -185,6 +186,11 @@ export async function resolveNotificationRecipients(
       email: users.email,
       displayName: users.displayName,
       isActive: users.isActive,
+      // Selected so a caller can ask whether a recipient can ACT on what it is about to mail them. Some
+      // groups feed a role-gated queue — the marketing expense approver being the first — and mailing an
+      // approval request to someone the queue will refuse looks handled while nobody can act on it.
+      // Additive: existing callers ignore it.
+      role: users.role,
     })
     .from(notificationRecipientGroups)
     .innerJoin(notificationRecipientAssignments, eq(notificationRecipientAssignments.groupId, notificationRecipientGroups.id))
@@ -201,7 +207,7 @@ export async function resolveNotificationRecipients(
   // That is the removal lockout again, one layer up in the read.
   const deliverable = assignmentRows
     .filter((row) => row.isActive)
-    .map(({ userId, email, displayName }) => ({ userId, email, displayName }));
+    .map(({ userId, email, displayName, role }) => ({ userId, email, displayName, role }));
   const assignedUserIds = assignmentRows.map((row) => row.userId);
   const inactiveAssignedUserIds = assignmentRows.filter((row) => !row.isActive).map((row) => row.userId);
   const groupExists = Boolean(groupRow);
@@ -223,6 +229,7 @@ export async function resolveNotificationRecipients(
       userId: users.id,
       email: users.email,
       displayName: users.displayName,
+      role: users.role,
     })
     .from(users)
     .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
@@ -1053,7 +1060,12 @@ export async function getNotificationRecipientGroup(tenantDb: TenantDb, key: str
   return { group, recipients, assignedUserIds, fallbackApplied };
 }
 
-export async function updateNotificationRecipientAssignments(tenantDb: TenantDb, key: string, userIds: string[]) {
+export async function updateNotificationRecipientAssignments(
+  tenantDb: TenantDb,
+  key: string,
+  userIds: string[],
+  activeOfficeId?: string,
+) {
   const [existing] = await tenantDb
     .select()
     .from(notificationRecipientGroups)
@@ -1083,10 +1095,54 @@ export async function updateNotificationRecipientAssignments(tenantDb: TenantDb,
     const alreadyAssigned = new Set(currentAssignments.map((row) => row.userId));
     const addedUserIds = uniqueUserIds.filter((userId) => !alreadyAssigned.has(userId));
 
-    const existingUsers = await tenantDb
-      .select({ id: users.id, role: users.role, isActive: users.isActive })
-      .from(users)
-      .where(inArray(users.id, uniqueUserIds));
+    /**
+     * Permission-bearing recipient groups live in the selected office. A user's base role answers their
+     * home-office authority, not whether they can act HERE: a rep granted admin in this office must be
+     * accepted, while a global admin with no access to this office must not receive a decision token.
+     *
+     * Direct service callers without office context retain the historical base-role behavior. HTTP writes
+     * always provide the active office through the route below, matching authMiddleware and the marketing
+     * expense approver resolver's home-office/grant/override calculation.
+     */
+    type AssignmentCandidate = { id: string; role: UserRole | null; isActive: boolean };
+    let existingUsers: AssignmentCandidate[];
+    if (activeOfficeId) {
+      const rows = await tenantDb
+        .select({
+          id: users.id,
+          baseRole: users.role,
+          primaryOfficeId: users.officeId,
+          isActive: users.isActive,
+          grantOfficeId: userOfficeAccess.officeId,
+          grantRoleOverride: userOfficeAccess.roleOverride,
+        })
+        .from(users)
+        .leftJoin(
+          userOfficeAccess,
+          and(
+            eq(userOfficeAccess.userId, users.id),
+            eq(userOfficeAccess.officeId, activeOfficeId),
+          ),
+        )
+        .where(inArray(users.id, uniqueUserIds));
+      existingUsers = rows.map((user) => {
+        const isHomeOffice = user.primaryOfficeId === activeOfficeId;
+        const hasAccess = isHomeOffice || user.grantOfficeId != null;
+        return {
+          id: user.id,
+          isActive: user.isActive,
+          role: hasAccess
+            ? (isHomeOffice ? user.baseRole : (user.grantRoleOverride ?? user.baseRole))
+            : null,
+        };
+      });
+    } else {
+      const rows = await tenantDb
+        .select({ id: users.id, role: users.role, isActive: users.isActive })
+        .from(users)
+        .where(inArray(users.id, uniqueUserIds));
+      existingUsers = rows.map((user) => ({ ...user, role: user.role as UserRole }));
+    }
     const userById = new Map(existingUsers.map((user) => [user.id, user]));
     const missingIds = uniqueUserIds.filter((userId) => !userById.has(userId));
 
@@ -1137,7 +1193,7 @@ export async function updateNotificationRecipientAssignments(tenantDb: TenantDb,
     if (assignableRoles) {
       const disallowedIds = addedUserIds.filter((userId) => {
         const role = userById.get(userId)?.role;
-        return role !== undefined && !assignableRoles.includes(role);
+        return role === null || (role !== undefined && !assignableRoles.includes(role));
       });
 
       if (disallowedIds.length > 0) {

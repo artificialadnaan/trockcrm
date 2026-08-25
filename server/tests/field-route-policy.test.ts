@@ -35,6 +35,9 @@ describe("field contractor route policy", () => {
       // surface is T-Rock Cam via /api/field, and this mount also exposes the leadership digest
       // recipients and every project's client contacts.
       "/weekly-reports",
+      // Marketing & advertising expense requests. CRM-only: the queue exposes every requester's name,
+      // budget code and requested spend, and there is no field-side surface for any of it.
+      "/marketing-expense-requests",
     ]);
     expect(FIELD_ACCESSIBLE_ROUTE_MOUNTS).toEqual(["/api/field"]);
     expect(PUBLIC_ROUTE_MOUNTS).toContain("/api/auth");

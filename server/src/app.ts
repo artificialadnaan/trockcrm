@@ -54,6 +54,7 @@ import { userRoutes } from "./modules/users/routes.js";
 import { fieldRoutes } from "./modules/field/routes.js";
 import { fieldRespondersRoutes } from "./modules/field/field-responders-routes.js";
 import { weeklyReportRoutes } from "./modules/weekly-reports/routes.js";
+import marketingExpenseRoutes from "./modules/marketing-expense/routes.js";
 import { weeklyReportPublicRoutes } from "./modules/weekly-reports/public-routes.js";
 import { weeklyReportDeliveryWebhookRoutes } from "./modules/weekly-reports/delivery-webhook-routes.js";
 import {
@@ -311,6 +312,10 @@ export function createApp() {
     ["/usage", usageRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[22], fieldRespondersRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[23], weeklyReportRoutes],
+    // The literal-string form, like "/usage" above. Indexing CRM_ONLY_TENANT_ROUTE_MOUNTS by ordinal makes
+    // this list and that one silently position-coupled; spelling the path out here means a future insert
+    // into the policy array cannot re-point this mount at somebody else's router.
+    ["/marketing-expense-requests", marketingExpenseRoutes],
   ] as const;
 
   for (const [mount, routes] of crmOnlyTenantRoutes) {

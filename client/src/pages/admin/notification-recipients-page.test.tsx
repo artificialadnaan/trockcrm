@@ -4,6 +4,7 @@
 import React, { StrictMode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NOTIFICATION_RECIPIENT_GROUPS } from "@trock-crm/shared/types";
 import { NotificationRecipientsPage } from "./notification-recipients-page";
@@ -86,6 +87,29 @@ const users = [
     officeName: "Dallas",
     isActive: true,
     extraOfficeCount: 0,
+    sourceSystems: [],
+    localAuthStatus: "active",
+    inviteSentAt: null,
+    inviteExpiresAt: null,
+    lastLoginAt: null,
+    failedLoginAttempts: 0,
+    lockedUntil: null,
+    passwordChangedAt: null,
+    revokedAt: null,
+    latestLocalAuthEvent: null,
+  },
+  {
+    // This person is a rep in their home office, but the selected office grants them admin authority.
+    // The picker is office-scoped, so the effective role—not this base role—is the permission boundary.
+    id: "office-admin-1",
+    email: "office-admin@example.com",
+    displayName: "Office Override Admin",
+    role: "rep",
+    effectiveRole: "admin",
+    officeId: "office-2",
+    officeName: "Houston",
+    isActive: true,
+    extraOfficeCount: 1,
     sourceSystems: [],
     localAuthStatus: "active",
     inviteSentAt: null,
@@ -189,7 +213,11 @@ afterEach(async () => {
 
 async function renderPage() {
   await act(async () => {
-    root.render(<NotificationRecipientsPage />);
+    root.render(
+      <MemoryRouter>
+        <NotificationRecipientsPage />
+      </MemoryRouter>
+    );
   });
 }
 
@@ -281,8 +309,42 @@ describe("NotificationRecipientsPage", () => {
     const section = sectionFor(DD_KEY);
     expect(section?.textContent).toContain("Admin User");
     expect(section?.textContent).toContain("Director User");
+    expect(section?.textContent).toContain("Office Override Admin");
     expect(section?.textContent).not.toContain("Rep User");
     expect(section?.textContent).not.toContain("Construction User");
+  });
+
+  it("uses the selected office's role override when selecting and retaining a permission recipient", async () => {
+    // Base role alone would hide/flag this person as a rep. The API says they are admin in this office, so
+    // they must be a normal, retainable DD recipient rather than an unassignable legacy row.
+    mocks.getNotificationRecipientGroup.mockImplementation(async (key: string) =>
+      key === DD_KEY
+        ? groupResponseFor(key, {
+            recipients: [
+              {
+                userId: "office-admin-1",
+                email: "office-admin@example.com",
+                displayName: "Office Override Admin",
+              },
+            ],
+            assignedUserIds: ["office-admin-1"],
+          })
+        : groupResponseFor(key),
+    );
+
+    await renderPage();
+    await waitForLoaded();
+
+    const section = sectionFor(DD_KEY);
+    const checkbox = checkboxFor(DD_KEY, "Office Override Admin");
+    expect(checkbox).toBeTruthy();
+    expect(checkbox?.checked).toBe(true);
+    expect(section?.textContent).not.toMatch(/no longer assignable/i);
+    expect(section?.textContent).toMatch(/OFFICE OVERRIDE ADMIN.*ADMIN/i);
+
+    await clickSave(DD_KEY);
+
+    expect(mocks.updateNotificationRecipientGroup).toHaveBeenCalledWith(DD_KEY, ["office-admin-1"]);
   });
 
   it("does not pre-tick fallback recipients — a stray Save would freeze the fallback into a static list", async () => {
@@ -553,10 +615,13 @@ describe("NotificationRecipientsPage", () => {
     await act(async () => {
       root.render(
         <StrictMode>
-          <NotificationRecipientsPage />
+          <MemoryRouter>
+            <NotificationRecipientsPage />
+          </MemoryRouter>
         </StrictMode>,
       );
     });
+    expect(resolvers).toHaveLength(NOTIFICATION_RECIPIENT_GROUPS.length * 2);
 
     // Resolve the SECOND run first, then let the superseded first run answer late.
     await act(async () => {
