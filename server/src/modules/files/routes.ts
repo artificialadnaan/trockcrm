@@ -416,12 +416,15 @@ router.patch("/:id/address", async (req, res, next) => {
     const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
 
+    // Runs FIRST and outside the ladder — see the read paths for why first-match-wins is not safe here.
+    if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
+    }
+
     if (existing.dealId) {
       await assertDealFileAccess(req, existing.dealId);
     } else if (existing.leadId) {
       await assertLeadFileAccess(req, existing.leadId);
-    } else if (existing.marketingExpenseRequestId) {
-      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
     } else if (req.user.role === "rep" && existing.uploadedBy !== req.user.id) {
       throw new AppError(403, "You can only modify files you uploaded");
     }
@@ -859,12 +862,18 @@ router.get("/:id", async (req, res, next) => {
 
     // RBAC: if file has a dealId, verify the user has access to that deal.
     // Contact/project files are office-scoped so any tenant user can view.
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
+
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
-    } else if (file.marketingExpenseRequestId) {
-      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     }
 
     await req.commitTransaction!();
@@ -881,12 +890,18 @@ router.get("/:id/download", async (req, res, next) => {
     if (!file) throw new AppError(404, "File not found");
 
     // RBAC: deal-scoped files require deal access check
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
+
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
-    } else if (file.marketingExpenseRequestId) {
-      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     }
 
     const logDownload = shouldLogFileDownloadEvent(req.query);
@@ -942,12 +957,18 @@ router.get("/:id/audit-log", async (req, res, next) => {
 
     // Authorize BEFORE answering "is this a photo". The 400 below is a fact about a file the caller may
     // have no right to know exists, and the ordering was only ever incidental.
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
+
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
-    } else if (file.marketingExpenseRequestId) {
-      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     } else if (req.user!.role === "rep" && file.uploadedBy !== req.user!.id) {
       throw new AppError(403, "You can only view files you uploaded");
     }
@@ -968,12 +989,18 @@ router.get("/:id/versions", async (req, res, next) => {
     // Fix 7: RBAC — load file and check deal access
     const file = await getFileById(req.tenantDb!, req.params.id);
     if (!file) throw new AppError(404, "File not found");
+    // The expense-request check runs FIRST and is NOT part of the ladder below. Exclusivity in
+    // validateAssociations stops new rows claiming two owners; this stops a row that somehow carries both
+    // (a backfill, an import, a future feature) being authorized by the other branch and never reaching
+    // here. Most restrictive wins, rather than first-match wins.
+    if (file.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
+    }
+
     if (file.dealId) {
       await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
       await assertLeadFileAccess(req, file.leadId);
-    } else if (file.marketingExpenseRequestId) {
-      await assertMarketingExpenseFileReadAccess(req, file.marketingExpenseRequestId);
     }
 
     const versions = await getFileVersions(req.tenantDb!, req.params.id);
@@ -994,12 +1021,15 @@ router.patch("/:id", async (req, res, next) => {
     if (!existing) throw new AppError(404, "File not found");
 
     // RBAC: deal-scoped files require deal access check
+    // Runs FIRST and outside the ladder — see the read paths for why first-match-wins is not safe here.
+    if (existing.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
+    }
+
     if (existing.dealId) {
       await assertDealFileAccess(req, existing.dealId);
     } else if (existing.leadId) {
       await assertLeadFileAccess(req, existing.leadId);
-    } else if (existing.marketingExpenseRequestId) {
-      await assertMarketingExpenseFileAccess(req, existing.marketingExpenseRequestId);
     } else if (req.user!.role === "rep" && existing.uploadedBy !== req.user!.id) {
       // Fix 8: Non-deal files (e.g. contact files) — reps can only modify files they uploaded
       throw new AppError(403, "You can only modify files you uploaded");

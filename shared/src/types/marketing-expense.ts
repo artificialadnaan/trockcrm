@@ -81,6 +81,16 @@ export const MARKETING_EXPENSE_COST_LABELS: Record<MarketingExpenseCostField, st
 
 export const MARKETING_EXPENSE_APPROVER_GROUP_KEY = "marketing_expense_approver";
 
+/**
+ * The `AppError` code the submit endpoint returns when the request is already past `draft`.
+ *
+ * A CONTRACT between two packages, so it lives in one place. The submit endpoint has two 409s — this one
+ * and "no approver configured" — and they mean opposite things to the client: this one says the operation
+ * SUCCEEDED and its response was lost, the other says it genuinely failed. A mistyped literal on either
+ * side turns a recovered submit back into a duplicate request, with nothing failing to say so.
+ */
+export const MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE = "ALREADY_SUBMITTED";
+
 export function isMarketingExpenseStatus(value: unknown): value is MarketingExpenseStatus {
   return (MARKETING_EXPENSE_STATUSES as readonly string[]).includes(value as string);
 }
@@ -101,6 +111,34 @@ export function isMarketingExpenseApproverDecision(
   value: unknown,
 ): value is MarketingExpenseApproverDecision {
   return (MARKETING_EXPENSE_APPROVER_DECISIONS as readonly string[]).includes(value as string);
+}
+
+/**
+ * The largest value `numeric(14,2)` holds: 12 integer digits and 2 decimals.
+ *
+ * Every individual cost field may legitimately be this large, which is exactly why the SUM needs its own
+ * bound — eight valid inputs can add up to an invalid total, and the overflow lands as a database error
+ * during the insert rather than as a validation message.
+ */
+export const MONEY_COLUMN_MAX_CENTS = 99_999_999_999_999;
+
+/**
+ * Does this set of amounts sum to more than the column can hold?
+ *
+ * Integer CENTS, not floats, and this is VALIDATION rather than computation — the stored `total_requested`
+ * is still summed by Postgres inside the INSERT. A range check has to happen before the statement runs, and
+ * exact integer arithmetic is the only way to do it without reintroducing the float problem. The maximum
+ * possible sum here is 8 x 99999999999999, comfortably inside Number.MAX_SAFE_INTEGER.
+ */
+export function moneyTotalExceedsColumn(values: ReadonlyArray<unknown>): boolean {
+  let cents = 0;
+  for (const value of values) {
+    const parsed = parseMoneyInput(value);
+    if (!parsed.ok) continue;
+    const [whole, fraction = ""] = parsed.value.split(".");
+    cents += Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
+  }
+  return cents > MONEY_COLUMN_MAX_CENTS;
 }
 
 export type MoneyParseResult =

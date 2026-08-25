@@ -17,12 +17,14 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { uploadFile } from "@/hooks/use-files";
+import { isApiError } from "@/lib/api";
 import {
   createMarketingExpenseRequest,
   submitMarketingExpenseRequest,
   type MarketingExpenseRequestPayload,
 } from "@/hooks/use-marketing-expense-requests";
 import {
+  MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE,
   MARKETING_EXPENSE_ATTACHMENT_KINDS,
   MARKETING_EXPENSE_ATTACHMENT_KIND_LABELS,
   MARKETING_EXPENSE_COST_LABELS,
@@ -123,7 +125,7 @@ export function MarketingExpenseRequestFormPage() {
   const draftIdRef = useRef<string | null>(null);
   // The attachments that have NOT yet landed. A file is removed only once its upload has succeeded, so a
   // retry resumes at the one that failed instead of skipping it.
-  const outstandingFilesRef = useRef<File[]>([]);
+  const outstandingFilesRef = useRef<Array<{ file: File; clientUploadId: string }>>([]);
 
   const handleChange = <K extends keyof MarketingExpenseRequestPayload>(
     field: K,
@@ -174,7 +176,11 @@ export function MarketingExpenseRequestFormPage() {
       if (!draftIdRef.current) {
         const draft = await createMarketingExpenseRequest(form);
         draftIdRef.current = draft.id;
-        outstandingFilesRef.current = [...attachments];
+        // One key per file, minted ONCE and reused by every retry of that file.
+        outstandingFilesRef.current = attachments.map((file) => ({
+          file,
+          clientUploadId: crypto.randomUUID(),
+        }));
         setCreatedDraft({ id: draft.id, requestNumber: draft.requestNumber });
       }
 
@@ -186,9 +192,14 @@ export function MarketingExpenseRequestFormPage() {
       // attached; the approver would get a request with nothing behind it. Shifting only on success means a
       // retry picks up exactly where it stopped, and submit is unreachable while anything is outstanding.
       while (outstandingFilesRef.current.length > 0) {
-        const file = outstandingFilesRef.current[0]!;
+        const { file, clientUploadId } = outstandingFilesRef.current[0]!;
         try {
-          await uploadFile({ file, category: "proposal", marketingExpenseRequestId: draftIdRef.current });
+          await uploadFile({
+            file,
+            category: "proposal",
+            marketingExpenseRequestId: draftIdRef.current,
+            clientUploadId,
+          });
         } catch (uploadError) {
           const reason = uploadError instanceof Error ? uploadError.message : "upload failed";
           throw new Error(
@@ -202,6 +213,15 @@ export function MarketingExpenseRequestFormPage() {
       toast.success(`Request ${submitted.requestNumber} submitted for approval`);
       navigate("/marketing-expense-requests");
     } catch (err) {
+      // The submit committed and only its RESPONSE was lost: the retry is told "already submitted", which
+      // is the truth and is a success from here. Reporting it as a failure is how somebody files the same
+      // expense twice. Matched on the CODE, because this endpoint's other 409 ("no approver configured")
+      // is a real failure and must keep reading as one.
+      if (isApiError(err) && err.status === 409 && err.code === MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE) {
+        toast.success("This request was already submitted");
+        navigate("/marketing-expense-requests");
+        return;
+      }
       const message = err instanceof Error ? err.message : "Could not submit the request.";
       setError(message);
       toast.error(message);
@@ -359,6 +379,7 @@ export function MarketingExpenseRequestFormPage() {
                 <Input
                   id={`${testId}-label`}
                   data-testid={`${testId}-label`}
+                  disabled={locked}
                   value={form[labelField]}
                   onChange={(event) => handleChange(labelField, event.target.value)}
                 />
@@ -504,6 +525,9 @@ export function MarketingExpenseRequestFormPage() {
                     <button
                       type="button"
                       aria-label={`Remove ${file.name}`}
+                      // Disabled once the draft exists: the retry queue was built at that moment, so
+                      // removing a file here would hide it from the list while it still uploaded.
+                      disabled={locked}
                       // slate-500 (4.76:1), not slate-400 (~2.5:1) — see muted-text-contrast.test.ts.
                       className="rounded p-0.5 text-slate-500 hover:text-slate-700"
                       onClick={() =>

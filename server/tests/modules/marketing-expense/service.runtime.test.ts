@@ -17,6 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AppError } from "../../../src/middleware/error-handler.js";
+import { MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE } from "@trock-crm/shared/types";
 import {
   allocateRequestNumber,
   createMarketingExpenseRequest,
@@ -277,6 +278,51 @@ describe("required fields", () => {
     });
   });
 
+  // A shape-only regex accepts "2026-02-31". Postgres then rejects the cast, and the generic error handler
+  // renders that as a 500 with no field named — the exact failure mode the money validators exist to
+  // prevent, on a different column. `isPostgresCalendarDate` is the repo's own validator and already
+  // handles the case no regex can (calendar overflow rolls forward silently under Date.parse).
+  it.each(["2026-02-31", "2026-99-99", "2026-13-01", "0000-01-01"])(
+    "rejects %s with a 400 rather than letting Postgres 500",
+    async (neededBy) => {
+      await expect(createDraft({ neededBy })).rejects.toMatchObject({ statusCode: 400 });
+    },
+  );
+
+  it("still accepts a real date, including a leap day", async () => {
+    await expect(createDraft({ neededBy: "2028-02-29" })).resolves.toBeDefined();
+  });
+
+  it("still accepts no date at all", async () => {
+    await expect(createDraft({ neededBy: "" })).resolves.toBeDefined();
+  });
+
+  it("REFUSES a total that would overflow numeric(14,2)", async () => {
+    // Each field allows the full 12 integer digits the column holds, but their SUM goes into another
+    // numeric(14,2). Eight valid inputs can therefore produce an invalid total, and the overflow surfaces
+    // as a database 500 during the insert.
+    await expect(
+      createDraft({ costAdvertising: "999999999999.99", costRegistration: "0.01" }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("names the TOTAL in that refusal, not one of the eight boxes", async () => {
+    let message = "";
+    await createDraft({ costAdvertising: "999999999999.99", costRegistration: "0.01" }).catch((err) => {
+      message = (err as Error).message;
+    });
+    expect(message.toLowerCase()).toContain("total");
+  });
+
+  it("still accepts a total that exactly fills the column", async () => {
+    const draft = await createDraft({
+      costAdvertising: "999999999999.99",
+      costRegistration: "", costTravel: "", costLodging: "",
+      costMeals: "", costMaterials: "", costOther1: "", costOther2: "",
+    });
+    expect(draft.totalRequested).toBe("999999999999.99");
+  });
+
   it("rejects an unknown payment method", async () => {
     await expect(createDraft({ paymentMethod: "crypto" as never })).rejects.toMatchObject({ statusCode: 400 });
   });
@@ -428,6 +474,66 @@ describe("draft -> submit ordering", () => {
       `SELECT status FROM ${SCHEMA}.marketing_expense_requests WHERE id = '${draft.id}'`,
     );
     expect(row.rows[0]?.status).toBe("draft");
+  });
+
+  // The Notification Recipients page lets an admin assign ANY active user to ANY group. The queue and the
+  // decide endpoint are role-gated (admin/director), so a rep assigned as the sole marketing approver gets
+  // the email, follows the link, and is refused — while the submitter is told everything went fine and the
+  // request sits pending with nobody able to act on it. A recipient who cannot decide is not an approver.
+  // The CODE, not just the status. This endpoint returns two different 409s and the client has to tell
+  // them apart: this one means "it worked, you lost the response", the other means "it genuinely failed".
+  // Without this the contract is a literal typed twice in two packages.
+  it("codes an already-submitted refusal so a client can reconcile a lost response", async () => {
+    const draft = await createAndSubmit();
+    let caught: { statusCode?: number; code?: string } = {};
+    await submitMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+    }).catch((err) => {
+      caught = err;
+    });
+    expect(caught.statusCode).toBe(409);
+    expect(caught.code).toBe(MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE);
+  });
+
+  it("does NOT code the no-approver refusal the same way — it is a real failure", async () => {
+    await pg.exec(`DELETE FROM public.notification_recipient_assignments`);
+    const draft = await createDraft();
+    let caught: { statusCode?: number; code?: string } = {};
+    await submitMarketingExpenseRequest(tenantDb, {
+      tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+    }).catch((err) => {
+      caught = err;
+    });
+    expect(caught.statusCode).toBe(409);
+    expect(caught.code).not.toBe(MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE);
+  });
+
+  it("REFUSES the submit when the only configured approver cannot actually decide", async () => {
+    await pg.exec(`
+      DELETE FROM public.notification_recipient_assignments;
+      INSERT INTO public.notification_recipient_assignments (group_id, user_id)
+      SELECT g.id, '${OTHER_REP}' FROM public.notification_recipient_groups g
+       WHERE g.key = 'marketing_expense_approver';
+    `);
+    const draft = await createDraft();
+    await expect(
+      submitMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining("Notification Recipients") });
+  });
+
+  it("mails only the recipients who CAN decide when the group mixes roles", async () => {
+    await pg.exec(`
+      INSERT INTO public.notification_recipient_assignments (group_id, user_id)
+      SELECT g.id, '${OTHER_REP}' FROM public.notification_recipient_groups g
+       WHERE g.key = 'marketing_expense_approver'
+       ON CONFLICT DO NOTHING;
+    `);
+    await createAndSubmit();
+    const [approverJob] = await jobRows();
+    // Takashi (director) is in; the rep is not — mailing them would be an invitation to a 403.
+    expect(approverJob?.payload.recipientEmails).toEqual(["tyamashita@trockgc.com"]);
   });
 
   it("REFUSES the submit when the approver group resolves to nobody, instead of mailing into the void", async () => {

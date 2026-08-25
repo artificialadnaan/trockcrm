@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CheckCircle, ChevronDown, ChevronRight, Inbox, Loader2, Megaphone, Paperclip, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -196,6 +196,15 @@ export function MarketingExpenseQueuePage() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MarketingExpenseRequestDetail | null>(null);
   const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
+  /**
+   * Which detail read is the current one.
+   *
+   * Comparing `detail.id` to the open row stopped a slow response for A rendering under B — but only by
+   * leaving B with NO detail, which takes B's review panel and its Approve/Deny controls away until the
+   * approver closes and reopens the row. Identity captured at issue time and compared at resolution lets
+   * the loser return without touching anything.
+   */
+  const latestDetailRequest = useRef(0);
   const [denyingId, setDenyingId] = useState<string | null>(null);
   // Keyed by request id: a reason typed for one request must never be submitted against another.
   const [reasons, setReasons] = useState<Record<string, string>>({});
@@ -204,6 +213,8 @@ export function MarketingExpenseQueuePage() {
   const activeTab = STATUS_TABS.find((tab) => tab.value === status) ?? STATUS_TABS[0]!;
 
   function closeAll() {
+    // Bump the generation so an in-flight read cannot repopulate a panel the user has closed.
+    latestDetailRequest.current += 1;
     setOpenId(null);
     setDetail(null);
     setDenyingId(null);
@@ -217,14 +228,18 @@ export function MarketingExpenseQueuePage() {
     setOpenId(request.id);
     setDetail(null);
     setDenyingId(null);
+    const requestGeneration = ++latestDetailRequest.current;
     setLoadingDetailId(request.id);
     try {
-      setDetail(await getMarketingExpenseRequest(request.id));
+      const loaded = await getMarketingExpenseRequest(request.id);
+      if (requestGeneration !== latestDetailRequest.current) return;
+      setDetail(loaded);
     } catch (err) {
+      if (requestGeneration !== latestDetailRequest.current) return;
       // The decision stays unavailable: `detail` is still null, so no Approve/Deny renders.
       toast.error(err instanceof Error ? err.message : "Could not load the request.");
     } finally {
-      setLoadingDetailId(null);
+      if (requestGeneration === latestDetailRequest.current) setLoadingDetailId(null);
     }
   }
 

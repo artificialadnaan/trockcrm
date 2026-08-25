@@ -10,12 +10,14 @@ import {
 } from "@trock-crm/shared/schema";
 import * as schema from "@trock-crm/shared/schema";
 import {
+  MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE,
   MARKETING_EXPENSE_APPROVER_GROUP_KEY,
   MARKETING_EXPENSE_COST_LABELS,
   MARKETING_EXPENSE_EMAIL_JOB,
   isMarketingExpenseAttachmentKind,
   isMarketingExpensePaymentMethod,
   notificationRecipientGroupByKey,
+  moneyTotalExceedsColumn,
   parseMoneyInput,
   type MarketingExpenseApprovalRow,
   type MarketingExpenseApproverDecision,
@@ -29,6 +31,7 @@ import {
   type MarketingExpenseStatus,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { isPostgresCalendarDate } from "../../lib/pg-timestamp.js";
 import { getNotificationRecipients } from "../leads/due-diligence-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -117,12 +120,21 @@ function requiredText(value: unknown, label: string): string {
   return trimmed;
 }
 
-/** `YYYY-MM-DD` only. A `date` column takes no time, and a full ISO string would silently shift by zone. */
+/**
+ * `YYYY-MM-DD` only, and a REAL calendar date.
+ *
+ * A `date` column takes no time, and a full ISO string would silently shift by zone. The shape check alone
+ * is not enough: "2026-02-31" matches the regex, Postgres rejects the cast, and the generic error handler
+ * renders that as a 500 with no field named — the same failure the money validators exist to prevent, on a
+ * different column. `isPostgresCalendarDate` is the repo's existing validator and catches what no regex
+ * can, because `Date.parse` rolls calendar overflow forward and reports success.
+ */
 function optionalDate(value: unknown, label: string): string | null {
   const trimmed = optionalText(value);
   if (!trimmed) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    throw new AppError(400, `${label} must be a date (YYYY-MM-DD).`);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match || !isPostgresCalendarDate(match[1]!, match[2]!, match[3]!)) {
+    throw new AppError(400, `${label} must be a real calendar date (YYYY-MM-DD).`);
   }
   return trimmed;
 }
@@ -232,6 +244,16 @@ export async function createMarketingExpenseRequest(
     COST_COLUMNS.map(([field]) => [field, normalizeCost(input[field], MARKETING_EXPENSE_COST_LABELS[field])]),
   ) as Record<(typeof COST_COLUMNS)[number][0], string>;
 
+  // Each field may hold the column maximum on its own, so eight VALID inputs can still sum to an invalid
+  // total. Postgres would report that as an overflow during the INSERT, which reaches the client as a 500
+  // naming nothing. Checked in exact integer cents; the stored total is still summed in SQL.
+  if (moneyTotalExceedsColumn(COST_COLUMNS.map(([field]) => costs[field]))) {
+    throw new AppError(
+      400,
+      "The total requested is larger than this form can record. Check the estimated cost lines.",
+    );
+  }
+
   const values = {
     status: "draft" as const,
     submittedBy: userId,
@@ -295,7 +317,11 @@ export async function submitMarketingExpenseRequest(
     throw new AppError(403, "You can only submit your own expense request.");
   }
   if (request.status !== "draft") {
-    throw new AppError(409, "This request has already been submitted.");
+    // CODED, because the client has to tell this apart from the other 409 this endpoint can return
+    // ("no approver configured"). If a submit commits and its RESPONSE is lost, the retry lands here and
+    // the honest answer is "it worked" — without the code the client can only show a failure for an
+    // operation that succeeded, and the user creates a duplicate request.
+    throw new AppError(409, "This request has already been submitted.", MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE);
   }
   // A $0.00 request is a form somebody abandoned halfway, not an expense. The React form already refuses
   // it, which is exactly the problem: that made the client the ONLY validation, so any direct API caller
@@ -324,7 +350,7 @@ export async function submitMarketingExpenseRequest(
     .where(and(eq(marketingExpenseRequests.id, requestId), eq(marketingExpenseRequests.status, "draft")))
     .returning({ id: marketingExpenseRequests.id });
   if (!updated) {
-    throw new AppError(409, "This request has already been submitted.");
+    throw new AppError(409, "This request has already been submitted.", MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE);
   }
 
   await tenantDb.insert(marketingExpenseRequestApprovals).values({
@@ -890,13 +916,25 @@ async function resolveApproverEmails(tenantDb: TenantDb): Promise<string[]> {
   const recipients = await getNotificationRecipients(tenantDb, MARKETING_EXPENSE_APPROVER_GROUP_KEY, {
     fallbackToAdminsAndDirectors: definition?.fallbackToAdminsAndDirectors ?? false,
   });
+  // Only recipients who can actually DECIDE.
+  //
+  // The Notification Recipients page lets an admin assign any active user to any group, but the queue and
+  // the decide endpoint are role-gated. A rep assigned as the marketing approver would receive the mail,
+  // follow the link and be refused — while the submitter was told it went through and the request sat
+  // pending with nobody able to act. Mailing someone an approval request they cannot action is worse than
+  // not mailing them, because it looks handled.
+  //
+  // Filtering here rather than authorizing group membership keeps ONE source of truth for who may approve
+  // (`isApprover`) — see this module's note on why approver-group authorization is not a thing this
+  // codebase has.
   const emails = recipients
+    .filter((recipient) => isApprover({ id: recipient.userId, role: recipient.role }))
     .map((recipient) => recipient.email?.trim())
     .filter((email): email is string => Boolean(email));
   if (emails.length === 0) {
     throw new AppError(
       409,
-      "No marketing expense approver is configured. An admin needs to add one under Admin → Notification Recipients before requests can be submitted.",
+      "No marketing expense approver who can act on this request is configured. An admin needs to assign an admin or director under Admin → Notification Recipients before requests can be submitted.",
     );
   }
   return emails;

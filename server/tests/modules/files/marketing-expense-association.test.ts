@@ -44,6 +44,49 @@ describe("validateAssociations", () => {
     }
   });
 
+  // EXCLUSIVITY. A file that claims two owners is a question about which authorization applies, and "both"
+  // is not an answer the read paths can express: they are an else-if ladder, so the FIRST matching branch
+  // decides and the rest never run. A file carrying both a dealId and a marketingExpenseRequestId is
+  // therefore authorized as a deal file — every collaborator on that deal can read a private expense
+  // attachment, and edit it after the request was decided.
+  it("REFUSES an expense-request upload that also claims a deal", () => {
+    expect(() => validateAssociations({ marketingExpenseRequestId: "req-1", dealId: "deal-1" })).toThrow(
+      AppError,
+    );
+  });
+
+  it.each([
+    ["lead", { leadId: "lead-1" }],
+    ["opportunity", { opportunityId: "opp-1" }],
+    ["contact", { contactId: "contact-1" }],
+    ["Procore project", { procoreProjectId: 42 }],
+    ["change order", { changeOrderId: "co-1" }],
+  ])("REFUSES an expense-request upload that also claims a %s", (_label, competing) => {
+    expect(() => validateAssociations({ marketingExpenseRequestId: "req-1", ...competing })).toThrow(
+      AppError,
+    );
+  });
+
+  it("says WHY, so the caller is not left guessing which field to drop", () => {
+    let message = "";
+    try {
+      validateAssociations({ marketingExpenseRequestId: "req-1", dealId: "deal-1" });
+    } catch (err) {
+      message = (err as AppError).message;
+    }
+    expect(message).toContain("expense request");
+    expect(message.toLowerCase()).toContain("only");
+  });
+
+  it("still accepts an expense-request upload on its own", () => {
+    expect(() => validateAssociations({ marketingExpenseRequestId: "req-1" })).not.toThrow();
+  });
+
+  it("leaves every OTHER combination alone — this rule is about expense requests only", () => {
+    expect(() => validateAssociations({ dealId: "d", contactId: "c" })).not.toThrow();
+    expect(() => validateAssociations({ leadId: "l", contactId: "c" })).not.toThrow();
+  });
+
   it("still honours allowUnassigned", () => {
     expect(() => validateAssociations({ allowUnassigned: true })).not.toThrow();
   });

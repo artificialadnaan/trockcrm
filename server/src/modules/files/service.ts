@@ -364,6 +364,35 @@ function validateAssociations(input: {
   ) {
     throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, change order, or marketing expense request).");
   }
+
+  // An expense-request attachment claims exactly ONE owner.
+  //
+  // Every other association here is additive and harmless together, because they all resolve to the same
+  // office-scoped visibility. This one does not: it is the only association that RESTRICTS who may read the
+  // file. A row carrying both a deal and an expense request is a question about which authorization
+  // applies, and the read paths cannot express "both" — they are an else-if ladder, so the first matching
+  // branch decides. Such a row reads as an ordinary deal file, and every collaborator on that deal gets a
+  // private quote plus the ability to edit it after the request was decided.
+  //
+  // Refused at the point of creation rather than reconciled later, because there is no correct
+  // reconciliation: the two answers are "more people may see it" and "fewer people may see it", and
+  // silently picking either is wrong.
+  if (input.marketingExpenseRequestId) {
+    const competing = [
+      input.dealId && "deal",
+      input.leadId && "lead",
+      input.opportunityId && "opportunity",
+      input.contactId && "contact",
+      input.procoreProjectId && "Procore project",
+      input.changeOrderId && "change order",
+    ].filter((label): label is string => Boolean(label));
+    if (competing.length > 0) {
+      throw new AppError(
+        400,
+        `A marketing expense request attachment can be associated with the expense request only, not also with a ${competing.join(" or ")}.`,
+      );
+    }
+  }
 }
 
 async function getDealLineageLeadId(tenantDb: TenantDb, dealId: string): Promise<string | null> {

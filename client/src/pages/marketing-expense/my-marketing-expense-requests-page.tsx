@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
+  submitMarketingExpenseRequest,
   useMyMarketingExpenseRequests,
   withdrawMarketingExpenseRequest,
 } from "@/hooks/use-marketing-expense-requests";
@@ -100,6 +101,7 @@ function StatTile({
 export function MyMarketingExpenseRequestsPage() {
   const { requests, loading, error, refetch } = useMyMarketingExpenseRequests();
   const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+  const [submittingId, setSubmittingId] = useState<string | null>(null);
 
   const stats = useMemo(() => {
     const count = (status: MarketingExpenseStatus) =>
@@ -108,6 +110,26 @@ export function MyMarketingExpenseRequestsPage() {
   }, [requests]);
 
   const showList = !error && requests.length > 0;
+
+  /**
+   * Finish a draft that was left behind.
+   *
+   * A draft only exists because a submit did not complete. If the page was reloaded in between, the form's
+   * retry state is gone — and until this existed the row was listed with no action on it at all, so the
+   * only way forward was to fill the whole form in again and file a duplicate.
+   */
+  async function submitDraft(request: MarketingExpenseRequestSummary) {
+    setSubmittingId(request.id);
+    try {
+      await submitMarketingExpenseRequest(request.id);
+      toast.success(`${request.requestNumber} submitted for approval`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not submit the request.");
+    } finally {
+      setSubmittingId(null);
+      await refetch();
+    }
+  }
 
   async function withdraw(request: MarketingExpenseRequestSummary) {
     setWithdrawingId(request.id);
@@ -246,6 +268,16 @@ export function MyMarketingExpenseRequestsPage() {
                         <td className="px-4 py-3 text-right">
                           {/* Only a PENDING request can be withdrawn — the server enforces the same rule,
                               and offering the button anywhere else is a promise it will refuse. */}
+                          {request.status === "draft" && (
+                            <Button
+                              size="sm"
+                              data-testid={`mer-submit-draft-${request.id}`}
+                              disabled={submittingId === request.id}
+                              onClick={() => void submitDraft(request)}
+                            >
+                              {submittingId === request.id ? "Submitting…" : "Submit"}
+                            </Button>
+                          )}
                           {request.status === "pending" && (
                             <Button
                               variant="outline"

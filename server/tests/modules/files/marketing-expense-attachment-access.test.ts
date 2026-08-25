@@ -213,6 +213,53 @@ describe("GET /api/files (the list route)", () => {
   });
 });
 
+// PRECEDENCE. Exclusivity at write time stops NEW rows claiming two owners; it says nothing about the
+// ladder itself, which is what made the shadowing possible and would make it possible again the moment any
+// path (a backfill, an import, a future feature) sets both columns. So the request check does not sit in
+// the else-if chain at all: it runs first and unconditionally, and the other branches still run after it.
+// Most restrictive wins, rather than first-match wins.
+describe("a competing association cannot shadow the request check", () => {
+  const BOTH = { ...ATTACHMENT, dealId: "deal-1", marketingExpenseRequestId: "req-1" };
+
+  it.each([
+    ["metadata", "/api/files/file-1"],
+    ["download", "/api/files/file-1/download"],
+    ["audit log", "/api/files/file-1/audit-log"],
+    ["versions", "/api/files/file-1/versions"],
+  ])("still runs the request check on %s when the row ALSO carries a deal", async (_label, path) => {
+    getFileById.mockResolvedValue(BOTH as never);
+    getFileByIdIncludingDeleted.mockResolvedValue(BOTH as never);
+    await request(createApp()).get(path);
+    expect(assertMarketingExpenseRequestReadAccess).toHaveBeenCalledWith(
+      expect.anything(),
+      "req-1",
+      expect.objectContaining({ id: "rep-1" }),
+    );
+    getFileById.mockResolvedValue(ATTACHMENT as never);
+    getFileByIdIncludingDeleted.mockResolvedValue(ATTACHMENT as never);
+  });
+
+  it("refuses the download even when the caller is a collaborator on the deal", async () => {
+    getFileById.mockResolvedValue(BOTH as never);
+    assertMarketingExpenseRequestReadAccess.mockRejectedValue(REFUSAL);
+    const response = await request(createApp()).get("/api/files/file-1/download");
+    expect(response.status).toBe(403);
+    expect(getFileDownloadUrl).not.toHaveBeenCalled();
+    getFileById.mockResolvedValue(ATTACHMENT as never);
+  });
+
+  it("still runs the request check on the MUTATION paths too", async () => {
+    getFileById.mockResolvedValue(BOTH as never);
+    await request(createApp()).patch("/api/files/file-1").send({ description: "x" });
+    expect(assertMarketingExpenseAttachmentAccess).toHaveBeenCalledWith(
+      expect.anything(),
+      "req-1",
+      "rep-1",
+    );
+    getFileById.mockResolvedValue(ATTACHMENT as never);
+  });
+});
+
 describe("files with no expense request", () => {
   it("is left entirely alone", async () => {
     getFileById.mockResolvedValueOnce({ ...ATTACHMENT, marketingExpenseRequestId: null } as never);

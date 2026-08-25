@@ -333,6 +333,45 @@ describe("reviewing before deciding", () => {
   });
 });
 
+describe("obsolete detail responses", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    return { promise: new Promise<T>((r) => { resolve = r; }), resolve };
+  }
+
+  it("does not let a slow response for A wipe out B's loaded detail", async () => {
+    // The detail.id guard stopped A rendering UNDER B, but it did so by leaving B with no detail at all —
+    // so B's review panel and its decision controls vanished until the approver closed and reopened it.
+    mocks.useMarketingExpenseQueue.mockReturnValue({
+      requests: [summary(), summary({ id: "req-2", requestNumber: "MER-0002" })],
+      loading: false,
+      error: null,
+      refetch,
+    });
+    const slowA = deferred<unknown>();
+    const fastB = deferred<unknown>();
+    mocks.getMarketingExpenseRequest
+      .mockReturnValueOnce(slowA.promise)
+      .mockReturnValueOnce(fastB.promise);
+
+    await renderPage();
+    await click("mer-review-req-1");
+    await click("mer-review-req-2");
+    await act(async () => {
+      fastB.resolve(detail({ id: "req-2" }));
+    });
+    expect(container.querySelector('[data-testid="mer-detail-req-2"]')).toBeTruthy();
+
+    // A finally answers. It must change nothing.
+    await act(async () => {
+      slowA.resolve(detail({ id: "req-1" }));
+    });
+    expect(container.querySelector('[data-testid="mer-detail-req-2"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="mer-approve-req-2"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="mer-detail-req-1"]')).toBeNull();
+  });
+});
+
 describe("the denial reason belongs to one request", () => {
   function twoRequests() {
     mocks.useMarketingExpenseQueue.mockReturnValue({

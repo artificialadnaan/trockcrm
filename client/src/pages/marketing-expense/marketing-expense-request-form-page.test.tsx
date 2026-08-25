@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createMarketingExpenseRequest: vi.fn(),
   submitMarketingExpenseRequest: vi.fn(),
   uploadFile: vi.fn(),
+  isApiError: vi.fn(() => false),
   navigate: vi.fn(),
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
@@ -30,6 +31,7 @@ vi.mock("@/hooks/use-marketing-expense-requests", () => ({
 }));
 
 vi.mock("@/hooks/use-files", () => ({ uploadFile: mocks.uploadFile }));
+vi.mock("@/lib/api", () => ({ isApiError: mocks.isApiError }));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -39,6 +41,7 @@ beforeEach(() => {
   mocks.createMarketingExpenseRequest.mockResolvedValue({ id: "req-1", requestNumber: "MER-0001" });
   mocks.submitMarketingExpenseRequest.mockResolvedValue({ id: "req-1", requestNumber: "MER-0001" });
   mocks.uploadFile.mockResolvedValue({ id: "file-1" });
+  mocks.isApiError.mockReturnValue(false);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -329,6 +332,84 @@ describe("the submit sequence", () => {
     await submit();
     await submit();
     expect(mocks.createMarketingExpenseRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("LOCKS the custom cost labels too, not just their amounts", async () => {
+    // The two "Other (describe)" boxes were the one pair the locking change missed. Editing a label after
+    // the draft exists shows the new text but submits the persisted one — the same silent divergence the
+    // lock was added to make impossible.
+    mocks.submitMarketingExpenseRequest.mockRejectedValueOnce(new Error("no approver"));
+    await renderPage();
+    await fillValid();
+    await submit();
+    expect(field("mer-cost-other-1-label").disabled).toBe(true);
+    expect(field("mer-cost-other-2-label").disabled).toBe(true);
+  });
+
+  it("disables attachment REMOVAL once locked, so the list matches what will actually be uploaded", async () => {
+    // Removing a file after the draft exists only changed `attachments`; the retry queue had already been
+    // snapshotted, so the "removed" file still uploaded on the next attempt.
+    mocks.uploadFile.mockRejectedValueOnce(new Error("network died"));
+    await renderPage();
+    await fillValid();
+    await attach("quote.pdf");
+    await submit();
+    const remove = container.querySelector<HTMLButtonElement>('[aria-label="Remove quote.pdf"]');
+    expect(remove?.disabled).toBe(true);
+  });
+
+  it("gives each queued attachment a STABLE idempotency key, reused across retries", async () => {
+    // If confirm-upload commits but its response is lost, uploadFile rejects and the file is retried. With
+    // no stable key that second attempt creates a second database row and a second R2 object for one
+    // document — duplicated approval evidence from a network blip.
+    mocks.uploadFile.mockRejectedValueOnce(new Error("lost response"));
+    await renderPage();
+    await fillValid();
+    await attach("quote.pdf");
+    await submit();
+    await submit();
+    const first = mocks.uploadFile.mock.calls[0]?.[0];
+    const second = mocks.uploadFile.mock.calls[1]?.[0];
+    expect(first.clientUploadId).toBeTruthy();
+    expect(second.clientUploadId).toBe(first.clientUploadId);
+  });
+
+  it("gives DIFFERENT files different keys", async () => {
+    await renderPage();
+    await fillValid();
+    await attach("quote.pdf", "agenda.pdf");
+    await submit();
+    const keys = mocks.uploadFile.mock.calls.map((call) => call[0].clientUploadId);
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  it("treats an ALREADY_SUBMITTED retry as success rather than reporting a failure", async () => {
+    // The submit committed; only its response was lost. Reporting failure for an operation that succeeded
+    // is how a user ends up filing the same expense request twice.
+    mocks.isApiError.mockReturnValue(true);
+    mocks.submitMarketingExpenseRequest.mockRejectedValueOnce(
+      Object.assign(new Error("This request has already been submitted."), {
+        status: 409,
+        code: "ALREADY_SUBMITTED",
+      }),
+    );
+    await renderPage();
+    await fillValid();
+    await submit();
+    expect(mocks.navigate).toHaveBeenCalledWith("/marketing-expense-requests");
+    expect(errorText()).toBe("");
+  });
+
+  it("still reports a 409 that is NOT already-submitted as the failure it is", async () => {
+    mocks.isApiError.mockReturnValue(true);
+    mocks.submitMarketingExpenseRequest.mockRejectedValueOnce(
+      Object.assign(new Error("No marketing expense approver is configured."), { status: 409 }),
+    );
+    await renderPage();
+    await fillValid();
+    await submit();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(errorText()).toContain("approver");
   });
 
   it("sends the money values as STRINGS, so nothing is rounded on the way out", async () => {

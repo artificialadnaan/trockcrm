@@ -13,6 +13,7 @@ import { MyMarketingExpenseRequestsPage } from "./my-marketing-expense-requests-
 const mocks = vi.hoisted(() => ({
   useMyMarketingExpenseRequests: vi.fn(),
   withdrawMarketingExpenseRequest: vi.fn(),
+  submitMarketingExpenseRequest: vi.fn(),
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
 
@@ -27,6 +28,7 @@ vi.mock("react-router-dom", () => ({
 vi.mock("@/hooks/use-marketing-expense-requests", () => ({
   useMyMarketingExpenseRequests: mocks.useMyMarketingExpenseRequests,
   withdrawMarketingExpenseRequest: mocks.withdrawMarketingExpenseRequest,
+  submitMarketingExpenseRequest: mocks.submitMarketingExpenseRequest,
 }));
 
 let container: HTMLDivElement;
@@ -176,6 +178,55 @@ describe("the list", () => {
     expect(container.querySelector('[data-testid="mer-stat-pending"]')?.textContent).toBe("2");
     expect(container.querySelector('[data-testid="mer-stat-approved"]')?.textContent).toBe("1");
     expect(container.querySelector('[data-testid="mer-stat-denied"]')?.textContent).toBe("1");
+  });
+});
+
+describe("a draft left behind by a failed submit", () => {
+  it("offers a way to finish it, instead of stranding it", async () => {
+    // Reload after the draft was created but before the submit landed and the client's retry state is
+    // gone. The row is listed but had no action on it, so the only way forward was to fill the whole form
+    // in again and file a duplicate.
+    mocks.useMyMarketingExpenseRequests.mockReturnValue(
+      state({ requests: [summary({ status: "draft" })] }),
+    );
+    await renderPage();
+    expect(container.querySelector('[data-testid="mer-submit-draft-req-1"]')).toBeTruthy();
+  });
+
+  it("submits that draft and refetches", async () => {
+    const refetch = vi.fn();
+    mocks.submitMarketingExpenseRequest.mockResolvedValue({ id: "req-1" });
+    mocks.useMyMarketingExpenseRequests.mockReturnValue(
+      state({ requests: [summary({ status: "draft" })], refetch }),
+    );
+    await renderPage();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mer-submit-draft-req-1"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.submitMarketingExpenseRequest).toHaveBeenCalledWith("req-1");
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("surfaces the reason when that submit is refused", async () => {
+    mocks.submitMarketingExpenseRequest.mockRejectedValue(new Error("No approver is configured"));
+    mocks.useMyMarketingExpenseRequests.mockReturnValue(
+      state({ requests: [summary({ status: "draft" })] }),
+    );
+    await renderPage();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mer-submit-draft-req-1"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.toast.error).toHaveBeenCalled();
+  });
+
+  it("offers no such action on a request that is already pending", async () => {
+    mocks.useMyMarketingExpenseRequests.mockReturnValue(state({ requests: [summary()] }));
+    await renderPage();
+    expect(container.querySelector('[data-testid="mer-submit-draft-req-1"]')).toBeNull();
   });
 });
 

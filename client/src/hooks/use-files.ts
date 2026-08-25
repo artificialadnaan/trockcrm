@@ -356,6 +356,14 @@ export interface UploadFileInput {
   changeOrderId?: string;
   /** A supporting document on a marketing & advertising expense request (migration 0232). */
   marketingExpenseRequestId?: string;
+  /**
+   * Stable per-file idempotency key, reused across retries of the SAME file.
+   *
+   * confirm-upload can commit and lose its response; without a key the retry presigns, uploads and
+   * confirms again, leaving two rows and two R2 objects for one document. The server already dedupes on
+   * this (migration 0170's partial unique index); the web path simply never sent one.
+   */
+  clientUploadId?: string;
   description?: string;
   tags?: string[];
   forceEditAfterRfp?: boolean;
@@ -483,6 +491,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     method: "POST",
     json: {
       uploadToken: presign.uploadToken,
+      clientUploadId: input.clientUploadId,
       forceEditAfterRfp,
     },
   });

@@ -124,7 +124,7 @@ export interface NotificationRecipientOptions {
 
 export interface NotificationRecipientResolution {
   /** Who the mail actually goes to — the assignments, or the fallback when they are empty. */
-  recipients: Array<{ userId: string; email: string; displayName: string }>;
+  recipients: Array<{ userId: string; email: string; displayName: string; role: string }>;
   /**
    * EVERY row in `notification_recipient_assignments` for this group — never the fallback, and never
    * narrowed to who happens to be deliverable today. Deactivated members are included on purpose.
@@ -185,6 +185,11 @@ export async function resolveNotificationRecipients(
       email: users.email,
       displayName: users.displayName,
       isActive: users.isActive,
+      // Selected so a caller can ask whether a recipient can ACT on what it is about to mail them. Some
+      // groups feed a role-gated queue — the marketing expense approver being the first — and mailing an
+      // approval request to someone the queue will refuse looks handled while nobody can act on it.
+      // Additive: existing callers ignore it.
+      role: users.role,
     })
     .from(notificationRecipientGroups)
     .innerJoin(notificationRecipientAssignments, eq(notificationRecipientAssignments.groupId, notificationRecipientGroups.id))
@@ -201,7 +206,7 @@ export async function resolveNotificationRecipients(
   // That is the removal lockout again, one layer up in the read.
   const deliverable = assignmentRows
     .filter((row) => row.isActive)
-    .map(({ userId, email, displayName }) => ({ userId, email, displayName }));
+    .map(({ userId, email, displayName, role }) => ({ userId, email, displayName, role }));
   const assignedUserIds = assignmentRows.map((row) => row.userId);
   const inactiveAssignedUserIds = assignmentRows.filter((row) => !row.isActive).map((row) => row.userId);
   const groupExists = Boolean(groupRow);
@@ -223,6 +228,7 @@ export async function resolveNotificationRecipients(
       userId: users.id,
       email: users.email,
       displayName: users.displayName,
+      role: users.role,
     })
     .from(users)
     .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
