@@ -363,7 +363,8 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
 // POST /api/files/confirm-upload — Step 2: record file metadata after upload
 router.post("/confirm-upload", async (req, res, next) => {
   try {
-    const { uploadToken, takenAt, geoLat, geoLng, latitude, longitude, addressSource } = req.body;
+    const { uploadToken, takenAt, geoLat, geoLng, latitude, longitude, addressSource, clientUploadId } =
+      req.body;
 
     // Fix 2: Require upload token — all other metadata is server-trusted
     if (!uploadToken) {
@@ -384,6 +385,11 @@ router.post("/confirm-upload", async (req, res, next) => {
       latitude: latitude !== undefined ? Number(latitude) : undefined,
       longitude: longitude !== undefined ? Number(longitude) : undefined,
       addressSource,
+      // The upload queue's idempotency key. Read here because this handler destructures the body field by
+      // field — anything not named is silently dropped, which is how the web path came to send a stable key
+      // that never reached `files.client_upload_id`, leaving the dedup index nothing to match on. Typed
+      // check because the value goes into a varchar column and a caller controls it.
+      clientUploadId: typeof clientUploadId === "string" ? clientUploadId : undefined,
     });
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;

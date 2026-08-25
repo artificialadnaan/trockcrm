@@ -101,6 +101,14 @@ beforeAll(async () => {
     -- arbiter index that does not exist (42P10). This is the partial unique index migration 0170 creates.
     CREATE UNIQUE INDEX files_client_upload_id_uidx
       ON public.files (client_upload_id) WHERE client_upload_id IS NOT NULL;
+    -- Supplying a clientUploadId sends confirmUpload through the scorecard edit-evidence lookup
+    -- (migration 0185). Nothing here is a scorecard, so the table just has to exist for the read.
+    CREATE TABLE public.field_scorecard_edit_uploads (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      scorecard_id uuid, deal_id uuid, client_upload_id text, uploaded_by uuid, file_id uuid,
+      state text, created_at timestamptz NOT NULL DEFAULT NOW(),
+      updated_at timestamptz NOT NULL DEFAULT NOW()
+    );
   `);
   tenantDb = drizzle(pg);
 }, 30_000);
@@ -161,11 +169,16 @@ describe("confirmUpload re-asserts the expense-request lifecycle", () => {
     expect(result.file.marketingExpenseRequestId).toBe(request.id);
   });
 
-  it("still lets the submitter confirm while the request is pending a decision", async () => {
+  it("REFUSES a grant confirmed after the request was submitted", async () => {
+    // The submit is the moment the approver is told. A grant taken before it and confirmed after adds a
+    // document to a request somebody has already been asked to review.
     const request = await draft();
     const token = await grantFor(request.id);
     await submit(request.id);
-    await expect(confirmUpload(tenantDb, SUBMITTER, { uploadToken: token })).resolves.toBeDefined();
+    await expect(confirmUpload(tenantDb, SUBMITTER, { uploadToken: token })).rejects.toMatchObject({
+      statusCode: 409,
+    });
+    expect(await fileCount()).toBe(0);
   });
 
   it("REFUSES a grant taken while the request was a draft and confirmed after it was APPROVED", async () => {
@@ -243,6 +256,51 @@ describe("confirmUpload re-asserts the expense-request lifecycle", () => {
       statusCode: 403,
     });
     expect(await fileCount()).toBe(0);
+  });
+
+  // ASSERT THE ARTIFACT. The route test next door proves the key is forwarded; this proves what forwarding
+  // it BUYS — the column is populated and the server-side dedup actually fires. A lost confirm-upload
+  // response is retried by the form with the same key, and must not produce a second row or a second R2
+  // object for one supporting document.
+  it("persists the idempotency key on the row", async () => {
+    const request = await draft();
+    const token = await grantFor(request.id);
+    const result = await confirmUpload(tenantDb, SUBMITTER, {
+      uploadToken: token,
+      clientUploadId: "attachment-key-1",
+    });
+    expect(result.file.clientUploadId).toBe("attachment-key-1");
+  });
+
+  it("DEDUPES a retry that reuses the key, instead of filing the document twice", async () => {
+    const request = await draft();
+    const first = await confirmUpload(tenantDb, SUBMITTER, {
+      uploadToken: await grantFor(request.id),
+      clientUploadId: "attachment-key-2",
+    });
+    expect(first.created).toBe(true);
+
+    // The form retries the same file after a lost response: a fresh grant, the SAME key.
+    const retry = await confirmUpload(tenantDb, SUBMITTER, {
+      uploadToken: await grantFor(request.id),
+      clientUploadId: "attachment-key-2",
+    });
+    expect(retry.created).toBe(false);
+    expect(retry.file.id).toBe(first.file.id);
+    expect(await fileCount()).toBe(1);
+  });
+
+  it("still files two DIFFERENT documents separately", async () => {
+    const request = await draft();
+    await confirmUpload(tenantDb, SUBMITTER, {
+      uploadToken: await grantFor(request.id),
+      clientUploadId: "key-a",
+    });
+    await confirmUpload(tenantDb, SUBMITTER, {
+      uploadToken: await grantFor(request.id),
+      clientUploadId: "key-b",
+    });
+    expect(await fileCount()).toBe(2);
   });
 
   it("leaves uploads with no expense request completely alone", async () => {

@@ -334,6 +334,25 @@ export async function submitMarketingExpenseRequest(
     );
   }
 
+  // A draft that DECLARED supporting documents and has none is a half-finished upload.
+  //
+  // Reachable when the page is reloaded mid-upload and the draft is resumed from the status page, which
+  // has no way to know which files never landed. Now that attachments freeze at submit, letting it through
+  // means the evidence can never be supplied — so the request would go to an approver permanently missing
+  // the documents its own author said it needed. Their declaration is the check.
+  if (request.attachmentKinds.length > 0) {
+    const [attached] = await tenantDb
+      .select({ count: sql<number>`count(*)::int` })
+      .from(files)
+      .where(and(eq(files.marketingExpenseRequestId, requestId), eq(files.isActive, true)));
+    if (Number(attached?.count ?? 0) === 0) {
+      throw new AppError(
+        400,
+        "This request lists supporting documents but none were uploaded. Attach them before submitting — they cannot be added afterwards.",
+      );
+    }
+  }
+
   // Resolve the approver BEFORE the write. An empty group is not a warning to log past: the whole point of
   // the feature is that somebody is asked to approve, and the submitter's own confirmation would otherwise
   // arrive as evidence that something happened when nothing did. Throwing here rolls the transaction back,
@@ -586,7 +605,7 @@ export function isApprover(user: ActingUser): boolean {
 /**
  * May this user attach a supporting document to this request?
  *
- * The SUBMITTER only, and only while the decision is still outstanding.
+ * The SUBMITTER only, and only while the request is still a DRAFT.
  *
  * Not the approver: a supporting document is part of the case being made, and an approver quietly adding
  * one to somebody's request changes what the record says was submitted. Not after a decision either — the
@@ -617,8 +636,20 @@ export async function assertMarketingExpenseAttachmentAccess(
   if (request.submittedBy !== userId) {
     throw new AppError(403, "You can only attach files to your own expense request.");
   }
-  if (request.status !== "draft" && request.status !== "pending") {
-    throw new AppError(409, "This request has already been decided — its attachments are final.");
+  // DRAFT ONLY. The window closes at SUBMIT, not at the decision.
+  //
+  // Submitting is the moment the approver is notified, and the create-upload-submit ordering exists so the
+  // evidence is complete before that happens. Leaving the window open until a decision meant the approver
+  // could read one set of documents and decide against another, with nothing recording which they saw.
+  //
+  // The cost is real and accepted: a submitter who forgot a document cannot add it, because withdrawing is
+  // terminal here. That is a worse day for one person than a record nobody can trust is for everyone, and
+  // making a withdrawn request editable again is a product decision this PR should not make quietly.
+  if (request.status !== "draft") {
+    throw new AppError(
+      409,
+      "This request has already been submitted — its attachments are final.",
+    );
   }
 }
 
@@ -659,6 +690,7 @@ async function lockRow(tenantDb: TenantDb, requestId: string) {
       submittedBy: marketingExpenseRequests.submittedBy,
       stepsRequired: marketingExpenseRequests.stepsRequired,
       totalRequested: marketingExpenseRequests.totalRequested,
+      attachmentKinds: marketingExpenseRequests.attachmentKinds,
     })
     .from(marketingExpenseRequests)
     .where(eq(marketingExpenseRequests.id, requestId))

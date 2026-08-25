@@ -40,9 +40,11 @@ vi.mock("../../../src/modules/marketing-expense/service.js", () => ({
   assertMarketingExpenseAttachmentAccess,
 }));
 
+const confirmUpload = vi.fn(async () => ({ file: { id: "file-1" }, created: true }));
+
 vi.mock("../../../src/modules/files/service.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../src/modules/files/service.js")>();
-  return { ...actual, requestUploadUrl };
+  return { ...actual, requestUploadUrl, confirmUpload, getPendingUploadMetadata: () => null };
 });
 
 const { createApp } = await import("../../../src/app.js");
@@ -58,6 +60,43 @@ beforeEach(() => {
   assertMarketingExpenseAttachmentAccess.mockClear();
   assertMarketingExpenseAttachmentAccess.mockResolvedValue(undefined);
   requestUploadUrl.mockClear();
+  confirmUpload.mockClear();
+});
+
+// THE IDEMPOTENCY KEY HAS TO REACH THE ROW, not merely leave the browser.
+//
+// The form mints a stable clientUploadId per attachment and `uploadFile` puts it in the confirm-upload
+// body — and that was the whole of the previous fix, which was inert: this route destructures the body
+// field by field and never read it, so `files.client_upload_id` stayed NULL and the server-side dedup
+// (migration 0170's partial unique index) had nothing to match on. A lost confirm-upload response still
+// produced a second row and a second R2 object for one document.
+//
+// The earlier test asserted ONE HOP — that the form handed the key to uploadFile. This asserts the hop that
+// was actually broken.
+describe("POST /api/files/confirm-upload", () => {
+  it("forwards clientUploadId from the body into confirmUpload", async () => {
+    await request(createApp())
+      .post("/api/files/confirm-upload")
+      .send({ uploadToken: "tok", clientUploadId: "attachment-key-1" });
+
+    expect(confirmUpload).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      expect.objectContaining({ uploadToken: "tok", clientUploadId: "attachment-key-1" }),
+    );
+  });
+
+  it("leaves it undefined when the caller sends none, rather than inventing one", async () => {
+    await request(createApp()).post("/api/files/confirm-upload").send({ uploadToken: "tok" });
+    expect(confirmUpload.mock.calls[0]?.[2]).toMatchObject({ clientUploadId: undefined });
+  });
+
+  it("ignores a non-string clientUploadId instead of passing it through to the column", async () => {
+    await request(createApp())
+      .post("/api/files/confirm-upload")
+      .send({ uploadToken: "tok", clientUploadId: { nope: true } });
+    expect(confirmUpload.mock.calls[0]?.[2]).toMatchObject({ clientUploadId: undefined });
+  });
 });
 
 describe("POST /api/files/upload-url with a marketing expense request", () => {

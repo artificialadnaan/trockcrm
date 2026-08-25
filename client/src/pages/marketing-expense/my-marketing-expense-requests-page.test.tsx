@@ -193,8 +193,29 @@ describe("a draft left behind by a failed submit", () => {
     expect(container.querySelector('[data-testid="mer-submit-draft-req-1"]')).toBeTruthy();
   });
 
+  it("WARNS before submitting, because documents cannot be added afterwards", async () => {
+    // The server refuses a draft that declared documents and attached none, but it cannot detect a
+    // PARTIAL upload — it does not know how many files were expected. Only the person who selected them
+    // does, and attachments freeze at submit, so this is their last chance to notice.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mocks.useMyMarketingExpenseRequests.mockReturnValue(
+      state({ requests: [summary({ status: "draft" })] }),
+    );
+    await renderPage();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mer-submit-draft-req-1"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(confirmSpy.mock.calls[0]?.[0]).toMatch(/document/i);
+    // Declining means nothing is sent.
+    expect(mocks.submitMarketingExpenseRequest).not.toHaveBeenCalled();
+  });
+
   it("submits that draft and refetches", async () => {
     const refetch = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     mocks.submitMarketingExpenseRequest.mockResolvedValue({ id: "req-1" });
     mocks.useMyMarketingExpenseRequests.mockReturnValue(
       state({ requests: [summary({ status: "draft" })], refetch }),
@@ -210,6 +231,7 @@ describe("a draft left behind by a failed submit", () => {
   });
 
   it("surfaces the reason when that submit is refused", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     mocks.submitMarketingExpenseRequest.mockRejectedValue(new Error("No approver is configured"));
     mocks.useMyMarketingExpenseRequests.mockReturnValue(
       state({ requests: [summary({ status: "draft" })] }),

@@ -125,7 +125,13 @@ describe("assertMarketingExpenseAttachmentAccess", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("still lets the submitter attach after submitting, while the approver is deciding", async () => {
+  // FREEZES AT SUBMIT, not at the decision. This inverts what this suite asserted before, and the earlier
+  // version was wrong on its own terms: the create-upload-submit ordering exists precisely so the evidence
+  // is complete BEFORE the approver is told. Leaving the window open until a decision meant the approver
+  // could be notified, read one set of documents, and decide against a different set — with nothing
+  // recording which one they actually saw. "Finalized evidence cannot change" has to start when the
+  // evidence is put in front of somebody, not when they finish looking at it.
+  it("REFUSES an attachment once the request has been submitted", async () => {
     const request = await draft();
     await submitMarketingExpenseRequest(tenantDb, {
       tenantSchema: SCHEMA,
@@ -135,7 +141,7 @@ describe("assertMarketingExpenseAttachmentAccess", () => {
     });
     await expect(
       assertMarketingExpenseAttachmentAccess(tenantDb, request.id, SUBMITTER),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it("refuses another rep attaching to somebody else's request", async () => {

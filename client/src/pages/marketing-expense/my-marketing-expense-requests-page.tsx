@@ -119,6 +119,17 @@ export function MyMarketingExpenseRequestsPage() {
    * only way forward was to fill the whole form in again and file a duplicate.
    */
   async function submitDraft(request: MarketingExpenseRequestSummary) {
+    // The server refuses a draft that declared documents and attached none, but it cannot detect a PARTIAL
+    // upload — it has no idea how many files were selected. Only the person who selected them does, and
+    // attachments freeze at submit, so this is the last moment anyone can notice. A confirm here is the
+    // difference between "I chose to send it" and "it was sent without the quote and now cannot have one".
+    const confirmed = window.confirm(
+      `Submit ${request.requestNumber} for approval?\n\n` +
+        "Supporting documents cannot be added after a request is submitted. If any of your files did not " +
+        "finish uploading, cancel and start a new request instead.",
+    );
+    if (!confirmed) return;
+
     setSubmittingId(request.id);
     try {
       await submitMarketingExpenseRequest(request.id);

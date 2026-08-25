@@ -68,7 +68,10 @@ const VALID_INPUT = {
   attendees: "Reggie Rep, Takashi Yamashita",
   businessMeetings: "Meeting with Greystar",
   paymentMethod: "company_card" as const,
-  attachmentKinds: ["quote_proposal" as const],
+  // Declares NO supporting documents, because this fixture attaches none. Declaring one and attaching
+  // nothing is now a refused submit — correctly: it is a half-finished upload. The cases that care about
+  // attachment kinds set them explicitly.
+  attachmentKinds: [] as string[],
 };
 
 beforeAll(async () => {
@@ -506,6 +509,59 @@ describe("draft -> submit ordering", () => {
     });
     expect(caught.statusCode).toBe(409);
     expect(caught.code).not.toBe(MARKETING_EXPENSE_ALREADY_SUBMITTED_CODE);
+  });
+
+  // A draft that DECLARES supporting documents and has none attached is a half-finished upload, not a
+  // complete request. It reaches submit when the page is reloaded mid-upload and the draft is resumed from
+  // the status page — and now that attachments freeze at submit, sending it means the evidence can never
+  // be supplied at all. The declaration is the submitter's own statement of what should be there.
+  it("REFUSES a submit that declares supporting documents but has none attached", async () => {
+    const draft = await createDraft({ attachmentKinds: ["quote_proposal"] });
+    await expect(
+      submitMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("allows it once the declared document is actually attached", async () => {
+    const draft = await createDraft({ attachmentKinds: ["quote_proposal"] });
+    await pg.exec(`
+      INSERT INTO ${SCHEMA}.files (marketing_expense_request_id, display_name)
+      VALUES ('${draft.id}', 'expo-quote.pdf')
+    `);
+    await expect(
+      submitMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+      }),
+    ).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("still stores the declared attachment kinds", async () => {
+    const draft = await createDraft({ attachmentKinds: ["quote_proposal", "travel_estimate"] });
+    expect(draft.attachmentKinds).toEqual(["quote_proposal", "travel_estimate"]);
+  });
+
+  it("does not require attachments from a request that declared none", async () => {
+    const draft = await createDraft({ attachmentKinds: [] });
+    await expect(
+      submitMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+      }),
+    ).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("does not count a soft-deleted file as the declared document", async () => {
+    const draft = await createDraft({ attachmentKinds: ["quote_proposal"] });
+    await pg.exec(`
+      INSERT INTO ${SCHEMA}.files (marketing_expense_request_id, display_name, is_active)
+      VALUES ('${draft.id}', 'gone.pdf', false)
+    `);
+    await expect(
+      submitMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA, officeId: OFFICE_ID, userId: SUBMITTER, requestId: draft.id,
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
   });
 
   it("REFUSES the submit when the only configured approver cannot actually decide", async () => {
