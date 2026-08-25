@@ -612,11 +612,20 @@ describe("a submission key the server has permanently retired", () => {
     expect(renewed.completionPercent).toBe("42");
   });
 
-  it("drops the dead report id, so the next attempt actually POSTs again", () => {
+  it("drops every row-bound field, so the replacement follows authoring semantics", () => {
     // `ensureReport` short-circuits on `draft.reportId`. Renewing the key while leaving a stale id behind
-    // would hand back the id of the report that was deleted and never retry at all.
+    // would hand back the id of the report that was deleted and never retry at all. The old status and
+    // transition marker are just as bound to that row: retaining `approved` makes a new draft look like
+    // "Save changes", and retaining a lost-reply marker can accept another user's replacement transition.
     const renewed = weeklyReportDraftReducer(
-      newDraft({ clientSubmissionId: "spent-key", reportId: "deleted-report" }),
+      newDraft({
+        clientSubmissionId: "spent-key",
+        reportId: "deleted-report",
+        mode: "review",
+        serverStatus: "approved",
+        pendingTransitionTo: "approved",
+        seededFrom: { status: "approved", signature: "old-row-signature" },
+      }),
       { type: "renewClientSubmissionId", clientSubmissionId: "fresh-key" },
     );
 
@@ -624,5 +633,8 @@ describe("a submission key the server has permanently retired", () => {
     // And the provenance goes with it: `seededFrom` describes a row that no longer exists, and leaving it
     // would make the next open compare this draft against a report nobody can read.
     expect(renewed.seededFrom).toBeNull();
+    expect(renewed.mode).toBe("author");
+    expect(renewed.serverStatus).toBeNull();
+    expect(renewed.pendingTransitionTo).toBeNull();
   });
 });

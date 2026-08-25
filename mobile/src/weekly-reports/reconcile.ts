@@ -203,6 +203,24 @@ export function isWeeklyReportWeekTakenError(error: unknown): boolean {
 /** Mirrors WEEKLY_REPORT_SUBMISSION_DELETED_CODE in server/src/modules/weekly-reports/reports-service.ts. */
 export const WEEKLY_REPORT_SUBMISSION_DELETED_CODE = "WEEKLY_REPORT_SUBMISSION_DELETED";
 
+/** Mirrors WEEKLY_REPORT_DELETED_CODE in server/src/modules/weekly-reports/reports-service.ts. */
+export const WEEKLY_REPORT_DELETED_CODE = "WEEKLY_REPORT_DELETED";
+
+/** Mirrors WEEKLY_REPORT_AUTHOR_DELETED_CODE in server/src/modules/weekly-reports/reports-service.ts. */
+export const WEEKLY_REPORT_AUTHOR_DELETED_CODE = "WEEKLY_REPORT_AUTHOR_DELETED";
+
+/**
+ * Did the field read conclusively say this actor authored the deleted row and may still replace it?
+ *
+ * A bare 404 is NOT enough: the field router intentionally uses 404 to conceal a live report from a user
+ * who is no longer assigned to its project. The generic deleted 410 is not enough either: an assigned PM
+ * can view another person's draft. Only this server-authoritative tag may drive a durable replacement.
+ */
+export function isWeeklyReportAuthorDeletedError(error: unknown): boolean {
+  const candidate = error as { status?: unknown; code?: unknown } | null | undefined;
+  return candidate?.status === 410 && candidate.code === WEEKLY_REPORT_AUTHOR_DELETED_CODE;
+}
+
 /**
  * Is this the THIRD 409 — "the report you are retrying was deleted"?
  *

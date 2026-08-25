@@ -34,12 +34,15 @@ import {
 import type { WeeklyReportStatusValue } from "../../api/types";
 import { openWeeklyReportDoor } from "../door";
 import {
+  WEEKLY_REPORT_AUTHOR_DELETED_CODE,
+  WEEKLY_REPORT_DELETED_CODE,
+  WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
+  WEEKLY_REPORT_WEEK_EXISTS_CODE,
   WeeklyReportWeekTakenError,
   weeklyReportReconcile,
 } from "../reconcile";
 import { weeklyReportFinalAction } from "../status";
 import { WeeklyReportOvertakenError } from "../transition";
-import { WEEKLY_REPORT_SUBMISSION_DELETED_CODE } from "../reconcile";
 import {
   adoptWeeklyReportWeekRow,
   createWeeklyReportWithRenewedSubmission,
@@ -111,7 +114,11 @@ type Write =
  * The wizard, reduced to the effects the submit asks it for — with the REAL reducer behind every dispatch,
  * so the marker and the provenance really do have to survive the reducer to be read by the next attempt.
  */
-function phone(initial: WeeklyReportDraft, server: ReturnType<typeof fakeServer>) {
+function phone(
+  initial: WeeklyReportDraft,
+  server: ReturnType<typeof fakeServer>,
+  options: { replacesExistingReport?: boolean } = {},
+) {
   let draft = initial;
   const calls: string[] = [];
   const writes: Write[] = [];
@@ -119,7 +126,7 @@ function phone(initial: WeeklyReportDraft, server: ReturnType<typeof fakeServer>
   const port: WeeklyReportSubmitPort = {
     ensureReport: async () => {
       calls.push("ensureReport");
-      return "rep-1";
+      return { reportId: "rep-1", replacesExistingReport: options.replacesExistingReport ?? false };
     },
     updateContent: async (reportId, patch) => {
       calls.push("patch");
@@ -395,6 +402,33 @@ describe("the lost-reply marker", () => {
     });
     await expect(wizard.submit("pending_review")).rejects.toBeInstanceOf(WeeklyReportOvertakenError);
     // …and disarmed, so tapping again cannot launder the same 409 either.
+    expect(wizard.draft.pendingTransitionTo).toBeNull();
+  });
+
+  it("does not carry a deleted report's lost-reply marker onto its replacement", async () => {
+    // The marker identifies a transition request against ONE ROW, not the week in the abstract. A reply can
+    // be lost, leadership can delete that row, and this phone can recreate it before submit's closure has
+    // re-rendered. Treating the old marker as evidence about the replacement would accept another user's
+    // 409 as this phone's success and delete the local draft over their work.
+    const server = fakeServer(serverReport({ status: "pending_review" }));
+    const stale = {
+      ...supersDraft(),
+      serverStatus: "pending_review" as const,
+      pendingTransitionTo: "pending_review" as const,
+    };
+    const wizard = phone(stale, server, { replacesExistingReport: true });
+    wizard.failAt({
+      at: "transition",
+      error: apiError(409, "A pending_review report cannot move to pending_review"),
+    });
+
+    // `null` is what the old pending row's "Save changes" action carried. A replacement is a fresh
+    // author draft, so it must instead arm and ask for `pending_review` — then refuse the other user's
+    // already-pending state rather than laundering it into a local success.
+    await expect(wizard.submit(null)).rejects.toBeInstanceOf(WeeklyReportOvertakenError);
+    expect(wizard.writes.map((write) => write.op)).toEqual(["patch", "photos", "transition"]);
+    expect(wizard.writes.at(-1)).toMatchObject({ op: "transition", to: "pending_review" });
+    expect(wizard.calls).toContain("mark:pending_review");
     expect(wizard.draft.pendingTransitionTo).toBeNull();
   });
 
@@ -676,7 +710,7 @@ describe("creating a report whose submission key the server has retired", () => 
 });
 
 describe("resolving a draft which already holds a report id", () => {
-  it("renews a deleted stored report id durably before creating its replacement", async () => {
+  it("renews an authorized deleted stored report id durably before creating its replacement", async () => {
     // A phone can reach Photos, persist reportId, and then have leadership delete that row. The previous
     // short-circuit returned the old id forever, so every later PATCH and photo PUT 404'd and the retired
     // key could never get to its recovery path.
@@ -695,7 +729,10 @@ describe("resolving a draft which already holds a report id", () => {
       {
         read: async (id) => {
           calls.push(`read:${id}`);
-          throw apiError(404, "Weekly report not found");
+          throw Object.assign(new Error("This weekly report was deleted"), {
+            status: 410,
+            code: WEEKLY_REPORT_AUTHOR_DELETED_CODE,
+          });
         },
         create: async (id) => {
           calls.push(`create:${id}`);
@@ -714,7 +751,11 @@ describe("resolving a draft which already holds a report id", () => {
     expect(calls).toEqual(["read:deleted-report", "persist:fresh-key"]);
 
     releaseDurability();
-    await expect(result).resolves.toEqual({ kind: "created", created: { reportId: "replacement-report" } });
+    await expect(result).resolves.toEqual({
+      kind: "created",
+      created: { reportId: "replacement-report" },
+      replacesExistingReport: true,
+    });
     expect(calls).toEqual(["read:deleted-report", "persist:fresh-key", "create:fresh-key"]);
   });
 
@@ -758,5 +799,130 @@ describe("resolving a draft which already holds a report id", () => {
 
     expect(create).not.toHaveBeenCalled();
     expect(onRenewed).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake a permission-hidden 404 for a deleted report", async () => {
+    // Field reads hide a live row from an unassigned user with the same 404 as a nonexistent id. Rotating
+    // the durable key here would strand the visible row and could create a second report when access later
+    // changes back, so only the tagged 410 path above may mutate the draft.
+    const hidden = apiError(404, "Weekly report not found");
+    const create = jest.fn(async () => ({ reportId: "must-not-create" }));
+    const onRenewed = jest.fn(async () => undefined);
+
+    await expect(
+      resolveWeeklyReportDraftRow(
+        { reportId: "hidden-live-report", clientSubmissionId: "live-key" },
+        {
+          read: async () => {
+            throw hidden;
+          },
+          create,
+          newClientSubmissionId: () => "must-not-mint",
+          onRenewed,
+        },
+      ),
+    ).rejects.toBe(hidden);
+
+    expect(create).not.toHaveBeenCalled();
+    expect(onRenewed).not.toHaveBeenCalled();
+  });
+
+  it("does not recreate a deleted report merely because the UI is in author mode", async () => {
+    // An assigned PM can open a superintendent's draft in author mode. The server returns the generic
+    // deleted code to that non-author, and a client-side mode check would turn a leadership deletion into
+    // the PM's fresh report.
+    const deleted = Object.assign(new Error("This weekly report was deleted"), {
+      status: 410,
+      code: WEEKLY_REPORT_DELETED_CODE,
+    });
+    const create = jest.fn(async () => ({ reportId: "must-not-create" }));
+    const onRenewed = jest.fn(async () => undefined);
+
+    await expect(
+      resolveWeeklyReportDraftRow(
+        { reportId: "deleted-other-authors-report", clientSubmissionId: "pm-key" },
+        {
+          read: async () => {
+            throw deleted;
+          },
+          create,
+          newClientSubmissionId: () => "must-not-mint",
+          onRenewed,
+        },
+      ),
+    ).rejects.toBe(deleted);
+
+    expect(create).not.toHaveBeenCalled();
+    expect(onRenewed).not.toHaveBeenCalled();
+  });
+
+  it("carries replacement semantics through a week-taken race after a deleted row", async () => {
+    // Another device can create this week's empty replacement between this phone learning that its authored
+    // row was deleted and its replacement POST. That is adoption, but still of a replacement: the caller
+    // must not let an old approved status or lost marker leave the new row as an unfiled draft.
+    const taken = Object.assign(new Error("A report already exists for this week"), {
+      status: 409,
+      code: WEEKLY_REPORT_WEEK_EXISTS_CODE,
+    });
+    const seen: string[] = [];
+
+    await expect(
+      resolveWeeklyReportDraftRow(
+        { reportId: "deleted-report", clientSubmissionId: "spent-key" },
+        {
+          read: async () => {
+            throw Object.assign(new Error("This weekly report was deleted"), {
+              status: 410,
+              code: WEEKLY_REPORT_AUTHOR_DELETED_CODE,
+            });
+          },
+          create: async (id) => {
+            seen.push(`create:${id}`);
+            throw taken;
+          },
+          newClientSubmissionId: () => "fresh-key",
+          onRenewed: async (id) => {
+            seen.push(`persist:${id}`);
+          },
+        },
+      ),
+    ).resolves.toEqual({ kind: "replacement-week-taken" });
+
+    expect(seen).toEqual(["persist:fresh-key", "create:fresh-key"]);
+  });
+
+  it("marks a retired key recovery as replacing a former row even without a saved id", async () => {
+    // Usually reportId and clientSubmissionId travel together. If an older persisted draft has already
+    // lost its id, though, `create` is the only place that can discover the key belonged to a deleted row.
+    // Submit must still disregard any stale transition marker from that former row.
+    const deletedSubmission = Object.assign(new Error("That report was deleted"), {
+      status: 409,
+      code: WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
+    });
+    const seen: string[] = [];
+
+    await expect(
+      resolveWeeklyReportDraftRow(
+        { reportId: null, clientSubmissionId: "spent-key" },
+        {
+          read: async () => ({ id: "unused" }),
+          create: async (id) => {
+            seen.push(`create:${id}`);
+            if (id === "spent-key") throw deletedSubmission;
+            return { reportId: "replacement-report" };
+          },
+          newClientSubmissionId: () => "fresh-key",
+          onRenewed: async (id) => {
+            seen.push(`persist:${id}`);
+          },
+        },
+      ),
+    ).resolves.toEqual({
+      kind: "created",
+      created: { reportId: "replacement-report" },
+      replacesExistingReport: true,
+    });
+
+    expect(seen).toEqual(["create:spent-key", "persist:fresh-key", "create:fresh-key"]);
   });
 });

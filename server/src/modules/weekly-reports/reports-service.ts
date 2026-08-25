@@ -360,6 +360,15 @@ export function canViewWeeklyReport(
   );
 }
 
+/** The actors who may start a new report for a project. Kept beside the author rule so recovery cannot
+ * mistake a UI mode for a server-authoritative right to create. */
+function canCreateWeeklyReportDraftForActor(
+  projectRow: Record<string, any>,
+  actor: WeeklyReportActor,
+): boolean {
+  return isAssignedSuper(projectRow, actor) || isAssignedPm(projectRow, actor) || isElevated(actor);
+}
+
 /**
  * May move the report to `to`.
  *
@@ -458,9 +467,22 @@ export async function getWeeklyReportForActor(
   id: string,
   actor: WeeklyReportActor,
 ): Promise<WeeklyReportForActor> {
-  const { reportRow, projectRow } = await loadReportWithProject(client, id);
+  // Inspect an inactive row only long enough to decide whether THIS actor is entitled to learn that it was
+  // deleted. The ordinary detail loader remains active-only, so no deleted content is ever returned.
+  const { reportRow, projectRow } = await loadReportWithProject(client, id, { includeInactiveReport: true });
   if (!canViewWeeklyReport(projectRow, reportRow, actor)) {
     throw new AppError(404, "Weekly report not found");
+  }
+  if (!reportRow.is_active) {
+    // A PM can open a superintendent's DRAFT in the app's author-mode UI, so that mode cannot prove who
+    // owns the deleted work. Only the server can make this recovery promise: the original author still
+    // has a current right to create a report for this project. Everybody else learns it was deleted but
+    // gets the generic signal, which deliberately never authorizes a client-side replacement.
+    const code =
+      isAuthor(reportRow, actor) && canCreateWeeklyReportDraftForActor(projectRow, actor)
+        ? WEEKLY_REPORT_AUTHOR_DELETED_CODE
+        : WEEKLY_REPORT_DELETED_CODE;
+    throw new AppError(410, "This weekly report was deleted", code);
   }
 
   const report = await getWeeklyReportDetail(client, id);
@@ -526,6 +548,25 @@ export const WEEKLY_REPORT_WEEK_EXISTS_CODE = "WEEKLY_REPORT_WEEK_EXISTS";
  * one, so the old key can never produce a row again however many times it is retried.
  */
 export const WEEKLY_REPORT_SUBMISSION_DELETED_CODE = "WEEKLY_REPORT_SUBMISSION_DELETED";
+
+/**
+ * The field reader returns this only to someone who was authorized to see the report before its deletion.
+ *
+ * A generic 404 must remain opaque for everybody else: /api/field admits every field user in an office,
+ * and confirming that an arbitrary id was deleted would be the same report-existence oracle the regular
+ * view gate intentionally prevents. The phone uses this tagged 410 to distinguish a removed local draft
+ * from an access change, which both otherwise look like a 404 at the transport boundary.
+ */
+export const WEEKLY_REPORT_DELETED_CODE = "WEEKLY_REPORT_DELETED";
+
+/**
+ * A deleted row which this actor actually authored and may currently recreate.
+ *
+ * This is intentionally distinct from the generic deleted signal above. The mobile wizard uses it to
+ * renew a permanently-spent submission id; it must never infer the same right from its `author` display
+ * mode, because an assigned PM can open someone else's draft in that mode.
+ */
+export const WEEKLY_REPORT_AUTHOR_DELETED_CODE = "WEEKLY_REPORT_AUTHOR_DELETED";
 
 /** What last week's report said, for the values a new week starts from. */
 export interface WeeklyReportCarryOver {
@@ -615,7 +656,7 @@ export async function createWeeklyReportDraft(
   if (projectRow.status !== "active") {
     throw new AppError(409, `Weekly reporting is ${projectRow.status} for this project`);
   }
-  if (!isAssignedSuper(projectRow, actor) && !isAssignedPm(projectRow, actor) && !isElevated(actor)) {
+  if (!canCreateWeeklyReportDraftForActor(projectRow, actor)) {
     throw new AppError(403, "You are not assigned to this project");
   }
   assertValidWeekOf(projectRow, input.weekOf);
@@ -885,10 +926,12 @@ async function loadReportWithProject(
   // permanently undeletable — refused with "Weekly report project not found", which is not even true —
   // and a stopped setup is exactly where leftover test data comes to rest. Writing CONTENT stays gated:
   // a project nobody reports on any more is not a project whose weeks should still be edited.
-  options: { allowInactiveProject?: boolean } = {},
+  options: { allowInactiveProject?: boolean; includeInactiveReport?: boolean } = {},
 ) {
   const result = await client.query(
-    `SELECT * FROM weekly_reports WHERE id = $1::uuid AND is_active LIMIT 1`,
+    `SELECT * FROM weekly_reports
+      WHERE id = $1::uuid ${options.includeInactiveReport ? "" : "AND is_active"}
+      LIMIT 1`,
     [id],
   );
   const reportRow = result.rows[0];

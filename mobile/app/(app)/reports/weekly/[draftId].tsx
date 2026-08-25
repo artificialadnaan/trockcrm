@@ -284,9 +284,10 @@ function Wizard({
    * Replace a key the server retired and make that replacement durable before another create can use it.
    *
    * This is deliberately a read-modify-write through `saveChain`, rather than an autosave of this render's
-   * `draft`: the renewal clears the dead report id and provenance, while another queued write may carry
-   * newer prose or photos. Reading after every earlier save has settled preserves both. More importantly,
-   * the caller AWAITS this promise before its retry; a React dispatch alone vanishes with an app kill.
+   * `draft`: the renewal clears the former row's identity and lifecycle state, while another queued write
+   * may carry newer prose or photos. Reading after every earlier save has settled preserves both. More
+   * importantly, the caller AWAITS this promise before its retry; a React dispatch alone vanishes with an
+   * app kill.
    */
   const persistRenewedClientSubmissionId = useCallback(
     async (clientSubmissionId: string): Promise<void> => {
@@ -351,52 +352,61 @@ function Wizard({
    * create whose response was lost returns the SAME report on the next attempt instead of a duplicate for
    * the week. A report opened for review already has an id and never reaches the POST.
    */
-  const ensureReport = useCallback(async (): Promise<string> => {
-    let resolved;
-    try {
-      // A saved report id is only a hint, not proof: leadership may have deleted the row while this phone
-      // was on Photos. The resolver confirms it and, on its definite 404, durably clears that id and
-      // renews the retired submission key before creating the replacement row.
-      resolved = await resolveWeeklyReportDraftRow(
-        { reportId: draft.reportId, clientSubmissionId: draft.clientSubmissionId },
-        {
-          read: (reportId) => getWeeklyReport(fetcher, reportId),
-          create: (clientSubmissionId) =>
-            createWeeklyReport(fetcher, {
-              clientSubmissionId,
-              weeklyReportProjectId: draft.weeklyReportProjectId,
-              weekOf: draft.weekOf,
-            }),
-          newClientSubmissionId: newSubmissionId,
-          // Awaited through the save chain BEFORE the retry leaves, so a create whose reply is lost on the
-          // way back is still idempotent under this new key after an app death.
-          onRenewed: persistRenewedClientSubmissionId,
-        },
-      );
-    } catch (error) {
-      if (!isWeeklyReportWeekTakenError(error)) throw error;
-      return await adoptExistingWeekRow();
-    }
-    if (resolved.kind === "existing") return resolved.reportId;
-    const created = resolved.created;
-    // Stamp what the server actually handed back rather than assuming an empty row: the create is
-    // idempotent, so this can be a row that already exists, and the provenance every later freshness
-    // check reads has to describe the row that is really there.
-    dispatch({
-      type: "setReportId",
-      reportId: created.report.id,
-      seededFrom: weeklyReportSeedStateFromDetail(created.report),
-    });
-    return created.report.id;
-  }, [
-    draft.reportId,
-    draft.clientSubmissionId,
-    draft.weeklyReportProjectId,
-    draft.weekOf,
-    fetcher,
-    adoptExistingWeekRow,
-    persistRenewedClientSubmissionId,
-  ]);
+  const ensureReport = useCallback(
+    async (): Promise<{ reportId: string; replacesExistingReport: boolean }> => {
+      let resolved;
+      try {
+        // A saved report id is only a hint, not proof: leadership may have deleted the row while this phone
+        // was on Photos. The resolver acts only on the server's explicit author-recovery signal — a field
+        // 404 may instead conceal a live report after reassignment, and author-mode UI is not authorship —
+        // then durably resets the old row state and renews its submission key before creating a replacement.
+        resolved = await resolveWeeklyReportDraftRow(
+          { reportId: draft.reportId, clientSubmissionId: draft.clientSubmissionId },
+          {
+            read: (reportId) => getWeeklyReport(fetcher, reportId),
+            create: (clientSubmissionId) =>
+              createWeeklyReport(fetcher, {
+                clientSubmissionId,
+                weeklyReportProjectId: draft.weeklyReportProjectId,
+                weekOf: draft.weekOf,
+              }),
+            newClientSubmissionId: newSubmissionId,
+            // Awaited through the save chain BEFORE the retry leaves, so a create whose reply is lost on the
+            // way back is still idempotent under this new key after an app death.
+            onRenewed: persistRenewedClientSubmissionId,
+          },
+        );
+      } catch (error) {
+        if (!isWeeklyReportWeekTakenError(error)) throw error;
+        return { reportId: await adoptExistingWeekRow(), replacesExistingReport: false };
+      }
+      if (resolved.kind === "existing") {
+        return { reportId: resolved.reportId, replacesExistingReport: false };
+      }
+      if (resolved.kind === "replacement-week-taken") {
+        return { reportId: await adoptExistingWeekRow(), replacesExistingReport: true };
+      }
+      const created = resolved.created;
+      // Stamp what the server actually handed back rather than assuming an empty row: the create is
+      // idempotent, so this can be a row that already exists, and the provenance every later freshness
+      // check reads has to describe the row that is really there.
+      dispatch({
+        type: "setReportId",
+        reportId: created.report.id,
+        seededFrom: weeklyReportSeedStateFromDetail(created.report),
+      });
+      return { reportId: created.report.id, replacesExistingReport: resolved.replacesExistingReport };
+    },
+    [
+      draft.reportId,
+      draft.clientSubmissionId,
+      draft.weeklyReportProjectId,
+      draft.weekOf,
+      fetcher,
+      adoptExistingWeekRow,
+      persistRenewedClientSubmissionId,
+    ],
+  );
 
   // The report row has to exist before the picker can ask what photos fall in its window, so create it
   // when the user reaches the photos step rather than at submit. Failure is left silent here: the step
@@ -538,7 +548,7 @@ function Wizard({
     setImporting(true);
     setNotice(null);
     try {
-      const reportId = await ensureReport();
+      const { reportId } = await ensureReport();
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) {
         setNotice({ tone: "error", text: "Photo library permission is required to import." });

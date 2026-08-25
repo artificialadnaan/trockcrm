@@ -310,8 +310,11 @@ export type WeeklyReportDraftAction =
    * is spent — so the recovery is a fresh key over the same words, and the alternative the field user
    * had was discarding a week's work and starting again on a jobsite.
    *
-   * The report id and its provenance go WITH the key. `ensureReport` short-circuits on `reportId`, so
-   * leaving the dead one behind would hand back the id of the deleted report and never retry at all.
+   * The report id, provenance, lifecycle status and lost-transition marker go WITH the row. A replacement
+   * is a new AUTHOR draft, not the deleted row wearing a new id: retaining `approved` would turn its final
+   * action into "Save changes" and leave the new row unfiled, while retaining a marker could call somebody
+   * else's replacement transition this phone's own lost reply. `ensureReport` also short-circuits on
+   * `reportId`, so leaving that dead id behind would hand back the deleted row forever.
    */
   | { type: "renewClientSubmissionId"; clientSubmissionId: string }
   | { type: "setSeededFrom"; seededFrom: WeeklyReportSeedState | null }
@@ -419,9 +422,12 @@ export function weeklyReportDraftReducer(
       return {
         ...draft,
         clientSubmissionId: action.clientSubmissionId,
-        // Both cleared deliberately — see the action's note. The content is left exactly as it is.
+        // Row-bound state is cleared deliberately — see the action note. The writing stays exactly as it is.
         reportId: null,
         seededFrom: null,
+        mode: "author",
+        serverStatus: null,
+        pendingTransitionTo: null,
       };
     case "setSeededFrom":
       return { ...draft, seededFrom: action.seededFrom };
