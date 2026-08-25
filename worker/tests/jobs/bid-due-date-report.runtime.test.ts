@@ -104,6 +104,13 @@ beforeAll(async () => {
       assigned_rep_id uuid,
       estimator_user_id uuid,
       bid_due_date timestamptz,
+      -- The resolver's FLAG-ON signal. The mirror is evidence only: a qualifying row still returns
+      -- bid_due_date, which is why this runtime schema carries all five inputs separately.
+      bid_board_due_date date,
+      bid_due_date_from_bid_board_at timestamptz,
+      bid_due_date_bid_board_project_number text,
+      bid_board_project_number text,
+      bid_board_detached_at timestamptz,
       expected_close_date date,
       bid_board_stage_slug varchar(100),
       awarded_amount numeric(14,2),
@@ -183,7 +190,11 @@ beforeAll(async () => {
     INSERT INTO ${SCHEMA}.leads (id, bid_due_date) VALUES
       ('${U("1a1")}', '2026-09-06'),   -- the lead owns a date the deal snapshot never received
       ('${U("1a2")}', '2026-09-07'),   -- the lead's date supersedes a stale snapshot
-      ('${U("1a3")}', NULL);           -- the lead's date was CLEARED; the stale snapshot must not resurrect it
+      ('${U("1a3")}', NULL),           -- the lead's date was CLEARED; the stale snapshot must not resurrect it
+      -- The stale source date is just OUTSIDE the report's +30-day window. A qualifying Board-landed
+      -- column must bring the row in at its own date; every rejected signal must leave it out.
+      ('${U("1a4")}', '2026-09-26'),
+      ('${U("1a5")}', NULL);
 
     INSERT INTO ${SCHEMA}.deals (id, name, deal_number, project_number, stage_id, assigned_rep_id, source_lead_id, bid_due_date, expected_close_date, bid_estimate, is_active, is_test_data, is_change_order, on_hold) VALUES
       ('${U("1b1")}', 'Lead Owns Date', 'DFW-1-30', '24-180', '${ESTIMATING}', '${REP_HELMS}', '${U("1a1")}', NULL, '2026-12-01', 400000, true, false, false, false),
@@ -192,6 +203,30 @@ beforeAll(async () => {
       -- source_lead_id pointing at a lead row that is not there: the server's hasSourceLead is
       -- Boolean(the loaded ROW), not "the column is set", so this one falls back to the deal column.
       ('${U("1b4")}', 'Orphan Lead Ref', 'DFW-1-33', '24-183', '${ESTIMATING}', '${REP_HELMS}', '${U("1c9")}', ${d("2026-09-09")}, '2026-12-01', 430000, true, false, false, false);
+
+    -- BID BOARD READBACK FIXTURES. The +30-day boundary is deliberate: the source lead says Sep 26
+    -- (outside this Wednesday's window), while a genuinely landed Board value says Sep 25 (inside it).
+    -- It proves the winning date drives selection as well as display, rather than merely formatting a row
+    -- already selected by the stale lead date.
+    INSERT INTO ${SCHEMA}.deals (
+      id, name, deal_number, project_number, stage_id, assigned_rep_id, source_lead_id,
+      bid_due_date, bid_board_due_date, bid_due_date_from_bid_board_at,
+      bid_due_date_bid_board_project_number, bid_board_project_number, bid_board_detached_at,
+      expected_close_date, bid_estimate, is_active, is_test_data, is_change_order, on_hold
+    ) VALUES
+      -- ALL signal legs hold: flag ON returns the DEAL column (Sep 25), flag OFF keeps the lead (Sep 26).
+      ('${U("1c1")}', 'Landed Board Horizon Edge', 'DFW-1-34', '24-184', '${ESTIMATING}', '${REP_HELMS}', '${U("1a4")}', ${d("2026-09-25")}, '2026-09-25', '2026-08-01 09:00:00+00', 'BB-VALID', 'BB-VALID', NULL, '2026-12-01', 440000, true, false, false, false),
+      -- COINCIDENCE only: same UTC day but no 0225 provenance stamp, so the lead still wins.
+      ('${U("1c2")}', 'Unstamped Board Coincidence', 'DFW-1-35', '24-185', '${ESTIMATING}', '${REP_HELMS}', '${U("1a4")}', ${d("2026-09-24")}, '2026-09-24', NULL, 'BB-UNSTAMPED', 'BB-UNSTAMPED', NULL, '2026-12-01', 450000, true, false, false, false),
+      -- The stamp belongs to a RETIRED project, not the project this deal is on now.
+      ('${U("1c3")}', 'Retired Board Project', 'DFW-1-36', '24-186', '${ESTIMATING}', '${REP_HELMS}', '${U("1a4")}', ${d("2026-09-23")}, '2026-09-23', '2026-08-01 09:00:00+00', 'BB-RETIRED', 'BB-CURRENT', NULL, '2026-12-01', 460000, true, false, false, false),
+      -- The old stamp is not CURRENCY: a rep changed the deal column after the Board wrote it.
+      ('${U("1c4")}', 'Stale Board Currency', 'DFW-1-37', '24-187', '${ESTIMATING}', '${REP_HELMS}', '${U("1a4")}', ${d("2026-09-22")}, '2026-09-21', '2026-08-01 09:00:00+00', 'BB-CURRENCY', 'BB-CURRENCY', NULL, '2026-12-01', 470000, true, false, false, false),
+      -- A detached deal must not resurrect the Board override even if every other signal still matches.
+      ('${U("1c5")}', 'Detached Board Deal', 'DFW-1-38', '24-188', '${ESTIMATING}', '${REP_HELMS}', '${U("1a4")}', ${d("2026-09-20")}, '2026-09-20', '2026-08-01 09:00:00+00', 'BB-DETACHED', 'BB-DETACHED', '2026-08-20 09:00:00+00', '2026-12-01', 480000, true, false, false, false),
+      -- A valid landing also outranks a deliberately cleared lead only WHEN the flag is ON. It makes the
+      -- footer test prove the same SQL expression controls NULL counting, not just visible rows.
+      ('${U("1c6")}', 'Landed Board Cleared Lead', 'DFW-1-39', '24-189', '${ESTIMATING}', '${REP_HELMS}', '${U("1a5")}', ${d("2026-09-24")}, '2026-09-24', '2026-08-01 09:00:00+00', 'BB-CLEARED', 'BB-CLEARED', NULL, '2026-09-30', 490000, true, false, false, false);
 
     UPDATE ${SCHEMA}.deals SET dd_estimate = 900000, bid_board_total_sales = 100000
       WHERE name = 'DD Beats Board';
@@ -234,8 +269,12 @@ afterAll(async () => {
 
 const names = (rows: { name: string }[]) => rows.map((row) => row.name);
 
-async function reportRows() {
-  return findBidDueDateReportRows(query, { tenantSchema: SCHEMA, weekOf: TODAY });
+async function reportRows(bidBoardDueDateReadbackEnabled = false) {
+  return findBidDueDateReportRows(query, {
+    tenantSchema: SCHEMA,
+    weekOf: TODAY,
+    bidBoardDueDateReadbackEnabled,
+  });
 }
 
 describe("findBidDueDateReportRows — population", () => {
@@ -402,6 +441,7 @@ describe("sectionBidDueDateReportRows", () => {
     const shifted = await findBidDueDateReportRows(query, {
       tenantSchema: SCHEMA,
       weekOf: THURSDAY,
+      bidBoardDueDateReadbackEnabled: false,
     });
     expect(names(shifted)).toContain("Just Past Horizon");
     expect(names(await reportRows())).not.toContain("Just Past Horizon");
@@ -424,10 +464,11 @@ describe("countEstimatingDealsMissingBidDueDate", () => {
     const count = await countEstimatingDealsMissingBidDueDate(query, {
       tenantSchema: SCHEMA,
       weekOf: TODAY,
+      bidBoardDueDateReadbackEnabled: false,
     });
-    // No Bid Date A, No Bid Date B, and 'Lead Cleared Date' — whose deal column still holds a stale
-    // snapshot but whose LEAD, which owns the field, has none.
-    expect(count).toBe(3);
+    // No Bid Date A, No Bid Date B, Lead Cleared Date, and Landed Board Cleared Lead. The last one is
+    // deliberately counted only while the flag is OFF: then the lead's clear wins over the deal snapshot.
+    expect(count).toBe(4);
   });
 
   it("measures the hold horizon against the REPORT WEEK, not against whenever the query runs", async () => {
@@ -441,13 +482,15 @@ describe("countEstimatingDealsMissingBidDueDate", () => {
     const june = await countEstimatingDealsMissingBidDueDate(query, {
       tenantSchema: SCHEMA,
       weekOf: "2026-06-03",
+      bidBoardDueDateReadbackEnabled: false,
     });
     const august = await countEstimatingDealsMissingBidDueDate(query, {
       tenantSchema: SCHEMA,
       weekOf: TODAY,
+      bidBoardDueDateReadbackEnabled: false,
     });
     expect(june).toBe(0);
-    expect(august).toBe(3);
+    expect(august).toBe(4);
   });
 });
 
@@ -496,6 +539,59 @@ describe("the EFFECTIVE bid due date — the lead owns this field, the deal colu
     const rows = await reportRows();
     expect(rows.find((r) => r.name === "Cedar Park Retail")?.bidDueOn).toBe("2026-09-04");
     expect(rows.find((r) => r.name === "Lead Owns Date")?.bidDueOn).toBe("2026-09-06");
+  });
+});
+
+describe("Bid Board due-date readback — worker SQL matches the canonical resolver", () => {
+  it("stays LEAD-first with the flag off, then uses a valid landed deal-column day at the +30 boundary", async () => {
+    // The source lead's Sep 26 is just OUTSIDE the Wednesday report window. The qualifying landed deal
+    // column's Sep 25 is the LAST included day. This catches both wrong precedence and the tempting but
+    // insufficient fix of changing only the displayed date after the stale lead already filtered the row
+    // out. It also leaves the normal flag-OFF decision intact.
+    const flagOff = await reportRows(false);
+    expect(names(flagOff)).not.toContain("Landed Board Horizon Edge");
+    expect(names(flagOff)).not.toContain("Landed Board Cleared Lead");
+
+    const flagOn = await reportRows(true);
+    const landed = flagOn.find((row) => row.name === "Landed Board Horizon Edge");
+    expect(landed?.bidDueOn).toBe("2026-09-25");
+    expect(flagOn.find((row) => row.name === "Landed Board Cleared Lead")?.bidDueOn).toBe("2026-09-24");
+    expect(flagOn.map((row) => row.bidDueOn)).toEqual([...flagOn.map((row) => row.bidDueOn)].sort());
+    expect(names(sectionBidDueDateReportRows(flagOn, TODAY).find((section) => section.key === "next_30")?.rows ?? [])).toContain(
+      "Landed Board Horizon Edge"
+    );
+  });
+
+  it("requires Board provenance, current-project identity, currency, and attachment before overriding the lead", async () => {
+    // Each rejected row has a source-lead date just past the window and a tempting deal/mirror date inside
+    // it. Deleting ANY signal guard makes that row appear, instead of a fixture whose expected date happens
+    // to agree either way. These are the same four guards resolveDealBidDueDateForRead applies.
+    const rows = await reportRows(true);
+    const rejected = [
+      "Unstamped Board Coincidence",
+      "Retired Board Project",
+      "Stale Board Currency",
+      "Detached Board Deal",
+    ];
+    for (const name of rejected) expect(names(rows)).not.toContain(name);
+  });
+
+  it("uses that same flag-on expression for the footer's missing-date count", async () => {
+    // The valid landed row whose lead is deliberately NULL is counted while readback is off, then becomes a
+    // visible deadline when it is on. If the footer keeps a raw/lead-only predicate while the list changes,
+    // this is the precise row that makes its reconciliation number lie.
+    const flagOff = await countEstimatingDealsMissingBidDueDate(query, {
+      tenantSchema: SCHEMA,
+      weekOf: TODAY,
+      bidBoardDueDateReadbackEnabled: false,
+    });
+    const flagOn = await countEstimatingDealsMissingBidDueDate(query, {
+      tenantSchema: SCHEMA,
+      weekOf: TODAY,
+      bidBoardDueDateReadbackEnabled: true,
+    });
+    expect(flagOff).toBe(4);
+    expect(flagOn).toBe(3);
   });
 });
 

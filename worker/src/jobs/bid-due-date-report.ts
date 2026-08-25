@@ -175,6 +175,15 @@ function daysBetween(from: string, to: string): number {
   return Math.round((b - a) / 86_400_000);
 }
 
+/**
+ * Keep the worker's flag parse byte-for-byte aligned with
+ * `server/src/config/feature-flags.ts`. The worker cannot import server source (its TypeScript root is
+ * `worker/src`), so this intentionally tiny twin is the boundary rather than a second feature-flag policy.
+ */
+function isBidBoardDueDateReadbackEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.BID_BOARD_DUE_DATE_READBACK === "true";
+}
+
 // ---------------------------------------------------------------------------------------------------
 // The query
 // ---------------------------------------------------------------------------------------------------
@@ -215,7 +224,7 @@ function daysBetween(from: string, to: string): number {
  * Both callers pass it anyway, so there is ONE population definition rather than two variants that could
  * drift. Do not "simplify" it out of the row query on the grounds that it changes nothing there.
  */
-function reportPopulationSql(weekOf: string): string {
+function reportPopulationSql(weekOf: string, bidDueOnSql: string): string {
   return `
       ${genuineEstimatingStageSqlPredicate("d")}
       AND d.is_active = true
@@ -230,7 +239,7 @@ function reportPopulationSql(weekOf: string): string {
         // exists to surface: a lead-backed deal whose snapshot is NULL falls back to expected_close_date,
         // and a close target more than 90 days out then parks a bid that the LEAD says is due in a
         // fortnight. The row vanishes from the list and is counted in the footer as having no bid date.
-        bidDueDateSql: BID_DUE_ON_SQL,
+        bidDueDateSql: bidDueOnSql,
       })})`;
 }
 
@@ -269,14 +278,36 @@ function reportFromSql(schema: string): string {
  * timezone shifts the calendar day — a row sorting between the wrong two neighbours, or a bid due today
  * filed under Overdue.
  *
- * NOT PORTED, deliberately: the flag-ON branch, where a Bid-Board-landed date outranks the lead. It turns
- * on a provenance SIGNAL (the 0225 stamp, project identity, detach state, calendar-day currency) that is
- * far more than a COALESCE, and the flag is off. `assertBidDueDateReadbackOff` below is what stops that
- * staying true silently.
+ * When `BID_BOARD_DUE_DATE_READBACK` is ON, this reproduces the complete signal rule from
+ * `resolveDealBidDueDateForRead`: the deal column only outranks a source lead after a Bid Board sync wrote
+ * it, for the project the deal is still on, and its UTC day still equals the mirrored day. The mirror is
+ * never returned as a value — it is evidence that the DEAL column carries the landed value. Every condition
+ * matters: a date coincidence has no provenance, a retired project has no authority, and an old stamp is
+ * not currency. The worker cannot call the server-only resolver, so the SQL below is the raw-query twin.
  */
-const BID_DUE_ON_SQL =
-  "CASE WHEN l.id IS NOT NULL THEN l.bid_due_date " +
-  "ELSE (d.bid_due_date AT TIME ZONE 'UTC')::date END";
+const DEAL_BID_DUE_ON_SQL = "(d.bid_due_date AT TIME ZONE 'UTC')::date";
+
+function effectiveBidDueOnSql(readbackEnabled: boolean): string {
+  const leadFirst = `CASE WHEN l.id IS NOT NULL THEN l.bid_due_date ELSE ${DEAL_BID_DUE_ON_SQL} END`;
+  if (!readbackEnabled) return leadFirst;
+
+  // SQL twin of resolveDealBidDueDate(). The exact same expression drives the list's NULL check, window,
+  // sort and display, and the footer's NULL count / hold horizon, so a flag-on deal cannot be selected by
+  // one date and rendered or parked by another.
+  return `CASE
+    WHEN d.bid_board_detached_at IS NULL
+     AND d.bid_due_date_from_bid_board_at IS NOT NULL
+     AND d.bid_due_date_bid_board_project_number IS NOT NULL
+     AND d.bid_board_project_number IS NOT NULL
+     AND d.bid_due_date_bid_board_project_number = d.bid_board_project_number
+     AND d.bid_board_due_date IS NOT NULL
+     AND ${DEAL_BID_DUE_ON_SQL} IS NOT NULL
+     AND ${DEAL_BID_DUE_ON_SQL} = d.bid_board_due_date
+    THEN ${DEAL_BID_DUE_ON_SQL}
+    WHEN l.id IS NOT NULL THEN l.bid_due_date
+    ELSE ${DEAL_BID_DUE_ON_SQL}
+  END`;
+}
 
 export async function findBidDueDateReportRows(
   query: PgQuery,
@@ -291,6 +322,11 @@ export async function findBidDueDateReportRows(
      * catch-up has to be indistinguishable from the run it replaces, in content as well as identity.
      */
     weekOf: string;
+    /**
+     * Snapshotted by the run before it starts, so every office reads the same flag value. Omitted direct
+     * callers use the current process environment, matching the server resolver's default.
+     */
+    bidBoardDueDateReadbackEnabled?: boolean;
     horizonDays?: number;
     overdueLookbackDays?: number;
   }
@@ -298,6 +334,9 @@ export async function findBidDueDateReportRows(
   const schema = assertSafeSchema(input.tenantSchema);
   const horizon = input.horizonDays ?? BID_DUE_REPORT_HORIZON_DAYS;
   const lookback = input.overdueLookbackDays ?? BID_DUE_REPORT_OVERDUE_LOOKBACK_DAYS;
+  const bidDueOnSql = effectiveBidDueOnSql(
+    input.bidBoardDueDateReadbackEnabled ?? isBidBoardDueDateReadbackEnabled()
+  );
 
   // THE VALUE CHAIN IS THE ESTIMATING-STAGE ONE (awarded > dd > bid_board > bid), matching the page this
   // email's CTA lands on. NOT `workerCurrentDealValueSql`, the worker's generic open chain, which is
@@ -320,16 +359,16 @@ export async function findBidDueDateReportRows(
             d.name AS name,
             d.deal_number AS deal_number,
             d.project_number AS project_number,
-            to_char(${BID_DUE_ON_SQL}, 'YYYY-MM-DD') AS bid_due_on,
+            to_char(${bidDueOnSql}, 'YYYY-MM-DD') AS bid_due_on,
             (${aliasedDealEstimatingValueSqlText("d")})::numeric AS value,
             u.display_name AS rep_name
        ${reportFromSql(schema)}
        LEFT JOIN public.users u ON u.id = d.assigned_rep_id
-      WHERE ${reportPopulationSql(input.weekOf)}
-        AND (${BID_DUE_ON_SQL}) IS NOT NULL
-        AND ${BID_DUE_ON_SQL} >= $1::date - $2::int
-        AND ${BID_DUE_ON_SQL} <= $1::date + $3::int
-      ORDER BY ${BID_DUE_ON_SQL} ASC, d.name ASC`,
+      WHERE ${reportPopulationSql(input.weekOf, bidDueOnSql)}
+        AND (${bidDueOnSql}) IS NOT NULL
+        AND ${bidDueOnSql} >= $1::date - $2::int
+        AND ${bidDueOnSql} <= $1::date + $3::int
+      ORDER BY ${bidDueOnSql} ASC, d.name ASC`,
     [input.weekOf, lookback, horizon]
   );
 
@@ -354,14 +393,17 @@ export async function findBidDueDateReportRows(
  */
 export async function countEstimatingDealsMissingBidDueDate(
   query: PgQuery,
-  input: { tenantSchema: string; weekOf: string }
+  input: { tenantSchema: string; weekOf: string; bidBoardDueDateReadbackEnabled?: boolean }
 ): Promise<number> {
   const schema = assertSafeSchema(input.tenantSchema);
+  const bidDueOnSql = effectiveBidDueOnSql(
+    input.bidBoardDueDateReadbackEnabled ?? isBidBoardDueDateReadbackEnabled()
+  );
   const result = await query(
     `SELECT COUNT(*)::int AS missing_count
        ${reportFromSql(schema)}
-      WHERE ${reportPopulationSql(input.weekOf)}
-        AND (${BID_DUE_ON_SQL}) IS NULL`
+      WHERE ${reportPopulationSql(input.weekOf, bidDueOnSql)}
+        AND (${bidDueOnSql}) IS NULL`
   );
   return Number(result.rows[0]?.missing_count ?? 0);
 }
@@ -683,6 +725,9 @@ export async function runBidDueDateReport(
   const logger = deps.logger ?? console;
   const query = deps.query ?? (pool.query.bind(pool) as PgQuery);
   const env = deps.env ?? process.env;
+  // Read once for the whole run. A Railway env update cannot make office A's report use a different
+  // precedence from office B's midway through this loop.
+  const bidBoardDueDateReadbackEnabled = isBidBoardDueDateReadbackEnabled(env);
   const now = deps.now ?? new Date();
   const todayCt = ctDateOf(now);
   const weekOf = bidDueReportWeekOf(todayCt);
@@ -772,6 +817,7 @@ export async function runBidDueDateReport(
           ccRecipients,
           weekOf,
           deliveryDate: todayCt,
+          bidBoardDueDateReadbackEnabled,
           officeName: normalizeText(office.name) ?? slug,
           frontendUrl: resolveFrontendUrl(env),
         });
@@ -815,6 +861,7 @@ async function sendOfficeReport(input: {
   ccRecipients: string[];
   weekOf: string;
   deliveryDate: string;
+  bidBoardDueDateReadbackEnabled: boolean;
   officeName: string;
   frontendUrl: string;
 }): Promise<void> {
@@ -850,10 +897,15 @@ async function sendOfficeReport(input: {
     return;
   }
 
-  const rows = await findBidDueDateReportRows(query, { tenantSchema, weekOf });
+  const rows = await findBidDueDateReportRows(query, {
+    tenantSchema,
+    weekOf,
+    bidBoardDueDateReadbackEnabled: input.bidBoardDueDateReadbackEnabled,
+  });
   const missingBidDateCount = await countEstimatingDealsMissingBidDueDate(query, {
     tenantSchema,
     weekOf,
+    bidBoardDueDateReadbackEnabled: input.bidBoardDueDateReadbackEnabled,
   });
   const sections = sectionBidDueDateReportRows(rows, weekOf);
 

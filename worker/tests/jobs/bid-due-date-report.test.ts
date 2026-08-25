@@ -268,6 +268,29 @@ describe("runBidDueDateReport recipients", () => {
   });
 });
 
+describe("runBidDueDateReport Bid Board readback wiring", () => {
+  it("threads an enabled readback flag to BOTH the row query and the footer count", async () => {
+    // The PGlite suite proves the SQL's behavior. This small run-level guard proves the production seam:
+    // `deps.env` is read once and reaches both callers, rather than a correct expression sitting behind an
+    // option that the actual cron never supplies.
+    const h = deps({ rows: [ROW] });
+    h.deps.env.BID_BOARD_DUE_DATE_READBACK = "true";
+    await runBidDueDateReport(h.deps);
+
+    const effectiveDateQueries = h.calls.filter(
+      (call) => call.sql.includes("AS bid_due_on") || call.sql.includes("AS missing_count")
+    );
+    expect(effectiveDateQueries).toHaveLength(2);
+    for (const { sql } of effectiveDateQueries) {
+      expect(sql).toContain("d.bid_board_detached_at IS NULL");
+      expect(sql).toContain("d.bid_due_date_from_bid_board_at IS NOT NULL");
+      expect(sql).toContain("d.bid_due_date_bid_board_project_number = d.bid_board_project_number");
+      expect(sql).toContain("d.bid_board_due_date IS NOT NULL");
+      expect(sql).toContain("(d.bid_due_date AT TIME ZONE 'UTC')::date = d.bid_board_due_date");
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------------------------------
 // 8, 9, 10. Receipts and outcomes
 // ---------------------------------------------------------------------------------------------------
