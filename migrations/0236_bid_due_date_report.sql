@@ -58,15 +58,40 @@
 -- records for this person ("Sidney Gibson owns 0 deals and is the estimator on 137"), so both are tried
 -- and either is enough.
 
+-- A CLAIM ledger, not a send log — the 0174 protocol (rfp_pending_sla_email_receipts).
+--
+-- The row is INSERTed before the provider is called and STAMPED after, because the three send outcomes are
+-- not two. `delivered` stamps sent_at. `rejected` means the provider refused and created nothing, so the
+-- claim is DELETED and the next tick retries. `unknown` — which is what resend@6 reports for a socket
+-- hang-up, a 5xx or a gateway timeout, since it wraps its whole fetch in a try/catch — means the message
+-- MAY ALREADY BE IN THE INBOX, so the claim STAYS, unstamped, and the next tick declines rather than
+-- risking a duplicate.
+--
+-- That distinction is only consequential because this job has a Thursday catch-up tick. Without it an
+-- ambiguous failure simply waited until next Wednesday; with it, the provider would be called again 24
+-- hours later for a message that may well have gone out. (Resend's own idempotency key is NOT the backstop
+-- here: its window is 24 hours, which is exactly the Wednesday-to-Thursday gap, so it is the one interval
+-- it cannot be relied on for.)
+--
+-- The cost of claim-first is the mirror image and is accepted deliberately: a crash between the claim and
+-- the send leaves an unstamped row and that week is not sent. `sent_at IS NULL` makes those visible --
+--   SELECT * FROM public.bid_due_date_report_receipts WHERE sent_at IS NULL;
+-- -- and deleting such a row re-arms the week. For a report to one estimator, a week that needs a nudge
+-- beats a duplicate nobody asked for.
 CREATE TABLE IF NOT EXISTS public.bid_due_date_report_receipts (
   tenant_schema text NOT NULL,
   -- The WEDNESDAY the report covers, resolved BACKWARD from the run date, so the Thursday catch-up tick
-  -- lands on the same key and reads the receipt instead of sending a second copy.
+  -- lands on the same key and reads the claim instead of sending a second copy.
   week_of date NOT NULL,
   recipient_emails text,
   resend_message_id text,
   deal_count integer,
-  sent_at timestamptz NOT NULL DEFAULT NOW(),
+  -- NULLABLE, no default: the row is a CLAIM at insert and is stamped only after a DELIVERED send. NULL
+  -- means "we asked, and never learned the answer" — never "not sent".
+  sent_at timestamptz,
+  -- The outcome that left this row unstamped, for an operator deciding whether to re-arm the week.
+  outcome text,
+  claimed_at timestamptz NOT NULL DEFAULT NOW(),
   created_at timestamptz NOT NULL DEFAULT NOW(),
   updated_at timestamptz NOT NULL DEFAULT NOW(),
   PRIMARY KEY (tenant_schema, week_of)

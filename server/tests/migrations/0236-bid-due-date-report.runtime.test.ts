@@ -130,6 +130,26 @@ describe("0236 — the receipt ledger", () => {
     expect(key.rows.map((row) => row.attname)).toEqual(["tenant_schema", "week_of"]);
   });
 
+  it("makes sent_at NULLABLE — the row is a CLAIM at insert, stamped only on a delivered send", async () => {
+    // The 0174 protocol. If sent_at carried NOT NULL DEFAULT NOW() the row could not represent "we asked
+    // and never learned the answer", and an ambiguous send would be indistinguishable from a delivered
+    // one — which is precisely the state the Thursday catch-up has to read to decide not to re-send.
+    await addUser("sidney@trockgc.com", "Sidney Gibson");
+    await run();
+    const columns = await pg.query<{ column_name: string; is_nullable: string; column_default: string | null }>(
+      `SELECT column_name, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'bid_due_date_report_receipts'
+          AND column_name IN ('sent_at', 'claimed_at', 'outcome')
+        ORDER BY column_name`,
+    );
+    const byName = Object.fromEntries(columns.rows.map((row) => [row.column_name, row]));
+    expect(byName.sent_at?.is_nullable).toBe("YES");
+    expect(byName.sent_at?.column_default).toBeNull();
+    // claimed_at is the opposite: always present, because every row is a claim.
+    expect(byName.claimed_at?.is_nullable).toBe("NO");
+    expect(byName.outcome?.is_nullable).toBe("YES");
+  });
+
   it("takes a second run without complaint — the operator recovery path re-runs this file", async () => {
     await addUser("sidney@trockgc.com", "Sidney Gibson");
     await run();

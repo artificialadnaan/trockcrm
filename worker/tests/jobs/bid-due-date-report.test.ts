@@ -95,6 +95,10 @@ interface StubOptions {
   offices?: { id: string; slug: string; name: string }[];
   /** Tenant schemas whose row query blows up, for the one-broken-office-must-not-cost-the-rest case. */
   failSchemas?: string[];
+  /** The claim INSERT returns no row — another run got there first. */
+  claimLost?: boolean;
+  /** Office ids for which NO group member holds access, for the authorization-scoping case. */
+  noAccessOffices?: string[];
 }
 
 /**
@@ -122,6 +126,15 @@ function stubQuery(options: StubOptions = {}) {
       }
     }
     if (sql.includes("INSERT INTO public.bid_due_date_report_receipts")) {
+      // The CLAIM. rowCount 1 = this run won it; the `claimLost` option makes it lose to a concurrent run.
+      return options.claimLost
+        ? { rows: [], rowCount: 0 }
+        : { rows: [{ tenant_schema: SCHEMA }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE public.bid_due_date_report_receipts")) {
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("DELETE FROM public.bid_due_date_report_receipts")) {
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes("FROM public.bid_due_date_report_receipts")) {
@@ -129,10 +142,20 @@ function stubQuery(options: StubOptions = {}) {
     }
     if (sql.includes("public.notification_recipient_groups")) {
       const key = String(params?.[0] ?? "");
-      const rows = key.endsWith("_cc")
+      const isCc = key.endsWith("_cc");
+      const configured = isCc
         ? options.ccRecipients ?? [{ email: "adnaan.iqbal@gmail.com" }]
         : options.toRecipients ?? [{ email: "sidney@trockgc.com" }];
-      return { rows, rowCount: rows.length };
+      // The GLOBAL pre-flight ("is anybody assigned at all") takes no office and ignores the per-office
+      // filter; the per-office resolve is the one `noAccessOffices` can empty. Keeping them distinguishable
+      // in the stub is what lets a test tell "nobody configured" from "nobody here can see this office".
+      const isPreflight = !sql.includes("user_office_access");
+      if (isPreflight) return { rows: configured, rowCount: configured.length };
+      const officeId = String(params?.[1] ?? "");
+      if (!isCc && (options.noAccessOffices ?? []).includes(officeId)) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: configured, rowCount: configured.length };
     }
     if (sql.includes("AS missing_count")) {
       return { rows: [{ missing_count: options.nullCount ?? 0 }], rowCount: 1 };
@@ -256,7 +279,7 @@ describe("runBidDueDateReport exactly-once", () => {
     expect(h.sendEmail).not.toHaveBeenCalled();
   });
 
-  it("writes a receipt only on outcome 'delivered'", async () => {
+  it("claims the week under (tenant_schema, week_of)", async () => {
     const h = deps({ rows: [ROW] });
     await runBidDueDateReport(h.deps);
     const inserts = h.calls.filter((c) =>
@@ -267,26 +290,73 @@ describe("runBidDueDateReport exactly-once", () => {
     expect(inserts[0].params).toContain("2026-08-26");
   });
 
-  it("writes NO receipt on outcome 'rejected' — a re-send is safe and next week must retry", async () => {
+  // `rejected` and `unknown` are NOT the same failure and must not get the same handling.
+  //
+  //   rejected — the provider positively refused and created NOTHING. Re-sending is safe, so the claim is
+  //              DELETED and the catch-up genuinely retries.
+  //   unknown  — resend@6 wraps its whole fetch in a try/catch, so a socket hang-up, a 5xx and a gateway
+  //              timeout all arrive as an ordinary error result. The message MAY have been delivered.
+  //              Re-sending risks a duplicate, so the claim STAYS, unstamped, and the catch-up declines.
+  //
+  // The catch-up tick is what makes this consequential rather than academic: without it, an ambiguous
+  // failure sat until next Wednesday. With it, the provider is called again 24 hours later.
+  it("DELETES the claim on 'rejected' — nothing was sent, so the catch-up must retry", async () => {
     const sendEmail = vi.fn(async () => ({ success: false, messageId: null, outcome: "rejected" }));
     const h = deps({ rows: [ROW], sendEmail });
     await expect(runBidDueDateReport(h.deps)).rejects.toThrow();
-    expect(
-      h.calls.some((c) => c.sql.includes("INSERT INTO public.bid_due_date_report_receipts")),
-    ).toBe(false);
+    expect(h.calls.some((c) => c.sql.includes("DELETE FROM public.bid_due_date_report_receipts"))).toBe(true);
+    expect(h.calls.some((c) => c.sql.includes("SET sent_at"))).toBe(false);
   });
 
-  it("writes NO receipt on outcome 'unknown' — resend@6 swallows its own fetch errors", async () => {
-    // `success` alone cannot tell a socket hang-up from a bad address, so branching on it would file an
-    // unknown outcome as a definite failure. Neither writes a receipt, but only one of them is safe to
-    // re-send, and the log line has to say which.
+  it("KEEPS the claim unstamped on 'unknown' — the mail may already be in the inbox", async () => {
     const sendEmail = vi.fn(async () => ({ success: false, messageId: null, outcome: "unknown" }));
     const h = deps({ rows: [ROW], sendEmail });
     await expect(runBidDueDateReport(h.deps)).rejects.toThrow();
-    expect(
-      h.calls.some((c) => c.sql.includes("INSERT INTO public.bid_due_date_report_receipts")),
-    ).toBe(false);
+    expect(h.calls.some((c) => c.sql.includes("DELETE FROM public.bid_due_date_report_receipts"))).toBe(false);
+    // Stamped as unconfirmed rather than as sent, so an operator can tell the two apart.
+    const marked = h.calls.find((c) => c.sql.includes("UPDATE public.bid_due_date_report_receipts"));
+    expect(marked?.params).toContain("unknown");
     expect(h.logger.error).toHaveBeenCalled();
+  });
+
+  it("the catch-up DECLINES after an 'unknown', instead of calling the provider again", async () => {
+    // The end-to-end consequence, and the reason the claim exists at all.
+    const h = deps({
+      rows: [ROW],
+      receipts: [{ week_of: "2026-08-26", sent_at: null, outcome: "unknown", resend_message_id: null }],
+      now: THURSDAY_1700_CDT,
+    });
+    await runBidDueDateReport(h.deps);
+    expect(h.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("claims the week BEFORE calling the provider, not after", async () => {
+    // A claim written only after a successful send cannot protect anything: the ambiguous outcome is
+    // precisely the case where the write never happens.
+    const h = deps({ rows: [ROW] });
+    await runBidDueDateReport(h.deps);
+    const claimAt = h.calls.findIndex((c) =>
+      c.sql.includes("INSERT INTO public.bid_due_date_report_receipts"),
+    );
+    const stampAt = h.calls.findIndex((c) => c.sql.includes("SET sent_at"));
+    expect(claimAt).toBeGreaterThanOrEqual(0);
+    expect(stampAt).toBeGreaterThan(claimAt);
+  });
+
+  it("declines when a concurrent run wins the claim", async () => {
+    // The advisory lock already serializes runs, so this is the backstop rather than the primary guard —
+    // but the claim is what makes the guarantee atomic rather than dependent on the lock holding.
+    const h = deps({ rows: [ROW], claimLost: true });
+    const summary = await runBidDueDateReport(h.deps);
+    expect(h.sendEmail).not.toHaveBeenCalled();
+    expect(summary.skipped).toBe(1);
+  });
+
+  it("stamps sent_at only on 'delivered'", async () => {
+    const h = deps({ rows: [ROW] });
+    await runBidDueDateReport(h.deps);
+    const stamp = h.calls.find((c) => c.sql.includes("SET sent_at"));
+    expect(stamp?.params).toContain("msg-1");
   });
 
   it("sends an EMPTY report rather than nothing — a silent week reads as a broken job", async () => {
@@ -356,16 +426,76 @@ describe("Wednesday run vs Thursday catch-up", () => {
     return { subject, html, text: options.text, idempotencyKey: options.idempotencyKey, calls: h.calls };
   }
 
-  it("produces a BYTE-IDENTICAL email — the catch-up is the missed run, delivered late", async () => {
-    // The receipt and the subject anchor on Wednesday. If any part of the BODY anchors on the run date
-    // instead, the same deal files under NEXT 30 DAYS on Wednesday and THIS WEEK on Thursday, and two
-    // emails claiming the same week disagree about it. One anchor per email, or none of it is true.
+  /**
+   * The text body renders each row as `  cell  ·  cell  ·  …`, so it parses back into columns. Column 1 is
+   * the relative-date PROSE; every other column, and the section headings, are the report's DATA.
+   */
+  function bodyOf(text: string) {
+    const headings: string[] = [];
+    const data: string[][] = [];
+    const prose: string[] = [];
+    for (const line of text.split("\n")) {
+      if (/^[A-Z0-9 ]+\(\d+\)$/.test(line.trim())) headings.push(line.trim());
+      if (!line.startsWith("  ")) continue;
+      const cells = line.trim().split("  ·  ");
+      if (cells.length < 6) continue;
+      prose.push(cells[1]);
+      data.push([cells[0], ...cells.slice(2)]);
+    }
+    return { headings, data, prose };
+  }
+
+  // TWO ANCHORS, and they are not the same one.
+  //
+  // `weekOf` decides WHAT THE REPORT CONTAINS — the SQL window, the sectioning, the subject, the receipt.
+  // The delivery date decides HOW A HUMAN READS IT: the reader's "today" is the day the mail lands in front
+  // of them, not the day the report is about. Anchoring the prose to weekOf too would tell a Thursday
+  // reader that a bid due Wednesday is due "today", which is the one thing this report exists to get right.
+  it("keeps the DATA identical across both ticks — same sections, same rows, same order", async () => {
+    const wednesday = bodyOf((await emailFrom(WEDNESDAY_1700_CDT)).text);
+    const thursday = bodyOf((await emailFrom(THURSDAY_1700_CDT)).text);
+    expect(thursday.headings).toEqual(wednesday.headings);
+    expect(thursday.data).toEqual(wednesday.data);
+    expect(thursday.data.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the subject and the receipt key identical — both name the same Wednesday", async () => {
     const wednesday = await emailFrom(WEDNESDAY_1700_CDT);
     const thursday = await emailFrom(THURSDAY_1700_CDT);
     expect(thursday.subject).toBe(wednesday.subject);
-    expect(thursday.text).toBe(wednesday.text);
-    expect(thursday.html).toBe(wednesday.html);
     expect(thursday.idempotencyKey).toBe(wednesday.idempotencyKey);
+  });
+
+  it("moves ONLY the relative-date prose, by exactly the one day that separates the ticks", async () => {
+    const wednesday = bodyOf((await emailFrom(WEDNESDAY_1700_CDT)).text);
+    const thursday = bodyOf((await emailFrom(THURSDAY_1700_CDT)).text);
+    // Sep 4 then Sep 2 (the stub returns fixture order; the real query sorts ascending), read from
+    // Wednesday the 26th and then from Thursday the 27th.
+    expect(wednesday.prose).toEqual(["in 9 days", "in 7 days"]);
+    expect(thursday.prose).toEqual(["in 8 days", "in 6 days"]);
+  });
+
+  it("says 'today' on the day the mail actually lands, not on the day the report is about", async () => {
+    // The whole point of the split, stated as the case that motivated it: a bid due Wednesday, in an email
+    // delivered Thursday, is not due today.
+    const dueWednesday = {
+      ...ROW,
+      id: "d3",
+      name: "Due On WeekOf",
+      bid_due_on: "2026-08-26",
+    };
+    const onWednesday = deps({ rows: [dueWednesday], now: WEDNESDAY_1700_CDT });
+    await runBidDueDateReport(onWednesday.deps);
+    const onThursday = deps({ rows: [dueWednesday], now: THURSDAY_1700_CDT });
+    await runBidDueDateReport(onThursday.deps);
+    expect(onWednesday.sendEmail.mock.calls[0][3].text).toContain("today");
+    expect(onThursday.sendEmail.mock.calls[0][3].text).toContain("yesterday");
+    expect(onThursday.sendEmail.mock.calls[0][3].text).not.toContain("  ·  today  ·  ");
+    // ...and it is still filed under THIS WEEK on both, because SECTIONING is anchored on weekOf. The row
+    // moves in prose only; a reader gets the right urgency without the two emails disagreeing about the
+    // week's contents.
+    expect(onThursday.sendEmail.mock.calls[0][3].text).toContain("THIS WEEK (1)");
+    expect(onWednesday.sendEmail.mock.calls[0][3].text).toContain("THIS WEEK (1)");
   });
 
   it("queries the SAME window on both ticks — the anchor reaches the SQL, not just the rendering", async () => {
@@ -397,6 +527,35 @@ describe("runBidDueDateReport per-office isolation", () => {
     { id: "office-b", slug: "bbb", name: "B" },
     { id: "office-c", slug: "ccc", name: "C" },
   ];
+
+  it("FAILS an office whose recipients cannot see it, rather than mailing them its pipeline", async () => {
+    // The P1, at the run level. Recipient assignments are global; office access is not. An office whose
+    // group resolves to nobody must fail loudly — the alternative that looks tidy, skipping it quietly, is
+    // an office whose report silently never arrives.
+    const h = deps({
+      rows: [ROW],
+      offices: THREE_OFFICES,
+      noAccessOffices: ["office-b"],
+    });
+    await expect(runBidDueDateReport(h.deps)).rejects.toThrow(/1 of 3/);
+    expect(h.sendEmail).toHaveBeenCalledTimes(2);
+    // The office-scoping fault must reach the log, not just the failure count — the per-office catch
+    // carries it in the `err` field, so an operator can tell it from a tenant-query blowup.
+    const logged = h.logger.error.mock.calls
+      .map(([, context]) => String((context as { err?: unknown })?.err ?? ""))
+      .join("\n");
+    expect(logged).toContain("has access to office");
+    expect(logged).toContain("user_office_access");
+  });
+
+  it("resolves recipients PER OFFICE, passing that office's id to the lookup", async () => {
+    const h = deps({ rows: [ROW], offices: THREE_OFFICES });
+    await runBidDueDateReport(h.deps);
+    const scoped = h.calls.filter(
+      (c) => c.sql.includes("user_office_access") && c.params?.[0] === "bid_due_date_report",
+    );
+    expect(scoped.map((c) => c.params?.[1])).toEqual(["office-a", "office-b", "office-c"]);
+  });
 
   it("keeps going when one office throws, and still sends to the others", async () => {
     // The offices are read in slug order, so a broken FIRST office is the worst case: without a per-office
@@ -448,6 +607,8 @@ describe("runBidDueDateReport per-office isolation", () => {
 describe("buildBidDueDateReportEmail", () => {
   const base = {
     weekOf: "2026-08-26",
+    // The two anchors COINCIDE on the normal Wednesday tick, which is why collapsing them looked correct.
+    deliveryDate: "2026-08-26",
     sections: [
       {
         key: "overdue" as const,
@@ -583,6 +744,26 @@ describe("buildBidDueDateReportEmail", () => {
     const email = buildBidDueDateReportEmail(base);
     expect(email.html).toContain("7 estimating deals have no bid due date set");
     expect(email.text).toContain("7 estimating deals have no bid due date set");
+  });
+
+  it("renders the prose against deliveryDate while the sections stay on weekOf", () => {
+    // Same report, read a day later: the section a row sits in is unchanged, the urgency beside it is not.
+    const later = buildBidDueDateReportEmail({ ...base, deliveryDate: "2026-08-27" });
+    const sameDay = buildBidDueDateReportEmail(base);
+    expect(sameDay.text).toContain("7 days ago");
+    expect(later.text).toContain("8 days ago");
+    // BOTH renderings. The html is the half most people actually read, and asserting only the text left
+    // the html's anchor free to be wired back to weekOf with the suite still green.
+    expect(sameDay.html).toContain("7 days ago");
+    expect(later.html).toContain("8 days ago");
+    expect(later.html).not.toContain("7 days ago");
+    // Headings, and therefore membership, are identical.
+    for (const section of base.sections) {
+      expect(later.text).toContain(`${section.label} (${section.rows.length})`);
+      expect(sameDay.text).toContain(`${section.label} (${section.rows.length})`);
+    }
+    // The subject names the week, never the delivery day.
+    expect(later.subject).toBe(sameDay.subject);
   });
 
   it("states the overdue lookback bound instead of implying the section is complete", () => {

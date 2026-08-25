@@ -64,7 +64,29 @@ beforeAll(async () => {
       id uuid PRIMARY KEY,
       display_name text,
       email text,
+      is_active boolean NOT NULL DEFAULT true,
+      office_id uuid
+    );
+    CREATE TABLE public.notification_recipient_groups (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      key text NOT NULL UNIQUE
+    );
+    CREATE TABLE public.notification_recipient_assignments (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      group_id uuid NOT NULL REFERENCES public.notification_recipient_groups(id) ON DELETE CASCADE,
+      user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+      UNIQUE (group_id, user_id)
+    );
+    CREATE TABLE public.offices (
+      id uuid PRIMARY KEY,
+      slug varchar(100) NOT NULL,
       is_active boolean NOT NULL DEFAULT true
+    );
+    CREATE TABLE public.user_office_access (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid NOT NULL,
+      office_id uuid NOT NULL,
+      UNIQUE (user_id, office_id)
     );
     CREATE TABLE ${SCHEMA}.deals (
       id uuid PRIMARY KEY,
@@ -141,9 +163,47 @@ beforeAll(async () => {
       -- NOT counted in the footer: same missing date, but excluded by the same predicates as the list.
       ('${U("f3")}', 'No Bid Date, Test', 'DFW-1-16', '24-162', '${ESTIMATING}', '${REP_HELMS}', NULL, '2026-09-30', NULL, 100000, true, true, false, false),
 
+      -- VALUE CHAIN discriminators. The CRM's estimating-stage chain is awarded > dd > bid_board > bid;
+      -- the worker's generic open chain is bid_board > bid > dd > awarded. These two rows are the only
+      -- shapes where those disagree, and they are what the emailed figure is checked against.
+      ('${U("d9")}', 'DD Beats Board', 'DFW-1-21', '24-146', '${ESTIMATING}', '${REP_HELMS}', ${d("2026-09-03")}, '2026-12-01', NULL, 50000, true, false, false, false),
+      ('${U("da")}', 'Awarded Beats All', 'DFW-1-22', '24-147', '${ESTIMATING}', '${REP_HELMS}', ${d("2026-09-05")}, '2026-12-01', NULL, 50000, true, false, false, false),
+
       -- REALIZED + FAR OUT: proves the terminal leg of the effective-on-hold predicate. Won in the CRM,
       -- with a horizon date ~200 days out. Without the stage_id terminal guard the far-out leg auto-parks it.
       ('${U("c1")}', 'Won And Far Out', 'DFW-1-17', '24-170', '${WON}', '${REP_HELMS}', ${d("2027-03-15")}, '2027-03-15', NULL, 100000, true, false, false, false);
+
+    UPDATE ${SCHEMA}.deals SET dd_estimate = 900000, bid_board_total_sales = 100000
+      WHERE name = 'DD Beats Board';
+    UPDATE ${SCHEMA}.deals SET awarded_amount = 700000, dd_estimate = 900000, bid_board_total_sales = 100000
+      WHERE name = 'Awarded Beats All';
+
+    -- RECIPIENTS AND OFFICE ACCESS, seeded once at file level so no suite depends on another suite's hook
+    -- having run first. An earlier draft split these across two describes and the second one's tables did
+    -- not exist yet — vitest reported that as 5 SKIPPED tests rather than failures, which is exactly the
+    -- silent no-op these tests exist to rule out.
+    INSERT INTO public.offices (id, slug) VALUES
+      ('${U("f01")}', 'dfw'),
+      ('${U("f02")}', 'atl');
+
+    UPDATE public.users SET office_id = '${U("f01")}' WHERE email = 'sidney@trockgc.com';
+    INSERT INTO public.users (id, display_name, email, is_active, office_id) VALUES
+      ('${U("b3")}', 'Departed Person', 'departed@trockgc.com', false, '${U("f01")}'),
+      ('${U("b4")}', 'No Address', NULL, true, '${U("f01")}'),
+      ('${U("f11")}', 'Cross Office', 'cross@trockgc.com', true, '${U("f01")}'),
+      ('${U("f12")}', 'Atlanta Only', 'atl@trockgc.com', true, '${U("f02")}');
+    -- Cross Office is DFW-primary AND explicitly granted ATL: the two halves of the access rule.
+    INSERT INTO public.user_office_access (user_id, office_id) VALUES ('${U("f11")}', '${U("f02")}');
+
+    INSERT INTO public.notification_recipient_groups (id, key) VALUES
+      ('${U("ca1")}', 'bid_due_date_report'),
+      ('${U("ca2")}', 'empty_group');
+    INSERT INTO public.notification_recipient_assignments (group_id, user_id) VALUES
+      ('${U("ca1")}', '${REP_GIBSON}'),
+      ('${U("ca1")}', '${U("b3")}'),
+      ('${U("ca1")}', '${U("b4")}'),
+      ('${U("ca1")}', '${U("f11")}'),
+      ('${U("ca1")}', '${U("f12")}');
   `);
   query = (sql: string, params?: unknown[]) => pg.query(sql, params as never[]);
 }, 30_000);
@@ -249,8 +309,16 @@ describe("findBidDueDateReportRows — the date", () => {
     }
   });
 
-  it("carries the deal value from the worker's open-value chain", async () => {
+  it("carries the deal value from the CRM's ESTIMATING-STAGE chain, not the generic open chain", async () => {
+    // The email is a drill-down with a longer wire, and its CTA lands on the estimating stage page — which
+    // resolves value awarded > dd > bid_board > bid. The worker's generic open chain
+    // (workerCurrentDealValueSql) is bid_board-FIRST, so a deal carrying both a DD estimate and a Bid Board
+    // total would be emailed $100,000 and then display $900,000 one click later. A figure and its
+    // drill-down move together.
     const rows = await reportRows();
+    expect(rows.find((row) => row.name === "DD Beats Board")?.value).toBe(900000);
+    expect(rows.find((row) => row.name === "Awarded Beats All")?.value).toBe(700000);
+    // Unchanged for the ordinary shape, where only one candidate is populated.
     expect(rows.find((row) => row.name === "Riverside Medical")?.value).toBe(1200000);
   });
 });
@@ -270,7 +338,9 @@ describe("sectionBidDueDateReportRows", () => {
     // Sep 2 (TODAY+7, the first day that is not this week), Sep 4, Sep 10
     expect(names(sections[2].rows)).toEqual([
       "Just After Week",
+      "DD Beats Board",
       "Cedar Park Retail",
+      "Awarded Beats All",
       "Mirrored Bidding",
     ]);
   });
@@ -333,48 +403,64 @@ describe("countEstimatingDealsMissingBidDueDate", () => {
   });
 });
 
+describe("resolveGroupRecipients — OFFICE SCOPING (authorization, not preference)", () => {
+  // This repo grants a user access to an office through their PRIMARY office (`users.office_id`) or an
+  // explicit `user_office_access` grant — the rule getOfficeAccess() implements, and the one a background
+  // job is expected to re-apply (that module's own header says so). The recipient groups are keyed UNIQUE
+  // in `public`, so they are GLOBAL: without this filter, a person configured for one office receives
+  // another office's estimating pipeline — deal names, numbers and dollar values — by email, for deals the
+  // CRM would not let them open. Latent at one office, and what makes it fire is somebody adding a second.
+  it("includes a user whose PRIMARY office is the one being reported on", async () => {
+    const dfw = await resolveGroupRecipients(query, "bid_due_date_report", U("f01"));
+    expect(dfw).toContain("sidney@trockgc.com");
+  });
+
+  it("includes a user holding an explicit user_office_access GRANT for that office", async () => {
+    const atl = await resolveGroupRecipients(query, "bid_due_date_report", U("f02"));
+    expect(atl).toContain("cross@trockgc.com");
+  });
+
+  it("EXCLUDES a recipient with no access to the office being reported on", async () => {
+    // The leak, stated directly: Atlanta Only must never receive the DFW pipeline, and Sidney (DFW
+    // primary, no ATL grant) must never receive Atlanta's.
+    const dfw = await resolveGroupRecipients(query, "bid_due_date_report", U("f01"));
+    expect(dfw).not.toContain("atl@trockgc.com");
+    const atl = await resolveGroupRecipients(query, "bid_due_date_report", U("f02"));
+    expect(atl).not.toContain("sidney@trockgc.com");
+  });
+
+  it("still applies is_active on top of the office filter", async () => {
+    const dfw = await resolveGroupRecipients(query, "bid_due_date_report", U("f01"));
+    expect(dfw).not.toContain("departed@trockgc.com");
+  });
+
+  it("returns [] when the group has members but NONE can see this office", async () => {
+    // Must be a loud failure at the caller, not a silent skip — an office nobody is configured for is a
+    // report that reaches nobody, which is the C1 case one level down.
+    const other = await resolveGroupRecipients(query, "empty_group", U("f01"));
+    expect(other).toEqual([]);
+  });
+});
+
 describe("resolveGroupRecipients, executed", () => {
   // The worker resolves recipients in raw SQL because the server's getNotificationRecipients takes a
   // drizzle TenantDb a cron does not have. These assertions are the ones that make the C1 throw meaningful:
   // if this query did not filter is_active, a deactivated recipient would keep receiving mail and the
   // "resolves to nobody" case would never arise to be thrown on.
-  beforeAll(async () => {
-    await pg.exec(`
-      CREATE TABLE public.notification_recipient_groups (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        key text NOT NULL UNIQUE
-      );
-      CREATE TABLE public.notification_recipient_assignments (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        group_id uuid NOT NULL REFERENCES public.notification_recipient_groups(id) ON DELETE CASCADE,
-        user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-        UNIQUE (group_id, user_id)
-      );
-      INSERT INTO public.users (id, display_name, email, is_active) VALUES
-        ('${U("b3")}', 'Departed Person', 'departed@trockgc.com', false),
-        ('${U("b4")}', 'No Address', NULL, true);
-      INSERT INTO public.notification_recipient_groups (id, key) VALUES
-        ('${U("ca1")}', 'bid_due_date_report'),
-        ('${U("ca2")}', 'empty_group');
-      INSERT INTO public.notification_recipient_assignments (group_id, user_id) VALUES
-        ('${U("ca1")}', '${REP_GIBSON}'),
-        ('${U("ca1")}', '${U("b3")}'),
-        ('${U("ca1")}', '${U("b4")}');
-    `);
-  });
-
   it("returns only ACTIVE users who have an address", async () => {
-    expect(await resolveGroupRecipients(query, "bid_due_date_report")).toEqual([
+    // Departed Person is inactive and No Address has none; both are assigned and both are dropped.
+    expect(await resolveGroupRecipients(query, "bid_due_date_report", U("f01"))).toEqual([
+      "cross@trockgc.com",
       "sidney@trockgc.com",
     ]);
   });
 
   it("returns [] for a group with no assignments — the case the caller must treat as fatal", async () => {
-    expect(await resolveGroupRecipients(query, "empty_group")).toEqual([]);
+    expect(await resolveGroupRecipients(query, "empty_group", U("f01"))).toEqual([]);
   });
 
   it("returns [] for a key with no group row at all", async () => {
-    expect(await resolveGroupRecipients(query, "no_such_group")).toEqual([]);
+    expect(await resolveGroupRecipients(query, "no_such_group", U("f01"))).toEqual([]);
   });
 });
 

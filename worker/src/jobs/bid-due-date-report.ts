@@ -7,11 +7,11 @@ import { escapeHtml, isSafeTenantSchema, normalizeText } from "../lib/email-form
 import { acquirePgAdvisoryLock } from "../lib/advisory-lock.js";
 import { renderBrandedEmail, resolveFrontendUrl } from "../lib/branded-email.js";
 import {
+  aliasedDealEstimatingValueSqlText,
   bidBoardTerminalSqlPredicate,
   effectiveOnHoldConditionSqlPredicate,
   genuineEstimatingStageSqlPredicate,
 } from "@trock-crm/shared/types";
-import { workerCurrentDealValueSql } from "./deal-value-sql.js";
 
 /**
  * THE WEDNESDAY BID-DUE-DATE REPORT.
@@ -256,6 +256,13 @@ export async function findBidDueDateReportRows(
   const horizon = input.horizonDays ?? BID_DUE_REPORT_HORIZON_DAYS;
   const lookback = input.overdueLookbackDays ?? BID_DUE_REPORT_OVERDUE_LOOKBACK_DAYS;
 
+  // THE VALUE CHAIN IS THE ESTIMATING-STAGE ONE (awarded > dd > bid_board > bid), matching the page this
+  // email's CTA lands on. NOT `workerCurrentDealValueSql`, the worker's generic open chain, which is
+  // bid_board-FIRST: a deal carrying both a DD estimate and a Bid Board total would be emailed one number
+  // and display another the moment the reader clicked through. A figure and its drill-down move together,
+  // and an email is a drill-down with a longer wire. The digest and the rep rollup keep the generic chain —
+  // their surfaces are not this one — which is why the two still exist side by side.
+  //
   // `assigned_rep_id`, NOT `estimator_user_id`. They are different fields with different semantics, and
   // migration 0222's own header is why: of Colby Burling's 221 estimator rows, 167 are his OWN deals, so
   // that column identifies "who touched the estimate", not "who owns the bid". This report answers "who do
@@ -271,7 +278,7 @@ export async function findBidDueDateReportRows(
             d.deal_number AS deal_number,
             d.project_number AS project_number,
             to_char(${BID_DUE_ON_SQL}, 'YYYY-MM-DD') AS bid_due_on,
-            (${workerCurrentDealValueSql("d")})::numeric AS value,
+            (${aliasedDealEstimatingValueSqlText("d")})::numeric AS value,
             u.display_name AS rep_name
        ${reportFromSql(schema)}
        LEFT JOIN public.users u ON u.id = d.assigned_rep_id
@@ -367,15 +374,34 @@ export function sectionBidDueDateReportRows(
 // ---------------------------------------------------------------------------------------------------
 
 /**
- * Who a notification group's mail goes to, resolved in RAW SQL.
+ * Who a notification group's mail goes to FOR ONE OFFICE, resolved in RAW SQL.
  *
- * The server's `getNotificationRecipients` takes a drizzle `TenantDb`, which a worker cron does not have —
- * but the tables are `public` (users are global, so their groups are too), so the read is the same three
- * joins against the same rows. `is_active` is enforced here for the same reason it is there: a deactivated
- * person is not a recipient, and a group that resolves entirely to deactivated people is EMPTY, which is
- * the case the caller has to notice.
+ * `officeId` IS REQUIRED, and that is the whole point of this signature.
+ *
+ * The groups are keyed UNIQUE in `public`, so an assignment is GLOBAL — it says "this person receives this
+ * notification", not "…for this office". Sending an office's report to that unfiltered list mails one
+ * office's estimating pipeline — deal names, project numbers and dollar values — to people who cannot open
+ * a single one of those deals in the CRM. That is an authorization leak, not a preference: access here is
+ * granted by a user's PRIMARY office or an explicit `user_office_access` row, and neither was being
+ * consulted. It is latent at one office and the thing that fires it is somebody adding a second, which
+ * nobody will connect to this job.
+ *
+ * The predicate is the SQL twin of `getOfficeAccess` (server/src/modules/auth/office-access.ts) and applies
+ * BOTH of its legs, because the helper applies both: the primary office passes on its own, any other office
+ * needs a grant. Copying only the grant leg would drop every ordinary single-office user; copying only the
+ * primary leg would drop exactly the cross-office people the grants exist for. That module's own header
+ * says the rule is needed by background work as well as by request middleware — this is that background
+ * work, reaching it the only way a worker can, since importing it would pull `server/src` into `worker/`.
+ *
+ * `is_active` is enforced for the same reason it is server-side: a deactivated person is not a recipient,
+ * and a group that resolves entirely to deactivated (or unauthorized) people is EMPTY — which the caller
+ * must treat as a hard failure, never a quiet skip.
  */
-export async function resolveGroupRecipients(query: PgQuery, key: string): Promise<string[]> {
+export async function resolveGroupRecipients(
+  query: PgQuery,
+  key: string,
+  officeId: string | null
+): Promise<string[]> {
   const result = await query(
     `SELECT u.email AS email
        FROM public.notification_recipient_groups g
@@ -383,8 +409,15 @@ export async function resolveGroupRecipients(query: PgQuery, key: string): Promi
        JOIN public.users u ON u.id = a.user_id
       WHERE g.key = $1
         AND u.is_active = true
+        AND (
+          u.office_id = $2::uuid
+          OR EXISTS (
+            SELECT 1 FROM public.user_office_access uoa
+             WHERE uoa.user_id = u.id AND uoa.office_id = $2::uuid
+          )
+        )
       ORDER BY lower(u.email)`,
-    [key]
+    [key, officeId]
   );
   // The blank/NULL address filter is HERE and not in the WHERE above, deliberately: normalizeText has to
   // run anyway to type the value, so a SQL guard beside it would be a predicate that cannot change a
@@ -413,8 +446,8 @@ function formatShortDate(isoDate: string): string {
   return `${MONTHS[Number(month) - 1]} ${Number(day)}`;
 }
 
-function formatRelativeDays(bidDueOn: string, weekOf: string): string {
-  const delta = daysBetween(weekOf, bidDueOn);
+function formatRelativeDays(bidDueOn: string, deliveryDate: string): string {
+  const delta = daysBetween(deliveryDate, bidDueOn);
   if (delta === 0) return "today";
   if (delta === 1) return "tomorrow";
   if (delta === -1) return "yesterday";
@@ -434,10 +467,10 @@ function formatRepName(repName: string | null): string {
   return `${parts[0]![0]}. ${parts.slice(1).join(" ")}`;
 }
 
-function rowCells(row: BidDueDateReportRow, weekOf: string): string[] {
+function rowCells(row: BidDueDateReportRow, deliveryDate: string): string[] {
   return [
     formatShortDate(row.bidDueOn),
-    formatRelativeDays(row.bidDueOn, weekOf),
+    formatRelativeDays(row.bidDueOn, deliveryDate),
     row.name,
     row.projectNumber ?? row.dealNumber ?? "—",
     formatMoney(row.value),
@@ -450,10 +483,10 @@ function rowCells(row: BidDueDateReportRow, weekOf: string): string[] {
  * table and is the wrong primitive for a ranked list. Same typography, same rule colour, so the two still
  * read as one product.
  */
-function renderSectionHtml(section: BidDueDateReportSection, weekOf: string): string {
+function renderSectionHtml(section: BidDueDateReportSection, deliveryDate: string): string {
   const rows = section.rows
     .map((row) => {
-      const cells = rowCells(row, weekOf);
+      const cells = rowCells(row, deliveryDate);
       const [date, relative, name, number, value, rep] = cells;
       return `
                 <tr>
@@ -474,12 +507,23 @@ function renderSectionHtml(section: BidDueDateReportSection, weekOf: string): st
 
 export interface BidDueDateReportEmailInput {
   /**
-   * The Wednesday this report is for, and the ONLY date it is rendered against. There used to be a second
-   * `todayCt` field beside this one, which is exactly how the catch-up tick came to render a body computed
-   * from Thursday under a subject and a receipt keyed to Wednesday. Two anchors in one email is not a bug
-   * you fix once; it is a shape that keeps producing the bug, so the shape is gone.
+   * THE CONTENT ANCHOR — the Wednesday this report is FOR. Decides the SQL window, the sectioning, the
+   * subject and the receipt key, so the Thursday catch-up contains exactly what the run it replaces would
+   * have contained.
    */
   weekOf: string;
+  /**
+   * THE READING ANCHOR — the CT day this email is actually delivered on. Decides ONLY the
+   * "today / tomorrow / in N days" prose beside each row.
+   *
+   * A SECOND anchor, deliberately, after a first draft collapsed both into `weekOf`. The two answer
+   * different questions and only coincide on the normal tick: `weekOf` is what the report is ABOUT, and
+   * this is when a human is reading it. Anchoring the prose to `weekOf` told a Thursday reader that a bid
+   * due Wednesday was due "today" — in the one column the report exists to make urgent — while anchoring
+   * the CONTENT here made the catch-up silently disagree with the run it stood in for. Neither field can
+   * do the other's job.
+   */
+  deliveryDate: string;
   sections: readonly BidDueDateReportSection[];
   missingBidDateCount: number;
   ctaUrl: string;
@@ -530,7 +574,7 @@ export function buildBidDueDateReportEmail(input: BidDueDateReportEmailInput) {
   }
 
   const bodyHtml =
-    input.sections.map((section) => renderSectionHtml(section, input.weekOf)).join("") +
+    input.sections.map((section) => renderSectionHtml(section, input.deliveryDate)).join("") +
     footerLines
       .map(
         (line) => `
@@ -550,7 +594,7 @@ export function buildBidDueDateReportEmail(input: BidDueDateReportEmailInput) {
   for (const section of input.sections) {
     textLines.push(`${section.label} (${section.rows.length})`);
     for (const row of section.rows) {
-      textLines.push(`  ${rowCells(row, input.weekOf).join("  ·  ")}`);
+      textLines.push(`  ${rowCells(row, input.deliveryDate).join("  ·  ")}`);
     }
     textLines.push("");
   }
@@ -597,11 +641,22 @@ export async function runBidDueDateReport(
   }
 
   try {
-    // Recipients resolve ONCE, before any office is read. They are global, and an unconfigured group is a
-    // configuration failure rather than an office-specific one — reading it per office would report the
-    // same fault N times and, worse, would let office 1's throw hide offices 2..N entirely.
-    const recipients = await resolveGroupRecipients(query, BID_DUE_REPORT_GROUP_KEY);
-    if (recipients.length === 0) {
+    // A GLOBAL pre-flight: is anybody assigned to the group AT ALL?
+    //
+    // Kept as an early throw even though the authoritative resolution is now per office, because the two
+    // faults are different and an operator fixes them differently. "Nobody is configured" is one message
+    // about one group; "nobody configured can see Atlanta" is a message about Atlanta. Reporting the first
+    // once, before any office is read, beats reporting it N times as N office failures.
+    const anyAssignment = await query(
+      `SELECT 1
+         FROM public.notification_recipient_groups g
+         JOIN public.notification_recipient_assignments a ON a.group_id = g.id
+         JOIN public.users u ON u.id = a.user_id
+        WHERE g.key = $1 AND u.is_active = true
+        LIMIT 1`,
+      [BID_DUE_REPORT_GROUP_KEY]
+    );
+    if (anyAssignment.rows.length === 0) {
       // error + throw, never a warn-and-return. The resolver has no way to say "nobody" out loud: it
       // returns [], the send is rejected by the provider, and the log line reads like a delivery blip. Next
       // Wednesday it happens again. The job retries, then dead-letters, and somebody is told.
@@ -611,17 +666,6 @@ export async function runBidDueDateReport(
         `Notification Recipients page. Not sending.`;
       logger.error(message, { weekOf });
       throw new Error(message);
-    }
-
-    // An empty CC is NOT an error. The `to` list is the report's audience; this one is oversight, and
-    // choosing not to be copied is a choice an admin is allowed to make. Warned so an accidental empty is
-    // still visible in the logs.
-    const ccRecipients = await resolveGroupRecipients(query, BID_DUE_REPORT_CC_GROUP_KEY);
-    if (ccRecipients.length === 0) {
-      logger.warn(
-        `${LOG} The "${BID_DUE_REPORT_CC_GROUP_KEY}" group is empty - sending with no copy`,
-        { weekOf }
-      );
     }
 
     const offices = await query(
@@ -639,17 +683,40 @@ export async function runBidDueDateReport(
         summary.failed += 1;
         continue;
       }
+      const officeId = (office.id as string | null) ?? null;
       try {
+        // RESOLVED PER OFFICE, because a recipient assignment is global and office access is not. See
+        // resolveGroupRecipients.
+        const recipients = await resolveGroupRecipients(query, BID_DUE_REPORT_GROUP_KEY, officeId);
+        if (recipients.length === 0) {
+          // The same loud failure as an empty group, scoped to one office — NOT a silent skip. An office
+          // whose report reaches nobody is the exact fault this job refuses to perform quietly, and the
+          // per-office catch below turns it into one failed office rather than a dead run.
+          throw new Error(
+            `${LOG} No ACTIVE member of "${BID_DUE_REPORT_GROUP_KEY}" has access to office ` +
+              `${tenantSchema}, so its report would reach nobody. Give a recipient this office as their ` +
+              `primary office or a user_office_access grant.`
+          );
+        }
+        const ccRecipients = await resolveGroupRecipients(query, BID_DUE_REPORT_CC_GROUP_KEY, officeId);
+        if (ccRecipients.length === 0) {
+          // Oversight, not audience: an empty cc is a choice an admin may make, so the report still goes.
+          logger.warn(`${LOG} No cc recipient has access to this office - sending with no copy`, {
+            tenantSchema,
+            weekOf,
+          });
+        }
         await sendOfficeReport({
           query,
           sendEmail: deps.sendEmail ?? sendSystemEmailWithMetadata,
           logger,
           summary,
           tenantSchema,
-          officeId: (office.id as string | null) ?? null,
+          officeId,
           recipients,
           ccRecipients,
           weekOf,
+          deliveryDate: todayCt,
           frontendUrl: resolveFrontendUrl(env),
         });
       } catch (err) {
@@ -691,25 +758,38 @@ async function sendOfficeReport(input: {
   recipients: string[];
   ccRecipients: string[];
   weekOf: string;
+  deliveryDate: string;
   frontendUrl: string;
 }): Promise<void> {
   const { query, logger, tenantSchema, weekOf } = input;
 
-  // Exactly-once for the week. Read BEFORE the work, so the Thursday catch-up costs one SELECT.
+  // Exactly-once for the week. Read BEFORE the work, so the Thursday catch-up usually costs one SELECT.
+  //
+  // ANY row here declines the send, stamped or not. An unstamped row is a claim whose outcome we never
+  // learned — the message may already be in the inbox — and re-sending on a maybe is the duplicate this
+  // ledger exists to prevent.
   const receipt = await query(
-    `SELECT resend_message_id, sent_at
+    `SELECT resend_message_id, sent_at, outcome
        FROM public.bid_due_date_report_receipts
       WHERE tenant_schema = $1 AND week_of = $2::date
       LIMIT 1`,
     [tenantSchema, weekOf]
   );
   if (receipt.rows.length > 0) {
+    const confirmed = receipt.rows[0]?.sent_at != null;
     input.summary.skipped += 1;
-    logger.log(`${LOG} Already sent this week - skipping`, {
-      tenantSchema,
-      weekOf,
-      messageId: receipt.rows[0]?.resend_message_id ?? null,
-    });
+    logger.log(
+      confirmed
+        ? `${LOG} Already sent this week - skipping`
+        : `${LOG} A previous attempt this week never confirmed - declining rather than risk a duplicate. ` +
+          `Delete the row to re-arm the week.`,
+      {
+        tenantSchema,
+        weekOf,
+        outcome: receipt.rows[0]?.outcome ?? null,
+        messageId: receipt.rows[0]?.resend_message_id ?? null,
+      }
+    );
     return;
   }
 
@@ -719,10 +799,34 @@ async function sendOfficeReport(input: {
 
   const email = buildBidDueDateReportEmail({
     weekOf,
+    deliveryDate: input.deliveryDate,
     sections,
     missingBidDateCount,
     ctaUrl: await resolveEstimatingCtaUrl(query, input.frontendUrl, input.officeId),
   });
+
+  // CLAIM THE WEEK BEFORE CALLING THE PROVIDER. A row written only after a successful send cannot protect
+  // anything: the ambiguous outcome is exactly the case where that write never happens. ON CONFLICT DO
+  // NOTHING makes the claim the atomic winner even though the advisory lock already serializes runs.
+  const claim = await query(
+    `INSERT INTO public.bid_due_date_report_receipts (
+        tenant_schema, week_of, recipient_emails, deal_count, claimed_at, created_at, updated_at
+      )
+      VALUES ($1, $2::date, $3, $4, NOW(), NOW(), NOW())
+      ON CONFLICT (tenant_schema, week_of) DO NOTHING
+      RETURNING tenant_schema`,
+    [
+      tenantSchema,
+      weekOf,
+      [...input.recipients, ...input.ccRecipients].join(", "),
+      rows.length,
+    ]
+  );
+  if ((claim.rowCount ?? claim.rows.length) === 0) {
+    input.summary.skipped += 1;
+    logger.log(`${LOG} Another run claimed this week first - skipping`, { tenantSchema, weekOf });
+    return;
+  }
 
   const sendResult = await input.sendEmail(input.recipients, email.subject, email.html, {
     text: email.text,
@@ -733,38 +837,44 @@ async function sendOfficeReport(input: {
     ...(input.ccRecipients.length > 0 ? { cc: input.ccRecipients } : {}),
   });
 
-  // BRANCH ON `outcome`, never `success`. resend@6 wraps its whole fetch in a try/catch and returns an
-  // ordinary error result, so a socket hang-up and a malformed address are otherwise identical — and only
-  // one of them is safe to re-send.
+  // BRANCH ON `outcome`, never `success` — and branch on all THREE values, because `rejected` and
+  // `unknown` need opposite handling. Treating them alike (the first draft threw on both and wrote
+  // nothing) means the Thursday catch-up calls the provider again for a message that may already have
+  // been delivered.
+  if (sendResult.outcome === "rejected") {
+    // The provider positively refused and created NOTHING, so a re-send is safe and the week must stay
+    // open. Releasing the claim is what lets the catch-up genuinely retry.
+    await query(
+      `DELETE FROM public.bid_due_date_report_receipts WHERE tenant_schema = $1 AND week_of = $2::date`,
+      [tenantSchema, weekOf]
+    );
+    const message = `${LOG} Send was REJECTED - claim released, the next tick will retry`;
+    logger.error(message, { tenantSchema, weekOf, reason: sendResult.reason ?? null });
+    throw new Error(message);
+  }
+
   if (sendResult.outcome !== "delivered") {
-    const message = `${LOG} Send did not complete (outcome: ${sendResult.outcome}) - no receipt written`;
-    logger.error(message, {
-      tenantSchema,
-      weekOf,
-      outcome: sendResult.outcome,
-      reason: sendResult.reason ?? null,
-    });
+    // `unknown`. The message MAY be in the inbox. The claim stays, unstamped, so the catch-up declines;
+    // the outcome is recorded so an operator can tell "never confirmed" from "never attempted" and delete
+    // the row to re-arm the week if they establish nothing arrived.
+    await query(
+      `UPDATE public.bid_due_date_report_receipts
+          SET outcome = $3, updated_at = NOW()
+        WHERE tenant_schema = $1 AND week_of = $2::date`,
+      [tenantSchema, weekOf, sendResult.outcome]
+    );
+    const message =
+      `${LOG} Send outcome UNKNOWN - the message may have been delivered, so the claim is kept and the ` +
+      `catch-up will NOT re-send. Delete the receipt row to re-arm the week.`;
+    logger.error(message, { tenantSchema, weekOf, reason: sendResult.reason ?? null });
     throw new Error(message);
   }
 
   await query(
-    `INSERT INTO public.bid_due_date_report_receipts (
-        tenant_schema, week_of, recipient_emails, resend_message_id, deal_count, sent_at, updated_at
-      )
-      VALUES ($1, $2::date, $3, $4, $5, NOW(), NOW())
-      ON CONFLICT (tenant_schema, week_of) DO UPDATE
-        SET recipient_emails = EXCLUDED.recipient_emails,
-            resend_message_id = EXCLUDED.resend_message_id,
-            deal_count = EXCLUDED.deal_count,
-            sent_at = EXCLUDED.sent_at,
-            updated_at = NOW()`,
-    [
-      tenantSchema,
-      weekOf,
-      [...input.recipients, ...input.ccRecipients].join(", "),
-      sendResult.messageId,
-      rows.length,
-    ]
+    `UPDATE public.bid_due_date_report_receipts
+        SET sent_at = NOW(), resend_message_id = $3, outcome = 'delivered', updated_at = NOW()
+      WHERE tenant_schema = $1 AND week_of = $2::date`,
+    [tenantSchema, weekOf, sendResult.messageId]
   );
   input.summary.sent += 1;
   logger.log(`${LOG} Sent`, {
