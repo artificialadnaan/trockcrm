@@ -701,6 +701,41 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
     expect(dialog()!.textContent).toContain("Brand new work");
   });
 
+  it("interrupts again when the same task id arrives as a newer assignment version", async () => {
+    // A hand-away-and-back preserves the task id but changes assigned_at. Suppressing only by id would
+    // treat this new handoff as the card already shown before the reassignment and hide it for the rest
+    // of the session.
+    setPendingByOffice({
+      "office-a": {
+        tasks: [
+          repeat({
+            id: "a1",
+            title: "Dallas roof walk",
+            assignmentVersion: "2026-08-25T12:34:56.000001Z",
+          }),
+        ],
+      },
+    });
+    await render(true, { officeId: "office-a" });
+    await click(buttonLabelled("Close"));
+
+    setPendingByOffice({
+      "office-a": {
+        tasks: [
+          task({
+            id: "a1",
+            title: "Dallas roof walk — reassigned back to you",
+            assignmentVersion: "2026-08-25T12:34:56.000002Z",
+          }),
+        ],
+      },
+    });
+    await reload();
+
+    expect(dialog(), "the newer handoff inherited suppression from its old assignment").not.toBeNull();
+    expect(dialog()!.textContent).toContain("reassigned back to you");
+  });
+
   // ⚠️ THE CROWDED-OUT RULE, AGAIN — now for the thing that PERSISTS.
   //
   // The server sends five rows and a total. A sixth eligible task never crossed the wire, so nobody

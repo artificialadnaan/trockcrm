@@ -168,12 +168,12 @@ export const MAX_FETCH_ATTEMPTS = 2;
  * login. localStorage would be wrong in the other direction: it would outlive the browser and the
  * repeat would never fire again on that machine.
  *
- * ── WHY TASK IDS AND NOT OFFICES ───────────────────────────────────────────────────────────────────
+ * ── WHY ASSIGNMENT VERSIONS, NOT JUST TASK IDS ──────────────────────────────────────────────────────
  * Suppressing a whole office would also suppress work assigned AFTER the modal was shown, which is the
- * one thing this feature exists to deliver. Remembering the individual assignments already put on
- * screen suppresses only the repeat, and a genuinely new assignment still opens the dialog on the next
- * load. Keyed per office as well, so the record stays meaningful without assuming task ids never repeat
- * across tenant schemas.
+ * one thing this feature exists to deliver. Remembering the individual assignment VERSION already put
+ * on screen suppresses only that handoff: a task that leaves someone and comes back has the same id but
+ * a new assigned_at version, so it must interrupt again. Keyed per office too, so the record stays
+ * meaningful without assuming task ids never repeat across tenant schemas.
  */
 /** Scoped to the person. The session-invalidation path bounces to /login WITHOUT clearing storage, so
  *  a second user signing in on the same tab must not inherit the first one's suppressions. */
@@ -181,8 +181,8 @@ function shownStorageKey(userId: string) {
   return taskAssignmentModalShownStorageKey(userId);
 }
 
-function shownTaskKey(officeId: string, taskId: string) {
-  return `${officeId}:${taskId}`;
+function shownTaskKey(officeId: string, taskId: string, assignmentVersion: string) {
+  return `${officeId}:${taskId}:${assignmentVersion}`;
 }
 
 /**
@@ -392,7 +392,10 @@ export function TaskAssignmentModal() {
         // made entirely of repeats they closed earlier — the ordinary case after a reload — opens
         // nothing; one carrying a newly assigned task still does.
         const unshown = result.tasks.filter(
-          (candidate) => !shownTasksRef.current.keys.has(shownTaskKey(office, candidate.id))
+          (candidate) =>
+            !shownTasksRef.current.keys.has(
+              shownTaskKey(office, candidate.id, candidate.assignmentVersion)
+            )
         );
         const opening = unshown.length > 0;
 
@@ -406,7 +409,9 @@ export function TaskAssignmentModal() {
         // crossed the wire was never shown either, and must stay able to open this dialog later.
         if (opening && shownTasksRef.current.userId) {
           for (const rendered of result.tasks) {
-            shownTasksRef.current.keys.add(shownTaskKey(office, rendered.id));
+            shownTasksRef.current.keys.add(
+              shownTaskKey(office, rendered.id, rendered.assignmentVersion)
+            );
           }
           persistShownTasks(shownTasksRef.current.userId, shownTasksRef.current.keys);
         }

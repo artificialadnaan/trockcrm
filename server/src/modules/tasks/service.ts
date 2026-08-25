@@ -1137,8 +1137,14 @@ export async function updateTask(
       WHEN ${tasks.assignedTo} IS DISTINCT FROM ${input.assignedTo} THEN ${userId}
       ELSE ${tasks.lastAssignedBy}
     END`;
+    // `NOW()` is the TRANSACTION-start timestamp in PostgreSQL: a request that sat open while another
+    // assignment was acknowledged could stamp this new handoff before that acknowledgement and silently
+    // make it look seen. clock_timestamp() is volatile and evaluates at the actual row change instead.
+    // A title edit still omits assignedAt entirely — re-stamping on every PATCH would make the login
+    // modal repeat forever. Migration 0239 explains why an acknowledgement must answer this specific
+    // assignment, rather than an earlier time the task belonged to the same person.
     updates.assignedAt = sql`CASE
-      WHEN ${tasks.assignedTo} IS DISTINCT FROM ${input.assignedTo} THEN NOW()
+      WHEN ${tasks.assignedTo} IS DISTINCT FROM ${input.assignedTo} THEN clock_timestamp()
       ELSE ${tasks.assignedAt}
     END`;
   }
@@ -1437,6 +1443,10 @@ export async function acknowledgeTaskAssignments(
     const key = `${normalizedTaskId}:${assignmentVersion}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    // The UI can render at most this many cards. Enforce the same boundary at the trust edge after
+    // deduplication: a crafted POST must not turn one acknowledgement into an unbounded OR predicate
+    // (or an unbounded set of row locks) merely because the browser itself sends a capped page.
+    if (candidates.length >= PENDING_ASSIGNMENT_MODAL_LIMIT) break;
     candidates.push({ taskId: normalizedTaskId, assignmentVersion });
   }
   if (candidates.length === 0) return 0;

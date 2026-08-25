@@ -475,6 +475,44 @@ describe("an acknowledgement answers ONE assignment, not a task forever", () => 
     expect(result.tasks[0]?.isNew).toBe(true);
   });
 
+  it("stamps a handoff at its actual row-change time, not the start of a long transaction", async () => {
+    const taskId = uid("1");
+    await seed([{ id: taskId, assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+
+    // PGlite has one connection, so this represents the concurrent history with a deliberately open
+    // transaction: an acknowledgement timestamp lands after BEGIN but before this request finally
+    // changes hands. PostgreSQL NOW() stays fixed at BEGIN; clock_timestamp() advances at the UPDATE.
+    await pg.exec("BEGIN");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await pg.query(
+        `INSERT INTO public.task_assignment_acknowledgements (task_id, user_id, acknowledged_at)
+         VALUES ($1::uuid, $2::uuid, clock_timestamp())`,
+        [taskId, BOB]
+      );
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      await updateTask(tdb, taskId, { assignedTo: BOB }, "admin", CARLA);
+
+      const timing = await pg.query<{ assignment_is_newer: boolean }>(
+        `SELECT t.assigned_at > a.acknowledged_at AS assignment_is_newer
+           FROM public.tasks t
+           JOIN public.task_assignment_acknowledgements a
+             ON a.task_id = t.id AND a.user_id = $2::uuid
+          WHERE t.id = $1::uuid`,
+        [taskId, BOB]
+      );
+      expect(timing.rows[0]?.assignment_is_newer).toBe(true);
+      // The old acknowledgement answers a prior Bob assignment, not this new handoff.
+      expect((await getPendingAssignmentTasks(tdb, BOB)).tasks.map((task) => task.id)).toEqual([taskId]);
+
+      await pg.exec("COMMIT");
+    } catch (error) {
+      await pg.exec("ROLLBACK");
+      throw error;
+    }
+  });
+
   it("does not re-stamp on an edit that leaves the assignee alone", async () => {
     await seed([{ id: uid("1"), assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
     await acknowledgeTaskAssignments(tdb, ALICE, [uid("1")]);
@@ -807,6 +845,22 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
     expect(acknowledged).toBe(1);
     expect(await ackRowCount(uid("1"), ALICE)).toBe(1);
     expect(await ackRowCount(uid("2"), ALICE)).toBe(0);
+  });
+
+  it("caps a syntactically valid crafted acknowledgement batch at the five-card modal page", async () => {
+    const ids = Array.from({ length: PENDING_ASSIGNMENT_MODAL_LIMIT + 1 }, (_, index) => uid(String(index + 1)));
+    await seed(ids.map((id) => ({ id, priority: "normal" as const })));
+    const craftedPayload = await acknowledgementPayload(ids);
+
+    // The real UI cannot emit this sixth row because its GET is capped. The endpoint still has to
+    // enforce that boundary before it expands candidates into its SQL OR predicate and row locks.
+    const acknowledged = await acknowledgeTaskAssignmentsService(tdb, ALICE, craftedPayload);
+
+    expect(acknowledged).toBe(PENDING_ASSIGNMENT_MODAL_LIMIT);
+    for (const id of ids.slice(0, PENDING_ASSIGNMENT_MODAL_LIMIT)) {
+      expect(await ackRowCount(id, ALICE), id).toBe(1);
+    }
+    expect(await ackRowCount(ids[PENDING_ASSIGNMENT_MODAL_LIMIT]!, ALICE)).toBe(0);
   });
 
   it("is a no-op on a duplicate acknowledge, not an error (StrictMode double-invoke, retries)", async () => {
