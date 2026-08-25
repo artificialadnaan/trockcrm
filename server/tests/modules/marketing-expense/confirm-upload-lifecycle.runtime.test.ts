@@ -22,7 +22,12 @@ import {
   marketingExpenseRequests,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
-import { confirmUpload, requestUploadUrl } from "../../../src/modules/files/service.js";
+import {
+  confirmUpload,
+  getPendingUploadMetadata,
+  requestUploadUrl,
+  uploadNewVersion,
+} from "../../../src/modules/files/service.js";
 import {
   createMarketingExpenseRequest,
   submitMarketingExpenseRequest,
@@ -167,6 +172,30 @@ describe("confirmUpload re-asserts the expense-request lifecycle", () => {
     const token = await grantFor(request.id);
     const result = await confirmUpload(tenantDb, SUBMITTER, { uploadToken: token });
     expect(result.file.marketingExpenseRequestId).toBe(request.id);
+  });
+
+  it("preserves request ownership when a draft attachment is replaced with a new version", async () => {
+    // The caller cannot name the request in a version-upload body. The parent is the authoritative owner;
+    // dropping that association makes request-only attachments fail validateAssociations before they can be
+    // corrected, while accepting caller input would let a version escape to another request.
+    const request = await draft();
+    const original = await confirmUpload(tenantDb, SUBMITTER, {
+      uploadToken: await grantFor(request.id),
+    });
+
+    const replacement = await uploadNewVersion(tenantDb, "dallas", SUBMITTER, original.file.id, {
+      originalFilename: "revised-quote.pdf",
+      mimeType: "application/pdf",
+      fileSizeBytes: 4096,
+      category: "proposal",
+    });
+    expect(getPendingUploadMetadata(replacement.uploadToken)?.marketingExpenseRequestId).toBe(request.id);
+
+    const confirmed = await confirmUpload(tenantDb, SUBMITTER, {
+      uploadToken: replacement.uploadToken,
+    });
+    expect(confirmed.file.marketingExpenseRequestId).toBe(request.id);
+    expect(confirmed.file.parentFileId).toBe(original.file.id);
   });
 
   it("REFUSES a grant confirmed after the request was submitted", async () => {

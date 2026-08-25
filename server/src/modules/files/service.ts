@@ -1100,6 +1100,10 @@ export async function uploadNewVersion(
     contactId: input.contactId ?? parentFile.contactId ?? undefined,
     procoreProjectId: input.procoreProjectId ?? parentFile.procoreProjectId ?? undefined,
     changeOrderId: input.changeOrderId ?? parentFile.changeOrderId ?? undefined,
+    // A version is the same supporting document, not a new upload with a caller-selectable owner. Without
+    // this the request-only parent loses its sole association, `validateAssociations` rejects the version,
+    // and draft evidence cannot be corrected before submission.
+    marketingExpenseRequestId: parentFile.marketingExpenseRequestId ?? undefined,
     category: input.category ?? parentFile.category,
     subcategory: input.subcategory ?? parentFile.subcategory ?? undefined,
     tags: input.tags ?? Array.from(parentFile.tags),

@@ -6,6 +6,7 @@ import {
   jobQueue,
   marketingExpenseRequestApprovals,
   marketingExpenseRequests,
+  userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
 import * as schema from "@trock-crm/shared/schema";
@@ -63,6 +64,7 @@ const MAX_REQUEST_NUMBER = 10 ** REQUEST_NUMBER_DIGITS - 1;
  * progress. Unbounded would turn a genuinely exhausted range into a spin.
  */
 const REQUEST_NUMBER_ATTEMPTS = 3;
+const MINIMUM_DENIAL_REASON_LENGTH = 10;
 
 const COST_COLUMNS = [
   ["costAdvertising", "cost_advertising"],
@@ -357,7 +359,7 @@ export async function submitMarketingExpenseRequest(
   // the feature is that somebody is asked to approve, and the submitter's own confirmation would otherwise
   // arrive as evidence that something happened when nothing did. Throwing here rolls the transaction back,
   // so the row stays a draft and the submit is retryable the moment an admin fixes the group.
-  const approverEmails = await resolveApproverEmails(tenantDb);
+  const approverEmails = await resolveApproverEmails(tenantDb, officeId);
   const submitterEmail = await resolveUserEmail(tenantDb, userId);
 
   const now = new Date();
@@ -428,6 +430,16 @@ export async function decideMarketingExpenseRequest(
   const reason = optionalText(args.reason);
   if (decision === "denied" && !reason) {
     throw new AppError(400, "A reason is required when denying a request.");
+  }
+  if (
+    decision === "denied" &&
+    reason !== null &&
+    reason.length < MINIMUM_DENIAL_REASON_LENGTH
+  ) {
+    throw new AppError(
+      400,
+      `A denial reason must be at least ${MINIMUM_DENIAL_REASON_LENGTH} characters.`,
+    );
   }
 
   const request = await lockRow(tenantDb, requestId);
@@ -948,30 +960,70 @@ function toIso(value: Date | string | null | undefined): string | null {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
-async function resolveApproverEmails(tenantDb: TenantDb): Promise<string[]> {
+async function resolveApproverEmails(tenantDb: TenantDb, officeId: string | null): Promise<string[]> {
   const definition = notificationRecipientGroupByKey(MARKETING_EXPENSE_APPROVER_GROUP_KEY);
   const recipients = await getNotificationRecipients(tenantDb, MARKETING_EXPENSE_APPROVER_GROUP_KEY, {
     fallbackToAdminsAndDirectors: definition?.fallbackToAdminsAndDirectors ?? false,
   });
-  // Only recipients who can actually DECIDE.
+  // Only recipients who can actually DECIDE in the office the request was submitted from.
   //
   // The Notification Recipients page lets an admin assign any active user to any group, but the queue and
-  // the decide endpoint are role-gated. A rep assigned as the marketing approver would receive the mail,
-  // follow the link and be refused — while the submitter was told it went through and the request sat
-  // pending with nobody able to act. Mailing someone an approval request they cannot action is worse than
-  // not mailing them, because it looks handled.
+  // the decide endpoint are role-gated in the SELECTED office. The group assignments are global: an
+  // assigned director from another office cannot enter this tenant at all, while a director whose grant
+  // overrides them to rep can enter but is still refused by `requireDirector`. Mirror authMiddleware's
+  // exact home-office/grant/effective-role calculation before declaring a recipient actionable.
   //
   // Filtering here rather than authorizing group membership keeps ONE source of truth for who may approve
   // (`isApprover`) — see this module's note on why approver-group authorization is not a thing this
-  // codebase has.
+  // codebase has. Direct service callers can omit an office; HTTP tenant routes cannot, and retain the
+  // historical base-role behaviour for that test-only/no-scope case.
+  const recipientIds = [...new Set(recipients.map((recipient) => recipient.userId))];
+  const actionableRecipientIds = new Set<string>();
+  if (officeId && recipientIds.length > 0) {
+    const candidates = await tenantDb
+      .select({
+        userId: users.id,
+        primaryOfficeId: users.officeId,
+        baseRole: users.role,
+        grantOfficeId: userOfficeAccess.officeId,
+        grantRoleOverride: userOfficeAccess.roleOverride,
+      })
+      .from(users)
+      .leftJoin(
+        userOfficeAccess,
+        and(
+          eq(userOfficeAccess.userId, users.id),
+          eq(userOfficeAccess.officeId, officeId),
+        ),
+      )
+      .where(and(inArray(users.id, recipientIds), eq(users.isActive, true)));
+
+    for (const candidate of candidates) {
+      const isHomeOffice = candidate.primaryOfficeId === officeId;
+      if (!isHomeOffice && candidate.grantOfficeId == null) continue;
+      const effectiveRole = isHomeOffice
+        ? candidate.baseRole
+        : (candidate.grantRoleOverride ?? candidate.baseRole);
+      if (isApprover({ id: candidate.userId, role: effectiveRole })) {
+        actionableRecipientIds.add(candidate.userId);
+      }
+    }
+  } else {
+    for (const recipient of recipients) {
+      if (isApprover({ id: recipient.userId, role: recipient.role })) {
+        actionableRecipientIds.add(recipient.userId);
+      }
+    }
+  }
+
   const emails = recipients
-    .filter((recipient) => isApprover({ id: recipient.userId, role: recipient.role }))
+    .filter((recipient) => actionableRecipientIds.has(recipient.userId))
     .map((recipient) => recipient.email?.trim())
     .filter((email): email is string => Boolean(email));
   if (emails.length === 0) {
     throw new AppError(
       409,
-      "No marketing expense approver who can act on this request is configured. An admin needs to assign an admin or director under Admin → Notification Recipients before requests can be submitted.",
+      "No marketing expense approver who can act on this request is configured. An admin needs to assign an active admin or director who has access to this office (with an effective admin or director role) under Admin → Notification Recipients before requests can be submitted.",
     );
   }
   return emails;

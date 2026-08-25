@@ -480,9 +480,14 @@ router.post("/:id/new-version", async (req, res, next) => {
       throw new AppError(400, "originalFilename, mimeType, and fileSizeBytes are required.");
     }
 
-    // Fix 7: RBAC — load parent file and check deal access
+    // Fix 7: RBAC — load parent file and check its owning record's write access.
     const parentFile = await getFileById(req.tenantDb!, req.params.id);
     if (!parentFile) throw new AppError(404, "File not found");
+    // Runs before the ordinary deal/lead ladder. Request attachments are submitter-only and draft-only;
+    // an approver may be allowed to inspect one, but must never mint a replacement version.
+    if (parentFile.marketingExpenseRequestId) {
+      await assertMarketingExpenseFileAccess(req, parentFile.marketingExpenseRequestId);
+    }
     if (parentFile.dealId) {
       await assertDealFileAccess(req, parentFile.dealId);
     }

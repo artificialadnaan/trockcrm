@@ -64,6 +64,16 @@ const getFileById = vi.fn(async () => ATTACHMENT);
 const getFileByIdIncludingDeleted = vi.fn(async () => ATTACHMENT);
 const getFileVersions = vi.fn(async () => []);
 const getFileDownloadUrl = vi.fn(async () => ({ url: "https://r2.example/get", expiresIn: 900 }));
+const uploadNewVersion = vi.fn(async () => ({
+  uploadUrl: "https://r2.example/put",
+  r2Key: "office_dallas/marketing-expense-requests/req-1/proposals/revised-quote.pdf",
+  expiresIn: 900,
+  systemFilename: "revised-quote.pdf",
+  displayName: "revised-quote",
+  folderPath: "Proposals",
+  version: 2,
+  parentFileId: "file-1",
+}));
 
 vi.mock("../../../src/modules/files/service.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../src/modules/files/service.js")>();
@@ -73,6 +83,7 @@ vi.mock("../../../src/modules/files/service.js", async (importOriginal) => {
     getFileByIdIncludingDeleted,
     getFileVersions,
     getFileDownloadUrl,
+    uploadNewVersion,
     shouldServeExternalFileUrl: () => false,
     updateFile: vi.fn(async () => ATTACHMENT),
     updateFileAddress: vi.fn(async () => ATTACHMENT),
@@ -95,6 +106,17 @@ beforeEach(() => {
   // not-called assertion below is answering a question about a different request.
   getFileDownloadUrl.mockClear();
   getFileById.mockClear();
+  uploadNewVersion.mockClear();
+  uploadNewVersion.mockResolvedValue({
+    uploadUrl: "https://r2.example/put",
+    r2Key: "office_dallas/marketing-expense-requests/req-1/proposals/revised-quote.pdf",
+    expiresIn: 900,
+    systemFilename: "revised-quote.pdf",
+    displayName: "revised-quote",
+    folderPath: "Proposals",
+    version: 2,
+    parentFileId: "file-1",
+  });
 });
 
 const READ_ROUTES: Array<[string, string]> = [
@@ -137,6 +159,52 @@ describe("reading an expense-request attachment", () => {
 });
 
 describe("mutating an expense-request attachment", () => {
+  it("gates POST /:id/new-version on the attachment-write rule before minting a version", async () => {
+    const response = await request(createApp())
+      .post("/api/files/file-1/new-version")
+      .send({
+        originalFilename: "revised-quote.pdf",
+        mimeType: "application/pdf",
+        fileSizeBytes: 4096,
+        category: "proposal",
+      });
+
+    expect(response.status).toBe(200);
+    expect(assertMarketingExpenseAttachmentAccess).toHaveBeenCalledWith(
+      expect.anything(),
+      "req-1",
+      "rep-1",
+    );
+    expect(uploadNewVersion).toHaveBeenCalledWith(
+      expect.anything(),
+      "dallas",
+      "rep-1",
+      "file-1",
+      expect.objectContaining({ originalFilename: "revised-quote.pdf" }),
+    );
+    expect(assertMarketingExpenseAttachmentAccess.mock.invocationCallOrder[0]).toBeLessThan(
+      uploadNewVersion.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("refuses POST /:id/new-version once the request has been decided", async () => {
+    assertMarketingExpenseAttachmentAccess.mockRejectedValue(
+      new AppError(409, "This request has already been decided — its attachments are final."),
+    );
+
+    const response = await request(createApp())
+      .post("/api/files/file-1/new-version")
+      .send({
+        originalFilename: "revised-quote.pdf",
+        mimeType: "application/pdf",
+        fileSizeBytes: 4096,
+        category: "proposal",
+      });
+
+    expect(response.status).toBe(409);
+    expect(uploadNewVersion).not.toHaveBeenCalled();
+  });
+
   it("gates PATCH /:id on the attachment-write rule", async () => {
     await request(createApp()).patch("/api/files/file-1").send({ description: "renamed" });
     expect(assertMarketingExpenseAttachmentAccess).toHaveBeenCalledWith(

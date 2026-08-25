@@ -40,7 +40,11 @@ const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const SUBMITTER = U("1");
 const OTHER_REP = U("2");
 const APPROVER = U("3");
+const FOREIGN_DIRECTOR = U("4");
+const OVERRIDDEN_DIRECTOR = U("5");
+const GRANTED_DIRECTOR = U("6");
 const OFFICE_ID = U("9");
+const OTHER_OFFICE_ID = U("10");
 
 let pg: PGlite;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -84,8 +88,17 @@ beforeAll(async () => {
       email text NOT NULL,
       display_name text,
       role text NOT NULL,
+      office_id uuid,
       is_active boolean NOT NULL DEFAULT true
     );
+    CREATE TABLE public.user_office_access (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+      office_id uuid NOT NULL,
+      role_override text
+    );
+    CREATE UNIQUE INDEX user_office_access_user_office_uidx
+      ON public.user_office_access (user_id, office_id);
     CREATE TABLE public.notification_recipient_groups (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       key text NOT NULL,
@@ -119,10 +132,16 @@ beforeAll(async () => {
       completed_at timestamptz
     );
 
-    INSERT INTO public.users (id, email, display_name, role) VALUES
-      ('${SUBMITTER}', 'reggie@trockgc.com', 'Reggie Rep', 'rep'),
-      ('${OTHER_REP}', 'rita@trockgc.com', 'Rita Rep', 'rep'),
-      ('${APPROVER}', 'tyamashita@trockgc.com', 'Takashi Yamashita', 'director');
+    INSERT INTO public.users (id, email, display_name, role, office_id) VALUES
+      ('${SUBMITTER}', 'reggie@trockgc.com', 'Reggie Rep', 'rep', '${OFFICE_ID}'),
+      ('${OTHER_REP}', 'rita@trockgc.com', 'Rita Rep', 'rep', '${OFFICE_ID}'),
+      ('${APPROVER}', 'tyamashita@trockgc.com', 'Takashi Yamashita', 'director', '${OFFICE_ID}'),
+      ('${FOREIGN_DIRECTOR}', 'foreign-director@trockgc.com', 'Foreign Director', 'director', '${OTHER_OFFICE_ID}'),
+      ('${OVERRIDDEN_DIRECTOR}', 'overridden-director@trockgc.com', 'Overridden Director', 'director', '${OTHER_OFFICE_ID}'),
+      ('${GRANTED_DIRECTOR}', 'granted-director@trockgc.com', 'Granted Director', 'rep', '${OTHER_OFFICE_ID}');
+    INSERT INTO public.user_office_access (user_id, office_id, role_override) VALUES
+      ('${OVERRIDDEN_DIRECTOR}', '${OFFICE_ID}', 'rep'),
+      ('${GRANTED_DIRECTOR}', '${OFFICE_ID}', 'director');
 
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.deals (id uuid PRIMARY KEY);
@@ -593,6 +612,36 @@ describe("draft -> submit ordering", () => {
     expect(approverJob?.payload.recipientEmails).toEqual(["tyamashita@trockgc.com"]);
   });
 
+  it("resolves assigned approvers in the submitting office, with that office's effective role", async () => {
+    await pg.exec(`
+      DELETE FROM public.notification_recipient_assignments;
+      INSERT INTO public.notification_recipient_assignments (group_id, user_id)
+      SELECT g.id, configured.user_id
+        FROM public.notification_recipient_groups g
+        CROSS JOIN (VALUES
+          ('${APPROVER}'::uuid),
+          ('${FOREIGN_DIRECTOR}'::uuid),
+          ('${OVERRIDDEN_DIRECTOR}'::uuid),
+          ('${GRANTED_DIRECTOR}'::uuid)
+        ) AS configured(user_id)
+       WHERE g.key = 'marketing_expense_approver';
+    `);
+
+    await createAndSubmit();
+    const [approverJob] = await jobRows();
+    const recipients = approverJob?.payload.recipientEmails ?? [];
+
+    // Home-office Takashi and the granted rep whose effective role is director can act. A director from
+    // another office cannot enter this tenant; a director overridden to rep can enter but cannot decide.
+    expect(recipients).toHaveLength(2);
+    expect(recipients).toEqual(expect.arrayContaining([
+      "tyamashita@trockgc.com",
+      "granted-director@trockgc.com",
+    ]));
+    expect(recipients).not.toContain("foreign-director@trockgc.com");
+    expect(recipients).not.toContain("overridden-director@trockgc.com");
+  });
+
   it("REFUSES the submit when the approver group resolves to nobody, instead of mailing into the void", async () => {
     await pg.exec(`DELETE FROM public.notification_recipient_assignments`);
     const draft = await createDraft();
@@ -705,6 +754,34 @@ describe("decisions", () => {
         reason: "   ",
       }),
     ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("rejects a denial reason shorter than the queue's 10-character minimum", async () => {
+    const draft = await createAndSubmit();
+    await expect(
+      decideMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA,
+        officeId: OFFICE_ID,
+        requestId: draft.id,
+        userId: APPROVER,
+        decision: "denied",
+        reason: "Too short",
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("10 characters") });
+  });
+
+  it("accepts a denial reason exactly at the 10-character minimum", async () => {
+    const draft = await createAndSubmit();
+    await expect(
+      decideMarketingExpenseRequest(tenantDb, {
+        tenantSchema: SCHEMA,
+        officeId: OFFICE_ID,
+        requestId: draft.id,
+        userId: APPROVER,
+        decision: "denied",
+        reason: "Ten chars!",
+      }),
+    ).resolves.toMatchObject({ status: "denied" });
   });
 
   it("approves and finalises when every required step is approved", async () => {
@@ -844,7 +921,7 @@ describe("two-stage sequencing", () => {
       requestId: draft.id,
       userId: APPROVER,
       decision: "denied",
-      reason: "No budget",
+      reason: "No budget remains",
     });
     expect(decided.status).toBe("denied");
     expect(decided.approvals.map((row) => row.decision)).toEqual(["denied", "skipped"]);
