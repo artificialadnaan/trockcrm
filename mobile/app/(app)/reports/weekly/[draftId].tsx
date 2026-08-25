@@ -281,6 +281,39 @@ function Wizard({
   }, []);
 
   /**
+   * Replace a key the server retired and make that replacement durable before another create can use it.
+   *
+   * This is deliberately a read-modify-write through `saveChain`, rather than an autosave of this render's
+   * `draft`: the renewal clears the dead report id and provenance, while another queued write may carry
+   * newer prose or photos. Reading after every earlier save has settled preserves both. More importantly,
+   * the caller AWAITS this promise before its retry; a React dispatch alone vanishes with an app kill.
+   */
+  const persistRenewedClientSubmissionId = useCallback(
+    async (clientSubmissionId: string): Promise<void> => {
+      const persisted = saveChain.current.then(async () => {
+        if (finalized.current) throw new Error("This weekly report draft has already been finalized.");
+        const stored = await loadWeeklyReportDraft(ownerKey, draftId);
+        if (!stored) throw new Error("This weekly report draft is no longer available.");
+        await saveWeeklyReportDraft(
+          ownerKey,
+          weeklyReportDraftReducer(stored, { type: "renewClientSubmissionId", clientSubmissionId }),
+          Date.now(),
+        );
+      });
+
+      // Let a failed durable save stop THIS retry, but leave the serialization chain usable for a later
+      // user retry. Swallowing it before the await would create a report under a key the next app launch
+      // cannot know, which is the exact orphan this recovery is meant to prevent.
+      saveChain.current = persisted.catch(() => undefined);
+      await persisted;
+      // Do not leave a volatile renewed key in React state when its disk write failed. If the user retries
+      // after that error, the old key is retried and this same durable renewal path runs again.
+      dispatch({ type: "renewClientSubmissionId", clientSubmissionId });
+    },
+    [ownerKey, draftId],
+  );
+
+  /**
    * The week already has a row, created under a DIFFERENT submission id — i.e. started on another device.
    *
    * Adopting it is the only way forward: without this the create 409s identically on every retry, the
@@ -334,10 +367,9 @@ function Wizard({
             weekOf: draft.weekOf,
           }),
         newClientSubmissionId: newSubmissionId,
-        // Persisted BEFORE the retry lands, so a create whose reply is lost on the way back is still
-        // idempotent under the new key rather than minting a third one on the next attempt.
-        onRenewed: (clientSubmissionId) =>
-          dispatch({ type: "renewClientSubmissionId", clientSubmissionId }),
+        // Awaited through the save chain BEFORE the retry leaves, so a create whose reply is lost on the
+        // way back is still idempotent under this new key after an app death.
+        onRenewed: persistRenewedClientSubmissionId,
       });
     } catch (error) {
       if (!isWeeklyReportWeekTakenError(error)) throw error;
@@ -359,6 +391,7 @@ function Wizard({
     draft.weekOf,
     fetcher,
     adoptExistingWeekRow,
+    persistRenewedClientSubmissionId,
   ]);
 
   // The report row has to exist before the picker can ask what photos fall in its window, so create it

@@ -565,7 +565,9 @@ describe("creating a report whose submission key the server has retired", () => 
         return { reportId: "r-new" };
       },
       newClientSubmissionId: () => "fresh-key",
-      onRenewed: (id) => renewed.push(id),
+      onRenewed: async (id) => {
+        renewed.push(id);
+      },
     });
 
     expect(created).toEqual({ reportId: "r-new" });
@@ -573,6 +575,65 @@ describe("creating a report whose submission key the server has retired", () => 
     // The caller is TOLD, so the new key is persisted with the draft. Without this the phone would mint
     // a fresh key on every attempt and lose the idempotency the key exists to provide.
     expect(renewed).toEqual(["fresh-key"]);
+  });
+
+  it("does not retry under the replacement key until that key is durable", async () => {
+    // This is intentionally a gate, not a callback-spy assertion. Removing `await port.onRenewed(...)`
+    // starts the fresh POST while this promise is still held, so this exact test fails before a fake
+    // "disk write" has completed.
+    const seen: string[] = [];
+    const renewed: string[] = [];
+    let releaseDurability!: () => void;
+    const durable = new Promise<void>((resolve) => {
+      releaseDurability = resolve;
+    });
+    let signalDurabilityStarted!: () => void;
+    const durabilityStarted = new Promise<void>((resolve) => {
+      signalDurabilityStarted = resolve;
+    });
+
+    const created = createWeeklyReportWithRenewedSubmission("spent-key", {
+      create: async (id) => {
+        seen.push(id);
+        if (id === "spent-key") throw deletedError();
+        return { reportId: "r-new" };
+      },
+      newClientSubmissionId: () => "fresh-key",
+      onRenewed: async (id) => {
+        renewed.push(id);
+        signalDurabilityStarted();
+        await durable;
+      },
+    });
+
+    await durabilityStarted;
+    expect(renewed).toEqual(["fresh-key"]);
+    expect(seen).toEqual(["spent-key"]);
+
+    releaseDurability();
+    await expect(created).resolves.toEqual({ reportId: "r-new" });
+    expect(seen).toEqual(["spent-key", "fresh-key"]);
+  });
+
+  it("does not mint a report under an unpersisted replacement key", async () => {
+    const diskFailure = new Error("disk full");
+    const seen: string[] = [];
+
+    await expect(
+      createWeeklyReportWithRenewedSubmission("spent-key", {
+        create: async (id) => {
+          seen.push(id);
+          if (id === "spent-key") throw deletedError();
+          return { reportId: "must-not-create" };
+        },
+        newClientSubmissionId: () => "fresh-key",
+        onRenewed: async () => {
+          throw diskFailure;
+        },
+      }),
+    ).rejects.toBe(diskFailure);
+
+    expect(seen).toEqual(["spent-key"]);
   });
 
   it("retries exactly once, so a server stuck on that answer cannot spin", async () => {
@@ -585,7 +646,7 @@ describe("creating a report whose submission key the server has retired", () => 
           throw deletedError();
         },
         newClientSubmissionId: () => `fresh-${(n += 1)}`,
-        onRenewed: () => undefined,
+        onRenewed: async () => undefined,
       }),
     ).rejects.toMatchObject({ code: WEEKLY_REPORT_SUBMISSION_DELETED_CODE });
     expect(seen).toHaveLength(2);
@@ -606,7 +667,7 @@ describe("creating a report whose submission key the server has retired", () => 
           throw taken;
         },
         newClientSubmissionId: () => "unused",
-        onRenewed: () => undefined,
+        onRenewed: async () => undefined,
       }),
     ).rejects.toBe(taken);
     expect(seen).toEqual(["key"]);

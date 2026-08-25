@@ -110,7 +110,12 @@ export async function createWeeklyReportWithRenewedSubmission<T>(
   port: {
     create(clientSubmissionId: string): Promise<T>;
     newClientSubmissionId(): string;
-    onRenewed(clientSubmissionId: string): void;
+    /**
+     * Persist the replacement key before the retry leaves the phone. A React dispatch by itself is not
+     * enough: an app death after the renewed POST commits but before an autosave runs would lose the key
+     * and make the next launch mint another one, stranding the report under the first replacement.
+     */
+    onRenewed(clientSubmissionId: string): Promise<void>;
   },
 ): Promise<T> {
   try {
@@ -118,7 +123,9 @@ export async function createWeeklyReportWithRenewedSubmission<T>(
   } catch (error) {
     if (!isWeeklyReportSubmissionDeletedError(error)) throw error;
     const renewed = port.newClientSubmissionId();
-    port.onRenewed(renewed);
+    // Do not let the replacement request out until the replacement key is durable. Its whole value is
+    // that a lost response can be retried with THIS exact key after a process death.
+    await port.onRenewed(renewed);
     return await port.create(renewed);
   }
 }
