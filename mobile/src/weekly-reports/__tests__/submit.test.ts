@@ -43,6 +43,7 @@ import { WEEKLY_REPORT_SUBMISSION_DELETED_CODE } from "../reconcile";
 import {
   adoptWeeklyReportWeekRow,
   createWeeklyReportWithRenewedSubmission,
+  resolveWeeklyReportDraftRow,
   runWeeklyReportSubmit,
   type WeeklyReportSubmitPort,
 } from "../submit";
@@ -671,5 +672,91 @@ describe("creating a report whose submission key the server has retired", () => 
       }),
     ).rejects.toBe(taken);
     expect(seen).toEqual(["key"]);
+  });
+});
+
+describe("resolving a draft which already holds a report id", () => {
+  it("renews a deleted stored report id durably before creating its replacement", async () => {
+    // A phone can reach Photos, persist reportId, and then have leadership delete that row. The previous
+    // short-circuit returned the old id forever, so every later PATCH and photo PUT 404'd and the retired
+    // key could never get to its recovery path.
+    const calls: string[] = [];
+    let releaseDurability!: () => void;
+    const durable = new Promise<void>((resolve) => {
+      releaseDurability = resolve;
+    });
+    let signalDurabilityStarted!: () => void;
+    const durabilityStarted = new Promise<void>((resolve) => {
+      signalDurabilityStarted = resolve;
+    });
+
+    const result = resolveWeeklyReportDraftRow(
+      { reportId: "deleted-report", clientSubmissionId: "spent-key" },
+      {
+        read: async (id) => {
+          calls.push(`read:${id}`);
+          throw apiError(404, "Weekly report not found");
+        },
+        create: async (id) => {
+          calls.push(`create:${id}`);
+          return { reportId: "replacement-report" };
+        },
+        newClientSubmissionId: () => "fresh-key",
+        onRenewed: async (id) => {
+          calls.push(`persist:${id}`);
+          signalDurabilityStarted();
+          await durable;
+        },
+      },
+    );
+
+    await durabilityStarted;
+    expect(calls).toEqual(["read:deleted-report", "persist:fresh-key"]);
+
+    releaseDurability();
+    await expect(result).resolves.toEqual({ kind: "created", created: { reportId: "replacement-report" } });
+    expect(calls).toEqual(["read:deleted-report", "persist:fresh-key", "create:fresh-key"]);
+  });
+
+  it("uses an existing stored row without minting or persisting a replacement key", async () => {
+    const read = jest.fn(async () => ({ id: "live-report" }));
+    const create = jest.fn(async () => ({ reportId: "must-not-create" }));
+    const newClientSubmissionId = jest.fn(() => "must-not-mint");
+    const onRenewed = jest.fn(async () => undefined);
+
+    await expect(
+      resolveWeeklyReportDraftRow(
+        { reportId: "live-report", clientSubmissionId: "live-key" },
+        { read, create, newClientSubmissionId, onRenewed },
+      ),
+    ).resolves.toEqual({ kind: "existing", reportId: "live-report" });
+
+    expect(read).toHaveBeenCalledWith("live-report");
+    expect(create).not.toHaveBeenCalled();
+    expect(newClientSubmissionId).not.toHaveBeenCalled();
+    expect(onRenewed).not.toHaveBeenCalled();
+  });
+
+  it("does not turn an uncertain read failure into a second report", async () => {
+    const offline = apiError(0, "Network request failed");
+    const create = jest.fn(async () => ({ reportId: "must-not-create" }));
+    const onRenewed = jest.fn(async () => undefined);
+
+    await expect(
+      resolveWeeklyReportDraftRow(
+        { reportId: "possibly-live-report", clientSubmissionId: "live-key" },
+        {
+          read: async () => {
+            throw offline;
+          },
+          create,
+          newClientSubmissionId: () => "must-not-mint",
+          onRenewed,
+        },
+      ),
+    ).rejects.toBe(offline);
+
+    expect(create).not.toHaveBeenCalled();
+    expect(onRenewed).not.toHaveBeenCalled();
   });
 });

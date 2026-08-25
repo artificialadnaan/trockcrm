@@ -44,7 +44,7 @@ import { isWeeklyReportWeekTakenError } from "../../../../src/weekly-reports/rec
 import { newSubmissionId } from "../../../../src/scorecards/ids";
 import {
   adoptWeeklyReportWeekRow,
-  createWeeklyReportWithRenewedSubmission,
+  resolveWeeklyReportDraftRow,
   runWeeklyReportSubmit,
 } from "../../../../src/weekly-reports/submit";
 import {
@@ -352,29 +352,33 @@ function Wizard({
    * the week. A report opened for review already has an id and never reaches the POST.
    */
   const ensureReport = useCallback(async (): Promise<string> => {
-    if (draft.reportId) return draft.reportId;
-    let created;
+    let resolved;
     try {
-      // RENEWS A SPENT KEY RATHER THAN RETRYING IT FOREVER. If leadership deleted the report this draft
-      // created, its `clientSubmissionId` is retired for good — the UNIQUE constraint is not partial — so
-      // every further attempt answers the same 409 and the only move the phone had left was discarding a
-      // week's writing. The helper mints a fresh key, tells us to persist it, and tries once more.
-      created = await createWeeklyReportWithRenewedSubmission(draft.clientSubmissionId, {
-        create: (clientSubmissionId) =>
-          createWeeklyReport(fetcher, {
-            clientSubmissionId,
-            weeklyReportProjectId: draft.weeklyReportProjectId,
-            weekOf: draft.weekOf,
-          }),
-        newClientSubmissionId: newSubmissionId,
-        // Awaited through the save chain BEFORE the retry leaves, so a create whose reply is lost on the
-        // way back is still idempotent under this new key after an app death.
-        onRenewed: persistRenewedClientSubmissionId,
-      });
+      // A saved report id is only a hint, not proof: leadership may have deleted the row while this phone
+      // was on Photos. The resolver confirms it and, on its definite 404, durably clears that id and
+      // renews the retired submission key before creating the replacement row.
+      resolved = await resolveWeeklyReportDraftRow(
+        { reportId: draft.reportId, clientSubmissionId: draft.clientSubmissionId },
+        {
+          read: (reportId) => getWeeklyReport(fetcher, reportId),
+          create: (clientSubmissionId) =>
+            createWeeklyReport(fetcher, {
+              clientSubmissionId,
+              weeklyReportProjectId: draft.weeklyReportProjectId,
+              weekOf: draft.weekOf,
+            }),
+          newClientSubmissionId: newSubmissionId,
+          // Awaited through the save chain BEFORE the retry leaves, so a create whose reply is lost on the
+          // way back is still idempotent under this new key after an app death.
+          onRenewed: persistRenewedClientSubmissionId,
+        },
+      );
     } catch (error) {
       if (!isWeeklyReportWeekTakenError(error)) throw error;
       return await adoptExistingWeekRow();
     }
+    if (resolved.kind === "existing") return resolved.reportId;
+    const created = resolved.created;
     // Stamp what the server actually handed back rather than assuming an empty row: the create is
     // idempotent, so this can be a row that already exists, and the provenance every later freshness
     // check reads has to describe the row that is really there.
@@ -400,9 +404,9 @@ function Wizard({
   // simply walked through the wizard while offline.
   const onPhotosStep = draft.step === "photos";
   useEffect(() => {
-    if (!onPhotosStep || draft.reportId) return;
+    if (!onPhotosStep) return;
     void ensureReport().catch(() => undefined);
-  }, [onPhotosStep, draft.reportId, ensureReport]);
+  }, [onPhotosStep, ensureReport]);
 
   const candidates = useQuery({
     queryKey: ["weekly-report-candidates", draft.reportId ?? "none"],

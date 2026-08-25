@@ -105,18 +105,20 @@ export async function adoptWeeklyReportWeekRow(
  * a phone that kept minting ids against it would create a report per attempt on a flaky connection —
  * which is the failure the idempotency key was introduced to prevent, arriving from the other side.
  */
+export interface WeeklyReportCreateWithRenewedSubmissionPort<T> {
+  create(clientSubmissionId: string): Promise<T>;
+  newClientSubmissionId(): string;
+  /**
+   * Persist the replacement key before the retry leaves the phone. A React dispatch by itself is not
+   * enough: an app death after the renewed POST commits but before an autosave runs would lose the key
+   * and make the next launch mint another one, stranding the report under the first replacement.
+   */
+  onRenewed(clientSubmissionId: string): Promise<void>;
+}
+
 export async function createWeeklyReportWithRenewedSubmission<T>(
   clientSubmissionId: string,
-  port: {
-    create(clientSubmissionId: string): Promise<T>;
-    newClientSubmissionId(): string;
-    /**
-     * Persist the replacement key before the retry leaves the phone. A React dispatch by itself is not
-     * enough: an app death after the renewed POST commits but before an autosave runs would lose the key
-     * and make the next launch mint another one, stranding the report under the first replacement.
-     */
-    onRenewed(clientSubmissionId: string): Promise<void>;
-  },
+  port: WeeklyReportCreateWithRenewedSubmissionPort<T>,
 ): Promise<T> {
   try {
     return await port.create(clientSubmissionId);
@@ -128,6 +130,60 @@ export async function createWeeklyReportWithRenewedSubmission<T>(
     await port.onRenewed(renewed);
     return await port.create(renewed);
   }
+}
+
+/** The field detail endpoint reserves 404 for an inactive or nonexistent report id. */
+function isWeeklyReportMissingError(error: unknown): boolean {
+  const candidate = error as { status?: unknown } | null | undefined;
+  return candidate?.status === 404;
+}
+
+export type WeeklyReportDraftRowResolution<T> =
+  | { kind: "existing"; reportId: string }
+  | { kind: "created"; created: T };
+
+/**
+ * Resolve the row a local weekly-report draft should write to.
+ *
+ * A persisted `reportId` used to be treated as proof that its row still existed. Leadership can delete
+ * the report after the phone reaches Photos, though, and that leaves the draft with BOTH an inactive id
+ * and a submission key the database will never accept again. Returning that id sent every PATCH and photo
+ * PUT into a permanent 404 instead of entering the existing key-renewal path.
+ *
+ * Confirm the stored id first. Only a definite 404 is deletion evidence: a timeout, permission response,
+ * or server failure must leave the draft alone rather than silently minting a second report. On 404, make
+ * a replacement key durable (which clears the dead id in the draft reducer) before its first POST leaves
+ * the device. The usual create helper remains responsible for the separate "new key was itself retired"
+ * response, and still retries at most once.
+ */
+export async function resolveWeeklyReportDraftRow<T>(
+  input: { reportId: string | null; clientSubmissionId: string },
+  port: WeeklyReportCreateWithRenewedSubmissionPort<T> & {
+    read(reportId: string): Promise<unknown>;
+  },
+): Promise<WeeklyReportDraftRowResolution<T>> {
+  if (input.reportId) {
+    try {
+      await port.read(input.reportId);
+      return { kind: "existing", reportId: input.reportId };
+    } catch (error) {
+      if (!isWeeklyReportMissingError(error)) throw error;
+
+      const renewed = port.newClientSubmissionId();
+      // `onRenewed` must clear `reportId` in durable state before a replacement row can be made. If its
+      // disk write fails, rethrow and leave the stale draft untouched for the next explicit retry.
+      await port.onRenewed(renewed);
+      return {
+        kind: "created",
+        created: await createWeeklyReportWithRenewedSubmission(renewed, port),
+      };
+    }
+  }
+
+  return {
+    kind: "created",
+    created: await createWeeklyReportWithRenewedSubmission(input.clientSubmissionId, port),
+  };
 }
 
 // ── The submit sequence ──────────────────────────────────────────────────────
