@@ -133,6 +133,23 @@ describe("per-office step — behaviour inside each office's transaction", () =>
     const dallas = await pg.query<{ kind: string }>(`SELECT kind FROM office_dallas.widgets ORDER BY id`);
     expect(dallas.rows[0]?.kind).toBe("derived");
   });
+
+  it("skips a missing optional capability without treating the required column as an ordering failure", async () => {
+    await seedSchemas(["office_dallas"]);
+
+    const result = await runPerOfficeTransactionalStep(asClient(), {
+      ...widgetStep,
+      capabilityColumns: ["legacy_provenance"],
+    });
+
+    // `kind` exists, so the migration-ordering guard must not fire; the optional capability simply
+    // prevents the statement from opening a transaction against this older schema.
+    expect(result).toEqual({ officesWithTable: 1, officesProcessed: 0 });
+    const rows = await pg.query<{ kind: string | null }>(
+      `SELECT kind FROM office_dallas.widgets ORDER BY id`
+    );
+    expect(rows.rows.map((row) => row.kind)).toEqual([null, "preset"]);
+  });
 });
 
 describe("per-office step — ONE transaction per office", () => {
@@ -173,6 +190,30 @@ describe("per-office step — ONE transaction per office", () => {
       "BEGIN", "DISABLE", "UPDATE", "ENABLE", "COMMIT",
       "BEGIN", "DISABLE", "UPDATE", "ENABLE", "COMMIT",
     ]);
+  });
+
+  it("checks optional capabilities before opening a transaction or taking trigger locks", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      statements.push(sql.trim());
+      if (sql.includes("information_schema.schemata")) {
+        return { rows: [{ schema_name: "office_dallas" }] };
+      }
+      if (sql.includes("information_schema.tables")) return { rows: [{ n: 1 }] };
+      if (sql.includes("information_schema.columns")) {
+        return { rows: [{ n: params?.[2] === "legacy_provenance" ? 0 : 1 }] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await runPerOfficeTransactionalStep({ query } as never, {
+      ...widgetStep,
+      capabilityColumns: ["legacy_provenance"],
+    });
+
+    expect(result).toEqual({ officesWithTable: 1, officesProcessed: 0 });
+    expect(statements).not.toContain("BEGIN");
+    expect(statements.some((sql) => sql.includes("TRIGGER"))).toBe(false);
   });
 
   // The property that actually releases the locks: office N commits before office N+1 begins. A single

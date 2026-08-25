@@ -25,13 +25,18 @@ export const TASK_SOURCE_BACKFILL_MIGRATION = "0233_task_source_classification.s
 
 /** Suspended for the duration of each office's transaction, and restored in reverse. */
 export const BACKFILL_SUSPENDED_TRIGGERS = ["set_tasks_updated_at", "audit_tasks"] as const;
+const TASK_SOURCE_CLASSIFICATION_CAPABILITIES = ["origin_rule", "entity_snapshot"] as const;
 
 /**
  * A task with no originating rule but a person recorded against it is a person's task.
  *
  * Every automated shape in production carries a non-null origin_rule (rules engine, email queue,
  * AI-disconnect cron, revision routing), so they are all excluded here and keep the 'automated' column
- * default without being rewritten. Reassignment tasks are the exception that has to be named: they
+ * default without being rewritten. Some long-lived office schemas predate one or both provenance fields.
+ * The per-office runner checks both capabilities once before taking trigger locks; a schema without either
+ * is unknown provenance, not a NULL origin_rule, so it skips classification and retains the conservative
+ * 'automated' default rather than being silently guessed into Manual. Reassignment tasks are the exception
+ * that has to be named: they
  * record the person who reassigned the deal, so they look hand-typed on every column, and they are
  * exactly the volume people are asking to filter away. They are excluded HERE rather than corrected in
  * a second pass so the backfill converges in ONE pass — setting them to 'manual' and putting them back
@@ -98,6 +103,7 @@ export const TASK_SOURCE_BACKFILL_STEP = {
   label: "0233 task source backfill",
   table: "tasks",
   requiredColumn: "source",
+  capabilityColumns: TASK_SOURCE_CLASSIFICATION_CAPABILITIES,
   suspendTriggers: BACKFILL_SUSPENDED_TRIGGERS,
   buildStatements: (schema: string) => [buildClassifyStatement(schema), buildRepairStatement(schema)],
 } as const;

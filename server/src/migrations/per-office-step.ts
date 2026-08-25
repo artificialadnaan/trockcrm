@@ -59,6 +59,13 @@ export interface PerOfficeStep {
    */
   requiredColumn: string;
   /**
+   * Columns this step reads but which do not establish its migration ordering. An office that has
+   * `requiredColumn` but lacks any capability column is deliberately skipped before a transaction is
+   * opened. This is for legacy schema variation: it must not turn a safe compatibility skip into the
+   * "migration ran too early" error reserved for a missing `requiredColumn`.
+   */
+  capabilityColumns?: readonly string[];
+  /**
    * Triggers suspended for the duration of each office's transaction, in this order (they are restored
    * in reverse). Suspension is transactional, so a failure rolls it back with everything else.
    *
@@ -112,8 +119,8 @@ const COLUMN_EXISTS_SQL = `
 /**
  * Runs `step` against every office_% schema, each in its OWN transaction, committing before moving on.
  *
- * Returns the counts rather than nothing so a caller (or a test) can tell "processed every office" from
- * "processed none", which is the difference between working and silently doing nothing.
+ * Returns the counts rather than nothing so a caller (or a test) can distinguish an office that lacks the
+ * table from one intentionally skipped for a missing compatibility capability.
  */
 export async function runPerOfficeTransactionalStep(
   client: pg.Client,
@@ -122,6 +129,7 @@ export async function runPerOfficeTransactionalStep(
   const schemaResult = await client.query<{ schema_name: string }>(OFFICE_SCHEMA_DISCOVERY_SQL);
 
   let officesWithTable = 0;
+  let officesWithRequiredColumn = 0;
   let officesProcessed = 0;
 
   for (const row of schemaResult.rows) {
@@ -140,6 +148,19 @@ export async function runPerOfficeTransactionalStep(
       step.requiredColumn,
     ]);
     if (ready === 0) continue;
+    officesWithRequiredColumn += 1;
+
+    // Capability columns are deliberately distinct from `requiredColumn`: their absence is a known
+    // legacy shape, so skip it before opening a transaction or taking trigger locks. The ordering guard
+    // below still keys only on `requiredColumn`, which is what the migration file actually adds.
+    let capable = true;
+    for (const column of step.capabilityColumns ?? []) {
+      if ((await countMatching(client, COLUMN_EXISTS_SQL, [schemaName, step.table, column])) === 0) {
+        capable = false;
+        break;
+      }
+    }
+    if (!capable) continue;
     officesProcessed += 1;
 
     await client.query("BEGIN");
@@ -169,7 +190,7 @@ export async function runPerOfficeTransactionalStep(
   // before it, every office fails the readiness test, the loop does nothing, and the migration is
   // recorded as applied — a silent no-op. That is precisely how the first-deploy bug in the concurrent
   // index pre-step survived review, so this refuses instead of returning quietly.
-  if (officesWithTable > 0 && officesProcessed === 0) {
+  if (officesWithTable > 0 && officesWithRequiredColumn === 0) {
     throw new Error(
       `${step.label}: ran before the required column existed — ${officesWithTable} office schema(s) ` +
         `have a "${step.table}" table and none has a "${step.requiredColumn}" column. This step must ` +
