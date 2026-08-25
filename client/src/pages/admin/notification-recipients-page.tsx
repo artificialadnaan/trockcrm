@@ -7,6 +7,7 @@ import {
 } from "@trock-crm/shared/types";
 import { Button } from "@/components/ui/button";
 import { useAdminUsers, type AdminUser } from "@/hooks/use-admin-users";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import {
   getNotificationRecipientGroup,
   updateNotificationRecipientGroup,
@@ -45,6 +46,12 @@ function createInitialGroupState(): GroupState {
     loading: true,
     saving: false,
   };
+}
+
+function createInitialGroups(): Record<string, GroupState> {
+  return Object.fromEntries(
+    NOTIFICATION_RECIPIENT_GROUPS.map((definition) => [definition.key, createInitialGroupState()])
+  );
 }
 
 /**
@@ -91,10 +98,12 @@ function pickerRowsFor(
 }
 
 export function NotificationRecipientsPage() {
+  const officeScopeId = useOfficeScopeId();
   const { users, loading: usersLoading } = useAdminUsers();
-  const [groups, setGroups] = useState<Record<string, GroupState>>(() =>
-    Object.fromEntries(NOTIFICATION_RECIPIENT_GROUPS.map((definition) => [definition.key, createInitialGroupState()]))
-  );
+  const [groups, setGroups] = useState<Record<string, GroupState>>(createInitialGroups);
+  /** The scope whose selections are in `groups`; a URL switch must never leave the old ids saveable. */
+  const [groupsOfficeScopeId, setGroupsOfficeScopeId] = useState<string | null>(officeScopeId);
+  const groupsMatchOfficeScope = groupsOfficeScopeId === officeScopeId;
 
   /**
    * Which effect run owns the in-flight requests.
@@ -105,7 +114,11 @@ export function NotificationRecipientsPage() {
    * setup and teardown makes a superseded run permanently superseded.
    */
   const runId = useRef(0);
-  /** Saves in flight, by key. A ref because two clicks can land before React re-renders — see `save`. */
+  /**
+   * Saves in flight, by scope and key. A ref because two clicks can land before React re-renders — see
+   * `save`. Scope belongs in the identity too: an old-office request must not block (or unlock) this
+   * office's save button.
+   */
   const savingKeys = useRef(new Set<string>());
 
   const patchGroup = useCallback((key: string, patch: Partial<GroupState>) => {
@@ -142,15 +155,20 @@ export function NotificationRecipientsPage() {
 
   useEffect(() => {
     const run = (runId.current += 1);
+    // Reset before issuing the reads. The comparison below also covers the render immediately after the
+    // URL changes, before this effect has had a chance to commit its reset.
+    setGroupsOfficeScopeId(officeScopeId);
+    setGroups(createInitialGroups());
     for (const definition of NOTIFICATION_RECIPIENT_GROUPS) {
       void loadGroup(definition.key, run);
     }
     return () => {
       runId.current += 1;
     };
-  }, [loadGroup]);
+  }, [loadGroup, officeScopeId]);
 
   const toggleRecipient = useCallback((key: string, userId: string, checked: boolean) => {
+    if (!groupsMatchOfficeScope) return;
     // Computed INSIDE the updater. Reading `state.selectedUserIds` off the render closure works only
     // because React flushes discrete events one at a time, which is a fact about React, not about us.
     setGroups((current) => {
@@ -160,13 +178,16 @@ export function NotificationRecipientsPage() {
       else next.delete(userId);
       return { ...current, [key]: { ...group, selectedUserIds: next } };
     });
-  }, []);
+  }, [groupsMatchOfficeScope]);
 
   const save = async (definition: NotificationRecipientGroupDefinition) => {
     // The `disabled` attribute cannot stop a double-click that lands in one batch — both clicks are
     // dispatched before React re-renders, so the button is still enabled for the second. Neither can a
     // render-scoped `state.saving`, whose closure also still reads false. A ref is written immediately.
-    if (savingKeys.current.has(definition.key)) return;
+    if (!groupsMatchOfficeScope) return;
+    const saveRun = runId.current;
+    const saveKey = `${officeScopeId ?? ""}\u0000${definition.key}`;
+    if (savingKeys.current.has(saveKey)) return;
 
     const selectedUserIds = [...groups[definition.key].selectedUserIds];
     if (selectedUserIds.length === 0) {
@@ -174,10 +195,13 @@ export function NotificationRecipientsPage() {
       if (!confirmed) return;
     }
 
-    savingKeys.current.add(definition.key);
+    savingKeys.current.add(saveKey);
     patchGroup(definition.key, { saving: true });
     try {
       const result = await updateNotificationRecipientGroup(definition.key, selectedUserIds);
+      // A save started in Office A can finish after the route enters Office B. Its response describes
+      // A and must not repaint B's freshly-reset group (nor claim success for the wrong tenant).
+      if (runId.current !== saveRun) return;
       // `recipients` and `fallbackApplied` are adopted from the response because only the server can know
       // them — who is deliverable, and whether the group fell back. The SELECTION deliberately is not.
       //
@@ -193,6 +217,7 @@ export function NotificationRecipientsPage() {
       });
       toast.success("Notification recipients updated");
     } catch (err) {
+      if (runId.current !== saveRun) return;
       patchGroup(definition.key, { saving: false });
       toast.error(
         err instanceof Error
@@ -200,7 +225,7 @@ export function NotificationRecipientsPage() {
           : "Failed to update recipients. Please try again."
       );
     } finally {
-      savingKeys.current.delete(definition.key);
+      savingKeys.current.delete(saveKey);
     }
   };
 
@@ -223,7 +248,9 @@ export function NotificationRecipientsPage() {
       </div>
 
       {NOTIFICATION_RECIPIENT_GROUPS.map((definition) => {
-        const state = groups[definition.key];
+        // React renders a URL change before effects reset state. Treat a scope mismatch as loading in
+        // that one render too, rather than briefly drawing Office A's recipient ids under Office B.
+        const state = groupsMatchOfficeScope ? groups[definition.key] : createInitialGroupState();
         const headingId = `notification-group-${definition.key}`;
         return (
           <section

@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import type { CrmAssignableRole, UserRole } from "@trock-crm/shared/types";
 
 export interface AdminUser {
@@ -89,19 +90,42 @@ export function useAdminUsers() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const officeScopeId = useOfficeScopeId();
+  /**
+   * The endpoint's `effectiveRole` is evaluated in the office selected by `?officeId`; it is not an
+   * attribute of the person. Keep the data's scope beside it so a URL switch cannot briefly offer an
+   * approver under their previous office role while the next request is in flight.
+   */
+  const [loadedOfficeScopeId, setLoadedOfficeScopeId] = useState<string | null | undefined>(undefined);
+  const currentOfficeScopeId = useRef(officeScopeId);
+  const latestRequestId = useRef(0);
+  currentOfficeScopeId.current = officeScopeId;
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    const requestScopeId = officeScopeId;
+    // A mutation handler can retain the previous render's `load`. Do not let it issue a request with the
+    // new URL header but label its response as the old scope (or invalidate the new scope's request).
+    if (currentOfficeScopeId.current !== requestScopeId) return;
+    const requestId = ++latestRequestId.current;
     setLoading(true);
     setError(null);
     try {
       const data = await api<{ users: AdminUser[] }>("/admin/users");
+      if (requestId !== latestRequestId.current || currentOfficeScopeId.current !== requestScopeId) return;
       setUsers(data.users);
+      setLoadedOfficeScopeId(requestScopeId);
     } catch {
+      if (requestId !== latestRequestId.current || currentOfficeScopeId.current !== requestScopeId) return;
+      // Do not relabel the previous office's people as an empty current-office result after an error.
+      setUsers([]);
+      setLoadedOfficeScopeId(requestScopeId);
       setError("Failed to load users");
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestId.current && currentOfficeScopeId.current === requestScopeId) {
+        setLoading(false);
+      }
     }
-  };
+  }, [officeScopeId]);
 
   const updateUser = async (id: string, input: Partial<AdminUser>) => {
     await api(`/admin/users/${id}`, {
@@ -190,11 +214,21 @@ export function useAdminUsers() {
     return response.events;
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    void load();
+    // A late response must not overwrite either another office or an unmounted page.
+    return () => {
+      latestRequestId.current += 1;
+    };
+  }, [load]);
+
+  const hasCurrentOfficeUsers = loadedOfficeScopeId === officeScopeId;
   return {
-    users,
-    loading,
-    error,
+    // Until this office has answered, hiding the previous office's roles is safer than drawing a picker
+    // that can submit them into the newly selected tenant.
+    users: hasCurrentOfficeUsers ? users : [],
+    loading: loading || !hasCurrentOfficeUsers,
+    error: hasCurrentOfficeUsers ? error : null,
     refetch: load,
     updateUser,
     createUser,

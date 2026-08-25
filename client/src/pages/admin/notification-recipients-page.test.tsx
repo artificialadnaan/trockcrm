@@ -4,6 +4,7 @@
 import React, { StrictMode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NOTIFICATION_RECIPIENT_GROUPS } from "@trock-crm/shared/types";
 import { NotificationRecipientsPage } from "./notification-recipients-page";
@@ -212,7 +213,11 @@ afterEach(async () => {
 
 async function renderPage() {
   await act(async () => {
-    root.render(<NotificationRecipientsPage />);
+    root.render(
+      <MemoryRouter>
+        <NotificationRecipientsPage />
+      </MemoryRouter>
+    );
   });
 }
 
@@ -610,10 +615,13 @@ describe("NotificationRecipientsPage", () => {
     await act(async () => {
       root.render(
         <StrictMode>
-          <NotificationRecipientsPage />
+          <MemoryRouter>
+            <NotificationRecipientsPage />
+          </MemoryRouter>
         </StrictMode>,
       );
     });
+    expect(resolvers).toHaveLength(NOTIFICATION_RECIPIENT_GROUPS.length * 2);
 
     // Resolve the SECOND run first, then let the superseded first run answer late.
     await act(async () => {
