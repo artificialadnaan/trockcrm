@@ -719,11 +719,20 @@ export async function getTaskById(
 
 /**
  * Create a new task.
+ *
+ * This is the HUMAN task constructor, and `source: 'manual'` is set here rather than by the callers on
+ * purpose. All three of them are a person filling in a form — the New Task dialog (tasks/routes.ts),
+ * the Procore project task form (procore/routes.ts), and accepting an AI suggestion
+ * (ai-copilot/task-suggestion-service.ts, where a person chose to accept it, which is what makes it
+ * theirs). Deciding this at one route would leave the other two on the column DEFAULT of 'automated'
+ * and file a task somebody typed into the automated tab. A machine path must not call this function;
+ * the rules engine, the crons and the reassignment writer all insert directly and set 'automated'.
  */
 export async function createTask(tenantDb: TenantDb, input: CreateTaskInput) {
   const result = await tenantDb
     .insert(tasks)
     .values({
+      source: "manual",
       title: input.title,
       description: input.description ?? null,
       type: input.type as any,

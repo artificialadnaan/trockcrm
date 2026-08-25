@@ -293,6 +293,61 @@ describe("task source backfill — classification", () => {
 // The mechanism itself is proven in per-office-step.runtime.test.ts. What these guard is that the task
 // backfill is actually WIRED to it — a future edit that inlines its own loop here would still classify
 // correctly and would still be the outage the mechanism exists to prevent.
+describe("task source CHECK — deferred by the migration, validated by the step", () => {
+  async function convalidated(schema: string) {
+    const r = await pg.query<{ convalidated: boolean }>(
+      `SELECT c.convalidated FROM pg_constraint c
+         JOIN pg_namespace n ON n.oid = c.connamespace
+        WHERE n.nspname = $1 AND c.conname = 'tasks_source_check'`,
+      [schema]
+    );
+    expect(r.rows, `${schema} constraint`).toHaveLength(1);
+    return r.rows[0].convalidated;
+  }
+
+  // The migration adds it NOT VALID so the row scan does not run under a lock held across every office.
+  it("0233 leaves the constraint NOT VALID", async () => {
+    await seedOffices(OFFICES);
+    await pg.exec(migrationSql(COLUMN_MIGRATION));
+
+    for (const schema of OFFICES) expect(await convalidated(schema), schema).toBe(false);
+  });
+
+  // ...but deferring it is only acceptable because something finishes the job. Without this the column
+  // would sit permanently unvalidated and the constraint would be a half-guarantee nobody noticed.
+  it("the step validates it afterwards, in EVERY office", async () => {
+    await seedOffices(OFFICES);
+    await pg.exec(migrationSql(COLUMN_MIGRATION));
+    for (const schema of OFFICES) await seedTaskShapes(schema);
+
+    await runTaskSourceBackfill(asClient());
+
+    for (const schema of OFFICES) expect(await convalidated(schema), schema).toBe(true);
+  });
+
+  // NOT VALID defers the scan of EXISTING rows only — new writes are rejected from the moment it exists,
+  // which is what makes the deferral safe rather than a hole between the two deploys.
+  it("rejects a bad value even while still NOT VALID", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(migrationSql(COLUMN_MIGRATION));
+    expect(await convalidated("office_dallas")).toBe(false);
+
+    await expect(
+      pg.exec(`INSERT INTO office_dallas.tasks (title, source) VALUES ('bogus', 'imported')`)
+    ).rejects.toThrow();
+  });
+
+  it("is idempotent — validating an already-validated constraint is a no-op", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(migrationSql(COLUMN_MIGRATION));
+    await seedTaskShapes("office_dallas");
+    await runTaskSourceBackfill(asClient());
+
+    await expect(runTaskSourceBackfill(asClient())).resolves.toBeUndefined();
+    expect(await convalidated("office_dallas")).toBe(true);
+  });
+});
+
 describe("task source backfill — wired to the per-office mechanism", () => {
   /**
    * A recording stand-in for pg.Client. This is the honest way to assert the transaction BOUNDARY:
@@ -321,19 +376,23 @@ describe("task source backfill — wired to the per-office mechanism", () => {
     if (sql.includes("DISABLE TRIGGER")) return "DISABLE";
     if (sql.includes("ENABLE TRIGGER")) return "ENABLE";
     if (sql.startsWith("UPDATE")) return "UPDATE";
+    if (sql.includes("VALIDATE CONSTRAINT")) return "VALIDATE";
     return null;
   };
 
-  it("opens and commits a transaction around EACH office", async () => {
+  it("opens and commits a transaction around EACH office, in BOTH passes", async () => {
     const { client, statements } = recordingClient(["office_dallas", "office_atlanta"]);
 
     await runTaskSourceBackfill(client);
 
     const shape = statements.map(kind).filter(Boolean);
-    // Two identical, closed cycles — not one BEGIN wrapping everything.
+    // Two passes over the offices — classification, then the deferred CHECK validation — and every one
+    // of the four cycles is individually opened and closed. Never one BEGIN wrapping any of it.
     expect(shape).toEqual([
       "BEGIN", "DISABLE", "DISABLE", "UPDATE", "UPDATE", "ENABLE", "ENABLE", "COMMIT",
       "BEGIN", "DISABLE", "DISABLE", "UPDATE", "UPDATE", "ENABLE", "ENABLE", "COMMIT",
+      "BEGIN", "VALIDATE", "COMMIT",
+      "BEGIN", "VALIDATE", "COMMIT",
     ]);
   });
 
@@ -345,8 +404,9 @@ describe("task source backfill — wired to the per-office mechanism", () => {
     await runTaskSourceBackfill(client);
 
     const shape = statements.map(kind).filter(Boolean) as string[];
-    expect(shape.filter((s) => s === "BEGIN")).toHaveLength(3);
-    expect(shape.filter((s) => s === "COMMIT")).toHaveLength(3);
+    // Three offices across two passes.
+    expect(shape.filter((s) => s === "BEGIN")).toHaveLength(6);
+    expect(shape.filter((s) => s === "COMMIT")).toHaveLength(6);
 
     let open = 0;
     for (const s of shape) {

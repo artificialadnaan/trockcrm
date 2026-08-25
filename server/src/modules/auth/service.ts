@@ -634,16 +634,23 @@ export async function ensureDevDemoWorkspace(
       ]
     );
 
+    // NOT flagged is_test_data. These four rows only exist when ENABLE_AUTH_DEMO_BOOTSTRAP is on --
+    // an opt-in flag, off by default and off in production -- and where it IS on they are the entire
+    // point: they populate the demo user's due-today, overdue, completed and compliance scenarios.
+    // Marking them as test data would exclude them from every task read path AND /tasks/counts, so the
+    // demo user would land on an empty Tasks page with zeroed metrics, re-seeded on every login. The
+    // is_test_data filter still does real work against scripts/seedTestUsersAndData.ts, which seeds
+    // synthetic bulk data into real offices and does set the flag.
     await client.query(
       `
         INSERT INTO tasks (
-          id, title, description, type, priority, status, assigned_to, created_by, office_id, deal_id, due_date, completed_at, created_at, updated_at
+          id, title, description, type, priority, status, assigned_to, created_by, office_id, deal_id, due_date, completed_at, created_at, updated_at, source
         )
         VALUES
-          ($1, 'Call Bridget about revised roof scope', 'Seeded demo follow-up task due today.', 'follow_up', 'high', 'pending', $2, $3, $4, $5, $6, NULL, NOW(), NOW()),
-          ($7, 'Follow up on garage waterproofing approvals', 'Seeded overdue task for dashboard urgency.', 'follow_up', 'urgent', 'pending', $2, $3, $4, $8, $9, NULL, NOW(), NOW()),
-          ($10, 'Send recap after site walk', 'Completed follow-up used for compliance calculations.', 'follow_up', 'normal', 'completed', $2, $3, $4, $5, $11, NOW(), NOW(), NOW()),
-          ($12, 'Closed-lost postmortem recap', 'Dismissed follow-up used for compliance calculations.', 'follow_up', 'normal', 'dismissed', $2, $3, $4, $13, $14, NULL, NOW(), NOW())
+          ($1, 'Call Bridget about revised roof scope', 'Seeded demo follow-up task due today.', 'follow_up', 'high', 'pending', $2, $3, $4, $5, $6, NULL, NOW(), NOW(), 'manual'),
+          ($7, 'Follow up on garage waterproofing approvals', 'Seeded overdue task for dashboard urgency.', 'follow_up', 'urgent', 'pending', $2, $3, $4, $8, $9, NULL, NOW(), NOW(), 'manual'),
+          ($10, 'Send recap after site walk', 'Completed follow-up used for compliance calculations.', 'follow_up', 'normal', 'completed', $2, $3, $4, $5, $11, NOW(), NOW(), NOW(), 'manual'),
+          ($12, 'Closed-lost postmortem recap', 'Dismissed follow-up used for compliance calculations.', 'follow_up', 'normal', 'dismissed', $2, $3, $4, $13, $14, NULL, NOW(), NOW(), 'manual')
         ON CONFLICT (id) DO UPDATE
         SET title = EXCLUDED.title,
             description = EXCLUDED.description,
@@ -654,6 +661,7 @@ export async function ensureDevDemoWorkspace(
             deal_id = EXCLUDED.deal_id,
             due_date = EXCLUDED.due_date,
             completed_at = EXCLUDED.completed_at,
+            source = EXCLUDED.source,
             updated_at = NOW()
       `,
       [

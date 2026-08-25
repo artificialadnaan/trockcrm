@@ -42,13 +42,15 @@
 -- New Task form, so a lock held across tenants means task writes progressively blocking in every
 -- office, on deploy, potentially past the app's 30/45s timeouts.
 --
--- This file therefore contains ONLY the additive part: ADD COLUMN (metadata-only in PG11+, so its brief
--- ACCESS EXCLUSIVE cannot be avoided and costs microseconds) and the CHECK. The two things that would
--- hold real locks live in runner steps that take one transaction PER OFFICE and release it before
--- moving on:
+-- This file therefore contains ONLY actions that take no row scan: ADD COLUMN (metadata-only in PG11+,
+-- so its brief ACCESS EXCLUSIVE cannot be avoided and costs microseconds) and ADD CONSTRAINT ... CHECK
+-- ... NOT VALID. Everything that would hold a real lock lives in runner steps that take one transaction
+-- PER OFFICE and release it before moving on:
 --   * the classification backfill, which must disable set_tasks_updated_at and audit_tasks around
 --     itself   -> server/src/migrations/task-source-backfill.ts, built on the REUSABLE mechanism in
 --                  server/src/migrations/per-office-step.ts (use that for any future migration here)
+--   * VALIDATING the CHECK, which scans every row -> the same per-office step; the constraint is added
+--                  NOT VALID below so the scan does not happen under this file's transaction
 --   * the index, which must be built CONCURRENTLY                -> 0237 + task-source-index.ts
 --
 -- WHY THE BACKFILL SUSPENDS THOSE TRIGGERS AT ALL (the reason it cannot simply run here). `tasks`
@@ -97,10 +99,17 @@ BEGIN
       WHERE conrelid = format('%I.tasks', schema_name)::regclass
         AND conname = 'tasks_source_check'
     ) THEN
+      -- NOT VALID, and that is not a shortcut. A plain ADD CONSTRAINT ... CHECK validates every
+      -- existing row while holding ACCESS EXCLUSIVE, and since this DO block is ONE transaction the
+      -- first office's lock would be held while every later office was scanned — the same cross-tenant
+      -- write outage the backfill and the index were moved out of this file to avoid. NOT VALID skips
+      -- the scan of existing rows; the constraint still rejects every new INSERT and UPDATE from this
+      -- moment on. The scan happens afterwards, per office, in the runner's VALIDATE step, which takes
+      -- only SHARE UPDATE EXCLUSIVE and blocks neither reads nor writes.
       EXECUTE format(
         $sql$
           ALTER TABLE %1$I.tasks
-            ADD CONSTRAINT tasks_source_check CHECK (source IN ('manual', 'automated'));
+            ADD CONSTRAINT tasks_source_check CHECK (source IN ('manual', 'automated')) NOT VALID;
         $sql$,
         schema_name
       );
@@ -117,8 +126,10 @@ ALTER TABLE office_dallas.tasks
 
 DO $constraint$
 BEGIN
+  -- NOT VALID here for the same reason as the loop: this block also executes against office_dallas as
+  -- part of the migration. A newly provisioned office has no rows, so nothing is left unvalidated there.
   ALTER TABLE office_dallas.tasks
-    ADD CONSTRAINT tasks_source_check CHECK (source IN ('manual', 'automated'));
+    ADD CONSTRAINT tasks_source_check CHECK (source IN ('manual', 'automated')) NOT VALID;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $constraint$;
 

@@ -184,6 +184,73 @@ describe("migration 0233 — tasks.source", () => {
 // are present in the file at all. They must not be: inside the file's one transaction they would be
 // held across every office.
 describe("migration 0233 — the file stays additive (structural)", () => {
+  /** The file's executable SQL, with comments removed so prose may still explain the reasoning. */
+  const executableSql = () =>
+    migrationSql(MIGRATION)
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+
+  /**
+   * Every ALTER TABLE action the file performs, normalised. ALTER TABLE is the only way this file can
+   * take a lock on a tenant table, so enumerating its actions enumerates the risk.
+   */
+  const alterTableActions = () => {
+    const sql = executableSql();
+    const actions: string[] = [];
+    const re = /ALTER\s+TABLE\s+[^\s]+\s+([\s\S]*?);/gi;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(sql)) !== null) {
+      actions.push(match[1].replace(/\s+/g, " ").trim());
+    }
+    return actions;
+  };
+
+  // AN ALLOWLIST, NOT A DENYLIST — this is the guard's second version, and the reason for the change is
+  // the bug it missed. The first version named three things the file must not CONTAIN (DISABLE TRIGGER,
+  // CREATE INDEX, UPDATE). A bare `ADD CONSTRAINT ... CHECK` contains none of them and does the exact
+  // damage they were listed for: it validates every existing row while holding ACCESS EXCLUSIVE, and
+  // because the DO block is one transaction the first office's lock is held while every later office is
+  // scanned. That is the second statement to walk past the denylist, so the question is inverted: every
+  // lock-taking action the file performs must be named here as safe, and anything new fails until
+  // somebody has justified it.
+  //
+  // What qualifies as safe, and why:
+  //   * ADD COLUMN IF NOT EXISTS ... DEFAULT <constant>  — metadata-only in PG11+, no row scan.
+  //   * ADD CONSTRAINT ... CHECK ... NOT VALID           — skips the scan of existing rows; still
+  //     enforced on every new insert and update. The scan happens later, per office, via
+  //     VALIDATE CONSTRAINT in a runner step, which takes only SHARE UPDATE EXCLUSIVE and does not
+  //     block reads or writes.
+  const ALLOWED_ACTIONS = [
+    /^ADD COLUMN IF NOT EXISTS source varchar\(20\) NOT NULL DEFAULT 'automated'$/i,
+    /^ADD CONSTRAINT tasks_source_check CHECK \(source IN \('manual', 'automated'\)\) NOT VALID$/i,
+  ];
+
+  it("performs ONLY allowlisted, lock-safe ALTER TABLE actions", () => {
+    const actions = alterTableActions();
+    // Two per site (the tenant loop and the provisioner block), so four in total. If this count moves,
+    // a statement was added or removed and the reviewer should look at it.
+    expect(actions, "expected ADD COLUMN + ADD CONSTRAINT, in the loop and the tenant block").toHaveLength(4);
+
+    for (const action of actions) {
+      const allowed = ALLOWED_ACTIONS.some((pattern) => pattern.test(action));
+      expect(allowed, `not an allowlisted lock-safe action: ALTER TABLE ... ${action}`).toBe(true);
+    }
+  });
+
+  // The specific property the allowlist encodes, asserted on its own so a failure names the reason
+  // rather than just "did not match a regex".
+  it("never validates the CHECK inline — that scan holds ACCESS EXCLUSIVE across every office", () => {
+    for (const action of alterTableActions()) {
+      if (/ADD CONSTRAINT/i.test(action)) {
+        expect(action, "an ADD CONSTRAINT ... CHECK without NOT VALID scans every row under a lock")
+          .toMatch(/NOT VALID$/i);
+      }
+      expect(action, "VALIDATE CONSTRAINT belongs in the per-office runner step, not this file")
+        .not.toMatch(/VALIDATE CONSTRAINT/i);
+    }
+  });
+
   it("contains no DISABLE TRIGGER — that lock would be held across every tenant", () => {
     expect(migrationSql(MIGRATION)).not.toMatch(/\bDISABLE\s+TRIGGER\b/i);
     expect(migrationSql(MIGRATION)).not.toMatch(/\bENABLE\s+TRIGGER\b/i);

@@ -71,6 +71,29 @@ export function buildRepairStatement(schema: string): string {
        AND source <> 'automated'`;
 }
 
+/**
+ * Validates the CHECK that 0233 adds NOT VALID.
+ *
+ * 0233 cannot validate inline: ADD CONSTRAINT ... CHECK scans every existing row while holding ACCESS
+ * EXCLUSIVE, and the migration file is one transaction, so the first office's lock would be held while
+ * every later office was scanned. Adding it NOT VALID defers only the scan of PRE-EXISTING rows — the
+ * constraint rejects every new INSERT and UPDATE from the moment it exists — and VALIDATE CONSTRAINT
+ * then takes only SHARE UPDATE EXCLUSIVE, which blocks neither reads nor writes.
+ *
+ * A second caller of the shared mechanism, and a useful demonstration that it generalises: no triggers
+ * to suspend, a different statement, same per-office transaction boundary.
+ *
+ * Idempotent: VALIDATE CONSTRAINT on an already-validated constraint is a no-op.
+ */
+export const TASK_SOURCE_VALIDATE_STEP = {
+  label: "0233 task source CHECK validation",
+  table: "tasks",
+  requiredColumn: "source",
+  buildStatements: (schema: string) => [
+    `ALTER TABLE ${schema}.tasks VALIDATE CONSTRAINT tasks_source_check`,
+  ],
+} as const;
+
 export const TASK_SOURCE_BACKFILL_STEP = {
   label: "0233 task source backfill",
   table: "tasks",
@@ -79,9 +102,16 @@ export const TASK_SOURCE_BACKFILL_STEP = {
   buildStatements: (schema: string) => [buildClassifyStatement(schema), buildRepairStatement(schema)],
 } as const;
 
-/** Classifies existing tasks per office, one transaction per office. */
+/**
+ * Classifies existing tasks and validates the deferred CHECK, per office, one transaction per office.
+ *
+ * Classification runs FIRST so validation scans rows that are already in their final state. It would
+ * pass either way — every row carries the column default until the backfill runs, and both values
+ * satisfy the constraint — but validating what was actually written is the honest order.
+ */
 export async function runTaskSourceBackfill(client: pg.Client): Promise<void> {
   await runPerOfficeTransactionalStep(client, TASK_SOURCE_BACKFILL_STEP);
+  await runPerOfficeTransactionalStep(client, TASK_SOURCE_VALIDATE_STEP);
 }
 
 export { validateOfficeSchemaName };
