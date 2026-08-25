@@ -47,7 +47,8 @@
 -- hold real locks live in runner steps that take one transaction PER OFFICE and release it before
 -- moving on:
 --   * the classification backfill, which must disable set_tasks_updated_at and audit_tasks around
---     itself   -> server/src/migrations/task-source-backfill.ts
+--     itself   -> server/src/migrations/task-source-backfill.ts, built on the REUSABLE mechanism in
+--                  server/src/migrations/per-office-step.ts (use that for any future migration here)
 --   * the index, which must be built CONCURRENTLY                -> 0237 + task-source-index.ts
 --
 -- WHY THE BACKFILL SUSPENDS THOSE TRIGGERS AT ALL (the reason it cannot simply run here). `tasks`

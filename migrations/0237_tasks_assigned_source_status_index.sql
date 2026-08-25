@@ -15,6 +15,10 @@
 -- migration file. That is why the real build happens in a runner step, and why even the nominally
 -- no-op statements below are catalog-guarded — see the comment on the guard itself.
 --
+-- For NON-index locking work (a backfill, a DISABLE TRIGGER), use the reusable per-office step in
+-- server/src/migrations/per-office-step.ts. Indexes need this file's sibling pattern instead, because
+-- CREATE INDEX CONCURRENTLY cannot run inside a transaction at all.
+--
 -- WHY THIS IS A SEPARATE MIGRATION FROM 0233, WHICH ADDS THE COLUMN IT INDEXES.
 -- The runner builds this index CONCURRENTLY in a pre-step (server/src/migrations/task-source-index.ts)
 -- so that API boot never takes a write-blocking lock on `tasks` across every office at once — the loop

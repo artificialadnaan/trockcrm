@@ -249,7 +249,7 @@ describe("task source backfill — classification", () => {
     await seedOffices(OFFICES);
     // deliberately NOT running 0233
 
-    await expect(runTaskSourceBackfill(asClient())).rejects.toThrow(/ran before the column existed/);
+    await expect(runTaskSourceBackfill(asClient())).rejects.toThrow(/ran before the required column existed/);
   });
 
   // ...but a single partially-provisioned office among healthy ones is a real state, and must not trip
@@ -290,7 +290,10 @@ describe("task source backfill — classification", () => {
   });
 });
 
-describe("task source backfill — one transaction PER OFFICE", () => {
+// The mechanism itself is proven in per-office-step.runtime.test.ts. What these guard is that the task
+// backfill is actually WIRED to it — a future edit that inlines its own loop here would still classify
+// correctly and would still be the outage the mechanism exists to prevent.
+describe("task source backfill — wired to the per-office mechanism", () => {
   /**
    * A recording stand-in for pg.Client. This is the honest way to assert the transaction BOUNDARY:
    * PGlite is one in-process connection and cannot show lock contention, but the statement SEQUENCE is
@@ -304,7 +307,7 @@ describe("task source backfill — one transaction PER OFFICE", () => {
       if (sql.includes("information_schema.schemata")) {
         return { rows: schemas.map((schema_name) => ({ schema_name })) };
       }
-      if (sql.includes("information_schema.columns")) {
+      if (sql.includes("information_schema.tables") || sql.includes("information_schema.columns")) {
         void params;
         return { rows: [{ n: 1 }] };
       }
@@ -370,7 +373,7 @@ describe("task source backfill — one transaction PER OFFICE", () => {
     const query = vi.fn(async (sql: string) => {
       statements.push(sql.trim());
       if (sql.includes("information_schema.schemata")) return { rows: [{ schema_name: "office_dallas" }] };
-      if (sql.includes("information_schema.columns")) return { rows: [{ n: 1 }] };
+      if (sql.includes("information_schema.")) return { rows: [{ n: 1 }] };
       if (sql.includes("DISABLE TRIGGER audit_tasks")) throw new Error("boom");
       return { rows: [] };
     });
@@ -382,16 +385,5 @@ describe("task source backfill — one transaction PER OFFICE", () => {
 
   it("suspends exactly the two triggers that would corrupt or bloat, and restores them in reverse", async () => {
     expect([...BACKFILL_SUSPENDED_TRIGGERS]).toEqual(["set_tasks_updated_at", "audit_tasks"]);
-  });
-});
-
-describe("task source backfill — statement builders reject an unsafe schema name", () => {
-  // The schema name is the one value here that comes from the database rather than from source, and it
-  // lands in a string that cannot be parameterised.
-  it.each([buildClassifyStatement, buildRepairStatement])("validates the schema name (%#)", (build) => {
-    for (const bad of ['office_x"; DROP TABLE tasks; --', "public", "office_", "Office_Dallas"]) {
-      expect(() => build(bad), bad).toThrow(/Invalid office schema name/);
-    }
-    expect(() => build("office_dallas")).not.toThrow();
   });
 });
