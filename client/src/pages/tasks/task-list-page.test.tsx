@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 import { describe, expect, it } from "vitest";
 import { afterEach, beforeEach, vi } from "vitest";
@@ -761,5 +761,40 @@ describe("TaskListPage project context", () => {
     // Only the Overdue bucket switches sort; other buckets keep their own selection.
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", sortBy: "priority", sortDir: "desc" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today", sortBy: "due_date", sortDir: "asc" }));
+  });
+
+  // `?complete=1` arrives from ONE task's emailed "Mark complete" link. Every other query parameter
+  // describes where the reader is — the filters, and `?officeId`, which is load-bearing because
+  // dropping it re-resolves the tenant from the reader's home office. This one describes what they
+  // were asked to do, and about what, so it is the one that must not ride along to a different task.
+  it("carries the view parameters to another conversation but drops the complete flag", () => {
+    function LocationSpy() {
+      const { pathname, search } = useLocation();
+      return <span data-testid="where">{`${pathname}${search}`}</span>;
+    }
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/tasks?source=manual&complete=1"]}>
+          <LocationSpy />
+          <Routes>
+            <Route path="/tasks" element={<TaskListPage />} />
+            <Route path="/tasks/:taskId" element={<TaskListPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+    });
+
+    const open = [...container.querySelectorAll<HTMLElement>("button")].find((b) =>
+      (b.getAttribute("aria-label") ?? b.textContent ?? "").toLowerCase().includes("conversation")
+    );
+    if (!open) throw new Error("no conversation button rendered");
+    act(() => open.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+    const where = container.querySelector('[data-testid="where"]')!.textContent!;
+    expect(where).toContain("source=manual");
+    // Otherwise the next drawer focuses and highlights THAT task's close action as though the email
+    // had asked for it — one click from completing the wrong task.
+    expect(where).not.toContain("complete=1");
   });
 });

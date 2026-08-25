@@ -487,3 +487,79 @@ describe("close from the drawer", () => {
     expect(container.textContent).not.toContain("Mark complete");
   });
 });
+
+// The drawer is ONE component instance reused for every task the list opens. Everything below is the
+// same defect wearing different clothes: state that belongs to a task outliving the task.
+//
+// The acknowledgement case is the one with teeth. `renderedUpTo` is derived from whatever comments are
+// in state and posted against `task.id`, so during the window where the drawer has swung to B and B's
+// comments have not landed, it will post A's timestamp against B — and the server accepts it, because
+// A's timestamp is a perfectly valid one. The assigner is then recorded as having read replies that
+// were never on screen, which is the single guarantee this whole feature sells.
+describe("switching to another task", () => {
+  const otherTask = { ...task, id: "task-2", title: "Order the dumpster" } as any;
+
+  function typeDraft(text: string) {
+    const textarea = container.querySelector<HTMLTextAreaElement>("#task-reply-composer")!;
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(textarea, text);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  it("clears a draft typed against the previous task", () => {
+    setComments([]);
+    render();
+    typeDraft("the north slope is still open, do not send the client photos yet");
+    expect(container.querySelector<HTMLTextAreaElement>("#task-reply-composer")!.value).toContain(
+      "north slope"
+    );
+
+    render({ task: otherTask });
+
+    // Otherwise Send posts one task's text — which is exactly where the sensitive sentence lives —
+    // into another task's thread.
+    expect(container.querySelector<HTMLTextAreaElement>("#task-reply-composer")!.value).toBe("");
+  });
+
+  // Reached through the FAILED-ack path, which the drawer handles deliberately: a failed
+  // acknowledgement clears `ackedRef` so it can be retried. That is correct on its own, and it also
+  // removes the only thing standing between a stale thread and a wrong-task acknowledgement.
+  //
+  // (Written the obvious way first — same comment on both tasks — this passed, because `ackedRef`
+  // still held that timestamp and the effect early-returned. It was not acking the wrong task, but
+  // only by accident. A test that passes because of an unrelated guard proves nothing about this one.)
+  it("does not acknowledge the new task using the previous task's comments", async () => {
+    mocks.ackTaskRepliesMock.mockRejectedValueOnce(new Error("offline"));
+    setComments([comment({ id: "c1", taskId: "task-1", createdAt: "2026-05-01T11:00:00.000Z" })]);
+    await act(async () => { render(); });
+    expect(mocks.ackTaskRepliesMock).toHaveBeenCalledWith("task-1", "2026-05-01T11:00:00.000Z");
+    mocks.ackTaskRepliesMock.mockClear().mockResolvedValue({ acknowledged: true });
+
+    // The drawer swings to task-2 while the hook is still holding task-1's thread — the ordinary
+    // in-flight state, not a race. Nothing in view belongs to task-2.
+    setComments([comment({ id: "c1", taskId: "task-1", createdAt: "2026-05-01T11:00:00.000Z" })], {
+      loading: true,
+    });
+    await act(async () => { render({ task: otherTask }); });
+
+    expect(mocks.ackTaskRepliesMock).not.toHaveBeenCalledWith("task-2", expect.anything());
+  });
+
+  it("still acknowledges the new task when its newest reply shares a timestamp with the last one", async () => {
+    const sharedStamp = "2026-05-01T11:00:00.000Z";
+    setComments([comment({ id: "c1", taskId: "task-1", createdAt: sharedStamp })]);
+    await act(async () => { render(); });
+    expect(mocks.ackTaskRepliesMock).toHaveBeenCalledWith("task-1", sharedStamp);
+    mocks.ackTaskRepliesMock.mockClear();
+
+    // `ackedRef` guards against re-posting the same thread head. Keyed to the timestamp alone it also
+    // swallows a DIFFERENT task whose head happens to match — two replies a minute apart round to the
+    // same second often enough for this to be real.
+    setComments([comment({ id: "c9", taskId: "task-2", createdAt: sharedStamp })]);
+    await act(async () => { render({ task: otherTask }); });
+
+    expect(mocks.ackTaskRepliesMock).toHaveBeenCalledWith("task-2", sharedStamp);
+  });
+});

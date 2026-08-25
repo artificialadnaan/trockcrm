@@ -183,10 +183,20 @@ export function TaskConversationDrawer({
   const projectContext = getTaskProjectContext(task);
   const notice = loopNotice(loop);
 
-  // Reset to the conversation whenever the drawer swings to a different task, so a tab left on
-  // History cannot carry over and suppress (or silently permit) the next task's acknowledgement.
+  // The drawer is ONE instance reused for every task the list opens, so anything task-scoped has to be
+  // reset here or it outlives the task it belongs to. Three things do:
+  //
+  //   * the tab, so a view left on History cannot carry over and suppress the next acknowledgement;
+  //   * the DRAFT, or Send posts one task's text — which is where the specific, sometimes sensitive
+  //     sentence lives — into another task's thread;
+  //   * `ackedRef`, which exists to stop re-posting the same thread head. Keyed to the timestamp alone
+  //     it also swallows a DIFFERENT task whose head happens to match, and two replies rounding to the
+  //     same second is not rare.
+  const ackedRef = useRef<string | null>(null);
   useEffect(() => {
     setTab("conversation");
+    setDraft("");
+    ackedRef.current = null;
   }, [task.id]);
 
   const completeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -205,18 +215,23 @@ export function TaskConversationDrawer({
   const renderedUpTo = useMemo(() => {
     let newest: string | null = null;
     for (const comment of comments) {
+      // Only comments belonging to THIS task. While the drawer has swung to B and B's thread has not
+      // landed, `comments` still holds A's — and posting A's timestamp against B is accepted by the
+      // server, because A's timestamp is a perfectly valid one. That records the assigner as having
+      // read replies that were never on screen, which is the single guarantee this feature sells.
+      // The hook's request-id guard discards a late RESPONSE; it cannot un-commit state already set.
+      if (comment.taskId !== task.id) continue;
       if (comment.kind !== "reply") continue;
       if (!newest || new Date(comment.createdAt).getTime() > new Date(newest).getTime()) {
         newest = comment.createdAt;
       }
     }
     return newest;
-  }, [comments]);
+  }, [comments, task.id]);
 
   // Acknowledge on open, once per rendered thread head. Guarded on the exact timestamp rather than a
   // boolean so a NEW reply arriving while the drawer is open is acknowledged too — and so a refetch
   // that returns the same head does not re-post.
-  const ackedRef = useRef<string | null>(null);
   useEffect(() => {
     // ...AND ONLY WHILE THE CONVERSATION IS ON SCREEN. The acknowledgement is a claim that a specific
     // person SAW something; recording it while the History tab is showing would take the task out of

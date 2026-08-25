@@ -227,7 +227,14 @@ function TaskRow({
   // home office and 404s a cross-office task.
   const openConversation = (event: React.MouseEvent) => {
     event.stopPropagation();
-    navigate(`/tasks/${task.id}${search}`);
+    // ...except `complete`, which is the one parameter that names a TASK rather than a view. It arrives
+    // from a specific task's emailed "Mark complete" link, and carrying it to a different task focuses
+    // and highlights that task's close action as though the email had asked for it. The other params
+    // describe where the reader is; this one describes what they were asked to do, and about what.
+    const carried = new URLSearchParams(search);
+    carried.delete("complete");
+    const query = carried.toString();
+    navigate(`/tasks/${task.id}${query ? `?${query}` : ""}`);
   };
 
   const unreadReplies = showUnreadReplies ? task.unreadReplyCount ?? 0 : 0;
