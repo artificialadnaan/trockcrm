@@ -17,7 +17,7 @@
 //
 // The remaining checks below are about the tenant loop reaching every schema, and about the file
 // staying additive.
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
 
@@ -33,9 +33,7 @@ const INDEX_NAME = "tasks_assigned_source_status_idx";
  */
 const OFFICES = ["office_dallas", "office_atlanta", "office_houston"] as const;
 
-let pg: PGlite;
-
-async function columnExists(schema: string, table: string, column: string) {
+async function columnExists(pg: PGlite, schema: string, table: string, column: string) {
   const result = await pg.query<{ n: number }>(
     `SELECT COUNT(*)::int AS n FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
@@ -44,7 +42,7 @@ async function columnExists(schema: string, table: string, column: string) {
   return (result.rows[0]?.n ?? 0) > 0;
 }
 
-async function sourceOf(schema: string, description: string) {
+async function sourceOf(pg: PGlite, schema: string, description: string) {
   const result = await pg.query<{ source: string }>(
     `SELECT source FROM ${schema}.tasks WHERE description = $1`,
     [description]
@@ -54,7 +52,7 @@ async function sourceOf(schema: string, description: string) {
 }
 
 /** A pre-0233 tenant: a tasks table carrying both triggers 0001 puts on it. */
-async function seedOffices(schemas: readonly string[]) {
+async function seedOffices(pg: PGlite, schemas: readonly string[]) {
   await pg.exec(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $fn$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $fn$ LANGUAGE plpgsql;
@@ -90,24 +88,30 @@ async function seedOffices(schemas: readonly string[]) {
   }
 }
 
-beforeEach(async () => {
-  pg = new PGlite();
-});
-
 describe("migration 0233 — tasks.source", () => {
+  let pg: PGlite;
+
+  beforeEach(() => {
+    pg = new PGlite();
+  });
+
+  afterEach(async () => {
+    await pg.close();
+  });
+
   it("adds the column to EVERY office schema, not just the first", async () => {
-    await seedOffices(OFFICES);
+    await seedOffices(pg, OFFICES);
     await pg.exec(migrationSql(MIGRATION));
 
     for (const schema of OFFICES) {
-      expect(await columnExists(schema, "tasks", "source"), schema).toBe(true);
+      expect(await columnExists(pg, schema, "tasks", "source"), schema).toBe(true);
     }
   });
 
   // Executed, not grepped: a CHECK constraint that exists but does not constrain is the failure this
   // catches, and reading its definition out of the catalog could not tell the difference.
   it("REJECTS a source outside the two allowed values, in EVERY office schema", async () => {
-    await seedOffices(OFFICES);
+    await seedOffices(pg, OFFICES);
     await pg.exec(migrationSql(MIGRATION));
 
     for (const schema of OFFICES) {
@@ -123,19 +127,19 @@ describe("migration 0233 — tasks.source", () => {
   });
 
   it("defaults new rows to 'automated' — the safer wrong answer for an unclassified row", async () => {
-    await seedOffices(OFFICES);
+    await seedOffices(pg, OFFICES);
     await pg.exec(migrationSql(MIGRATION));
 
     for (const schema of OFFICES) {
       await pg.exec(
         `INSERT INTO ${schema}.tasks (title, description) VALUES ('t', 'no source supplied')`
       );
-      expect(await sourceOf(schema, "no source supplied"), schema).toBe("automated");
+      expect(await sourceOf(pg, schema, "no source supplied"), schema).toBe("automated");
     }
   });
 
   it("is idempotent — re-running changes nothing and does not error", async () => {
-    await seedOffices(["office_dallas"]);
+    await seedOffices(pg, ["office_dallas"]);
     await pg.exec(migrationSql(MIGRATION));
     await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
 
@@ -151,11 +155,11 @@ describe("migration 0233 — tasks.source", () => {
   });
 
   it("skips a schema that has no tasks table, instead of failing the whole migration", async () => {
-    await seedOffices(["office_dallas"]);
+    await seedOffices(pg, ["office_dallas"]);
     await pg.exec(`CREATE SCHEMA office_empty;`);
 
     await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
-    expect(await columnExists("office_dallas", "tasks", "source")).toBe(true);
+    expect(await columnExists(pg, "office_dallas", "tasks", "source")).toBe(true);
   });
 
   // The provisioner replays ONLY the marked block for offices created after this deploy. If it drifts
@@ -168,13 +172,26 @@ describe("migration 0233 — tasks.source", () => {
     expect(raw.split("-- TENANT_SCHEMA_END")).toHaveLength(2);
 
     const block = raw.split("-- TENANT_SCHEMA_START")[1].split("-- TENANT_SCHEMA_END")[0];
-    await seedOffices(["office_dallas"]);
+    await seedOffices(pg, ["office_dallas"]);
     await pg.exec(block);
 
-    expect(await columnExists("office_dallas", "tasks", "source")).toBe(true);
+    expect(await columnExists(pg, "office_dallas", "tasks", "source")).toBe(true);
     await expect(
       pg.exec(`INSERT INTO office_dallas.tasks (title, source) VALUES ('bogus', 'imported')`)
     ).rejects.toThrow();
+  });
+
+  it("builds NO index in any office — that is 0237's job, via a CONCURRENTLY pre-step", async () => {
+    // One office: this is a property of the FILE, and the regex check below already covers the loop and
+    // the provisioner block together. Executing it here proves the two agree.
+    await seedOffices(pg, ["office_dallas"]);
+    await pg.exec(migrationSql(MIGRATION));
+
+    const found = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pg_indexes WHERE indexname = $1`,
+      [INDEX_NAME]
+    );
+    expect(found.rows[0]?.n).toBe(0);
   });
 });
 
@@ -269,18 +286,5 @@ describe("migration 0233 — the file stays additive (structural)", () => {
       .join("\n");
     expect(withoutComments).not.toMatch(/\bUPDATE\s+\S+\.tasks\b/i);
     expect(withoutComments).not.toMatch(/\bUPDATE\s+%1\$I\b/i);
-  });
-
-  it("builds NO index in any office — that is 0237's job, via a CONCURRENTLY pre-step", async () => {
-    // One office: this is a property of the FILE, and the regex check above already covers the loop and
-    // the provisioner block together. Executing it here proves the two agree.
-    await seedOffices(["office_dallas"]);
-    await pg.exec(migrationSql(MIGRATION));
-
-    const found = await pg.query<{ n: number }>(
-      `SELECT COUNT(*)::int AS n FROM pg_indexes WHERE indexname = $1`,
-      [INDEX_NAME]
-    );
-    expect(found.rows[0]?.n).toBe(0);
   });
 });
