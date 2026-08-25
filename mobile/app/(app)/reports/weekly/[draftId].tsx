@@ -41,8 +41,10 @@ import {
 import { retryWeeklyReportPhotoUploads } from "../../../../src/weekly-reports/photo-import";
 import { weeklyReportServerReportId } from "../../../../src/weekly-reports/hub";
 import { isWeeklyReportWeekTakenError } from "../../../../src/weekly-reports/reconcile";
+import { newSubmissionId } from "../../../../src/scorecards/ids";
 import {
   adoptWeeklyReportWeekRow,
+  createWeeklyReportWithRenewedSubmission,
   runWeeklyReportSubmit,
 } from "../../../../src/weekly-reports/submit";
 import {
@@ -320,10 +322,22 @@ function Wizard({
     if (draft.reportId) return draft.reportId;
     let created;
     try {
-      created = await createWeeklyReport(fetcher, {
-        clientSubmissionId: draft.clientSubmissionId,
-        weeklyReportProjectId: draft.weeklyReportProjectId,
-        weekOf: draft.weekOf,
+      // RENEWS A SPENT KEY RATHER THAN RETRYING IT FOREVER. If leadership deleted the report this draft
+      // created, its `clientSubmissionId` is retired for good — the UNIQUE constraint is not partial — so
+      // every further attempt answers the same 409 and the only move the phone had left was discarding a
+      // week's writing. The helper mints a fresh key, tells us to persist it, and tries once more.
+      created = await createWeeklyReportWithRenewedSubmission(draft.clientSubmissionId, {
+        create: (clientSubmissionId) =>
+          createWeeklyReport(fetcher, {
+            clientSubmissionId,
+            weeklyReportProjectId: draft.weeklyReportProjectId,
+            weekOf: draft.weekOf,
+          }),
+        newClientSubmissionId: newSubmissionId,
+        // Persisted BEFORE the retry lands, so a create whose reply is lost on the way back is still
+        // idempotent under the new key rather than minting a third one on the next attempt.
+        onRenewed: (clientSubmissionId) =>
+          dispatch({ type: "renewClientSubmissionId", clientSubmissionId }),
       });
     } catch (error) {
       if (!isWeeklyReportWeekTakenError(error)) throw error;

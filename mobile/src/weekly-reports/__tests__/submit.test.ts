@@ -39,7 +39,13 @@ import {
 } from "../reconcile";
 import { weeklyReportFinalAction } from "../status";
 import { WeeklyReportOvertakenError } from "../transition";
-import { adoptWeeklyReportWeekRow, runWeeklyReportSubmit, type WeeklyReportSubmitPort } from "../submit";
+import { WEEKLY_REPORT_SUBMISSION_DELETED_CODE } from "../reconcile";
+import {
+  adoptWeeklyReportWeekRow,
+  createWeeklyReportWithRenewedSubmission,
+  runWeeklyReportSubmit,
+  type WeeklyReportSubmitPort,
+} from "../submit";
 import { ALL_ALLOWED, doorServer, emptyRow, fakeDoorHub, seed, serverReport } from "./fixtures";
 
 function apiError(status: number, message: string) {
@@ -536,5 +542,73 @@ describe("adopting the row another device created for this week", () => {
     expect(error).toBeInstanceOf(WeeklyReportWeekTakenError);
     expect(error.message).not.toMatch(/open that week/i);
     expect(error.message).toMatch(/still on this phone/i);
+  });
+});
+
+describe("creating a report whose submission key the server has retired", () => {
+  // THE DEAD END THIS REPLACES: the phone retried a key belonging to a report leadership had deleted,
+  // got the same 409 every time, and the only way forward offered was discarding a week's writing.
+  function deletedError() {
+    return Object.assign(new Error("That report was deleted — start this week again"), {
+      status: 409,
+      code: WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
+    });
+  }
+
+  it("mints a fresh key and retries, keeping the caller's draft intact", async () => {
+    const seen: string[] = [];
+    const renewed: string[] = [];
+    const created = await createWeeklyReportWithRenewedSubmission("spent-key", {
+      create: async (id) => {
+        seen.push(id);
+        if (id === "spent-key") throw deletedError();
+        return { reportId: "r-new" };
+      },
+      newClientSubmissionId: () => "fresh-key",
+      onRenewed: (id) => renewed.push(id),
+    });
+
+    expect(created).toEqual({ reportId: "r-new" });
+    expect(seen).toEqual(["spent-key", "fresh-key"]);
+    // The caller is TOLD, so the new key is persisted with the draft. Without this the phone would mint
+    // a fresh key on every attempt and lose the idempotency the key exists to provide.
+    expect(renewed).toEqual(["fresh-key"]);
+  });
+
+  it("retries exactly once, so a server stuck on that answer cannot spin", async () => {
+    const seen: string[] = [];
+    let n = 0;
+    await expect(
+      createWeeklyReportWithRenewedSubmission("spent-key", {
+        create: async (id) => {
+          seen.push(id);
+          throw deletedError();
+        },
+        newClientSubmissionId: () => `fresh-${(n += 1)}`,
+        onRenewed: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: WEEKLY_REPORT_SUBMISSION_DELETED_CODE });
+    expect(seen).toHaveLength(2);
+  });
+
+  it("leaves every other failure alone, including the week-taken conflict", async () => {
+    // The week-taken 409 has its own recovery — adopting the row somebody else made — and swallowing it
+    // here would take the phone off that path.
+    const taken = Object.assign(new Error("A report already exists for this week"), {
+      status: 409,
+      code: "WEEKLY_REPORT_WEEK_EXISTS",
+    });
+    const seen: string[] = [];
+    await expect(
+      createWeeklyReportWithRenewedSubmission("key", {
+        create: async (id) => {
+          seen.push(id);
+          throw taken;
+        },
+        newClientSubmissionId: () => "unused",
+        onRenewed: () => undefined,
+      }),
+    ).rejects.toBe(taken);
+    expect(seen).toEqual(["key"]);
   });
 });

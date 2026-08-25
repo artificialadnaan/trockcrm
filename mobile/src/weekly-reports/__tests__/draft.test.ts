@@ -586,3 +586,43 @@ describe("the picker's grid", () => {
     expect(merged.map((c) => c.fileId)).toEqual(["a"]);
   });
 });
+
+describe("a submission key the server has permanently retired", () => {
+  // `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial one. Once
+  // leadership deletes the report a phone created, that key can never produce a row again — every retry
+  // gets the same 409 forever. The draft's writing is fine; only its key is spent.
+  it("mints a new key and keeps every word of the draft", () => {
+    const draft = newDraft({
+      clientSubmissionId: "spent-key",
+      workCompleted: "Framing on level 3",
+      nextWeekLookAhead: "Drywall",
+      completionPercent: "42",
+    });
+
+    const renewed = weeklyReportDraftReducer(draft, {
+      type: "renewClientSubmissionId",
+      clientSubmissionId: "fresh-key",
+    });
+
+    expect(renewed.clientSubmissionId).toBe("fresh-key");
+    // THE WRITING IS THE WHOLE POINT. The alternative the field user had was discarding it and starting
+    // the week again from an empty form, on a phone, on a jobsite.
+    expect(renewed.workCompleted).toBe("Framing on level 3");
+    expect(renewed.nextWeekLookAhead).toBe("Drywall");
+    expect(renewed.completionPercent).toBe("42");
+  });
+
+  it("drops the dead report id, so the next attempt actually POSTs again", () => {
+    // `ensureReport` short-circuits on `draft.reportId`. Renewing the key while leaving a stale id behind
+    // would hand back the id of the report that was deleted and never retry at all.
+    const renewed = weeklyReportDraftReducer(
+      newDraft({ clientSubmissionId: "spent-key", reportId: "deleted-report" }),
+      { type: "renewClientSubmissionId", clientSubmissionId: "fresh-key" },
+    );
+
+    expect(renewed.reportId).toBeNull();
+    // And the provenance goes with it: `seededFrom` describes a row that no longer exists, and leaving it
+    // would make the next open compare this draft against a report nobody can read.
+    expect(renewed.seededFrom).toBeNull();
+  });
+});

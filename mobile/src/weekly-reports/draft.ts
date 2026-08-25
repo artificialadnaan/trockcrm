@@ -301,6 +301,19 @@ export type WeeklyReportDraftAction =
    * conflict dialog naming a colleague who does not exist — whose destructive button then drops the
    * photos this phone had just successfully uploaded.
    */
+  /**
+   * The server has permanently retired this draft's submission key, so give it a new one.
+   *
+   * `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial one: once the
+   * report a phone created is DELETED, that key can never produce a row again and every retry gets the
+   * same 409 for the rest of time. The writing on the draft is untouched by any of that — only its key
+   * is spent — so the recovery is a fresh key over the same words, and the alternative the field user
+   * had was discarding a week's work and starting again on a jobsite.
+   *
+   * The report id and its provenance go WITH the key. `ensureReport` short-circuits on `reportId`, so
+   * leaving the dead one behind would hand back the id of the deleted report and never retry at all.
+   */
+  | { type: "renewClientSubmissionId"; clientSubmissionId: string }
   | { type: "setSeededFrom"; seededFrom: WeeklyReportSeedState | null }
   /** The server moved the report; record it so the final button stops asking for a transition it made. */
   | { type: "setServerStatus"; status: WeeklyReportStatusValue }
@@ -401,6 +414,14 @@ export function weeklyReportDraftReducer(
         reportId: action.reportId,
         // `undefined` means "leave the provenance alone"; an explicit null clears it.
         seededFrom: action.seededFrom === undefined ? draft.seededFrom : action.seededFrom,
+      };
+    case "renewClientSubmissionId":
+      return {
+        ...draft,
+        clientSubmissionId: action.clientSubmissionId,
+        // Both cleared deliberately — see the action's note. The content is left exactly as it is.
+        reportId: null,
+        seededFrom: null,
       };
     case "setSeededFrom":
       return { ...draft, seededFrom: action.seededFrom };

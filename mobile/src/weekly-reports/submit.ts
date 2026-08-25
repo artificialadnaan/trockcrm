@@ -26,6 +26,7 @@ import {
 } from "./draft";
 import {
   WeeklyReportWeekTakenError,
+  isWeeklyReportSubmissionDeletedError,
   weeklyReportWeekRowIsUntouched,
   weeklyReportWeekTakenMessage,
 } from "./reconcile";
@@ -86,6 +87,40 @@ export async function adoptWeeklyReportWeekRow(
   }
   port.adopt(existingId, seededFrom);
   return existingId;
+}
+
+/**
+ * Create the report, and if this draft's submission key has been RETIRED, mint a new one and try again.
+ *
+ * `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial one. Once the
+ * report a phone created is deleted, that key is spent for good — every retry answers the same 409 for
+ * the rest of time, and the phone's only remaining move used to be discarding a week's writing and
+ * starting the form again on a jobsite.
+ *
+ * The draft's CONTENT is untouched by any of this; only its key is dead. So the recovery is a fresh key
+ * over the same words, and `onRenewed` is how it reaches storage — a key minted and not persisted would
+ * be re-minted on the next attempt, throwing away the idempotency the key exists to provide.
+ *
+ * EXACTLY ONE RETRY. A second refusal means something other than a spent key is answering that way, and
+ * a phone that kept minting ids against it would create a report per attempt on a flaky connection —
+ * which is the failure the idempotency key was introduced to prevent, arriving from the other side.
+ */
+export async function createWeeklyReportWithRenewedSubmission<T>(
+  clientSubmissionId: string,
+  port: {
+    create(clientSubmissionId: string): Promise<T>;
+    newClientSubmissionId(): string;
+    onRenewed(clientSubmissionId: string): void;
+  },
+): Promise<T> {
+  try {
+    return await port.create(clientSubmissionId);
+  } catch (error) {
+    if (!isWeeklyReportSubmissionDeletedError(error)) throw error;
+    const renewed = port.newClientSubmissionId();
+    port.onRenewed(renewed);
+    return await port.create(renewed);
+  }
 }
 
 // ── The submit sequence ──────────────────────────────────────────────────────
