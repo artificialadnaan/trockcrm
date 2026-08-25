@@ -361,7 +361,7 @@ function markOutstanding(
 }
 
 /**
- * @throws 404 when the project does not exist or has been soft-deleted.
+ * @throws 404 when the project does not exist. A STOPPED setup still loads — see the call below.
  *
  * Reports are read WITHOUT an `is_active` filter on purpose: a soft-deleted version is part of what
  * happened, and an audit trail that quietly omits the rows somebody removed is not one. That promise was
@@ -372,7 +372,10 @@ export async function getWeeklyReportProjectAudit(
   client: QueryExecutor,
   projectId: string,
 ): Promise<WeeklyReportProjectAudit> {
-  const project = await getWeeklyReportProject(client, projectId);
+  // A STOPPED SETUP STILL HAS A HISTORY, and after this feature it may hold the only record of a
+  // deletion. 404 remains the answer for a project that does not exist — see the service's own note on
+  // why an empty history and a missing project must not look alike.
+  const project = await getWeeklyReportProject(client, projectId, { allowInactive: true });
   if (!project) throw new AppError(404, "Weekly report project not found");
 
   // THE DELETION COMES OFF `audit_log`, LATERALLY.

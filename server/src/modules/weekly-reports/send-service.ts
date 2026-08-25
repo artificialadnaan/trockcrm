@@ -189,6 +189,19 @@ function senderFrom(projectRow: Record<string, any>): WeeklyReportSenderContact 
  *
  * `complained` is deliberately NOT excluded: a spam complaint can only follow a delivery, so that client
  * does have the report and the replacement wording is correct for them.
+ *
+ * NO `is_active` FILTER, and its absence is the point. This asks what the CLIENT HOLDS, which is a fact
+ * about the outside world — deleting our row does not recall their email. With the filter, removing a
+ * delivered v1 made the v2 that follows introduce itself as an ordinary first report to somebody already
+ * holding last Thursday's copy, which is the single sentence the correction wording exists to prevent.
+ * Every other predicate in this module that asks about OUR records keeps the filter; this one asks about
+ * theirs. Same rule the audit page applies to a removed bounce: a removal is not a re-write of history.
+ *
+ * The remaining ambiguity is pre-existing and unchanged: a v1 delivered to the WRONG recipient and then
+ * removed still counts, so a v2 addressed elsewhere tells a first-time reader it replaces a copy they
+ * never had. That is already true of a live v1 in the same situation — recipients are per-send and this
+ * predicate does not compare them — so including removed rows makes them behave like live ones rather
+ * than introducing a new way to be wrong.
  */
 async function priorVersionReachedClient(
   client: QueryExecutor,
@@ -200,7 +213,6 @@ async function priorVersionReachedClient(
       WHERE weekly_report_project_id = $1::uuid
         AND week_of = $2::date
         AND version < $3
-        AND is_active
         AND status = 'sent'
         AND send_delivered_at IS NOT NULL
         AND (send_delivery_status IS NULL OR NOT (send_delivery_status = ANY($4::text[])))

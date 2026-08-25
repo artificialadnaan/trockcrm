@@ -638,6 +638,43 @@ describe("the per-project audit trail", () => {
     expect(audit.reports[0]!.outstanding).toBe(true);
   });
 
+  it("still loads once the SETUP has been stopped, or a deletion becomes unreadable the moment it happens", async () => {
+    // THE RECORD HAS TO OUTLIVE THE THING IT DESCRIBES. Deleting a report under a stopped setup is a
+    // supported path — it is where leftover test data comes to rest — and `audit_log` is the only place
+    // the actor, timestamp and reason are kept. With the active-only project load, this endpoint 404'd
+    // for exactly those setups, and they are absent from the Projects tab and the dashboard too, so the
+    // deletion evidence was unreachable from every surface the instant it was written.
+    await seedFullySentReport({ is_active: false });
+    await pg.query(
+      `INSERT INTO office_dallas.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ('weekly_report', $1::uuid, 'soft_delete', $2::uuid, $3::jsonb, '2026-08-20T09:00:00Z'::timestamptz)`,
+      [REPORT, DIRECTOR, JSON.stringify({ reason: "Leftover from the e2e runbook" })],
+    );
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects SET is_active = false WHERE id = $1::uuid`,
+      [PROJECT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports).toHaveLength(1);
+    expect(audit.reports[0]).toMatchObject({
+      isActive: false,
+      deletedByName: "Takashi",
+      deletedReason: "Leftover from the e2e runbook",
+    });
+    // And the page can say the reporting itself has stopped, rather than presenting a finished job as
+    // though Thursdays were still owed.
+    expect(audit.project.isActive).toBe(false);
+  });
+
+  it("still 404s a project that does not exist at all — the control", async () => {
+    // Loading stopped setups must not become loading anything. Without this the change above would pass
+    // for a service that had dropped its existence check entirely.
+    await expect(getWeeklyReportProjectAudit(db as any, U("99999"))).rejects.toMatchObject({
+      statusCode: 404,
+    });
+  });
+
   it("never returns the stored send request, which carries the RAW share token", async () => {
     // `send_request.shareUrl` holds the raw token — the only place it exists, since
     // `weekly_report_tokens` stores just its SHA-256. This endpoint is open to every `rep` in the

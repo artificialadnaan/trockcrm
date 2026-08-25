@@ -192,8 +192,34 @@ export const WEEKLY_REPORT_WEEK_EXISTS_CODE = "WEEKLY_REPORT_WEEK_EXISTS";
 export function isWeeklyReportWeekTakenError(error: unknown): boolean {
   const candidate = error as { status?: unknown; code?: unknown; message?: unknown } | null | undefined;
   if (candidate?.status !== 409) return false;
+  // A DELETED SUBMISSION IS NOT A TAKEN WEEK, and it is checked first because the prose fallback below
+  // is a loose match — one wording change on the server and a stranded draft would start reading as an
+  // adoptable row again. See isWeeklyReportSubmissionDeletedError.
+  if (isWeeklyReportSubmissionDeletedError(candidate)) return false;
   if (candidate.code === WEEKLY_REPORT_WEEK_EXISTS_CODE) return true;
   return typeof candidate.message === "string" && /already exists for this week/i.test(candidate.message);
+}
+
+/** Mirrors WEEKLY_REPORT_SUBMISSION_DELETED_CODE in server/src/modules/weekly-reports/reports-service.ts. */
+export const WEEKLY_REPORT_SUBMISSION_DELETED_CODE = "WEEKLY_REPORT_SUBMISSION_DELETED";
+
+/**
+ * Is this the THIRD 409 — "the report you are retrying was deleted"?
+ *
+ * Kept apart from the week-taken conflict because the two want opposite moves. That one is recovered by
+ * ADOPTING the row somebody else created; there is no row here, so `adoptWeeklyReportWeekRow` finds
+ * nothing and raises its permanent "unlisted" error with the superintendent's unsent writing still on
+ * the device and no id it can ever be filed under.
+ *
+ * `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial one, so the key
+ * this draft is holding can never produce a row again however many times it retries. The recovery is a
+ * FRESH `clientSubmissionId` over the same local draft. This predicate is the half of that the phone can
+ * ship today; acting on it — minting the new id and keeping the writing — is a change to the submit
+ * sequence and belongs with a mobile build, not with a server PR.
+ */
+export function isWeeklyReportSubmissionDeletedError(error: unknown): boolean {
+  const candidate = error as { status?: unknown; code?: unknown } | null | undefined;
+  return candidate?.status === 409 && candidate.code === WEEKLY_REPORT_SUBMISSION_DELETED_CODE;
 }
 
 /**

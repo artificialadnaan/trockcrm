@@ -38,6 +38,7 @@ import {
   listWeeklyReportProjects,
 } from "../../../src/modules/weekly-reports/projects-service.js";
 import {
+  WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
   WEEKLY_REPORT_WEEK_EXISTS_CODE,
   createWeeklyReportDraft,
   deleteWeeklyReport,
@@ -46,6 +47,7 @@ import {
   updateWeeklyReportContent,
 } from "../../../src/modules/weekly-reports/reports-service.js";
 import { getWeeklyReportDashboard } from "../../../src/modules/weekly-reports/dashboard-service.js";
+import { buildWeeklyReportSendDraft } from "../../../src/modules/weekly-reports/send-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const OFFICE = U("00001");
@@ -736,10 +738,16 @@ describe("what a deleted report stops doing", () => {
     expect(week?.reportId).toBeNull();
   });
 
-  it("stops counting as the version a correction replaces, so the next email says the right thing", async () => {
-    // `priorVersionReachedClient` filters `AND is_active`. A delivered v1 that is then deleted makes the
-    // next version's email read "here is this week's report" to a client who is holding v1 — the one
-    // sentence the correction wording exists to prevent.
+  it("is STILL the version a correction replaces, because deleting a row does not un-send it", async () => {
+    // THE TEST THAT USED TO LIVE HERE ASSERTED THE BUG AS CORRECT. It re-implemented
+    // `priorVersionReachedClient`'s query inline, watched the count fall to 0 after the delete, and was
+    // named as though that were the right answer — while its own comment described the harm. Both the
+    // one-hop query and the reassuring name are exactly the traps this suite exists to avoid.
+    //
+    // What the client HOLDS is a fact about the outside world. Deleting our row does not recall their
+    // email, so a later version of that week is still a correction and must say so; the alternative
+    // greets somebody holding last Thursday's report with "here is this week's report". This is the same
+    // rule the audit page already applies to a removed bounce — removal is not a re-write of history.
     const project = await seedProject();
     const v1 = await seedDraft(project.id);
     await setStatus(v1, "sent");
@@ -748,27 +756,43 @@ describe("what a deleted report stops doing", () => {
         WHERE id = $1::uuid`,
       [v1],
     );
+    const v2 = await seedVersion(project.id, 2);
+    await pg.query(`UPDATE office_dallas.weekly_reports SET status = 'approved' WHERE id = $1::uuid`, [v2]);
 
-    const before = await pg.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM office_dallas.weekly_reports
-        WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date AND version < 2
-          AND is_active AND status = 'sent' AND send_delivered_at IS NOT NULL`,
-      [project.id, WEEK_OF],
-    );
-    expect(before.rows[0]!.n).toBe(1);
+    // Through the REAL send path, not a re-typed predicate: `buildWeeklyReportSendDraft` is what decides
+    // the wording the client actually reads.
+    const before = await buildWeeklyReportSendDraft(db, v2, DIRECTOR_ACTOR);
+    expect(before.isCorrection).toBe(true);
 
     await deleteWeeklyReport(db, v1, ADMIN_ACTOR, {
-      reason: "Sent to the wrong client",
+      reason: "Superseded by the corrected version",
       confirmWeekOf: WEEK_OF,
     });
 
-    const after = await pg.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM office_dallas.weekly_reports
-        WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date AND version < 2
-          AND is_active AND status = 'sent' AND send_delivered_at IS NOT NULL`,
-      [project.id, WEEK_OF],
-    );
-    expect(after.rows[0]!.n).toBe(0);
+    const after = await buildWeeklyReportSendDraft(db, v2, DIRECTOR_ACTOR);
+    expect(after.isCorrection).toBe(true);
+    // THE SENTENCE THE CLIENT ACTUALLY READS, not just the flag behind it. `isCorrection` is a boolean
+    // three layers from the mailbox; this is the difference between the two paragraphs.
+    expect(after.contextParagraph).toMatch(/replaces the version sent previously/i);
+    expect(after.contextParagraph).not.toMatch(/Please find this week's progress report/i);
+  });
+
+  it("is not a correction when the deleted version never reached anybody — the control", async () => {
+    // Keeps the rule about RECEIPT rather than about existence. A v1 that was committed but never
+    // accepted by the provider is not something the client holds, so removing it changes nothing and the
+    // replacement is still an ordinary first report.
+    const project = await seedProject();
+    const v1 = await seedDraft(project.id);
+    await setStatus(v1, "sent");
+    const v2 = await seedVersion(project.id, 2);
+    await pg.query(`UPDATE office_dallas.weekly_reports SET status = 'approved' WHERE id = $1::uuid`, [v2]);
+
+    await deleteWeeklyReport(db, v1, ADMIN_ACTOR, {
+      reason: "Never went out",
+      confirmWeekOf: WEEK_OF,
+    });
+
+    expect((await buildWeeklyReportSendDraft(db, v2, DIRECTOR_ACTOR)).isCorrection).toBe(false);
   });
 });
 
@@ -799,8 +823,35 @@ describe("creating a report after one has been deleted", () => {
     }
     expect(caught).toBeInstanceOf(AppError);
     expect((caught as AppError).statusCode).toBe(409);
-    // The CODE, not the prose: the phone tells this 409 apart from "reporting is paused" by matching it,
-    // and the two want opposite handling.
+    // ITS OWN CODE, not the week-taken one — and the distinction is not cosmetic.
+    //
+    // The phone matches `WEEKLY_REPORT_WEEK_EXISTS` to mean "somebody else already started this week"
+    // and recovers by ADOPTING that row (`adoptWeeklyReportWeekRow`). There is no row to adopt here: the
+    // week's report was deleted, so `findServerReportId` returns nothing and the phone lands in its
+    // permanent "unlisted" dead end, holding work it can no longer file under any id. The truth is
+    // "the submission you are retrying was removed", whose recovery is a FRESH submission id over the
+    // same local draft — the opposite move.
+    expect((caught as AppError).code).toBe(WEEKLY_REPORT_SUBMISSION_DELETED_CODE);
+    expect((caught as AppError).code).not.toBe(WEEKLY_REPORT_WEEK_EXISTS_CODE);
+  });
+
+  it("keeps the week-taken code for an actual live row, so the two stay tellable apart", async () => {
+    // The control. A DIFFERENT submission id for a week that already has a live report is the genuine
+    // "two people started the same week" conflict, and the phone's adopt path is the right answer there.
+    const project = await seedProject();
+    await seedDraft(project.id);
+
+    let caught: unknown;
+    try {
+      await createWeeklyReportDraft(
+        db,
+        { clientSubmissionId: nextSubmissionId(), weeklyReportProjectId: project.id, weekOf: WEEK_OF },
+        SUPER_ACTOR,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as AppError).statusCode).toBe(409);
     expect((caught as AppError).code).toBe(WEEKLY_REPORT_WEEK_EXISTS_CODE);
   });
 

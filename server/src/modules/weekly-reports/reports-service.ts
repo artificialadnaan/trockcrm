@@ -512,6 +512,21 @@ export interface CreateWeeklyReportInput {
  */
 export const WEEKLY_REPORT_WEEK_EXISTS_CODE = "WEEKLY_REPORT_WEEK_EXISTS";
 
+/**
+ * Machine-readable tag on "the submission you are retrying was DELETED".
+ *
+ * A THIRD answer, and it needs to be — it is not the week-taken conflict wearing a different message.
+ * The phone reads `WEEKLY_REPORT_WEEK_EXISTS` as "somebody else already started this week" and recovers
+ * by adopting that row (`adoptWeeklyReportWeekRow` in mobile/src/weekly-reports/submit.ts). Here there
+ * is nothing to adopt: the week's report is gone, so the lookup finds no row and the phone lands in its
+ * permanent "unlisted" branch still holding work it can no longer file under any id.
+ *
+ * The recovery for THIS one is the opposite move — mint a fresh `clientSubmissionId` over the same local
+ * draft — because `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial
+ * one, so the old key can never produce a row again however many times it is retried.
+ */
+export const WEEKLY_REPORT_SUBMISSION_DELETED_CODE = "WEEKLY_REPORT_SUBMISSION_DELETED";
+
 /** What last week's report said, for the values a new week starts from. */
 export interface WeeklyReportCarryOver {
   reportId: string;
@@ -688,8 +703,9 @@ export async function createWeeklyReportDraft(
  * plain UNIQUE constraint, not a partial one, so that key can never produce a row again. Reading the id
  * without `is_active` and then dereferencing it through `getWeeklyReportDetail`, which DOES filter
  * `is_active`, answered 404 "Weekly report not found" — to a CREATE call, permanently, for the one
- * mechanism that exists to make flaky-LTE retries boring. The phone recovers from this 409 by adopting
- * the week's live report or starting a fresh submission; it cannot recover from a 404 at all.
+ * mechanism that exists to make flaky-LTE retries boring. The phone recovers from this 409 by minting a fresh
+ * submission id over the same local draft; it cannot recover from a 404 at all, and it must not be told
+ * to ADOPT — see WEEKLY_REPORT_SUBMISSION_DELETED_CODE for why that answer strands the draft.
  */
 async function adoptOrRefuseSubmission(
   client: QueryExecutor,
@@ -699,7 +715,7 @@ async function adoptOrRefuseSubmission(
     throw new AppError(
       409,
       "That report was deleted — start this week again",
-      WEEKLY_REPORT_WEEK_EXISTS_CODE,
+      WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
     );
   }
   const report = await getWeeklyReportDetail(client, row.id);

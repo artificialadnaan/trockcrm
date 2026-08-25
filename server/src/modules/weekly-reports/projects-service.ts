@@ -319,8 +319,17 @@ export async function listWeeklyReportProjects(
 export async function getWeeklyReportProject(
   client: QueryExecutor,
   id: string,
+  // READING a stopped setup is not the same as working on one. The audit trail has to outlive the thing
+  // it describes — a report deleted under a stopped setup records its actor, timestamp and reason in
+  // `audit_log` and nowhere else, and that setup is absent from the Projects tab and the dashboard, so
+  // an active-only load made the evidence unreachable from every surface the moment it was written.
+  // Every WRITE path keeps the filter; `allowInactive` is for the surfaces that only look.
+  options: { allowInactive?: boolean } = {},
 ): Promise<WeeklyReportProject | null> {
-  const result = await client.query(`${PROJECT_SELECT} WHERE wrp.id = $1::uuid AND wrp.is_active LIMIT 1`, [id]);
+  const result = await client.query(
+    `${PROJECT_SELECT} WHERE wrp.id = $1::uuid ${options.allowInactive ? "" : "AND wrp.is_active"} LIMIT 1`,
+    [id],
+  );
   return result.rows[0] ? mapWeeklyReportProject(result.rows[0]) : null;
 }
 

@@ -18,7 +18,9 @@ import {
   type WeeklyReportSeedableReport,
 } from "../draft";
 import {
+  WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
   WEEKLY_REPORT_WEEK_EXISTS_CODE,
+  isWeeklyReportSubmissionDeletedError,
   isWeeklyReportWeekTakenError,
   weeklyReportDiscardWarning,
   weeklyReportOpenRefusal,
@@ -415,6 +417,45 @@ describe("a week that got a report row from another device", () => {
     ).toBe(false);
     expect(isWeeklyReportWeekTakenError(Object.assign(new Error("nope"), { status: 403 }))).toBe(false);
     expect(isWeeklyReportWeekTakenError(new Error("A report already exists for this week"))).toBe(false);
+  });
+
+  it("does NOT read a deleted submission as a taken week, which would strand the draft", () => {
+    // THE THIRD 409, and the one that must not be mistaken for the first. `WEEKLY_REPORT_SUBMISSION_DELETED`
+    // means the report this phone is retrying was removed — so there is no row to adopt, `findServerReportId`
+    // comes back empty, and `adoptWeeklyReportWeekRow` throws its permanent "unlisted" error with the
+    // superintendent's unsent writing still on the device and no id it can ever be filed under. The
+    // recovery is a fresh submission id over the same draft, which is the opposite of adopting.
+    const deleted = Object.assign(new Error("That report was deleted — start this week again"), {
+      status: 409,
+      code: WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
+    });
+    expect(isWeeklyReportSubmissionDeletedError(deleted)).toBe(true);
+    expect(isWeeklyReportWeekTakenError(deleted)).toBe(false);
+
+    // And the week-taken conflict is not a deleted submission either — the recognisers are disjoint, not
+    // merely ordered, so neither can quietly swallow the other if one is checked first.
+    const taken = Object.assign(new Error("A report already exists for this week"), {
+      status: 409,
+      code: WEEKLY_REPORT_WEEK_EXISTS_CODE,
+    });
+    expect(isWeeklyReportSubmissionDeletedError(taken)).toBe(false);
+  });
+
+  it("keeps the CODE ahead of the prose, so server copy cannot re-strand the draft", () => {
+    // THE CASE THE EARLY RETURN EXISTS FOR, and without it the guard is unprovable. `isWeeklyReportWeekTaken`
+    // falls back to matching the message for API builds that predate the codes, and that fallback is a
+    // loose regex. The day somebody rewords the deleted-submission 409 into anything containing "already
+    // exists for this week" — which is a perfectly natural thing to write about a week whose report was
+    // removed — the phone would route the draft back into the adopt path and lose it again.
+    //
+    // The code is authoritative and the prose is only a fallback; this pins that order rather than
+    // trusting today's wording to keep them apart by accident.
+    const rewordedByAFutureServer = Object.assign(
+      new Error("A report already exists for this week, but it was deleted"),
+      { status: 409, code: WEEKLY_REPORT_SUBMISSION_DELETED_CODE },
+    );
+    expect(isWeeklyReportSubmissionDeletedError(rewordedByAFutureServer)).toBe(true);
+    expect(isWeeklyReportWeekTakenError(rewordedByAFutureServer)).toBe(false);
   });
 
   it("warns, before Discard, that unsent writing is being deleted for good", () => {

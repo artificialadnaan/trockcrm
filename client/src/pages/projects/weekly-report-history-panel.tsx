@@ -78,6 +78,7 @@ export function WeeklyReportHistoryPanel({
   refreshSignal,
   onSend,
   onChanged,
+  onOpenAudit,
 }: {
   projects: WeeklyReportProject[];
   /** Incremented by the page's Refresh button. This panel's request belongs to no one else. */
@@ -86,6 +87,11 @@ export function WeeklyReportHistoryPanel({
   onSend: (reportId: string) => void;
   /** Fired after a correction is created, so the board picks up the new version. */
   onChanged: () => void;
+  /**
+   * Opens the per-project audit dialog. Optional so the panel still renders without it, but the page
+   * should pass it: for a stopped setup this is the only surface that can reach that project's record.
+   */
+  onOpenAudit?: (projectId: string) => void;
 }) {
   const [projectId, setProjectId] = useState<string>("");
 
@@ -100,10 +106,14 @@ export function WeeklyReportHistoryPanel({
    * is live work by default.
    */
   const [showStopped, setShowStopped] = useState(false);
-  const { projects: withStopped } = useWeeklyReportProjects({
-    includeInactive: true,
-    enabled: showStopped,
-  });
+  const {
+    projects: withStopped,
+    // LOADING AND ERROR ARE NOT THE SAME AS ZERO, and dropping them made a failed fetch render as "this
+    // office has no weekly report setups at all" — while hiding the live history that was on screen a
+    // moment before, with no retry and nothing saying anything had gone wrong.
+    loading: stoppedLoading,
+    error: stoppedError,
+  } = useWeeklyReportProjects({ includeInactive: true, enabled: showStopped });
   const selectable = showStopped ? withStopped : projects;
 
   // Default to the first project once the list arrives, so the tab isn't an empty prompt on open.
@@ -189,6 +199,18 @@ export function WeeklyReportHistoryPanel({
         {selected?.clientName && (
           <span className="text-[12.5px] font-semibold text-slate-500">for {selected.clientName}</span>
         )}
+        {/* THE ONLY ROUTE TO A DELETION RECORD under a stopped setup. The actor, timestamp and reason
+            live in `audit_log` and nowhere else, and a stopped setup is absent from both surfaces that
+            otherwise open this dialog — the Projects tab and the dashboard. */}
+        {onOpenAudit && selected && (
+          <button
+            type="button"
+            onClick={() => onOpenAudit(selected.id)}
+            className="rounded-lg border border-slate-200 px-2.5 py-1 text-[12.5px] font-semibold text-slate-600 hover:border-brand-red hover:text-brand-red"
+          >
+            Audit trail
+          </button>
+        )}
         <label className="ml-auto flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-500">
           <input
             type="checkbox"
@@ -201,7 +223,16 @@ export function WeeklyReportHistoryPanel({
         </label>
       </div>
 
-      {selectable.length === 0 ? (
+      {showStopped && stoppedError ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
+          <AlertTriangle className="h-4 w-4 text-brand-red" />
+          {stoppedError} — untick “include stopped setups” to get back to the live ones.
+        </div>
+      ) : showStopped && stoppedLoading ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
+          <Loader2 className="h-4 w-4 animate-spin text-slate-500" /> Loading stopped setups…
+        </div>
+      ) : selectable.length === 0 ? (
         // BELOW THE SELECTOR, not instead of it. This used to be an early return, so an office that had
         // stopped ALL of its setups saw "add a project first" and no way to disagree — the one state
         // where "include stopped setups" is the only route to anything is the state where the control

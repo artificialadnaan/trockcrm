@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   reports: [] as any[],
   stoppedProjects: [] as any[],
+  stoppedProjectsLoading: false,
+  stoppedProjectsError: null as string | null,
   /** WHICH project's history was actually requested — the observable consequence of the selection. */
   historyFor: [] as (string | null)[],
   refetch: vi.fn(),
@@ -32,8 +34,8 @@ vi.mock("@/hooks/use-weekly-reports", () => ({
   // not, because `listWeeklyReportProjects` filters them out of every ordinary list.
   useWeeklyReportProjects: (filters: any) => ({
     projects: filters?.enabled ? mocks.stoppedProjects : [],
-    loading: false,
-    error: null,
+    loading: filters?.enabled ? mocks.stoppedProjectsLoading : false,
+    error: filters?.enabled ? mocks.stoppedProjectsError : null,
     refetch: vi.fn(),
   }),
   fetchWeeklyReportDetail: mocks.fetchWeeklyReportDetail,
@@ -120,6 +122,8 @@ beforeEach(() => {
   root = createRoot(container);
   mocks.reports = [];
   mocks.stoppedProjects = [];
+  mocks.stoppedProjectsLoading = false;
+  mocks.stoppedProjectsError = null;
   mocks.historyFor = [];
   mocks.refetch.mockReset();
   mocks.createWeeklyReportCorrection.mockReset();
@@ -843,5 +847,104 @@ describe("an office that has stopped every setup it has", () => {
       toggle!.click();
     });
     expect(document.body.textContent).toMatch(/No weekly report setups at all/i);
+  });
+});
+
+describe("reaching the audit trail from History", () => {
+  // AFTER A DELETION UNDER A STOPPED SETUP, this is the only route to the record of it. The actor,
+  // timestamp and reason live in `audit_log` and nowhere else, and a stopped setup appears in neither the
+  // Projects tab nor the dashboard — the two surfaces that otherwise open the audit dialog.
+  it("offers the audit trail for the selected project", async () => {
+    mocks.reports = [report()];
+    const onOpenAudit = vi.fn();
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel
+          projects={[PROJECT]}
+          refreshSignal={0}
+          onSend={vi.fn()}
+          onChanged={vi.fn()}
+          onOpenAudit={onOpenAudit}
+        />,
+      );
+    });
+
+    const trail = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Audit trail",
+    ) as HTMLButtonElement | undefined;
+    expect(trail).toBeDefined();
+
+    await act(async () => {
+      trail!.click();
+    });
+    expect(onOpenAudit).toHaveBeenCalledWith("p1");
+  });
+
+  it("opens it for a STOPPED setup too, which is the case with no other way in", async () => {
+    mocks.stoppedProjects = [
+      { id: "p2", propertyDisplayName: "1900 Pearl — finished", dealName: "1900 Pearl", isActive: false },
+    ];
+    const onOpenAudit = vi.fn();
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel
+          projects={[]}
+          refreshSignal={0}
+          onSend={vi.fn()}
+          onChanged={vi.fn()}
+          onOpenAudit={onOpenAudit}
+        />,
+      );
+    });
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    await act(async () => {
+      toggle!.click();
+    });
+
+    const trail = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Audit trail",
+    ) as HTMLButtonElement | undefined;
+    await act(async () => {
+      trail!.click();
+    });
+    expect(onOpenAudit).toHaveBeenCalledWith("p2");
+  });
+});
+
+describe("the stopped-setup request failing", () => {
+  // SILENCE, ZERO AND ERROR ARE THREE DIFFERENT RENDERINGS. A failed opt-in fetch left `selectable`
+  // empty, which the panel then reported as "no weekly report setups at all" — the same overclaim the
+  // not-yet-fetched case was already fixed for, arriving by a different road. It also hid the live
+  // history that was on screen a moment earlier, with no retry and nothing saying anything had failed.
+  it("says the request failed rather than reporting an empty office", async () => {
+    mocks.stoppedProjectsError = "Network request failed";
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel projects={[]} refreshSignal={0} onSend={vi.fn()} onChanged={vi.fn()} />,
+      );
+    });
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(document.body.textContent).toContain("Network request failed");
+    expect(document.body.textContent).not.toMatch(/No weekly report setups at all/i);
+  });
+
+  it("says it is still loading rather than reporting an empty office", async () => {
+    mocks.stoppedProjectsLoading = true;
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel projects={[]} refreshSignal={0} onSend={vi.fn()} onChanged={vi.fn()} />,
+      );
+    });
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(document.body.textContent).toMatch(/Loading/i);
+    expect(document.body.textContent).not.toMatch(/No weekly report setups at all/i);
   });
 });
