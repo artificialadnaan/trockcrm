@@ -597,7 +597,8 @@ async function tenantSchemas(client: pg.Client): Promise<string[]> {
   return slugs.map((slug) => validateSchemaName(`office_${slug}`));
 }
 
-async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUserId: string, email: string, step: string, auditRows: AuditRow[]) {
+/** Exported for server/tests/scripts/reconcile-users-assignment-stamp.runtime.test.ts. */
+export async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUserId: string, email: string, step: string, auditRows: AuditRow[]) {
   for (const schemaName of await tenantSchemas(client)) {
     const deals = await client.query(
       `UPDATE ${schemaName}.deals SET assigned_rep_id = $2, updated_at = NOW() WHERE assigned_rep_id = $1 AND is_active = true RETURNING id, deal_number`,
@@ -631,12 +632,15 @@ async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUse
     );
     for (const row of assignerLoops.rows) auditRows.push({ timestamp: nowIso(), step, action: "transfer_task_assigner", entityType: `${schemaName}.task`, entityId: row.id, email, before: fromUserId, after: toUserId, details: `${row.status}:${row.title ?? ""}` });
 
-    // If the retiring user is also the assignee, move that ownership. A source-resolved assigner on
-    // the same row follows the replacement too; that is the genuine replacement self-assignment case
-    // above, whereas an unrelated previous assigner remains the person waiting on the reply.
+    // If the retiring user is also the assignee, move that ownership and stamp the new assignment.
+    // A source-resolved assigner on the same row follows the replacement too; that is the genuine
+    // replacement self-assignment case above, whereas an unrelated previous assigner remains the
+    // person waiting on the reply. `assigned_at` makes an earlier acknowledgement stop answering this
+    // handoff, so the login modal shows the transfer instead of silently inheriting stale state.
     const tasks = await client.query(
       `UPDATE ${schemaName}.tasks
           SET assigned_to = $2,
+              assigned_at = NOW(),
               last_assigned_by = CASE
                 WHEN COALESCE(last_assigned_by, created_by) = $1 THEN $2
                 ELSE last_assigned_by

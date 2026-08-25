@@ -3,20 +3,14 @@
 // 0239 adds `tasks.assigned_at` — when the task last changed hands — which is what lets an
 // acknowledgement answer ONE assignment rather than a task forever.
 //
-// Two properties carry the risk, and neither is visible by reading the file:
-//
-//   1. THE BACKFILL MUST DATE FROM created_at, NOT now(). History does not record when a task changed
-//      hands, so any value is a guess and the DIRECTION of the guess is the whole decision. Too early
-//      is safe: an existing acknowledgement still covers the assignment and nothing pops. now() would
-//      post-date every acknowledgement in the table at a stroke and re-notify the entire company about
-//      work they have already seen — the same failure 0235's own seed exists to prevent, reintroduced
-//      by its neighbour.
-//   2. THE UPDATED_AT TRIGGER MUST NOT FIRE. `tasks` carries set_tasks_updated_at, and the contacts
-//      list reads MAX(tasks.updated_at) straight through as a contact's "Last touch" — with the
-//      "Untouched 30d+" card, its drill and its aggregate all derived from that one expression. A
-//      backfill that lets the trigger fire stamps every contact with the migration's timestamp; the
-//      card, the drill and the aggregate move together so nothing looks wrong, and the original values
-//      are gone.
+// THE FILE ADDS THE COLUMN AND NOTHING ELSE. Dating the existing rows is a runner step
+// (server/src/migrations/tasks-assigned-at-backfill.ts, covered by its own suite) because the backfill
+// must disable set_tasks_updated_at and audit_tasks around itself, and `ALTER TABLE ... DISABLE
+// TRIGGER` takes a lock that conflicts with every task write. runner.ts sends each .sql as ONE
+// client.query(), so a DO block looping offices here would hold the first office's lock until the last
+// one finished — task writes blocking across every tenant during API startup. That the file contains
+// no backfill is asserted below, not just assumed: putting one back is the regression this file half
+// has to prevent, and it would look perfectly reasonable in a diff.
 //
 // THREE offices, because office_dallas is ALSO written by the literal tenant block at the foot of the
 // file and so comes out correct even with the loop broken. A third office has no second source.
@@ -88,23 +82,33 @@ describe("migration 0239 — tasks.assigned_at", () => {
     }
   });
 
-  // The direction of the guess is the decision. Asserted on a row whose created_at is YEARS before the
-  // migration, so a backfill that used now() cannot pass by coincidence.
-  it("dates an existing task from its creation, never from the migration", async () => {
+  it("adds the column with a default, so a worker on the old image can still INSERT", async () => {
     await seedOffices(OFFICES);
     await pg.exec(migrationSql(MIGRATION));
 
     for (const schema of OFFICES) {
-      const result = await pg.query<{ same: boolean; assigned_at: string }>(
-        `SELECT assigned_at = created_at AS same, assigned_at::text FROM ${schema}.tasks`
-      );
-      expect(result.rows[0]?.same, `${schema}: assigned_at must equal created_at`).toBe(true);
-      expect(result.rows[0]?.assigned_at).toContain("2019-06-07");
+      // The API runs migrations and the worker does not, and they are separate Railway services. A
+      // NOT NULL column with no default would fail every rules-engine write during the deploy window.
+      await expect(
+        pg.exec(`INSERT INTO ${schema}.tasks (title) VALUES ('written by an old worker')`),
+        schema
+      ).resolves.toBeDefined();
     }
   });
 
-  // Seeded on a row the backfill DOES rewrite: asserting on one it skips would pass whatever happened.
-  it("leaves updated_at untouched — the contacts 'Last touch' column depends on it", async () => {
+  // THE BACKFILL MUST NOT COME BACK. Restoring it to the file would restore the cross-tenant lock hold
+  // this PR moved it out to avoid, and it would read as a perfectly ordinary DO block in review.
+  it("contains no backfill and no trigger juggling — both belong to the runner step", async () => {
+    const source = migrationSql(MIGRATION);
+
+    expect(source, "an UPDATE here runs inside one transaction spanning every office").not.toMatch(
+      /UPDATE\s+%1\$I\.tasks/
+    );
+    expect(source).not.toContain("DISABLE TRIGGER");
+    expect(source).not.toContain("ENABLE TRIGGER");
+  });
+
+  it("leaves updated_at alone, because it writes no rows at all", async () => {
     await seedOffices(OFFICES);
     await pg.exec(migrationSql(MIGRATION));
 
@@ -112,11 +116,11 @@ describe("migration 0239 — tasks.assigned_at", () => {
       const result = await pg.query<{ updated_at: string }>(
         `SELECT updated_at::text FROM ${schema}.tasks`
       );
-      expect(result.rows[0]?.updated_at, `${schema}: set_tasks_updated_at fired`).toContain("2020-01-02");
+      expect(result.rows[0]?.updated_at, schema).toContain("2020-01-02");
     }
   });
 
-  it("writes no audit rows for a column no person edited", async () => {
+  it("writes no audit rows", async () => {
     await seedOffices(OFFICES);
     await pg.exec(migrationSql(MIGRATION));
 
@@ -124,29 +128,15 @@ describe("migration 0239 — tasks.assigned_at", () => {
     expect(result.rows[0]?.n).toBe(0);
   });
 
-  it("re-enables both triggers afterwards", async () => {
-    await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
-
-    for (const schema of OFFICES) {
-      const result = await pg.query<{ n: number }>(
-        `SELECT COUNT(*)::int AS n FROM pg_trigger
-          WHERE tgrelid = '${schema}.tasks'::regclass AND tgenabled = 'D'`
-      );
-      expect(result.rows[0]?.n, `${schema}: a trigger was left disabled`).toBe(0);
-    }
-  });
-
-  it("is idempotent — a second run neither errors nor moves the dates", async () => {
+  it("is idempotent — a second run neither errors nor touches a row", async () => {
     await seedOffices(OFFICES);
     await pg.exec(migrationSql(MIGRATION));
     await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
 
     for (const schema of OFFICES) {
-      const result = await pg.query<{ same: boolean; updated_at: string }>(
-        `SELECT assigned_at = created_at AS same, updated_at::text FROM ${schema}.tasks`
+      const result = await pg.query<{ updated_at: string }>(
+        `SELECT updated_at::text FROM ${schema}.tasks`
       );
-      expect(result.rows[0]?.same, schema).toBe(true);
       expect(result.rows[0]?.updated_at, schema).toContain("2020-01-02");
     }
   });

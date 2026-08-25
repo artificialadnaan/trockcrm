@@ -35,6 +35,10 @@ import {
   FILES_ASSOCIATION_CHECK_REPAIR_MIGRATION,
   runFilesAssociationCheckRepair,
 } from "./files-association-check-repair.js";
+import {
+  TASKS_ASSIGNED_AT_BACKFILL_MIGRATION,
+  runTasksAssignedAtBackfill,
+} from "./tasks-assigned-at-backfill.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -113,6 +117,15 @@ async function runMigrations(): Promise<void> {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
         await runTaskSourceBackfill(client);
+      } else if (file === TASKS_ASSIGNED_AT_BACKFILL_MIGRATION) {
+        // Same invariant as the task-source backfill immediately above, on the same table and with the
+        // same two triggers: DISABLE TRIGGER conflicts with every task write, and a DO block looping
+        // offices inside the file would hold the first office's lock until the last one finished. The
+        // file adds the column (metadata-only, instant); the step below dates the existing rows one
+        // transaction PER OFFICE. See tasks-assigned-at-backfill.ts.
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
+        await runTasksAssignedAtBackfill(client);
       } else if (file === TASK_SOURCE_INDEX_MIGRATION) {
         // Same reason again: `tasks` is written by the rules engine, the email queue, two crons, deal
         // reassignment and every person using the New Task form, so a plain CREATE INDEX inside the

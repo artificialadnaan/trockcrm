@@ -24,6 +24,7 @@ import { tasks } from "@trock-crm/shared/schema";
 import { getPendingAssignmentTasks } from "../../../src/modules/tasks/service.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { migrationSql } from "../../helpers/migration-sql.js";
+import { runTasksAssignedAtBackfill } from "../../../src/migrations/tasks-assigned-at-backfill.js";
 
 const SCHEMA = "office_dallas";
 const MIGRATIONS = ["0235_task_assignment_acknowledgements", "0239_tasks_assigned_at"] as const;
@@ -90,8 +91,13 @@ beforeAll(async () => {
     );
   }
 
-  // Both migrations, from disk, in the order the runner applies them.
+  // Both migrations, from disk, in the order the runner applies them — INCLUDING 0239's runner step.
+  // The step is not optional decoration: 0239's file only adds the column, so skipping it would leave
+  // every pre-existing row dated now() by the column default, which is the exact post-dating that makes
+  // 0235's seeded acknowledgements stale. Running the migrations without it would prove nothing about
+  // what actually deploys.
   for (const migration of MIGRATIONS) await pg.exec(migrationSql(migration));
+  await runTasksAssignedAtBackfill(pg as unknown as Parameters<typeof runTasksAssignedAtBackfill>[0]);
 
   await pg.exec(`SET search_path = ${SCHEMA}, public;`);
   tdb = drizzle(pg);

@@ -33,15 +33,22 @@
 -- before this deploy therefore keep whatever acknowledgement they had; only handoffs from here on are
 -- distinguished.
 --
--- ⚠️ THE TRIGGERS ARE DISABLED AROUND THE BACKFILL, for the reason 0233's header sets out at length:
--- `tasks` carries set_tasks_updated_at, the contacts list reads MAX(tasks.updated_at) straight through
--- as a contact's "Last touch", and the "Untouched 30d+" card, its drill and its aggregate are all
--- derived from that one expression. Letting the trigger fire here would stamp every contact that has
--- ever had a task with this migration's timestamp, and the original values are not recoverable.
--- audit_tasks is disabled for the same window because it writes an audit row per task, in every office,
--- for a column no person edited.
+-- ⚠️ THE BACKFILL IS NOT IN THIS FILE, AND CANNOT BE.
+-- It lives in server/src/migrations/tasks-assigned-at-backfill.ts, which the runner calls immediately
+-- after executing this file. runner.ts sends each .sql as ONE client.query(), so a DO block looping
+-- every office holds the first office's locks until the LAST office finishes — and the backfill has to
+-- DISABLE set_tasks_updated_at and audit_tasks around itself (see that file for why), which takes a
+-- lock conflicting with every task write. Inside this file that would block task creation and edits
+-- across ALL tenants during API startup. Per-office transactions are not expressible in a migration
+-- file at all, so this is not something the SQL can be rearranged to fix. 0233 hit the same wall and
+-- the mechanism reused here is the one that PR settled on.
+--
+-- What remains below is the ADD COLUMN, which is metadata-only in PG11+ and effectively instant, and
+-- which has to stay here regardless: the office provisioner replays the marked block for schemas
+-- created after this deploy.
 
--- Existing tenants: add the column and date it from creation in every office_* schema.
+-- Existing tenants: add the column in every office_* schema. Dating the existing rows from their
+-- creation happens in the runner step afterwards, per office.
 DO $tenant$
 DECLARE
   schema_name text;
@@ -66,20 +73,7 @@ BEGIN
       schema_name
     );
 
-    EXECUTE format('ALTER TABLE %1$I.tasks DISABLE TRIGGER set_tasks_updated_at', schema_name);
-    EXECUTE format('ALTER TABLE %1$I.tasks DISABLE TRIGGER audit_tasks', schema_name);
-
-    -- Guarded on the value actually changing, so a re-run against a converged schema rewrites nothing.
-    EXECUTE format(
-      $sql$
-        UPDATE %1$I.tasks SET assigned_at = created_at
-         WHERE assigned_at <> created_at;
-      $sql$,
-      schema_name
-    );
-
-    EXECUTE format('ALTER TABLE %1$I.tasks ENABLE TRIGGER audit_tasks', schema_name);
-    EXECUTE format('ALTER TABLE %1$I.tasks ENABLE TRIGGER set_tasks_updated_at', schema_name);
+    -- Nothing else here. Dating the existing rows is the runner step's job, one transaction per office.
   END LOOP;
 END $tenant$;
 
