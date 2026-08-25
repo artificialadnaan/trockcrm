@@ -17,9 +17,10 @@ import { runPerOfficeTransactionalStep, validateOfficeSchemaName } from "./per-o
 // contact that has ever had a task with the migration's timestamp, unrecoverably. audit_tasks would
 // write an audit row per task, in every office, for a column no person edited.
 //
-// WHAT STAYS IN 0239: the `ALTER TABLE ... ADD COLUMN assigned_at timestamptz NOT NULL DEFAULT now()`,
-// which is metadata-only in PG11+ and has to be in the file regardless — the office provisioner replays
-// that marked block for schemas created after this deploy.
+// WHAT STAYS IN 0239: metadata-only ADD COLUMN, DEFAULT now() for new inserts, and the compatibility
+// trigger. The column is nullable for this short migration window so an old API reassignment can stamp
+// it before this step reaches its office; this step backfills only NULL history, then restores NOT NULL.
+// A newly provisioned office has no history, so the tenant block applies the strict contract directly.
 export const TASKS_ASSIGNED_AT_BACKFILL_MIGRATION = "0239_tasks_assigned_at.sql";
 
 /** The two triggers suspended around the backfill, in the order they are suspended. */
@@ -34,15 +35,24 @@ export const ASSIGNED_AT_SUSPENDED_TRIGGERS = ["set_tasks_updated_at", "audit_ta
  * post-date every acknowledgement 0235 seeded and re-notify the entire company about work they have
  * already seen — the failure that seed exists to prevent, reintroduced by its neighbour.
  *
- * Guarded on the value actually differing, so a converged schema is not rewritten and a re-run touches
- * nothing.
+ * NULL is the deploy-safe discriminator. The migration's compatibility trigger stamps any assignment
+ * written by an old API after the column appears, while untouched historical rows remain NULL. Updating
+ * only NULLs means this backfill cannot erase a real handoff that races the deployment. It also makes a
+ * converged schema a no-op.
  *
  * @param schema an ALREADY validated and quoted schema identifier.
  */
 export function buildAssignedAtBackfillStatement(schema: string): string {
   return `
     UPDATE ${schema}.tasks SET assigned_at = created_at
-     WHERE assigned_at <> created_at`;
+     WHERE assigned_at IS NULL`;
+}
+
+/** Restore the final NOT NULL contract after history has a value; 0239 already installed the default. */
+export function buildAssignedAtConstraintStatement(schema: string): string {
+  return `
+    ALTER TABLE ${schema}.tasks
+      ALTER COLUMN assigned_at SET NOT NULL`;
 }
 
 export const TASKS_ASSIGNED_AT_BACKFILL_STEP = {
@@ -50,7 +60,10 @@ export const TASKS_ASSIGNED_AT_BACKFILL_STEP = {
   table: "tasks",
   requiredColumn: "assigned_at",
   suspendTriggers: ASSIGNED_AT_SUSPENDED_TRIGGERS,
-  buildStatements: (schema: string) => [buildAssignedAtBackfillStatement(schema)],
+  buildStatements: (schema: string) => [
+    buildAssignedAtBackfillStatement(schema),
+    buildAssignedAtConstraintStatement(schema),
+  ],
 } as const;
 
 /** Dates existing tasks from their creation, one transaction per office. */

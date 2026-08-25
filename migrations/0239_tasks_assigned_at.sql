@@ -20,10 +20,32 @@
 -- and a task that has never changed hands still has assigned_at = created_at, which is exactly what
 -- separates self-creation from a return.
 --
--- NOT NULL DEFAULT now(), for the same deploy-window reason 0233 gives for tasks.source: the API runs
--- migrations and the worker does not, and they are separate Railway services. A default means a worker
--- still on the old image can INSERT without naming the column instead of failing every rules-engine
--- write on `column "assigned_at" does not exist`.
+-- THE OLD IMAGE HAS TO KEEP WRITING CORRECTLY, NOT MERELY KEEP WRITING. The API runs migrations before
+-- it serves, so during a rolling deploy the previous API can still UPDATE assigned_to after this column
+-- exists. That image cannot name assigned_at. A default protects only INSERTs; without the trigger below
+-- a hand-back written by the old API retains the previous version and can be hidden forever by an old
+-- acknowledgement (or mistaken for self-creation when it returns to its creator).
+--
+-- The default plus trigger are therefore the compatibility authority for BOTH generations:
+--   * INSERT with no assigned_at: DEFAULT now(), equal to created_at's now() in the same transaction.
+--   * real assigned_to change with no newer explicit stamp: advance monotonically at the database clock.
+--   * new API supplies its own clock_timestamp(): keep it; the trigger must not replace a newer stamp.
+--   * assigned_to re-sent unchanged: do nothing. A no-op is not a new assignment.
+--
+-- The one-microsecond floor matters when the stored value is ahead of the wall clock (clock correction,
+-- restored data, or a deliberately future test value): every real handoff still gets a strictly newer
+-- optimistic-concurrency version.
+--
+-- 0240's `last_assigned_by` was already live before this migration was added. Its old API writes the
+-- actor on the ordinary path, but decides whether the assignee changed from an unlocked pre-read. Two
+-- interleavings therefore need a database backstop while that image is still serving:
+--   * it can omit last_assigned_by while its UPDATE actually moves the row, leaving the prior actor;
+--   * it can supply last_assigned_by while its UPDATE is an assigned_to no-op, inventing an actor move.
+-- Tenant middleware already exposes the authenticated actor as transaction-local app.current_user_id.
+-- The second trigger below fills that actor only when a REAL move omitted it, preserves an explicit
+-- actor, and restores the old actor on an actual no-op. It inspects the row through JSON because a
+-- clean install runs 0239 before 0240 adds the column; no writes are served between startup migrations,
+-- and the same guard becomes active as soon as 0240 (or the atomic office provisioner) adds it.
 --
 -- THE BACKFILL USES created_at, NOT now(), AND THAT DIRECTION IS DELIBERATE. History does not record
 -- when a task changed hands, so any value is a guess; created_at is the earliest defensible one. Being
@@ -44,9 +66,70 @@
 -- something the SQL can be rearranged to fix. 0233 hit the same wall first; this is the same mechanism
 -- with a second caller, not a second mechanism.
 --
--- What remains below is the ADD COLUMN, which is metadata-only in PG11+ and effectively instant, and
--- which has to stay here regardless: the office provisioner replays the marked block for schemas
--- created after this deploy.
+-- THE COLUMN STARTS NULLABLE, DELIBERATELY. Existing rows are NULL; an old-image handoff after this file
+-- commits is stamped non-NULL by the trigger. The runner then backfills ONLY rows still NULL, so it cannot
+-- erase a real deploy-window handoff, and restores NOT NULL in the same per-office transaction. Setting
+-- DEFAULT now() after the nullable ADD protects later inserts without filling history. Adding the column
+-- as NOT NULL DEFAULT now() here would make untouched history and a newly-stamped
+-- assignment indistinguishable to that backfill.
+
+CREATE OR REPLACE FUNCTION public.stamp_task_assigned_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+  IF NEW.assigned_at IS NULL
+     OR (OLD.assigned_at IS NOT NULL AND NEW.assigned_at <= OLD.assigned_at) THEN
+    NEW.assigned_at := GREATEST(
+      pg_catalog.clock_timestamp(),
+      OLD.assigned_at + interval '1 microsecond'
+    );
+  END IF;
+
+  RETURN NEW;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.stabilize_task_assignment_actor()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+  old_row jsonb := to_jsonb(OLD);
+  new_row jsonb := to_jsonb(NEW);
+  actor_user_id text := NULLIF(current_setting('app.current_user_id', true), '');
+BEGIN
+  -- On a clean install 0239 precedes 0240. Keeping this function column-tolerant lets the trigger be
+  -- installed now and become effective after 0240 adds last_assigned_by, without a vulnerable DDL gap.
+  IF NOT (new_row ? 'last_assigned_by') THEN
+    RETURN NEW;
+  END IF;
+
+  IF OLD.assigned_to IS NOT DISTINCT FROM NEW.assigned_to THEN
+    -- The old API may have decided "changed" from a stale pre-read and supplied an actor even though
+    -- this UPDATE does not move the row. A no-op cannot transfer who is waiting for the reply.
+    IF (new_row -> 'last_assigned_by') IS DISTINCT FROM (old_row -> 'last_assigned_by') THEN
+      NEW := jsonb_populate_record(
+        NEW,
+        jsonb_build_object('last_assigned_by', old_row -> 'last_assigned_by')
+      );
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- An explicit actor from either API generation is authoritative. The session actor only repairs the
+  -- stale-pre-read case where a real database change arrived with the old actor copied through.
+  IF (new_row -> 'last_assigned_by') IS NOT DISTINCT FROM (old_row -> 'last_assigned_by')
+     AND actor_user_id IS NOT NULL THEN
+    NEW := jsonb_populate_record(
+      NEW,
+      jsonb_build_object('last_assigned_by', actor_user_id)
+    );
+  END IF;
+
+  RETURN NEW;
+END;
+$function$;
 
 -- Existing tenants: add the column in every office_* schema. Dating the existing rows from their
 -- creation happens in the runner step afterwards, per office.
@@ -69,12 +152,37 @@ BEGIN
     EXECUTE format(
       $sql$
         ALTER TABLE %1$I.tasks
-          ADD COLUMN IF NOT EXISTS assigned_at timestamptz NOT NULL DEFAULT now();
+          ADD COLUMN IF NOT EXISTS assigned_at timestamptz;
+
+        ALTER TABLE %1$I.tasks
+          ALTER COLUMN assigned_at SET DEFAULT now();
       $sql$,
       schema_name
     );
 
-    -- Nothing else here. Dating the existing rows is the runner step's job, one transaction per office.
+    -- DROP + CREATE makes a partially-run migration retry converge. Both are in this same transaction as
+    -- ADD COLUMN, so no old API can observe the column without also getting the compatibility trigger.
+    EXECUTE format('DROP TRIGGER IF EXISTS stamp_tasks_assigned_at ON %I.tasks', schema_name);
+    EXECUTE format(
+      'CREATE TRIGGER stamp_tasks_assigned_at
+         BEFORE UPDATE OF assigned_to ON %I.tasks
+         FOR EACH ROW
+         WHEN (OLD.assigned_to IS DISTINCT FROM NEW.assigned_to)
+         EXECUTE FUNCTION public.stamp_task_assigned_at()',
+      schema_name
+    );
+
+    EXECUTE format('DROP TRIGGER IF EXISTS stabilize_tasks_assignment_actor ON %I.tasks', schema_name);
+    EXECUTE format(
+      'CREATE TRIGGER stabilize_tasks_assignment_actor
+         BEFORE UPDATE OF assigned_to ON %I.tasks
+         FOR EACH ROW
+         EXECUTE FUNCTION public.stabilize_task_assignment_actor()',
+      schema_name
+    );
+
+    -- Dating untouched history and restoring the final column contract is the runner step's job, one
+    -- transaction per office. It must not move back into this cross-tenant transaction.
   END LOOP;
 END $tenant$;
 
@@ -83,6 +191,19 @@ END $tenant$;
 -- TENANT_SCHEMA_START
 ALTER TABLE office_dallas.tasks
   ADD COLUMN IF NOT EXISTS assigned_at timestamptz NOT NULL DEFAULT now();
+
+DROP TRIGGER IF EXISTS stamp_tasks_assigned_at ON office_dallas.tasks;
+CREATE TRIGGER stamp_tasks_assigned_at
+  BEFORE UPDATE OF assigned_to ON office_dallas.tasks
+  FOR EACH ROW
+  WHEN (OLD.assigned_to IS DISTINCT FROM NEW.assigned_to)
+  EXECUTE FUNCTION public.stamp_task_assigned_at();
+
+DROP TRIGGER IF EXISTS stabilize_tasks_assignment_actor ON office_dallas.tasks;
+CREATE TRIGGER stabilize_tasks_assignment_actor
+  BEFORE UPDATE OF assigned_to ON office_dallas.tasks
+  FOR EACH ROW
+  EXECUTE FUNCTION public.stabilize_task_assignment_actor();
 -- TENANT_SCHEMA_END
 
 COMMENT ON COLUMN office_dallas.tasks.assigned_at IS

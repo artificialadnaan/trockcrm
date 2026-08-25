@@ -3,7 +3,8 @@
 // 0239 adds `tasks.assigned_at` — when the task last changed hands — which is what lets an
 // acknowledgement answer ONE assignment rather than a task forever.
 //
-// THE FILE ADDS THE COLUMN AND NOTHING ELSE. Dating the existing rows is a runner step
+// THE FILE ADDS THE NULLABLE COLUMN, its default and its rolling-deploy trigger. Dating untouched rows
+// and restoring NOT NULL is a runner step
 // (server/src/migrations/tasks-assigned-at-backfill.ts, covered by its own suite) because the backfill
 // must disable set_tasks_updated_at and audit_tasks around itself, and `ALTER TABLE ... DISABLE
 // TRIGGER` takes a lock that conflicts with every task write. runner.ts sends each .sql as ONE
@@ -24,6 +25,9 @@ const OFFICES = ["office_dallas", "office_atlanta", "office_houston"] as const;
 /** The moment every seeded row was last touched. Any trigger firing during the backfill moves this. */
 const SEEDED_UPDATED_AT = "2020-01-02 03:04:05+00";
 const SEEDED_CREATED_AT = "2019-06-07 08:09:10+00";
+const USER_A = "00000000-0000-4000-8000-000000000001";
+const USER_B = "00000000-0000-4000-8000-000000000002";
+const USER_C = "00000000-0000-4000-8000-000000000003";
 
 let pg: PGlite;
 
@@ -56,8 +60,8 @@ async function seedOffices(schemas: readonly string[]) {
         AFTER INSERT OR UPDATE OR DELETE ON ${schema}.tasks
         FOR EACH ROW EXECUTE FUNCTION audit_trigger_probe();
 
-      INSERT INTO ${schema}.tasks (title, created_at, updated_at)
-        VALUES ('historic task', '${SEEDED_CREATED_AT}', '${SEEDED_UPDATED_AT}');
+      INSERT INTO ${schema}.tasks (title, assigned_to, created_at, updated_at)
+        VALUES ('historic task', '${USER_A}', '${SEEDED_CREATED_AT}', '${SEEDED_UPDATED_AT}');
     `);
     await pg.exec(`DELETE FROM public.audit_log_probe;`);
   }
@@ -82,17 +86,51 @@ describe("migration 0239 — tasks.assigned_at", () => {
     }
   });
 
-  it("adds the column with a default, so a worker on the old image can still INSERT", async () => {
+  it("lets an old-image worker INSERT before the runner restores the final default", async () => {
     await seedOffices(OFFICES);
     await pg.exec(migrationSql(MIGRATION));
 
     for (const schema of OFFICES) {
-      // The API runs migrations and the worker does not, and they are separate Railway services. A
-      // NOT NULL column with no default would fail every rules-engine write during the deploy window.
-      await expect(
-        pg.exec(`INSERT INTO ${schema}.tasks (title) VALUES ('written by an old worker')`),
-        schema
-      ).resolves.toBeDefined();
+      // Both columns use the transaction-stable now(), so an old insert remains self-creation-shaped.
+      await pg.exec(`INSERT INTO ${schema}.tasks (title) VALUES ('written by an old worker')`);
+      const result = await pg.query<{ same: boolean }>(
+        `SELECT assigned_at = created_at AS same
+           FROM ${schema}.tasks
+          WHERE title = 'written by an old worker'`
+      );
+      expect(result.rows[0]?.same, schema).toBe(true);
+    }
+  });
+
+  it("installs the assignment-stamp trigger in EVERY existing office", async () => {
+    await seedOffices(OFFICES);
+    await pg.exec(migrationSql(MIGRATION));
+
+    for (const schema of OFFICES) {
+      const result = await pg.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n
+           FROM pg_trigger
+          WHERE tgrelid = '${schema}.tasks'::regclass
+            AND tgname = 'stamp_tasks_assigned_at'
+            AND NOT tgisinternal`
+      );
+      expect(result.rows[0]?.n, schema).toBe(1);
+    }
+  });
+
+  it("installs the rolling-image actor guard in EVERY existing office", async () => {
+    await seedOffices(OFFICES);
+    await pg.exec(migrationSql(MIGRATION));
+
+    for (const schema of OFFICES) {
+      const result = await pg.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n
+           FROM pg_trigger
+          WHERE tgrelid = '${schema}.tasks'::regclass
+            AND tgname = 'stabilize_tasks_assignment_actor'
+            AND NOT tgisinternal`
+      );
+      expect(result.rows[0]?.n, schema).toBe(1);
     }
   });
 
@@ -100,14 +138,11 @@ describe("migration 0239 — tasks.assigned_at", () => {
   // A denylist names the statements seen to be dangerous so far; a bare `ADD CONSTRAINT ... CHECK`
   // walked past 0233's first version while doing exactly what it forbade. So the question is inverted:
   // every lock-taking action this file performs must be named here as safe, and anything new fails
-  // until somebody has justified it. 0239 currently performs exactly one kind.
+  // until somebody has justified it. Trigger DDL shares the ADD COLUMN transaction and performs no row
+  // scan; the row-writing backfill and final constraint still stay in the per-office runner.
   //
-  // Why ADD COLUMN ... DEFAULT now() qualifies, which is less obvious than it looks: PG11+ makes an
-  // ADD COLUMN with a default metadata-only, storing the evaluated value as a "missing value" instead
-  // of rewriting the table — but ONLY when the default contains no VOLATILE function. now() is STABLE,
-  // so it is evaluated once at ALTER time and takes the fast path. random() or clock_timestamp() would
-  // not, and would rewrite every row under ACCESS EXCLUSIVE across every office in one transaction.
-  // That distinction is proved below rather than argued from the manual.
+  // ADD COLUMN is nullable and metadata-only. SET DEFAULT now() affects only later inserts, so existing
+  // rows remain NULL for the runner while old-image inserts are safe immediately.
   const alterTableActions = () => {
     const actions: string[] = [];
     const re = /ALTER\s+TABLE\s+[^\s]+\s+([\s\S]*?);/gi;
@@ -119,14 +154,16 @@ describe("migration 0239 — tasks.assigned_at", () => {
   };
 
   const ALLOWED_ACTIONS = [
+    /^ADD COLUMN IF NOT EXISTS assigned_at timestamptz$/i,
+    /^ALTER COLUMN assigned_at SET DEFAULT now\(\)$/i,
     /^ADD COLUMN IF NOT EXISTS assigned_at timestamptz NOT NULL DEFAULT now\(\)$/i,
   ];
 
   it("performs ONLY allowlisted, lock-safe ALTER TABLE actions", () => {
     const actions = alterTableActions();
-    // One per site: the tenant loop and the provisioner block. If this count moves, a statement was
-    // added or removed and a reviewer should look at it.
-    expect(actions, "expected ADD COLUMN in the loop and in the tenant block").toHaveLength(2);
+    // Nullable ADD + default in the tenant loop, plus strict ADD in the new-office block. If this count
+    // moves, a statement was added or removed and a reviewer should look at it.
+    expect(actions, "expected the existing-office and provisioner ALTERs").toHaveLength(3);
 
     for (const action of actions) {
       const allowed = ALLOWED_ACTIONS.some((pattern) => pattern.test(action));
@@ -134,38 +171,37 @@ describe("migration 0239 — tasks.assigned_at", () => {
     }
   });
 
-  // EXECUTED, not reasoned about. atthasmissing is true only when PG took the metadata-only path and
-  // stored the default as a missing value; a volatile default rewrites the table instead and leaves it
-  // false. This is the difference between an instant ALTER and one holding ACCESS EXCLUSIVE over every
-  // row in every office, and it turns on a property of the default expression that no amount of reading
-  // the statement reveals.
-  it("adds the column WITHOUT rewriting the table — the default takes PG's fast path", async () => {
+  // Existing rows must remain NULL until the per-office step dates them. NULL is what distinguishes
+  // untouched history from a handoff the compatibility trigger stamps during the deploy window; a
+  // DEFAULT here would make those cases indistinguishable and let the backfill erase the handoff.
+  it("leaves existing history NULL for the deploy-safe backfill discriminator", async () => {
     await seedOffices(OFFICES);
     await pg.exec(`INSERT INTO office_dallas.tasks (title) VALUES ('pre-existing row')`);
 
     await pg.exec(migrationSql(MIGRATION));
 
-    const result = await pg.query<{ atthasmissing: boolean }>(
-      `SELECT atthasmissing FROM pg_attribute
-        WHERE attrelid = 'office_dallas.tasks'::regclass AND attname = 'assigned_at'`
+    const result = await pg.query<{ nulls: number; atthasmissing: boolean }>(
+      `SELECT
+         (SELECT COUNT(*)::int FROM office_dallas.tasks WHERE assigned_at IS NULL) AS nulls,
+         atthasmissing
+       FROM pg_attribute
+       WHERE attrelid = 'office_dallas.tasks'::regclass AND attname = 'assigned_at'`
     );
-    expect(
-      result.rows[0]?.atthasmissing,
-      "the ADD COLUMN rewrote the table instead of storing a missing value — check the default is not volatile"
-    ).toBe(true);
+    expect(result.rows[0]?.nulls).toBe(2);
+    expect(result.rows[0]?.atthasmissing, "the staged column unexpectedly carries a missing default").toBe(false);
   });
 
   // THE BACKFILL MUST NOT COME BACK. Restoring it would restore the cross-tenant lock hold this PR
   // moved it out to avoid, and it would read as a perfectly ordinary DO block in review. Kept as
   // explicit negatives alongside the allowlist because each names its own reason on failure.
-  it("runs no UPDATE, and no trigger juggling — both belong to the runner step", async () => {
+  it("runs no UPDATE and never suspends row triggers — both belong to the runner step", async () => {
     const source = migrationSql(MIGRATION)
       .split("\n")
       .filter((line) => !line.trimStart().startsWith("--"))
       .join("\n");
 
-    expect(source, "an UPDATE here runs inside one transaction spanning every office").not.toMatch(
-      /\bUPDATE\b/i
+    expect(source, "a row UPDATE here runs inside one transaction spanning every office").not.toMatch(
+      /\bUPDATE\s+(?!OF\b)/i
     );
     expect(source, "this lock is held across every tenant").not.toMatch(/\bDISABLE\s+TRIGGER\b/i);
     expect(source).not.toMatch(/\bENABLE\s+TRIGGER\b/i);
@@ -220,14 +256,52 @@ describe("migration 0239 — tasks.assigned_at", () => {
     expect(source.indexOf("-- TENANT_SCHEMA_START", startIdx + 1)).toBe(-1);
 
     const block = source.slice(startIdx + "-- TENANT_SCHEMA_START".length, endIdx).trim();
+    // In production the global trigger function was installed when 0239 ran. Model that before the
+    // office provisioner later replays only the tenant block.
+    await seedOffices(["office_dallas"]);
+    await pg.exec(source);
     await seedOffices(["office_tulsa"]);
+    await pg.exec(`DELETE FROM office_tulsa.tasks`);
     await pg.exec(block.replace(/office_dallas/g, "office_tulsa"));
 
-    const result = await pg.query<{ n: number }>(
-      `SELECT COUNT(*)::int AS n FROM information_schema.columns
-        WHERE table_schema = 'office_tulsa' AND table_name = 'tasks' AND column_name = 'assigned_at'`
+    const result = await pg.query<{ n: number; isNullable: string; hasDefault: boolean }>(
+      `SELECT
+         COUNT(*)::int AS n,
+         MAX(is_nullable) AS "isNullable",
+         BOOL_AND(column_default IS NOT NULL) AS "hasDefault"
+       FROM information_schema.columns
+       WHERE table_schema = 'office_tulsa' AND table_name = 'tasks' AND column_name = 'assigned_at'`
     );
     expect(result.rows[0]?.n).toBe(1);
+    expect(result.rows[0]?.isNullable).toBe("NO");
+    expect(result.rows[0]?.hasDefault).toBe(true);
+
+    const trigger = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pg_trigger
+        WHERE tgrelid = 'office_tulsa.tasks'::regclass
+          AND tgname = 'stamp_tasks_assigned_at' AND NOT tgisinternal`
+    );
+    expect(trigger.rows[0]?.n).toBe(1);
+
+    const actorTrigger = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pg_trigger
+        WHERE tgrelid = 'office_tulsa.tasks'::regclass
+          AND tgname = 'stabilize_tasks_assignment_actor' AND NOT tgisinternal`
+    );
+    expect(actorTrigger.rows[0]?.n).toBe(1);
+
+    // 0240 runs after 0239 on a clean install (and later in this same atomic provisioner transaction).
+    // The guard is deliberately column-tolerant until that happens, then becomes active without DDL.
+    await pg.exec(`ALTER TABLE office_tulsa.tasks ADD COLUMN last_assigned_by uuid`);
+    await pg.exec(`INSERT INTO office_tulsa.tasks (title, assigned_to) VALUES ('new task', '${USER_A}')`);
+    await pg.exec(`SELECT set_config('app.current_user_id', '${USER_C}', false)`);
+    await pg.exec(`UPDATE office_tulsa.tasks SET assigned_to = '${USER_B}' WHERE title = 'new task'`);
+    const stamped = await pg.query<{ newer: boolean; actor: string }>(
+      `SELECT assigned_at > created_at AS newer, last_assigned_by AS actor
+         FROM office_tulsa.tasks WHERE title = 'new task'`
+    );
+    expect(stamped.rows[0]?.newer).toBe(true);
+    expect(stamped.rows[0]?.actor).toBe(USER_C);
   });
 
   it("skips an office schema that has no tasks table instead of aborting the deploy", async () => {

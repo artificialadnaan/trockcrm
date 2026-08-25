@@ -765,10 +765,13 @@ export interface PendingAssignmentTasksResponse {
  * redirects it. Naming the office makes the request self-contained; hasOfficeHeader() in api() then
  * leaves the explicit header alone.
  */
-export async function fetchPendingAssignmentTasks(officeId?: string | null) {
+export async function fetchPendingAssignmentTasks(
+  officeId?: string | null,
+  signal?: AbortSignal
+) {
   return api<PendingAssignmentTasksResponse>(
     "/tasks/pending-acknowledgement",
-    getOfficeRequestOptions(officeId)
+    { ...getOfficeRequestOptions(officeId), signal }
   );
 }
 

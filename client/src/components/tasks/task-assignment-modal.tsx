@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 import {
@@ -249,7 +249,7 @@ export function TaskAssignmentModal() {
   const [open, setOpen] = useState(false);
 
   /**
-   * THE ONLY LIFECYCLE REF, and it holds a request IDENTITY rather than a lifecycle state.
+   * THE REQUEST IDENTITY, not another copy of the fetch lifecycle state.
    *
    * `id` is monotonic and answers "which request is this the answer to?" — a response whose id is no
    * longer current lost a race and is dropped without touching anything.
@@ -258,9 +258,18 @@ export function TaskAssignmentModal() {
    * reason: StrictMode runs the effect twice before the first run's state write commits, so the second
    * run reads a stale `fetchState` and would issue a duplicate request. Deduping on the attempt the
    * request was issued FOR is not a record of "done" — a genuine retry bumps `attempts` and a genuine
-   * office change changes the office, so both produce a new key and both proceed.
+   * office change changes the office, so both produce a new key and both proceed. The neighbouring
+   * refs answer only commit facts — whether this component is mounted and which office was committed —
+   * so an async continuation cannot turn an abandoned response back into lifecycle state.
    */
-  const requestRef = useRef<{ id: number; key: string | null }>({ id: 0, key: null });
+  const requestRef = useRef<{
+    id: number;
+    key: string | null;
+    office: string | null;
+    controller: AbortController | null;
+  }>({ id: 0, key: null, office: null, controller: null });
+  const mountedRef = useRef(false);
+  const activeOfficeRef = useRef<string | null>(null);
 
   /**
    * Assignments already put on screen for this person, hydrated from sessionStorage.
@@ -287,6 +296,45 @@ export function TaskAssignmentModal() {
   // otherwise the user's home office — exactly the fallback authMiddleware applies when no header
   // arrives, resolved here so it can be PINNED on the request instead of left ambient.
   const requestOfficeId = officeScopeId ?? user?.officeId ?? null;
+
+  // Commit the scope BEFORE passive fetch effects or promise continuations can run. A render guard keeps
+  // stale data out of the DOM; this guard also keeps it out of state and sessionStorage. Abort releases
+  // the underlying connection promptly, while the bumped identity remains authoritative for transports
+  // or test doubles that still deliver a response after abort.
+  useLayoutEffect(() => {
+    activeOfficeRef.current = requestOfficeId;
+    const request = requestRef.current;
+    if (request.office === null || request.office === requestOfficeId) return;
+
+    request.controller?.abort();
+    requestRef.current = {
+      id: request.id + 1,
+      key: null,
+      office: null,
+      controller: null,
+    };
+    // An abandoned request must not leave its office represented as `loading`. A quiet flag office
+    // may issue no replacement request at all, so nothing else would overwrite that state; returning
+    // to the abandoned office would then treat the orphaned `loading` value as an in-flight answer and
+    // suppress its fetch forever.
+    setFetchState(IDLE_FETCH_STATE);
+    setOpen(false);
+  }, [requestOfficeId]);
+
+  // The active bit invalidates a continuation synchronously on unmount. Abort is deferred one microtask
+  // solely for React StrictMode's development-only setup -> cleanup -> setup probe: that is not a real
+  // unmount, reactivates this same ref synchronously, and should keep the one deduplicated request alive.
+  // A real unmount leaves the bit false, so its request is then aborted without being allowed to write.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const controller = requestRef.current.controller;
+      queueMicrotask(() => {
+        if (!mountedRef.current) controller?.abort();
+      });
+    };
+  }, []);
 
   // Hydrated during render, and re-hydrated whenever the person or their explicit-login session
   // changes. Mutating a ref here rather than in an effect is deliberate: `needsFetch` and the open
@@ -355,21 +403,26 @@ export function TaskAssignmentModal() {
     if (requestRef.current.key === key) return;
 
     const id = requestRef.current.id + 1;
-    requestRef.current = { id, key };
+    const controller = new AbortController();
+    requestRef.current = { id, key, office, controller };
     setFetchState({ office, status: "loading", attempts: attempt, tasks: [], total: 0, newTotal: 0 });
     // Anything currently on screen belonged to the previous answer. Closed directly rather than through
     // handleOpenChange, because an office change is not a dismissal and must not acknowledge anything.
     setOpen(false);
 
-    // BOTH settle paths check the id before writing, and neither writes anything when it loses.
-    //
-    // No `cancelled` cleanup flag: pairing one with a request identity is the mistake that made the
-    // modal never open under StrictMode earlier in this branch, because the flag belonged to a mount
-    // that no longer existed while the identity belonged to the request that was still in flight. The
-    // id is the single authority on whether a response is wanted.
-    fetchPendingAssignmentTasks(office)
+    // BOTH settle paths require the same mounted component, request identity and committed office before
+    // writing. Abort is resource cleanup; these checks are the correctness boundary because a transport
+    // is still allowed to settle after its signal flips.
+    fetchPendingAssignmentTasks(office, controller.signal)
       .then((result) => {
-        if (id !== requestRef.current.id) return;
+        if (
+          !mountedRef.current ||
+          activeOfficeRef.current !== office ||
+          id !== requestRef.current.id
+        ) {
+          return;
+        }
+        requestRef.current.controller = null;
         // Captured BEFORE the dialog mounts so focus can be handed back on close. Base UI's default
         // restores to the trigger, and this dialog has none — nobody opened it.
         previouslyFocusedRef.current =
@@ -397,33 +450,53 @@ export function TaskAssignmentModal() {
             )
         );
         const opening = unshown.length > 0;
-
-        // Recorded HERE, at the point the dialog actually goes on screen, and nowhere else. An empty
-        // list opens nothing, so nothing is recorded; the same is true of the error path below and of
-        // any response that failed the id check above. Recording from the mere arrival of a response
-        // would mark work as seen that nobody ever laid eyes on.
-        //
-        // EVERY RENDERED TASK, not just the unshown ones — they are all on screen. And only the ones
-        // in `result.tasks`, which is the server's capped page: a sixth eligible task that never
-        // crossed the wire was never shown either, and must stay able to open this dialog later.
-        if (opening && shownTasksRef.current.userId) {
-          for (const rendered of result.tasks) {
-            shownTasksRef.current.keys.add(
-              shownTaskKey(office, rendered.id, rendered.assignmentVersion)
-            );
-          }
-          persistShownTasks(shownTasksRef.current.userId, shownTasksRef.current.keys);
-        }
         setOpen(opening);
       })
       .catch(() => {
-        if (id !== requestRef.current.id) return;
+        if (
+          !mountedRef.current ||
+          activeOfficeRef.current !== office ||
+          id !== requestRef.current.id
+        ) {
+          return;
+        }
+        requestRef.current.controller = null;
         // Recorded as a FAILURE, never as an empty result. Those must not be the same state: only
         // `loaded` renders, so an error can never reach the modal and reassure somebody that they have
         // nothing waiting when the truth is that nobody managed to ask.
         setFetchState({ office, status: "error", attempts: attempt, tasks: [], total: 0, newTotal: 0 });
       });
   }, [needsFetch, requestOfficeId, fetchState]);
+
+  // Persist only AFTER React committed the matching open dialog. The fetch continuation is too early:
+  // AuthGate can unmount this component, or an office navigation can commit, between a response arriving
+  // and the dialog being rendered. Writing there would suppress assignments nobody ever saw while the
+  // server correctly retained no acknowledgement.
+  useEffect(() => {
+    const renderedOffice = fetchState.office;
+    if (
+      !open ||
+      fetchState.status !== "loaded" ||
+      renderedOffice === null ||
+      renderedOffice !== requestOfficeId ||
+      activeOfficeRef.current !== requestOfficeId
+    ) {
+      return;
+    }
+
+    const shownUser = shownTasksRef.current.userId;
+    if (!shownUser) return;
+
+    // EVERY RENDERED TASK, not just the previously-unshown ones — they are all on screen. Only this
+    // capped page is recorded; a sixth eligible task that never crossed the wire remains able to open
+    // the dialog later.
+    for (const rendered of fetchState.tasks) {
+      shownTasksRef.current.keys.add(
+        shownTaskKey(renderedOffice, rendered.id, rendered.assignmentVersion)
+      );
+    }
+    persistShownTasks(shownUser, shownTasksRef.current.keys);
+  }, [fetchState, open, requestOfficeId]);
 
   const handleOpenChange = useCallback(
     (nextOpen: boolean) => {

@@ -522,18 +522,24 @@ describe("TaskAssignmentModal — it says what is actually true", () => {
 function deferredFetches() {
   const waiting = new Map<string, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>();
   const issued: string[] = [];
+  const signals = new Map<string, AbortSignal | undefined>();
 
-  apiMock.mockImplementation((path: string, options?: { headers?: Record<string, string> }) => {
+  apiMock.mockImplementation((
+    path: string,
+    options?: { headers?: Record<string, string>; signal?: AbortSignal }
+  ) => {
     if (path === "/tasks/acknowledge") return Promise.resolve(undefined);
     if (path !== "/tasks/pending-acknowledgement") throw new Error(`unexpected api call: ${path}`);
     const office = options?.headers?.["x-office-id"] ?? "(none)";
     issued.push(office);
+    signals.set(office, options?.signal);
     return new Promise((resolve, reject) => waiting.set(office, { resolve, reject }));
   });
 
   return {
     /** How many times a fetch has been ISSUED for this office — not how many are outstanding. */
     issuedFor: (office: string) => issued.filter((entry) => entry === office).length,
+    signalFor: (office: string) => signals.get(office),
     async resolveFor(office: string, tasks: PendingTask[]) {
       const settleFns = waiting.get(office);
       if (!settleFns) throw new Error(`no outstanding fetch for ${office}`);
@@ -568,7 +574,9 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
   it("never lets a late response from an abandoned office replace the current one", async () => {
     const fetches = deferredFetches();
     await render(true, { officeId: "office-a" });
+    const abandonedSignal = fetches.signalFor("office-a");
     await changeOfficeTo("office-b");
+    expect(abandonedSignal?.aborted, "the abandoned office request kept running").toBe(true);
 
     // B wins the race and is displayed...
     await fetches.resolveFor("office-b", [task({ id: "b1", title: "Atlanta punch list" })]);
@@ -580,6 +588,25 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
     expect(dialog(), "the current office's modal must survive a superseded response").not.toBeNull();
     expect(dialog()!.textContent).toContain("Atlanta punch list");
     expect(dialog()!.textContent).not.toContain("Dallas roof walk");
+  });
+
+  it("aborts and ignores a response that settles after the modal unmounts", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a" });
+    const abandonedSignal = fetches.signalFor("office-a");
+
+    await act(async () => {
+      root?.unmount();
+      await Promise.resolve();
+    });
+    root = null;
+    expect(abandonedSignal?.aborted, "the unmounted request kept running").toBe(true);
+
+    // Model a transport that delivers a response despite abort. It may not update React state OR the
+    // session shown-set: this assignment never reached a committed dialog and has no server ack.
+    await fetches.resolveFor("office-a", [task({ id: "a1", title: "Never rendered" })]);
+    expect(dialog()).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
   });
 
   it("lets a later office change fetch again — a superseded response must not poison the latch", async () => {
@@ -594,6 +621,26 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
 
     // A losing response that "tidied up" by writing the latch would leave this at 1, and office A
     // would be permanently unfetchable for the rest of the session.
+    expect(fetches.issuedFor("office-a")).toBe(2);
+  });
+
+  // The boot office's auth flag can truthfully say "nothing pending", so visiting it issues no
+  // replacement request. If abandoning A leaves A/loading in the state machine, nothing overwrites
+  // that latch and a later return to A mistakes an aborted request for one still in flight forever.
+  it("refetches an aborted office after visiting a flag-scoped office that needs no fetch", async () => {
+    const fetches = deferredFetches();
+    await render(false, { officeId: "office-b" });
+    expect(fetches.issuedFor("office-b")).toBe(0);
+
+    await changeOfficeTo("office-a");
+    const abandonedSignal = fetches.signalFor("office-a");
+    expect(fetches.issuedFor("office-a")).toBe(1);
+
+    await changeOfficeTo("office-b");
+    expect(abandonedSignal?.aborted, "the abandoned office request kept running").toBe(true);
+    expect(fetches.issuedFor("office-b")).toBe(0);
+
+    await changeOfficeTo("office-a");
     expect(fetches.issuedFor("office-a")).toBe(2);
   });
 
