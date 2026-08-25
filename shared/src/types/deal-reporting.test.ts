@@ -4,9 +4,21 @@ import {
   isReportableDeal,
   reportableDealSqlPredicate,
   effectiveOnHoldSqlPredicate,
+  activeDealCountFilterSqlPredicate,
+  bidBoardTerminalSqlPredicate,
+  closeTargetFarOutSqlPredicate,
+  effectiveOnHoldConditionSqlPredicate,
+  genuineEstimatingStageSqlPredicate,
+  terminalDealStageIdSubselectSql,
+  TERMINAL_DEAL_STAGE_SLUGS,
 } from "./deal-reporting.js";
 import { CLOSE_TARGET_HOLD_HORIZON_DAYS } from "./deal-hold-risk.js";
-import { GENUINE_ESTIMATING_DEAL_STAGE_SLUGS } from "./workflow.js";
+import {
+  CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+  GENUINE_ESTIMATING_DEAL_STAGE_SLUGS,
+  LOST_DEAL_STAGE_SLUGS,
+  WON_DEAL_STAGE_SLUGS,
+} from "./workflow.js";
 
 describe("deal reporting helpers", () => {
   it("uses active on-hold state as the single reportability rule", () => {
@@ -89,5 +101,131 @@ describe("deal reporting helpers", () => {
     // Without the explicit IS NOT NULL, `NOT (NULL > x)` is NULL and a deal with no close target and no
     // bid due date would silently disappear from the Active list instead of appearing in it.
     expect(effectiveOnHoldSqlPredicate("d")).toContain(") IS NOT NULL AND (");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The STRING twins of the server's three "standard exclusion" drizzle builders.
+//
+// These are the artifact itself — a pure string builder's output IS what reaches Postgres — so exact
+// equality is the right assertion here, unlike a substring match on a job's assembled query.
+// ---------------------------------------------------------------------------------------------------
+
+const TERMINAL_SLUG_SQL_LIST =
+  "'won', 'lost', 'sent_to_production', 'service_sent_to_production', 'service_scheduled', " +
+  "'service_complete', 'closed_won', 'deal_canceled', 'production_lost', 'service_lost', 'closed_lost'";
+
+describe("worker-reachable string twins of the standard deal exclusions", () => {
+  it("derives the terminal slug set from won + lost + canonical-terminal, never a hand list", () => {
+    expect([...TERMINAL_DEAL_STAGE_SLUGS].sort()).toEqual(
+      [
+        ...new Set([
+          ...CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+          ...WON_DEAL_STAGE_SLUGS,
+          ...LOST_DEAL_STAGE_SLUGS,
+        ]),
+      ].sort()
+    );
+    // The mirror slug that C3 is about. If this ever stops being terminal, the report's exclusion of a
+    // won-on-the-Bid-Board estimating deal stops working and this test is the one that says so.
+    expect(TERMINAL_DEAL_STAGE_SLUGS).toContain("closed_won");
+  });
+
+  it("exports the genuine-estimating predicate the report selects its population with", () => {
+    expect(genuineEstimatingStageSqlPredicate("d")).toBe(
+      "d.stage_id IN (SELECT id FROM public.pipeline_stage_config " +
+        "WHERE slug IN ('estimating', 'estimate_in_progress'))"
+    );
+    expect(genuineEstimatingStageSqlPredicate()).toBe(
+      "stage_id IN (SELECT id FROM public.pipeline_stage_config " +
+        "WHERE slug IN ('estimating', 'estimate_in_progress'))"
+    );
+    expect(genuineEstimatingStageSqlPredicate("d")).not.toContain("service_estimating");
+  });
+
+  it("resolves terminal stage IDS as a subselect, so a raw-SQL caller needs no id round trip", () => {
+    expect(terminalDealStageIdSubselectSql()).toBe(
+      `SELECT id FROM public.pipeline_stage_config WHERE slug IN (${TERMINAL_SLUG_SQL_LIST})`
+    );
+  });
+
+  it("builds the Bid Board mirror-terminal predicate as text", () => {
+    expect(bidBoardTerminalSqlPredicate("d")).toBe(
+      `COALESCE(d.bid_board_stage_slug, '') IN (${TERMINAL_SLUG_SQL_LIST})`
+    );
+    expect(() => bidBoardTerminalSqlPredicate("d; DROP TABLE deals")).toThrow();
+  });
+
+  it("aliases the active-deal count filter onto the one reportability rule", () => {
+    expect(activeDealCountFilterSqlPredicate("d")).toBe(reportableDealSqlPredicate("d"));
+    expect(activeDealCountFilterSqlPredicate("d")).toBe("COALESCE(d.on_hold, false) = false");
+  });
+
+  it("carries the CRM-stage terminal leg BY DEFAULT — the arg the drizzle twin drops when unpassed", () => {
+    // aliasedEffectiveOnHoldConditionSql defaults `terminalStageIds` to [] and therefore emits NO
+    // stage_id leg unless a caller resolves and threads the ids. A raw-SQL caller has no such list to
+    // thread, so the string twin defaults to the subselect instead: the safe form is the one you get for
+    // free. Deleting the leg from the source makes this go red.
+    const predicate = effectiveOnHoldConditionSqlPredicate("d");
+    expect(predicate).toContain(
+      `d.stage_id NOT IN (SELECT id FROM public.pipeline_stage_config WHERE slug IN (${TERMINAL_SLUG_SQL_LIST}))`
+    );
+    expect(predicate).toContain(
+      `COALESCE(d.bid_board_stage_slug, '') NOT IN (${TERMINAL_SLUG_SQL_LIST})`
+    );
+  });
+
+  it("emits stored-flag OR (both terminal guards AND far-out), in that shape", () => {
+    // The far-out leg is the SHARED day-math, not a restatement — that is what keeps the SQL and the TS
+    // twin (isDealEffectivelyOnHold) from disagreeing about which day a deal parks on.
+    const farOut = closeTargetFarOutSqlPredicate("d");
+    expect(effectiveOnHoldConditionSqlPredicate("d")).toBe(
+      "(COALESCE(d.on_hold, false) = true OR (" +
+        `d.stage_id NOT IN (${terminalDealStageIdSubselectSql()}) AND ` +
+        `COALESCE(d.bid_board_stage_slug, '') NOT IN (${TERMINAL_SLUG_SQL_LIST}) AND ` +
+        `(${farOut})))`
+    );
+  });
+
+  it("drops the CRM-stage leg only when a caller asks for the open-only form", () => {
+    // The legacy `terminalStageIds: []` shape, for a population that has no terminal rows at all.
+    const openOnly = effectiveOnHoldConditionSqlPredicate("d", null);
+    expect(openOnly).not.toContain("d.stage_id NOT IN");
+    // The mirror guard is NOT optional — a Bid-Board-owned deal can be terminal in the mirror while its
+    // CRM stage is still open, so no population is provably free of it.
+    expect(openOnly).toContain(`COALESCE(d.bid_board_stage_slug, '') NOT IN (${TERMINAL_SLUG_SQL_LIST})`);
+  });
+
+  it("measures the far-out horizon against a caller-supplied DAY when one is given", () => {
+    // For a report that must reproduce a particular run rather than describe this instant.
+    expect(closeTargetFarOutSqlPredicate("d", { asOfDate: "2026-08-26" })).toContain(
+      "DATE '2026-08-26' + INTERVAL '90 days'"
+    );
+    expect(closeTargetFarOutSqlPredicate("d")).toContain(
+      "(now() AT TIME ZONE 'America/Chicago')::date + INTERVAL '90 days'"
+    );
+    expect(effectiveOnHoldConditionSqlPredicate("d", null, { asOfDate: "2026-08-26" })).toContain(
+      "DATE '2026-08-26'"
+    );
+    // Interpolated, not bound — so the format is the guard.
+    expect(() => closeTargetFarOutSqlPredicate("d", { asOfDate: "26-08-2026" })).toThrow();
+    expect(() => closeTargetFarOutSqlPredicate("d", { asOfDate: "2026-08-26'; DROP TABLE deals--" })).toThrow();
+  });
+
+  it("measures the horizon against a caller-supplied BID DUE DATE expression when one is given", () => {
+    // So a caller that has already resolved the EFFECTIVE date (lead-first) parks deals on the same date
+    // it reports them on. Default unchanged: the deal column, UTC-normalized.
+    const withOverride = closeTargetFarOutSqlPredicate("d", { bidDueDateSql: "l.bid_due_date" });
+    expect(withOverride).toContain("COALESCE(l.bid_due_date, d.expected_close_date)");
+    expect(withOverride).not.toContain("(d.bid_due_date AT TIME ZONE 'UTC')::date");
+    expect(closeTargetFarOutSqlPredicate("d")).toContain(
+      "COALESCE((d.bid_due_date AT TIME ZONE 'UTC')::date, d.expected_close_date)"
+    );
+  });
+
+  it("validates the alias on every door", () => {
+    expect(() => effectiveOnHoldConditionSqlPredicate("d; DROP TABLE deals")).toThrow();
+    expect(() => genuineEstimatingStageSqlPredicate("d; DROP TABLE deals")).toThrow();
+    expect(() => activeDealCountFilterSqlPredicate("d; DROP TABLE deals")).toThrow();
   });
 });

@@ -1,7 +1,17 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
   reportableDealSqlPredicate,
+  bidBoardTerminalSqlPredicate,
   closeTargetFarOutSqlPredicate,
+  // The chain ORDER and its SQL-TEXT rendering now live in shared, so a worker raw-SQL caller can reach the
+  // same definition. Re-exported below under the names this module has always used.
+  DEAL_VALUE_PRIORITY_CHAIN,
+  ESTIMATING_VALUE_CHAIN,
+  FORECAST_FIRST_VALUE_CHAIN,
+  aliasedDealBestEstimateSqlText,
+  aliasedDealEstimatingValueSqlText,
+  aliasedPositiveDealValueCandidateSqlText,
+  type DealValueColumn,
   PROJECT_TYPE_CODE_BY_VALUE,
   PROJECT_TYPE_VALUES,
   SHOWCASE_ROUTE_BUCKETS,
@@ -25,66 +35,17 @@ type DealValueTable = {
   isChangeOrder: unknown;
 };
 
-type DealValueColumn =
-  | "forecast_revenue"
-  | "bid_board_total_sales"
-  | "bid_estimate"
-  | "dd_estimate"
-  | "awarded_amount";
-
-// DEFAULT deal-value priority chain (awarded-first): awarded_amount > bid_board_total_sales > bid_estimate
-// > dd_estimate. Used by every stage EXCEPT the single 'estimating' stage, which overrides DD ABOVE bid
-// (ESTIMATING_VALUE_CHAIN below; 2026-06-18). Won and every other open stage share THIS one chain (no
-// parallel won-vs-open logic). Each candidate is gated `> 0` (positiveDealValueCandidateSql), so BOTH 0
-// and NULL fall through to the next candidate; the chain's final fallback is 0.
-//
-// CONVENTION SHIFT (2026-06-18, "editable DD + awarded-highest" decision): the open/estimating basis was
-// formerly bid-first with awarded LAST (and distinct from the Won basis). It was flipped to awarded-first
-// after verifying the change is INERT on prod REPORTABLE totals ($0 delta — only 2 open deals carry an
-// awarded amount and both already equal their bid). The flip also makes lost/terminal deals awarded-first;
-// that touches only 13 non-reportable lost/inactive CARD displays (never summed in any bucket total).
-// dealBestEstimateSql and dealAwardedFirstWithFallbackSql are retained as separate names (many call sites)
-// but now both resolve through this one chain.
-const DEAL_VALUE_PRIORITY_CHAIN = [
-  "awarded_amount",
-  "bid_board_total_sales",
-  "bid_estimate",
-  "dd_estimate",
-] as const satisfies readonly DealValueColumn[];
-
-const FORECAST_FIRST_VALUE_CHAIN = [
-  "forecast_revenue",
-  ...DEAL_VALUE_PRIORITY_CHAIN,
-] as const satisfies readonly DealValueColumn[];
-
-// STAGE-AWARE override for the single 'estimating' stage (2026-06-18, Adnaan): during estimating the
-// bid is in-progress/incomplete, so DD outranks bid — awarded > dd_estimate > bid_board_total_sales >
-// bid_estimate. Awarded still wins; bid is NOT skipped, just outranked when DD exists (a bid-only
-// estimating deal keeps its bid, never $0). Applies ONLY to the canonical 'estimating' stage (route-aware:
-// includes the legacy estimate_in_progress alias, excludes service_estimating). Same `> 0` gating +
-// on-hold-zeroing as the default chain.
-//
-// SCOPE (Adnaan, 2026-06-19, re Codex P2): this DD-over-bid rule is applied ONLY on the DEALS pipeline value
-// paths — the kanban/stage-workspace per-column totals (pipelineValueSourceForStageSlug) and the deals-list
-// filter/sort/total + stage drill (aliasedStageAwareEffectiveDealValueSql), mirrored by the TS card resolvers
-// (getRawDealValue / resolveBestEstimate). Dashboard + reports value aggregates DELIBERATELY keep the default
-// open chain (deal-value-sql default + reports foundations bases), so an estimating deal can read DD-first on
-// the deals board and bid-first in a report. Verified ~inert on prod (only ~2 estimating deals have bid != DD).
-// Extending platform-wide is a deliberate follow-up, NOT an accidental gap.
-const ESTIMATING_VALUE_CHAIN = [
-  "awarded_amount",
-  "dd_estimate",
-  "bid_board_total_sales",
-  "bid_estimate",
-] as const satisfies readonly DealValueColumn[];
+// The three value chains and the DealValueColumn union moved to shared/src/types/deal-value-sql-text.ts.
+// They are imported above and re-exported at the bottom of this file, so every call site here is unchanged
+// and there is exactly ONE definition of the candidate order. The long-form rationale for each chain — the
+// awarded-first convention shift, and the estimating-stage DD-over-bid override with its scope note — went
+// with them; this module keeps the drizzle builders that compose them.
 
 export function positiveDealValueCandidateSql(value: unknown): SQL {
   return sql`CASE WHEN ${value} > 0 THEN ${value} END`;
 }
 
-function aliasedPositiveDealValueCandidateSql(alias: string, column: string): string {
-  return `CASE WHEN ${alias}.${column} > 0 THEN ${alias}.${column} END`;
-}
+const aliasedPositiveDealValueCandidateSql = aliasedPositiveDealValueCandidateSqlText;
 
 function tableColumnSql(table: DealValueTable, column: DealValueColumn): unknown {
   switch (column) {
@@ -307,46 +268,11 @@ export function aliasedDealBestEstimateSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
-/**
- * The same awarded-first chain as plain SQL TEXT, for callers that build query strings rather than drizzle
- * fragments — the tenant-sweeping internal routes run raw `pool.query` across every office schema.
- *
- * Exported as a rendering of DEAL_VALUE_PRIORITY_CHAIN rather than a hand-written COALESCE, so a change to
- * the chain reaches string callers too. A restated copy is how the platform ends up quoting two different
- * numbers for the same deal.
- *
- * INCLUDING the change-order branch, which the first draft of this function omitted. Without it the
- * positive-only chain drops a DEDUCTIVE change order's negative awarded_amount and renders 0 — so this
- * would not have been the same value chain at all, merely a similar-looking one, and the two would have
- * disagreed on precisely the rows where being wrong is most visible. Same REQUIRED COLUMN as the drizzle
- * twin: `is_change_order` must exist at `alias`.
- */
-export function aliasedDealBestEstimateSqlText(alias: string): string {
-  return dealValueChainSqlText(alias, DEAL_VALUE_PRIORITY_CHAIN);
-}
-
-/**
- * The 'estimating' stage chain (DD outranks bid) as plain SQL TEXT — the string twin of
- * aliasedDealEstimatingValueSql, rendered from the same ESTIMATING_VALUE_CHAIN constant.
- *
- * Exists because a string caller reporting on estimating-stage deals otherwise has only the DEFAULT chain
- * available and silently quotes bid-over-DD for exactly the population whose board and list show
- * DD-over-bid. Same REQUIRED COLUMN as the drizzle twin: `is_change_order` must exist at `alias`.
- */
-export function aliasedDealEstimatingValueSqlText(alias: string): string {
-  return dealValueChainSqlText(alias, ESTIMATING_VALUE_CHAIN);
-}
-
-/** Shared renderer for the two *SqlText builders, so the change-order branch cannot drift between them. */
-function dealValueChainSqlText(alias: string, chainColumns: readonly DealValueColumn[]): string {
-  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
-    throw new Error(`Invalid SQL alias: ${alias}`);
-  }
-  const chain = `COALESCE(${chainColumns
-    .map((column) => aliasedPositiveDealValueCandidateSql(alias, column))
-    .join(", ")}, 0)`;
-  return `CASE WHEN COALESCE(${alias}.is_change_order, false) THEN COALESCE(${alias}.awarded_amount, 0) ELSE ${chain} END`;
-}
+// The plain-SQL-TEXT twins, for callers that build query strings rather than drizzle fragments — the
+// tenant-sweeping internal routes and the worker crons. RE-EXPORTED from shared rather than defined here:
+// the string form existed so "worker raw-SQL callers can reuse it" and they could not, because nothing under
+// worker/src can import server/src. Same output, same chain constants, one definition.
+export { aliasedDealBestEstimateSqlText, aliasedDealEstimatingValueSqlText };
 
 // 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
 export function aliasedDealEstimatingValueSql(alias: string): SQL {
@@ -444,11 +370,14 @@ export function aliasedTerminalDealBySlugSql(dealAlias: string, stageSlugColumn:
 // The Bid Board MIRROR terminal signal alone: true when a deal is won/lost in bid_board_stage_slug. Use on a
 // population already constrained to a single OPEN CRM stage (a stage page) or filtered CRM-non-terminal,
 // where the only remaining terminal exposure is a BB-owned deal whose mirror is terminal while its CRM stage
-// is still open. Returns a raw SQL string fragment so worker raw-SQL callers can reuse it.
-export function bidBoardTerminalSqlPredicate(dealAlias: string): string {
-  const slugs = TERMINAL_STAGE_SLUGS.map((slug) => `'${slug.replace(/'/g, "''")}'`).join(", ");
-  return `COALESCE(${dealAlias}.bid_board_stage_slug, '') IN (${slugs})`;
-}
+// is still open.
+//
+// RE-EXPORTED FROM `shared`, not defined here. The string form existed "so worker raw-SQL callers can reuse
+// it" and they could not: nothing under worker/src can import server/src. It now lives beside the other two
+// standard-exclusion string twins in shared/src/types/deal-reporting.ts, where a worker cron can actually
+// reach it, and this name is kept so the server's call sites are untouched. Same output, plus the shared
+// identifier validation.
+export { bidBoardTerminalSqlPredicate };
 
 export function aliasedBidBoardTerminalSql(dealAlias: string): SQL {
   return sql.raw(`(${bidBoardTerminalSqlPredicate(dealAlias)})`);
@@ -714,3 +643,8 @@ export function aliasedWorkflowRouteFilterSql(
   // request layer rejects an empty selection with a 400 long before this; the throw is the invariant backstop.
   throw new Error("workflow-route filter needs at least one bucket: service and/or other");
 }
+
+// Re-exported so the chain order stays importable under the names this module established, while the
+// definition itself lives in shared where the worker can reach it too.
+export { DEAL_VALUE_PRIORITY_CHAIN, ESTIMATING_VALUE_CHAIN, FORECAST_FIRST_VALUE_CHAIN };
+export type { DealValueColumn };

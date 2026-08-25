@@ -17,6 +17,11 @@ import {
   runWeeklyReportReminders,
 } from "./jobs/weekly-report-reminders.js";
 import { runWeeklyReportSendSweep } from "./jobs/weekly-report-send-sweep.js";
+import {
+  BID_DUE_REPORT_CRON,
+  BID_DUE_REPORT_TZ,
+  runBidDueDateReport,
+} from "./jobs/bid-due-date-report.js";
 import { runWeeklyReportViewPurge } from "./jobs/weekly-report-view-purge.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
@@ -267,6 +272,23 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: weekly report sales-rep escalation at 5:00 PM CT daily");
+
+  // Estimating bid-due-date report: Wednesday 17:00 CT, with a Thursday catch-up tick.
+  //
+  // THE SCHEDULE IS NOT WRITTEN HERE. It comes from BID_DUE_REPORT_CRON/_TZ in the job module, because
+  // this file boots the worker on import and can never be loaded from a test — so a cron expression
+  // spelled here is a string nothing in the repo asserts, and mutating "0 17 * * 3,4" to "0 18 * * 3"
+  // would leave every suite green. Importing the constant is what makes the DST test able to drive
+  // node-cron's own TimeMatcher against the value this line actually schedules.
+  cron.schedule(BID_DUE_REPORT_CRON, async () => {
+    console.log("[Worker:cron] Running estimating bid-due-date report...");
+    try {
+      await runBidDueDateReport();
+    } catch (err) {
+      console.error("[Worker:cron] Bid-due-date report failed:", err);
+    }
+  }, { timezone: BID_DUE_REPORT_TZ });
+  console.log("[Worker] Cron scheduled: estimating bid-due-date report Wed 5:00 PM CT (catch-up Thu)");
 
   // Weekly Reports dead-letter sweep: every 15 minutes, round the clock.
   //

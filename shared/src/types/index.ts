@@ -21,6 +21,7 @@ export * from "./deal-description-history.js";
 export * from "./deal-hold.js";
 export * from "./deal-hold-risk.js";
 export * from "./deal-reporting.js";
+export * from "./deal-value-sql-text.js";
 export * from "./deal-regions.js";
 export * from "./at-risk.js";
 export * from "./deal-sorts.js";
