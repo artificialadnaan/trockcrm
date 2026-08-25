@@ -126,12 +126,19 @@ export interface NotificationRecipientResolution {
   /** Who the mail actually goes to — the assignments, or the fallback when they are empty. */
   recipients: Array<{ userId: string; email: string; displayName: string }>;
   /**
-   * The rows genuinely written in `notification_recipient_assignments`, never the fallback.
+   * EVERY row in `notification_recipient_assignments` for this group — never the fallback, and never
+   * narrowed to who happens to be deliverable today. Deactivated members are included on purpose.
    *
-   * Separate from `recipients` because the admin page pre-ticks what it is told is assigned. Handed the
-   * fallback under the same name it ticks every admin and director, and the next Save — including a stray
-   * one while configuring a different group — writes them in as real rows. The fallback then never fires
-   * again, so a director hired next year silently stops receiving DD and the list still looks correct.
+   * Two distinctions live here, and both were bugs before they were rules:
+   *
+   * 1. NOT THE FALLBACK. The admin page pre-ticks what it is told is assigned. Handed the fallback under
+   *    this name it ticks every admin and director, and the next Save — including a stray one while
+   *    configuring a different group — writes them in as real rows. The fallback then never fires again,
+   *    so a director hired next year silently stops receiving DD and the list still looks correct.
+   *
+   * 2. NOT FILTERED BY `is_active`. The write path filters, because that governs what may be CREATED. A
+   *    read filtered the same way answers a different question than the one asked, and hides a
+   *    deactivated assignee from the only person who can remove it.
    */
   assignedUserIds: string[];
   /**
@@ -184,10 +191,18 @@ export async function resolveNotificationRecipients(
     .innerJoin(users, eq(users.id, notificationRecipientAssignments.userId))
     .where(eq(notificationRecipientGroups.key, key));
 
+  // THE WRITE PATH FILTERS, THE READ PATH DOES NOT. `updateNotificationRecipientAssignments` refuses to
+  // ADD a deactivated user — that is about what may be created. This is about what is true, and the two
+  // must not be confused: `recipients` is narrowed to who can actually be mailed, while `assignedUserIds`
+  // reports the membership as it stands, deactivated members included.
+  //
+  // Narrowing the membership here would hide a deactivated assignee from the admin page, which pre-ticks
+  // from this list — so the person who could take the bad assignment off would not be shown that it exists.
+  // That is the removal lockout again, one layer up in the read.
   const deliverable = assignmentRows
     .filter((row) => row.isActive)
     .map(({ userId, email, displayName }) => ({ userId, email, displayName }));
-  const assignedUserIds = deliverable.map((row) => row.userId);
+  const assignedUserIds = assignmentRows.map((row) => row.userId);
   const inactiveAssignedUserIds = assignmentRows.filter((row) => !row.isActive).map((row) => row.userId);
   const groupExists = Boolean(groupRow);
 
@@ -1090,6 +1105,23 @@ export async function updateNotificationRecipientAssignments(tenantDb: TenantDb,
     //
     // Every group, not only the role-gated ones: assigning somebody who cannot receive mail is a mistake
     // wherever it happens, and the two keys without `assignableRoles` never reach the check below.
+    //
+    // THE RACE, AND WHY IT IS NOT LOCKED. This reads `is_active` and then writes, so a user deactivated
+    // between the two lands an inactive assignment anyway. That is deliberately left open, because the
+    // damage it could do is already closed somewhere else and a lock here would not close it:
+    //
+    //   • the widening — the dangerous outcome — is prevented in `resolveNotificationRecipients`, which
+    //     counts assignment ROWS rather than deliverable ones, so an inactive-only group resolves to an
+    //     empty recipient list rather than to every admin and director;
+    //   • no mail reaches a deactivated mailbox, because `recipients` is filtered;
+    //   • the row is VISIBLE (`assignedUserIds` is unfiltered) and removable (the gates judge additions,
+    //     not the resulting set), so an admin can clear it without help.
+    //
+    // What is left when this check loses the race is an untidy row that mails nobody and can be deleted
+    // from the page — not a privilege anyone gained. Closing it properly would need the deactivation path
+    // to lock these rows too, since `SELECT ... FOR UPDATE` here excludes nothing that does not cooperate;
+    // that is a change to user deactivation, not to this function, and it buys a tidier row rather than a
+    // safer one. Revisit only alongside a group whose fallback makes an empty list dangerous.
     const deactivatedIds = addedUserIds.filter((userId) => userById.get(userId)?.isActive === false);
     if (deactivatedIds.length > 0) {
       throw new AppError(

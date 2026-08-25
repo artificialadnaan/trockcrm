@@ -196,7 +196,12 @@ describe("getNotificationRecipients", () => {
     expect(resolution.fallbackApplied).toBe(true);
   });
 
-  it("mails the active assignees and reports the deactivated ones alongside them", async () => {
+  it("mails only the active assignees but REPORTS everyone who is assigned", async () => {
+    // THE WRITE PATH FILTERS, THE READ PATH MUST NOT. `recipients` answers "who gets the mail" and is
+    // rightly narrowed to deliverable people. `assignedUserIds` answers "what is on this group", and
+    // narrowing THAT hides the deactivated assignee from the admin page — which pre-ticks from it — so the
+    // one person who could take the bad assignment off cannot see that it is there. That is the same trap
+    // as the removal lockout, moved one layer up into the read.
     const { db } = buildTenantDb({ assignedUserIds: ["director-1", "inactive-admin"], people: PEOPLE });
 
     const resolution = await resolveNotificationRecipients(db, "lead_due_diligence", {
@@ -204,8 +209,21 @@ describe("getNotificationRecipients", () => {
     });
 
     expect(resolution.recipients.map((recipient) => recipient.userId)).toEqual(["director-1"]);
-    expect(resolution.assignedUserIds).toEqual(["director-1"]);
+    expect(resolution.assignedUserIds).toEqual(["director-1", "inactive-admin"]);
     expect(resolution.inactiveAssignedUserIds).toEqual(["inactive-admin"]);
+  });
+
+  it("reports a group whose ONLY assignee is deactivated as assigned, not as empty", async () => {
+    // The sharpest version: nothing is deliverable, so a filtered read reports an empty list and the page
+    // draws a group nobody is on. The assignment is still there, still the reason no mail is going out.
+    const { db } = buildTenantDb({ assignedUserIds: ["inactive-admin"], people: PEOPLE });
+
+    const resolution = await resolveNotificationRecipients(db, "lead_due_diligence", {
+      fallbackToAdminsAndDirectors: true,
+    });
+
+    expect(resolution.recipients).toEqual([]);
+    expect(resolution.assignedUserIds).toEqual(["inactive-admin"]);
   });
 });
 
