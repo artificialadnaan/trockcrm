@@ -41,7 +41,19 @@ async function sourceOf(schema: string, description: string) {
   return result.rows[0].source;
 }
 
-async function seedOffices(schemas: readonly string[]) {
+async function sourceCheckIsValidated(schema: string) {
+  const result = await pg.query<{ convalidated: boolean }>(
+    `SELECT c.convalidated FROM pg_constraint c
+       JOIN pg_namespace n ON n.oid = c.connamespace
+      WHERE n.nspname = $1 AND c.conname = 'tasks_source_check'`,
+    [schema]
+  );
+  expect(result.rows, `${schema} constraint`).toHaveLength(1);
+  return result.rows[0].convalidated;
+}
+
+async function seedOffices(schemas: readonly string[], withoutOriginRule: readonly string[] = []) {
+  const schemasWithoutOriginRule = new Set(withoutOriginRule);
   await pg.exec(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $fn$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $fn$ LANGUAGE plpgsql;
@@ -57,6 +69,7 @@ async function seedOffices(schemas: readonly string[]) {
     END; $fn$ LANGUAGE plpgsql;
   `);
   for (const schema of schemas) {
+    const originRuleColumn = schemasWithoutOriginRule.has(schema) ? "" : "origin_rule varchar(120),";
     await pg.exec(`
       CREATE SCHEMA IF NOT EXISTS ${schema};
       CREATE TABLE ${schema}.tasks (
@@ -68,7 +81,7 @@ async function seedOffices(schemas: readonly string[]) {
         status varchar(20) NOT NULL DEFAULT 'pending',
         assigned_to uuid,
         created_by uuid,
-        origin_rule varchar(120),
+        ${originRuleColumn}
         entity_snapshot jsonb,
         contact_id uuid,
         due_date date,
@@ -265,6 +278,38 @@ describe("task source backfill — classification", () => {
     expect(await sourceOf("office_atlanta", "hand-typed")).toBe("manual");
   });
 
+  it("keeps unknown-provenance rows automated when an older office lacks origin_rule", async () => {
+    await seedOffices(["office_dallas", "office_legacy"], ["office_legacy"]);
+    await pg.exec(migrationSql(COLUMN_MIGRATION));
+    await seedTaskShapes("office_dallas");
+
+    // This row looks hand-authored, but the old schema has no provenance column. Treating the missing
+    // column as NULL would silently misclassify it; 0233's safe default must remain intact instead.
+    await pg.exec(`
+      INSERT INTO office_legacy.tasks (description, title, type, created_by)
+      VALUES ('legacy-unknown-provenance', 'Call the client', 'manual', '${HUMAN}');
+    `);
+    const before = await pg.query<{ xmin: string }>(
+      `SELECT xmin::text AS xmin FROM office_legacy.tasks WHERE description = 'legacy-unknown-provenance'`
+    );
+
+    await expect(runTaskSourceBackfill(asClient())).resolves.toBeUndefined();
+
+    // The same run still classifies offices where provenance is available.
+    expect(await sourceOf("office_dallas", "hand-typed")).toBe("manual");
+    expect(await sourceOf("office_legacy", "legacy-unknown-provenance")).toBe("automated");
+    const after = await pg.query<{ xmin: string }>(
+      `SELECT xmin::text AS xmin FROM office_legacy.tasks WHERE description = 'legacy-unknown-provenance'`
+    );
+    // `automated` alone could mask an UPDATE that guessed and rewrote the row. The compatibility path
+    // must leave opaque legacy data physically untouched, and stay safe on a retry.
+    expect(after.rows[0]?.xmin).toBe(before.rows[0]?.xmin);
+    await expect(runTaskSourceBackfill(asClient())).resolves.toBeUndefined();
+    expect(await sourceOf("office_legacy", "legacy-unknown-provenance")).toBe("automated");
+    // Backfill compatibility must not prevent the separate source CHECK validation pass.
+    expect(await sourceCheckIsValidated("office_legacy")).toBe(true);
+  });
+
   it("skips a schema that never received the column, instead of failing every other office", async () => {
     await seedOffices(["office_dallas"]);
     await pg.exec(migrationSql(COLUMN_MIGRATION));
@@ -344,23 +389,12 @@ describe("task source classifier — re-runnable as a repair for the deploy wind
 });
 
 describe("task source CHECK — deferred by the migration, validated by the step", () => {
-  async function convalidated(schema: string) {
-    const r = await pg.query<{ convalidated: boolean }>(
-      `SELECT c.convalidated FROM pg_constraint c
-         JOIN pg_namespace n ON n.oid = c.connamespace
-        WHERE n.nspname = $1 AND c.conname = 'tasks_source_check'`,
-      [schema]
-    );
-    expect(r.rows, `${schema} constraint`).toHaveLength(1);
-    return r.rows[0].convalidated;
-  }
-
   // The migration adds it NOT VALID so the row scan does not run under a lock held across every office.
   it("0233 leaves the constraint NOT VALID", async () => {
     await seedOffices(OFFICES);
     await pg.exec(migrationSql(COLUMN_MIGRATION));
 
-    for (const schema of OFFICES) expect(await convalidated(schema), schema).toBe(false);
+    for (const schema of OFFICES) expect(await sourceCheckIsValidated(schema), schema).toBe(false);
   });
 
   // ...but deferring it is only acceptable because something finishes the job. Without this the column
@@ -372,7 +406,7 @@ describe("task source CHECK — deferred by the migration, validated by the step
 
     await runTaskSourceBackfill(asClient());
 
-    for (const schema of OFFICES) expect(await convalidated(schema), schema).toBe(true);
+    for (const schema of OFFICES) expect(await sourceCheckIsValidated(schema), schema).toBe(true);
   });
 
   // NOT VALID defers the scan of EXISTING rows only — new writes are rejected from the moment it exists,
@@ -380,7 +414,7 @@ describe("task source CHECK — deferred by the migration, validated by the step
   it("rejects a bad value even while still NOT VALID", async () => {
     await seedOffices(["office_dallas"]);
     await pg.exec(migrationSql(COLUMN_MIGRATION));
-    expect(await convalidated("office_dallas")).toBe(false);
+    expect(await sourceCheckIsValidated("office_dallas")).toBe(false);
 
     await expect(
       pg.exec(`INSERT INTO office_dallas.tasks (title, source) VALUES ('bogus', 'imported')`)
@@ -394,7 +428,7 @@ describe("task source CHECK — deferred by the migration, validated by the step
     await runTaskSourceBackfill(asClient());
 
     await expect(runTaskSourceBackfill(asClient())).resolves.toBeUndefined();
-    expect(await convalidated("office_dallas")).toBe(true);
+    expect(await sourceCheckIsValidated("office_dallas")).toBe(true);
   });
 });
 

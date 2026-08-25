@@ -31,7 +31,11 @@ export const BACKFILL_SUSPENDED_TRIGGERS = ["set_tasks_updated_at", "audit_tasks
  *
  * Every automated shape in production carries a non-null origin_rule (rules engine, email queue,
  * AI-disconnect cron, revision routing), so they are all excluded here and keep the 'automated' column
- * default without being rewritten. Reassignment tasks are the exception that has to be named: they
+ * default without being rewritten. Some long-lived office schemas predate that column entirely. A
+ * missing field is unknown provenance, not a NULL origin_rule: inspect the row as JSON so this statement
+ * can run there, but only classify rows whose schema actually contains the field. Those unknown rows keep
+ * the conservative 'automated' default rather than being silently guessed into Manual. Reassignment tasks
+ * are the exception that has to be named: they
  * record the person who reassigned the deal, so they look hand-typed on every column, and they are
  * exactly the volume people are asking to filter away. They are excluded HERE rather than corrected in
  * a second pass so the backfill converges in ONE pass — setting them to 'manual' and putting them back
@@ -45,13 +49,14 @@ export const BACKFILL_SUSPENDED_TRIGGERS = ["set_tasks_updated_at", "audit_tasks
  */
 export function buildClassifyStatement(schema: string): string {
   return `
-    UPDATE ${schema}.tasks SET source = 'manual'
-     WHERE origin_rule IS NULL
-       AND created_by IS NOT NULL
-       AND source = 'automated'
+    UPDATE ${schema}.tasks AS t SET source = 'manual'
+     WHERE to_jsonb(t) ? 'origin_rule'
+       AND (to_jsonb(t) ->> 'origin_rule') IS NULL
+       AND t.created_by IS NOT NULL
+       AND t.source = 'automated'
        AND NOT (
-         title IN ('New Deal Assignment', 'New Lead Assignment')
-         AND COALESCE(entity_snapshot ? 'assignedAt', false)
+         t.title IN ('New Deal Assignment', 'New Lead Assignment')
+         AND COALESCE(t.entity_snapshot ? 'assignedAt', false)
        )`;
 }
 
@@ -64,11 +69,12 @@ export function buildClassifyStatement(schema: string): string {
  */
 export function buildRepairStatement(schema: string): string {
   return `
-    UPDATE ${schema}.tasks SET source = 'automated'
-     WHERE origin_rule IS NULL
-       AND title IN ('New Deal Assignment', 'New Lead Assignment')
-       AND entity_snapshot ? 'assignedAt'
-       AND source <> 'automated'`;
+    UPDATE ${schema}.tasks AS t SET source = 'automated'
+     WHERE to_jsonb(t) ? 'origin_rule'
+       AND (to_jsonb(t) ->> 'origin_rule') IS NULL
+       AND t.title IN ('New Deal Assignment', 'New Lead Assignment')
+       AND t.entity_snapshot ? 'assignedAt'
+       AND t.source <> 'automated'`;
 }
 
 /**
