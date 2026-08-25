@@ -426,13 +426,22 @@ describe("the well-known group registry", () => {
     }
   });
 
-  it("restricts due-diligence membership to admins and directors, and restricts nothing else", () => {
-    // DD recipients are mailed a decision token that authenticates on its own, so membership here is a
-    // permission. The other two are mailing lists and must stay open — the bid report goes to a `rep`.
+  it("restricts membership where it is a PERMISSION, and leaves the mailing list open", () => {
+    // The rule is the one stated on `assignableRoles`: set it when membership grants an ability, leave it
+    // unset for a subscription.
+    //
+    // DD recipients are mailed a decision token that authenticates on its own, so membership there is a
+    // permission. The marketing expense approver is one too — that list decides who is asked to approve
+    // company spend, and the queue and decide endpoints admit admins and directors only, so an
+    // unrestricted list lets an admin tick a rep who is then mailed a request they will be refused. (It
+    // was unrestricted when this test was written, because the group existed before the queue that gates
+    // it did; #1106 adds the gate and this line with it.)
+    //
+    // The bid due date report stays open, and must: it goes to an estimator, whose role is `rep`.
     const byKey = Object.fromEntries(NOTIFICATION_RECIPIENT_GROUPS.map((group) => [group.key, group]));
     expect(byKey.lead_due_diligence.assignableRoles).toEqual(["admin", "director"]);
+    expect(byKey.marketing_expense_approver.assignableRoles).toEqual(["admin", "director"]);
     expect(byKey.bid_due_date_report.assignableRoles).toBeUndefined();
-    expect(byKey.marketing_expense_approver.assignableRoles).toBeUndefined();
   });
 
   // The lazy upsert only fires when an admin opens the page. Until then a job reading the key sees an

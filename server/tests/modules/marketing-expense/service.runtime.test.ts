@@ -23,6 +23,7 @@ import {
   createMarketingExpenseRequest,
   decideMarketingExpenseRequest,
   getMarketingExpenseRequest,
+  isApprover,
   listMarketingExpenseQueue,
   listMyMarketingExpenseRequests,
   submitMarketingExpenseRequest,
@@ -1017,6 +1018,28 @@ describe("queue", () => {
     await createAndSubmit();
     const [row] = await listMarketingExpenseQueue(tenantDb, "pending");
     expect(row?.submittedByName).toBe("Reggie Rep");
+  });
+});
+
+// The write-side gate and the read-side authorization are two lists of roles in two packages, and they
+// only work together while they agree. Derived from each other here rather than both retyped.
+describe("who may be assigned and who may decide are the same set", () => {
+  it("every role assignable to the approver group can actually approve", async () => {
+    const { NOTIFICATION_RECIPIENT_GROUPS, MARKETING_EXPENSE_APPROVER_GROUP_KEY } = await import(
+      "@trock-crm/shared/types"
+    );
+    const group = NOTIFICATION_RECIPIENT_GROUPS.find(
+      (entry) => entry.key === MARKETING_EXPENSE_APPROVER_GROUP_KEY,
+    );
+    expect(group?.assignableRoles?.length).toBeGreaterThan(0);
+    for (const role of group!.assignableRoles!) {
+      expect(isApprover({ id: "someone", role })).toBe(true);
+    }
+  });
+
+  it("and a role that cannot approve is not assignable", () => {
+    expect(isApprover({ id: "someone", role: "rep" })).toBe(false);
+    expect(isApprover({ id: "someone", role: "construction" })).toBe(false);
   });
 });
 

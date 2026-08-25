@@ -6,7 +6,9 @@ import {
   parseMoneyInput,
   sumMoneyForDisplay,
   formatDateOnly,
+  MARKETING_EXPENSE_APPROVER_GROUP_KEY,
 } from "./marketing-expense.js";
+import { NOTIFICATION_RECIPIENT_GROUPS } from "./notification-recipient-groups.js";
 
 describe("parseMoneyInput", () => {
   it("coerces an empty CurrencyInput to zero — the form's cleared state is not an error", () => {
@@ -124,5 +126,25 @@ describe("formatDateOnly", () => {
     expect(formatDateOnly(undefined)).toBe("—");
     expect(formatDateOnly("")).toBe("—");
     expect(formatDateOnly("not a date")).toBe("—");
+  });
+});
+
+describe("the approver group is a permission, not a mailing list", () => {
+  const group = NOTIFICATION_RECIPIENT_GROUPS.find(
+    (entry) => entry.key === MARKETING_EXPENSE_APPROVER_GROUP_KEY,
+  );
+
+  it("restricts who may be assigned to it", () => {
+    // Unset means "any active user", which is right for a subscription like the bid due date report. This
+    // group decides who is ASKED to approve company spend, and the queue and decide endpoints admit only
+    // admins and directors — so an unrestricted list lets an admin tick a rep who then receives the mail,
+    // follows the link and is refused, while the request sits pending with nobody able to act.
+    expect(group?.assignableRoles).toEqual(["admin", "director"]);
+  });
+
+  it("does not widen to the whole leadership team when emptied", () => {
+    // The fallback is what makes an empty list dangerous elsewhere; here an empty list is a refused submit
+    // that names the admin page, which is the outcome we want.
+    expect(group?.fallbackToAdminsAndDirectors).toBe(false);
   });
 });

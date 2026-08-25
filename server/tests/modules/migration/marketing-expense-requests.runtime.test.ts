@@ -214,6 +214,37 @@ describe("0232 marketing expense requests — tenant DDL", () => {
     expect(assignment.rows.map((row) => row.email)).toEqual(["tyamashita@trockgc.com"]);
   });
 
+  // 0232 and 0238 both create the `marketing_expense_approver` group row: this file because the feature
+  // needs it, and PR-0's registry migration because the registry is not allowed to name a key no migration
+  // creates. Filename order runs 0232 first, but the reverse is reachable — a database that already ran
+  // 0238 gets 0232 on the deploy that merges this branch, because the runner keys on the full filename and
+  // skips only what it has executed. Both orders have to converge, and this asserts the half this file
+  // owns: a row that already exists is left alone, and the assignment is not duplicated.
+  it("leaves an existing approver group row alone (0238 may have created it first)", async () => {
+    await pg.exec(`
+      DELETE FROM public.notification_recipient_assignments;
+      DELETE FROM public.notification_recipient_groups WHERE key = 'marketing_expense_approver';
+      INSERT INTO public.notification_recipient_groups (key, name, description)
+      VALUES ('marketing_expense_approver', 'Pre-existing name', 'Pre-existing description');
+    `);
+    await expect(pg.exec(MIGRATION)).resolves.toBeDefined();
+
+    const rows = await pg.query<{ count: number; name: string }>(`
+      SELECT count(*)::int AS count, min(name) AS name
+        FROM public.notification_recipient_groups WHERE key = 'marketing_expense_approver'
+    `);
+    // ON CONFLICT DO NOTHING: exactly one row, and this file does not rewrite what is there.
+    expect(rows.rows[0]?.count).toBe(1);
+    expect(rows.rows[0]?.name).toBe("Pre-existing name");
+
+    const assignment = await pg.query<{ count: number }>(`
+      SELECT count(*)::int AS count FROM public.notification_recipient_assignments a
+        JOIN public.notification_recipient_groups g ON g.id = a.group_id
+       WHERE g.key = 'marketing_expense_approver'
+    `);
+    expect(assignment.rows[0]?.count).toBe(1);
+  });
+
   it("is idempotent — re-executing the whole file changes nothing and raises nothing", async () => {
     await expect(pg.exec(MIGRATION)).resolves.toBeDefined();
     const assignment = await pg.query<{ count: number }>(`

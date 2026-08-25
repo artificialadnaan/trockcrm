@@ -85,6 +85,14 @@ export const NOTIFICATION_RECIPIENT_GROUPS: readonly NotificationRecipientGroupD
     description: "Approves marketing and advertising expense requests.",
     emptyWarning: "Marketing and advertising expense requests will have no approver until one is added back.",
     fallbackToAdminsAndDirectors: false,
+    // A PERMISSION, by the rule above: this list decides who is asked to approve company spend, and the
+    // queue and decide endpoints admit admins and directors only. Left unset, an admin could tick a rep,
+    // who would then be mailed an approval request, follow the link and be refused — while the submitter
+    // was told it went through and the request sat pending with nobody able to act on it.
+    //
+    // This is the WRITE side. The resolver also filters recipients to roles that can decide, because this
+    // gate blocks new assignments and does not retroactively remove one made before it existed.
+    assignableRoles: ["admin", "director"],
   },
 ];
 
