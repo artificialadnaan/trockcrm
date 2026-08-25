@@ -6,7 +6,7 @@
  * module owns everything the loop adds and imports only the visibility/authority assertions from it,
  * so the two can be reviewed and merged independently.
  */
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, jobQueue, taskComments, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -108,14 +108,21 @@ type LoopTaskRow = {
  * ("Adam changed Last reply at") on top of the comment the timeline already shows; entity_snapshot is
  * a large opaque blob. An audit row whose only changes are in this set is dropped entirely.
  */
-const TIMELINE_NOISE_COLUMNS = new Set([
+const TIMELINE_NOISE_COLUMN_NAMES = [
   "updated_at",
   "last_reply_at",
   "last_reply_by",
   "assigner_ack_at",
   "entity_snapshot",
   "is_overdue",
-]);
+] as const;
+
+const TIMELINE_NOISE_COLUMNS = new Set<string>(TIMELINE_NOISE_COLUMN_NAMES);
+const TIMELINE_NOISE_COLUMN_SQL = sql.join(
+  TIMELINE_NOISE_COLUMN_NAMES.map((column) => sql`${column}`),
+  sql`, `
+);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const TIMELINE_FIELD_LABELS: Record<string, string> = {
   assigned_to: "Assignee",
@@ -180,6 +187,44 @@ export function mapTaskAuditChanges(changes: unknown): TaskTimelineFieldChange[]
     });
   }
   return out;
+}
+
+/**
+ * The audit trigger stores `assigned_to` as UUID text. Resolve it only after the complete timeline
+ * window has been mapped, so a busy task pays one public.users lookup rather than one lookup per
+ * audit row (and historical/deactivated people remain nameable in the record of work they did).
+ */
+function taskTimelineAssigneeIds(fieldChangesByRow: readonly TaskTimelineFieldChange[][]): string[] {
+  const ids = new Set<string>();
+
+  for (const fieldChanges of fieldChangesByRow) {
+    for (const change of fieldChanges) {
+      if (change.key !== "assigned_to") continue;
+      for (const value of [change.fromDisplay, change.toDisplay]) {
+        if (value && UUID_PATTERN.test(value)) ids.add(value.toLowerCase());
+      }
+    }
+  }
+
+  return [...ids];
+}
+
+function hydrateTaskTimelineAssigneeNames(
+  fieldChanges: readonly TaskTimelineFieldChange[],
+  namesById: ReadonlyMap<string, string>
+): TaskTimelineFieldChange[] {
+  const nameFor = (value: string | null) => {
+    if (value === null || !UUID_PATTERN.test(value)) return value;
+    // UUID equality is case-insensitive in Postgres, while the audit trigger preserves its text
+    // representation. Normalize the map key so an older uppercase audit payload still resolves.
+    return namesById.get(value.toLowerCase()) ?? value;
+  };
+
+  return fieldChanges.map((change) => (
+    change.key === "assigned_to"
+      ? { ...change, fromDisplay: nameFor(change.fromDisplay), toDisplay: nameFor(change.toDisplay) }
+      : change
+  ));
 }
 
 /**
@@ -453,12 +498,24 @@ export async function getTaskTimeline(
   // (table_name, record_id, action, changed_by, changes, created_at); entity_type arrived in 0117 and
   // is written ONLY by the application-level rich logger, whose surface registry has no task entry —
   // so it is NULL for every row here and filtering on it would return an empty timeline forever.
-  // `audit_record_idx` (table_name, record_id, created_at) serves this exactly.
+  // `audit_record_idx` (table_name, record_id, created_at) serves this exactly. Bookkeeping-only
+  // updates are excluded HERE, before the cap: filtering them after LIMIT would let 200 unreadable
+  // timestamp rows hide a real edit immediately behind them.
   const auditResult = await tenantDb.execute(sql`
     SELECT a.id, a.action, a.changed_by, a.changes, a.created_at, u.display_name AS actor_display_name
       FROM audit_log a
       LEFT JOIN public.users u ON u.id = a.changed_by
      WHERE a.table_name = 'tasks' AND a.record_id = ${taskId}
+       AND (
+         a.action <> 'update'
+         OR EXISTS (
+           SELECT 1
+             FROM jsonb_object_keys(
+               CASE WHEN jsonb_typeof(a.changes) = 'object' THEN a.changes ELSE '{}'::jsonb END
+             ) AS key(field_name)
+            WHERE field_name NOT IN (${TIMELINE_NOISE_COLUMN_SQL})
+         )
+       )
      ORDER BY a.created_at DESC, a.id DESC
      LIMIT ${limit}
   `);
@@ -471,13 +528,32 @@ export async function getTaskTimeline(
     actor_display_name: string | null;
   }>;
 
+  const mappedAuditRows = auditRows
+    .map((row) => ({ row, fieldChanges: mapTaskAuditChanges(row.changes) }))
+    .filter(({ row, fieldChanges }) => {
+      // An update whose every changed column is bookkeeping is not an event. Insert/delete rows carry
+      // `full_row` rather than `changes`, so they must not be filtered on an empty change list.
+      return row.action !== "update" || fieldChanges.length > 0;
+    });
+
+  const assigneeIds = taskTimelineAssigneeIds(mappedAuditRows.map(({ fieldChanges }) => fieldChanges));
+  // Deliberately no is_active predicate: an audit row describing a departed person must still say
+  // their name. A missing historical user falls back to the trigger's UUID below instead of breaking
+  // the entire timeline.
+  const assigneeRows = assigneeIds.length > 0
+    ? await tenantDb
+        .select({ id: users.id, displayName: users.displayName })
+        .from(users)
+        .where(inArray(users.id, assigneeIds))
+    : [];
+  const assigneeNamesById = new Map(
+    assigneeRows.map((user) => [user.id.toLowerCase(), user.displayName])
+  );
+
   const entries: TaskTimelineEntry[] = [];
 
-  for (const row of auditRows) {
-    const fieldChanges = mapTaskAuditChanges(row.changes);
-    // An update whose every changed column is bookkeeping is not an event. Insert/delete rows carry
-    // `full_row` rather than `changes`, so they must not be filtered on an empty change list.
-    if (row.action === "update" && fieldChanges.length === 0) continue;
+  for (const { row, fieldChanges: rawFieldChanges } of mappedAuditRows) {
+    const fieldChanges = hydrateTaskTimelineAssigneeNames(rawFieldChanges, assigneeNamesById);
 
     const { actorLabel, actorType } = buildTaskAuditActorLabel(
       task,
@@ -865,6 +941,10 @@ export async function ackTaskReplies(
        SET assigner_ack_at = GREATEST(COALESCE(assigner_ack_at, '-infinity'::timestamptz), ${seenIso}::timestamptz)
      WHERE id = ${taskId}::uuid
        AND ${seenIso}::timestamptz <= last_reply_at
+       -- The read above authorizes the request as it arrived; this predicate authorizes the write
+       -- against the row version it actually mutates. A reassignment between the two cannot let the
+       -- former assigner mark the new assigner's replies read.
+       AND COALESCE(last_assigned_by, created_by) = ${userId}::uuid
     RETURNING last_reply_at, assigner_ack_at
   `);
   const rows = ((result as any).rows ?? result) as Array<{

@@ -52,10 +52,15 @@ let pg: PGlite;
 
 async function taskRow(id: string) {
   const result = await pg.query<{
+    assigned_to: string;
+    last_assigned_by: string | null;
     last_reply_at: Date | null;
     last_reply_by: string | null;
     assigner_ack_at: Date | null;
-  }>(`SELECT last_reply_at, last_reply_by, assigner_ack_at FROM tasks WHERE id = $1`, [id]);
+  }>(
+    `SELECT assigned_to, last_assigned_by, last_reply_at, last_reply_by, assigner_ack_at FROM tasks WHERE id = $1`,
+    [id]
+  );
   return result.rows[0]!;
 }
 
@@ -458,6 +463,44 @@ describe("acknowledgement", () => {
     expect((await getTasksAwaitingMe(tdb, ASSIGNER)).map((t) => t.id)).not.toContain(TASK);
   });
 
+  it("does not let a former assigner acknowledge after the assignment changes between read and write", async () => {
+    await replyAt(TASK, ASSIGNEE, "r1", "2026-05-01T10:00:00Z");
+
+    // PGlite has one connection, so stage the real reassignment at the exact seam between
+    // ackTaskReplies' unlocked read and its UPDATE. A pre-reassigned fixture only tests the initial
+    // 403; this fails if the UPDATE itself does not repeat the effective-assigner guard.
+    let reassignedAtWrite = false;
+    const interleavedDb = new Proxy(tdb, {
+      get(target, property) {
+        const value = target[property];
+        if (property !== "execute") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (...args: unknown[]) => {
+          if (!reassignedAtWrite) {
+            reassignedAtWrite = true;
+            await pg.exec(`
+              UPDATE tasks
+                 SET assigned_to = '${STRANGER}', last_assigned_by = '${STRANGER}'
+               WHERE id = '${TASK}'
+            `);
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+
+    const result = await ackTaskReplies(
+      interleavedDb, TASK, new Date("2026-05-01T10:00:00Z"), "rep", ASSIGNER
+    );
+
+    expect(reassignedAtWrite, "the interleaving must actually run").toBe(true);
+    expect(result.acknowledged).toBe(false);
+    const row = await taskRow(TASK);
+    expect(row.last_assigned_by).toBe(STRANGER);
+    expect(row.assigner_ack_at).toBeNull();
+  });
+
   // THE ONE THE WHOLE MODEL EXISTS FOR. The assertion on `assigner_ack_at IS NOT NULL` is what makes
   // this a test of the COMPARISON rather than of the IS NULL branch: under a design that cleared the
   // ack, this task would be back in the bucket with a NULL ack and the comparison would never run.
@@ -744,6 +787,49 @@ describe("the merged timeline", () => {
     // ...but the window is the tail of the history, not its head.
     expect(entries.at(-1)!.summary).toContain("edit 29");
     expect(entries.some((e) => e.summary.includes("created this task"))).toBe(false);
+  });
+
+  it("does not let more than 200 bookkeeping updates push a meaningful edit out of the timeline", async () => {
+    await pg.exec(`UPDATE tasks SET title = 'This edit must survive the noise' WHERE id = '${TASK}'`);
+
+    // Every row below changes last_reply_at (and the trigger's updated_at); neither belongs in the
+    // timeline. They intentionally follow the meaningful row, so LIMIT-before-filtering returns only
+    // noise and makes this test fail.
+    const bookkeepingUpdates = Array.from({ length: 205 }, (_, index) => `
+      UPDATE tasks
+         SET last_reply_at = '2026-06-01T00:00:00Z'::timestamptz + INTERVAL '${index + 1} seconds',
+             last_reply_by = '${ASSIGNEE}'
+       WHERE id = '${TASK}';
+    `).join("\n");
+    await pg.exec(bookkeepingUpdates);
+
+    const entries = await getTaskTimeline(tdb, TASK, "rep", ASSIGNER);
+    expect(entries.some((entry) => entry.fieldChanges.some((change) => (
+      change.key === "title" && change.toDisplay === "This edit must survive the noise"
+    )))).toBe(true);
+    expect(entries.some((entry) => (
+      entry.kind === "audit" && entry.action === "update" && entry.fieldChanges.length === 0
+    ))).toBe(false);
+  });
+
+  it("hydrates active and departed assignee UUIDs in audit history with their names", async () => {
+    await pg.exec(`UPDATE tasks SET assigned_to = '${DEPARTED}' WHERE id = '${TASK}'`);
+    await pg.exec(`UPDATE tasks SET assigned_to = '${STRANGER}' WHERE id = '${TASK}'`);
+
+    const timeline = await getTaskTimeline(tdb, TASK, "rep", ASSIGNER);
+    const assignments = timeline
+      .flatMap((entry) => entry.fieldChanges)
+      .filter((change) => change.key === "assigned_to");
+
+    expect(assignments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fromDisplay: "Derek Barr", toDisplay: "Gone Person" }),
+      expect.objectContaining({ fromDisplay: "Gone Person", toDisplay: "Someone Else" }),
+    ]));
+    expect(timeline.some((entry) => (
+      entry.summary.includes("Derek Barr") || entry.summary.includes("Gone Person")
+    ))).toBe(true);
+    expect(JSON.stringify(assignments)).not.toContain(ASSIGNEE);
+    expect(JSON.stringify(assignments)).not.toContain(DEPARTED);
   });
 
   it("403s a user who cannot see the task", async () => {
