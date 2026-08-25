@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MetricCard } from "@/components/shared/metric-card";
+import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import {
   completeTask,
   getTaskStatusLabel,
@@ -24,9 +25,11 @@ import {
   useTaskCounts,
   useTask,
   useTasks,
+  isTaskSource,
   type Task,
   type TaskSortBy,
   type TaskSortDir,
+  type TaskSource,
 } from "@/hooks/use-tasks";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
@@ -447,6 +450,56 @@ function AssigneeFilter({
   );
 }
 
+/**
+ * The automated/manual tab selection, held in the URL as `?source=`.
+ *
+ * DELIBERATELY TAKES NO ROLE. The `?assignee=` filter alongside this one is read behind
+ * `const canAssign = role === "admin" || role === "director"`, which is right for assignee (a rep has
+ * nobody else to filter by) and would be exactly wrong here: reps have the most automated noise in
+ * their lists, so gating this would break the filter for the people who need it most. Taking no role
+ * argument means it cannot be gated on one by accident.
+ *
+ * An unrecognised value falls back to All, matching the server's allowlist for the same param, so a
+ * hand-edited URL degrades to "show everything" rather than filtering on a value nothing can match.
+ */
+export function useTaskSourceFilter() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const raw = searchParams.get("source");
+  const source = isTaskSource(raw) ? raw : undefined;
+
+  const setSource = (next: TaskSource | undefined) => {
+    const params = new URLSearchParams(searchParams);
+    if (next) params.set("source", next);
+    else params.delete("source");
+    setSearchParams(params);
+  };
+
+  return { source, setSource };
+}
+
+/**
+ * Tab options for the automated/manual toggle.
+ *
+ * The counts belong to a SCOPE — the assignee and the tab — and useTaskCounts reports `stale` while a
+ * scope swap is in flight. The summary cards already honour that (cardValue renders "—"); these labels
+ * must too, or after an assignee change the totals go on describing the previous assignee while the
+ * buckets underneath have already switched, indefinitely if the request fails.
+ *
+ * Counts drop to undefined rather than 0: ScopeToggle renders no number for undefined, whereas 0 would
+ * assert the new scope is empty — precisely what is not yet known.
+ */
+export function buildTaskSourceToggleOptions(
+  bySource: { manual: number; automated: number; all: number },
+  countsStale: boolean
+): ScopeToggleOption<"all" | TaskSource>[] {
+  const count = (value: number) => (countsStale ? undefined : value);
+  return [
+    { value: "all", label: "All", count: count(bySource.all) },
+    { value: "manual", label: "Manual", count: count(bySource.manual) },
+    { value: "automated", label: "Automated", count: count(bySource.automated) },
+  ];
+}
+
 export function TaskListPage() {
   const { user, loading: authLoading } = useAuth();
 
@@ -468,6 +521,8 @@ function TaskListPageContent({ role }: { role: string }) {
   const canAssign = role === "admin" || role === "director";
   const selectedAssignee = canAssign ? searchParams.get("assignee") ?? "" : "";
   const assigneeFilter = selectedAssignee || undefined;
+  // Read for EVERY role — see useTaskSourceFilter.
+  const { source: sourceFilter, setSource } = useTaskSourceFilter();
   // Per-bucket sort selection (ephemeral view preference, kept in local state — not URL).
   const [sortByGroup, setSortByGroup] = useState<Record<GroupKey, string>>(DEFAULT_SORT);
   const setGroupSort = (groupKey: GroupKey) => (value: string) =>
@@ -479,17 +534,17 @@ function TaskListPageContent({ role }: { role: string }) {
   const laterSort = parseSortValue(sortByGroup.later);
   const completedSort = parseSortValue(sortByGroup.completed);
 
-  const { counts, loading: countsLoading, stale: countsStale, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
+  const { counts, loading: countsLoading, stale: countsStale, refetch: refetchCounts } = useTaskCounts(assigneeFilter, sourceFilter);
   // Each displayed bucket is now exactly one server query, sorted server-side over its full set.
-  const { tasks: overdueTasks, loading: overdueLoading, error: overdueError, refetch: refetchOverdue } = useTasks({ section: "overdue", assignedTo: assigneeFilter, sortBy: overdueSort.sortBy, sortDir: overdueSort.sortDir });
-  const { tasks: todayTasks, loading: todayLoading, error: todayError, refetch: refetchToday } = useTasks({ section: "today", assignedTo: assigneeFilter, sortBy: todaySort.sortBy, sortDir: todaySort.sortDir });
-  const { tasks: thisWeekTasks, loading: thisWeekLoading, error: thisWeekError, refetch: refetchThisWeek } = useTasks({ section: "this_week", assignedTo: assigneeFilter, sortBy: thisWeekSort.sortBy, sortDir: thisWeekSort.sortDir });
+  const { tasks: overdueTasks, loading: overdueLoading, error: overdueError, refetch: refetchOverdue } = useTasks({ section: "overdue", source: sourceFilter, assignedTo: assigneeFilter, sortBy: overdueSort.sortBy, sortDir: overdueSort.sortDir });
+  const { tasks: todayTasks, loading: todayLoading, error: todayError, refetch: refetchToday } = useTasks({ section: "today", source: sourceFilter, assignedTo: assigneeFilter, sortBy: todaySort.sortBy, sortDir: todaySort.sortDir });
+  const { tasks: thisWeekTasks, loading: thisWeekLoading, error: thisWeekError, refetch: refetchThisWeek } = useTasks({ section: "this_week", source: sourceFilter, assignedTo: assigneeFilter, sortBy: thisWeekSort.sortBy, sortDir: thisWeekSort.sortDir });
   // limit 200 preserves the prior display ceiling: "Later" used to be two fetches (scheduled ≤100 +
   // the >7-day tail of upcoming ≤100); it's now a single unified server query. The default sort is by
   // effective date (due_date ?? scheduled_for), so near-term scheduled follow-ups are kept even when
   // the bucket is busy — the limit drops the furthest-out rows, not scheduled tasks categorically.
-  const { tasks: laterTasks, loading: laterLoading, error: laterError, refetch: refetchLater } = useTasks({ section: "later", limit: 200, assignedTo: assigneeFilter, sortBy: laterSort.sortBy, sortDir: laterSort.sortDir });
-  const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20, assignedTo: assigneeFilter, sortBy: completedSort.sortBy, sortDir: completedSort.sortDir });
+  const { tasks: laterTasks, loading: laterLoading, error: laterError, refetch: refetchLater } = useTasks({ section: "later", source: sourceFilter, limit: 200, assignedTo: assigneeFilter, sortBy: laterSort.sortBy, sortDir: laterSort.sortDir });
+  const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", source: sourceFilter, limit: 20, assignedTo: assigneeFilter, sortBy: completedSort.sortBy, sortDir: completedSort.sortDir });
   const { task: linkedTask, loading: linkedTaskLoading, error: linkedTaskError, refetch: refetchLinkedTask } = useTask(taskId);
 
   const groupLoading: Record<GroupKey, boolean> = {
@@ -598,7 +653,25 @@ function TaskListPageContent({ role }: { role: string }) {
               className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm font-medium text-slate-900 outline-none focus:border-brand-red focus:ring-2 focus:ring-brand-red/20"
             />
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/*
+              Rendered for every role, unlike the assignee filter beside it. Counts come from
+              /tasks/counts rather than the loaded rows: the buckets are independently paginated, so a
+              client-side .length would understate exactly the busy lists this filter is for. They
+              describe OPEN work, which is what the four open buckets show, and they blank while a
+              scope swap is in flight rather than describing the scope the user just left.
+
+              size="touch" rather than the default "sm": the default pill is px-3.5 py-1.5 text-xs,
+              which is under the WCAG target-size minimum that #1100/#1101 just went through the app
+              fixing. Adding a new control below that bar would walk it straight back.
+            */}
+            <ScopeToggle<"all" | TaskSource>
+              ariaLabel="Filter tasks by who created them"
+              size="touch"
+              value={sourceFilter ?? "all"}
+              onChange={(next) => setSource(next === "all" ? undefined : next)}
+              options={buildTaskSourceToggleOptions(counts.bySource, countsStale)}
+            />
             {canAssign ? (
               <AssigneeFilter selectedAssignee={selectedAssignee} onChange={updateAssignee} />
             ) : null}

@@ -1512,6 +1512,8 @@ export async function routeRevisionToEstimating(
       title,
       description:
         "Client feedback sent this deal back into estimating. Review the requested changes and prepare a revised estimate.",
+      // Machine-routed, even though createdBy records the person whose edit triggered the routing.
+      source: "automated",
       type: "system",
       priority: "high",
       status: "pending",

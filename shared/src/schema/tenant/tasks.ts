@@ -51,6 +51,11 @@ export const tasks = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
     isOverdue: boolean("is_overdue").default(false).notNull(),
     isTestData: boolean("is_test_data").default(false).notNull(),
+    // Who created this task: a person, or the system. No pre-existing column could answer it --
+    // `type` is 'manual' on both a hand-typed task and the AI-disconnect cron's output, and
+    // `created_by` holds a real human on two machine paths. Migration 0233; DEFAULT 'automated' there
+    // only covers the deploy window, so every write site sets this explicitly.
+    source: varchar("source", { length: 20 }).default("automated").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -68,5 +73,9 @@ export const tasks = pgTable(
     // MAX(tasks.updated_at) subquery an Index Only Scan instead of a Seq Scan. Source-of-truth marker;
     // migration 0166 builds it per-office as PARTIAL (WHERE contact_id IS NOT NULL) + updated_at DESC.
     index("tasks_contact_updated_at_idx").on(table.contactId, table.updatedAt),
+    // Serves the per-source task tabs: assigned_to scopes the list, source is the tab, status/due_date
+    // carry the bucket predicates. Source-of-truth marker; migration 0233 builds it per-office, and the
+    // runner's pre-step builds it CONCURRENTLY so API boot never blocks task writes on it.
+    index("tasks_assigned_source_status_idx").on(table.assignedTo, table.source, table.status, table.dueDate),
   ]
 );

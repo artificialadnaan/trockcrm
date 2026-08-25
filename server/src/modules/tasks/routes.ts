@@ -20,6 +20,7 @@ import {
   snoozeTask,
   isTaskSortBy,
   isTaskSection,
+  isTaskSource,
   type TaskSortDir,
 } from "./service.js";
 import {
@@ -143,6 +144,11 @@ router.get("/", async (req, res, next) => {
     // same as omitting it) rather than being cast straight through to the service.
     const section = isTaskSection(req.query.section) ? req.query.section : undefined;
 
+    // Same treatment for the automated/manual tab filter: anything outside the two known values
+    // becomes undefined, which means BOTH — the pre-existing behaviour for every caller that has
+    // never sent the param.
+    const source = isTaskSource(req.query.source) ? req.query.source : undefined;
+
     const filters = {
       assignedTo: req.query.assignedTo as string | undefined,
       status: req.query.status as string | undefined,
@@ -150,6 +156,7 @@ router.get("/", async (req, res, next) => {
       dealId: req.query.dealId as string | undefined,
       contactId: req.query.contactId as string | undefined,
       section,
+      source,
       sortBy,
       sortDir,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
@@ -168,13 +175,27 @@ router.get("/", async (req, res, next) => {
 router.get("/counts", async (req, res, next) => {
   try {
     const userId = req.query.userId as string | undefined;
-    const counts = await getTaskCounts(req.tenantDb!, req.user!.role, req.user!.id, userId);
+    // Same allowlist as the list route: the cards must scope to whichever tab is selected, or a card
+    // sits above a bucket it disagrees with.
+    const source = isTaskSource(req.query.source) ? req.query.source : undefined;
+    const counts = await getTaskCounts(req.tenantDb!, req.user!.role, req.user!.id, userId, source);
     await req.commitTransaction!();
     res.json({ counts });
   } catch (err) {
     next(err);
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// ADD NEW SINGLE-SEGMENT GET ROUTES ABOVE THIS LINE.
+//
+// `GET /:id` below matches ANY single path segment, and Express takes the first route that matches.
+// A literal route registered after it — /awaiting-me, /pending-acknowledgement, /summary — is never
+// reached: the request falls into this handler, the literal string is passed to getTaskById as a
+// task id, and Postgres rejects it as malformed uuid input (22P07), so the caller gets a 500 with
+// nothing in it that points at the routing. `/assignees` and `/counts` above are already ordered
+// this way for exactly that reason.
+// ---------------------------------------------------------------------------------------------
 
 // GET /api/tasks/:id — single task
 router.get("/:id", async (req, res, next) => {

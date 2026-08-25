@@ -10,6 +10,14 @@ export type TaskStatus =
   | "completed"
   | "dismissed";
 
+/** Mirrors the server allowlist — anything else is treated as "no filter" on both sides. */
+export type TaskSource = "manual" | "automated";
+export const TASK_SOURCES: readonly TaskSource[] = ["manual", "automated"];
+
+export function isTaskSource(value: unknown): value is TaskSource {
+  return typeof value === "string" && (TASK_SOURCES as readonly string[]).includes(value);
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -17,6 +25,8 @@ export interface Task {
   type: string;
   priority: string;
   status: TaskStatus;
+  /** Who created it: a person ('manual') or the system ('automated'). Recorded, never derived. */
+  source: TaskSource;
   assignedTo: string;
   assignedToName: string | null;
   createdBy: string | null;
@@ -181,6 +191,12 @@ export interface TaskCounts {
   // Resolved (completed or dismissed) in the last 7 days — authoritative source for the
   // "Completed this week" summary card (server-computed, not derived from the limited bucket).
   completedThisWeek: number;
+  /**
+   * Open-work totals for the tab labels, from the same request as everything else. Counted server-side
+   * over the full set: the buckets are independently paginated (later caps at 200, completed at 20), so
+   * a client-side .length would be wrong for exactly the polluted lists this filter exists for.
+   */
+  bySource: { manual: number; automated: number; all: number };
 }
 
 export type TaskSection = "overdue" | "today" | "this_week" | "later" | "upcoming" | "completed";
@@ -194,6 +210,8 @@ export interface TaskFilters {
   type?: string;
   dealId?: string;
   contactId?: string;
+  /** Omitted means BOTH — "All" is the default and hides nothing. */
+  source?: TaskSource;
   // Per-bucket sort wired through to the server so the FULL bucket sorts in the DB.
   sortBy?: TaskSortBy;
   sortDir?: TaskSortDir;
@@ -236,9 +254,15 @@ export function useTasks(filters: TaskFilters = {}) {
   // rows so re-sorting doesn't flicker. React's "adjust state during render" pattern; the ref guard
   // makes it fire once per scope change. We ALSO invalidate the request token here so a previous-scope
   // response that resolves before the passive refetch effect starts can't repopulate the cleared rows.
-  const scopeRef = useRef(filters.assignedTo);
-  if (scopeRef.current !== filters.assignedTo) {
-    scopeRef.current = filters.assignedTo;
+  // The SCOPE is the assignee AND the source: both change WHICH tasks may be shown, as opposed to
+  // sort/search/page which only reorder or narrow the same set. Tracking only the assignee meant
+  // switching Manual/Automated advertised the new tab while leaving the previous tab's rows on screen
+  // and interactive until the request landed -- and indefinitely if it failed, so a stray
+  // complete/snooze could hit a task that is not in the tab the user is looking at.
+  const scopeKey = `${filters.assignedTo ?? ""}|${filters.source ?? ""}`;
+  const scopeRef = useRef(scopeKey);
+  if (scopeRef.current !== scopeKey) {
+    scopeRef.current = scopeKey;
     setTasks([]);
     requestIdRef.current++;
   }
@@ -255,6 +279,7 @@ export function useTasks(filters: TaskFilters = {}) {
       if (filters.type) params.set("type", filters.type);
       if (filters.dealId) params.set("dealId", filters.dealId);
       if (filters.contactId) params.set("contactId", filters.contactId);
+      if (filters.source) params.set("source", filters.source);
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
@@ -280,6 +305,7 @@ export function useTasks(filters: TaskFilters = {}) {
     filters.type,
     filters.dealId,
     filters.contactId,
+    filters.source,
     filters.sortBy,
     filters.sortDir,
     filters.page,
@@ -326,12 +352,20 @@ export function useTask(taskId: string | undefined) {
   return { task, loading, error, refetch: fetchTask };
 }
 
-export function useTaskCounts(userId?: string) {
-  const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0 });
+export function useTaskCounts(userId?: string, source?: TaskSource) {
+  const [counts, setCounts] = useState<TaskCounts>({
+    overdue: 0, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0,
+    bySource: { manual: 0, automated: 0, all: 0 },
+  });
   const [loading, setLoading] = useState(true);
   // The scope (userId) the loaded counts belong to; updated only when a response actually lands, so
   // a scope change is detectable synchronously at render without an effect-timing race.
-  const [loadedUserId, setLoadedUserId] = useState<string | undefined>(undefined);
+  // The scope is the assignee AND the source: both change WHICH tasks the numbers describe. Tracking
+  // only the assignee left the previous tab's card values eligible for display while the new request
+  // was in flight — and indefinitely if it failed — so the cards could contradict the buckets under
+  // them. Same combined key as useTasks, so the two cannot drift apart.
+  const scopeKey = `${userId ?? ""}|${source ?? ""}`;
+  const [loadedScopeKey, setLoadedScopeKey] = useState<string | undefined>(undefined);
   const loadedOnceRef = useRef(false);
   const requestIdRef = useRef(0);
 
@@ -339,11 +373,20 @@ export function useTaskCounts(userId?: string) {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
-      const qs = userId ? `?userId=${encodeURIComponent(userId)}` : "";
-      const data = await api<{ counts: TaskCounts }>(`/tasks/counts${qs}`);
+      const params = new URLSearchParams();
+      if (userId) params.set("userId", userId);
+      if (source) params.set("source", source);
+      const qs = params.toString();
+      const data = await api<{ counts: TaskCounts }>(`/tasks/counts${qs ? `?${qs}` : ""}`);
       if (requestId !== requestIdRef.current) return; // superseded by a newer scope's request
-      setCounts(data.counts);
-      setLoadedUserId(userId);
+      // The API deploys separately from this bundle, so a response from a server that predates
+      // bySource is a real state, not a hypothetical. Default it rather than letting the tab labels
+      // read through an undefined.
+      setCounts({
+        ...data.counts,
+        bySource: data.counts?.bySource ?? { manual: 0, automated: 0, all: 0 },
+      });
+      setLoadedScopeKey(scopeKey);
       loadedOnceRef.current = true;
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
@@ -351,15 +394,16 @@ export function useTaskCounts(userId?: string) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [userId]);
+  }, [userId, source, scopeKey]);
 
   useEffect(() => {
     fetchCounts();
   }, [fetchCounts]);
 
-  // The loaded counts belong to a different assignee than the active filter → an in-flight scope
-  // swap. Callers should not display these numbers (they're the previous assignee's).
-  const stale = loadedOnceRef.current && loadedUserId !== userId;
+  // The loaded counts belong to a different assignee or a different tab than the active filter → an
+  // in-flight scope swap. Callers should not display these numbers; they describe a filter the user
+  // has already left.
+  const stale = loadedOnceRef.current && loadedScopeKey !== scopeKey;
 
   return { counts, loading, stale, refetch: fetchCounts };
 }

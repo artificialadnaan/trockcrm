@@ -203,8 +203,8 @@ async function insertTask(client: pg.Client, ctx: SeedContext, ownerEmail: SeedU
   ] as const;
   const state = states[index % states.length];
   await client.query(`
-    INSERT INTO ${SCHEMA}.tasks (title, description, type, priority, status, assigned_to, created_by, due_date, completed_at, is_overdue, is_test_data, updated_at)
-    VALUES ($1, $2, 'follow_up', $3::task_priority, $4::task_status, $5, $5, $6::date, $7::timestamptz, $8, true, NOW())
+    INSERT INTO ${SCHEMA}.tasks (title, description, type, priority, status, assigned_to, created_by, due_date, completed_at, is_overdue, is_test_data, updated_at, source)
+    VALUES ($1, $2, 'follow_up', $3::task_priority, $4::task_status, $5, $5, $6::date, $7::timestamptz, $8, true, NOW(), 'manual')
   `, [prefixed(`${ownerEmail} ${state.label} task ${index + 1}`), prefixed(`Synthetic ${state.label} task for ${ownerEmail}`), index % 5 === 0 ? "high" : "normal", state.status, ctx.users[ownerEmail], todayOffset(state.due), state.completed, state.overdue]);
 }
 
