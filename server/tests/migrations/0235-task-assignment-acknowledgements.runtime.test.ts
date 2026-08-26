@@ -274,8 +274,9 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     expect(ledger, "never record 0235 until both the fence and scan completed").toBeGreaterThan(scan);
   });
 
-  it("repairs a legacy #1107 provisioner at COMMIT, then converges idempotently with the runner step", async () => {
+  it("repairs a legacy #1107 provisioner at COMMIT without seeding its post-fence tasks on retry", async () => {
     await seedOffices(["office_dallas"]);
+    await seedTasks("office_dallas");
     await pg.exec(migrationSql(MIGRATION));
 
     // INSERT is intentionally first, exactly like createOffice. If the constraint trigger becomes
@@ -298,13 +299,45 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     `);
     expect(guarded.rows[0]).toMatchObject({ indexes: 1, constraints: 1, rows: 0 });
 
-    // The ordinary runner scan immediately follows the SQL file. It must safely meet the table the
-    // guard already made, rather than duplicating its index or constraint.
+    const fenced = await pg.query<{ schema_name: string }>(`
+      SELECT schema_name
+        FROM public._task_assignment_acknowledgements_fenced_offices
+       ORDER BY schema_name
+    `);
+    expect(fenced.rows.map((row) => row.schema_name)).toEqual(["office_tulsa"]);
+
+    // This task lands after the fenced office commits but before a failed deployment's helper retries.
+    // It is a normal, brand-new assignment: if the retry walks every visible office schema and seeds it,
+    // the modal can never show it. The durable fence marker must keep this office out of that pass.
+    await pg.exec(`
+      INSERT INTO office_tulsa.tasks (id, title, assigned_to)
+      VALUES ('aaaaaaaa-0000-0000-0000-000000000099', 'new task', '${ALICE}');
+    `);
+
+    // Replaying the file models a retry after its first execution installed the fence but the helper
+    // failed before runner.ts could record 0235 in public._migrations.
+    await pg.exec(migrationSql(MIGRATION));
     await expect(
       runTaskAssignmentAcknowledgementsMigration(
         pg as unknown as Parameters<typeof runTaskAssignmentAcknowledgementsMigration>[0]
       )
     ).resolves.toBeUndefined();
+
+    const retrySeed = await pg.query<{ n: number }>(`
+      SELECT COUNT(*)::int AS n
+        FROM office_tulsa.${TABLE}
+       WHERE task_id = 'aaaaaaaa-0000-0000-0000-000000000099'
+         AND user_id = '${ALICE}'
+    `);
+    expect(retrySeed.rows[0]?.n, "a post-fence assignment must remain unacknowledged").toBe(0);
+
+    const historicalSeed = await pg.query<{ n: number }>(`
+      SELECT COUNT(*)::int AS n
+        FROM office_dallas.${TABLE}
+       WHERE task_id = 'aaaaaaaa-0000-0000-0000-000000000001'
+         AND user_id = '${ALICE}'
+    `);
+    expect(historicalSeed.rows[0]?.n, "the post-fence marker must not skip real history").toBe(1);
 
     const converged = await pg.query<{ indexes: number; constraints: number }>(`
       SELECT
@@ -315,11 +348,9 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     `);
     expect(converged.rows[0]).toMatchObject({ indexes: 1, constraints: 1 });
 
-    // A task created after the fenced office commits is new, not historical. Prove the guard really
-    // installed the same writable, cascading table shape as the normal provisioner template.
+    // Prove the guard really installed the same writable, cascading table shape as the normal
+    // provisioner template. The prior zero-row assertion establishes that this is the first ack.
     await pg.exec(`
-      INSERT INTO office_tulsa.tasks (id, title, assigned_to)
-      VALUES ('aaaaaaaa-0000-0000-0000-000000000099', 'new task', '${ALICE}');
       INSERT INTO office_tulsa.${TABLE} (task_id, user_id)
       VALUES ('aaaaaaaa-0000-0000-0000-000000000099', '${ALICE}')
       ON CONFLICT (task_id, user_id) DO NOTHING;

@@ -8,9 +8,18 @@ import { runPerOfficeTransactionalStep, validateOfficeSchemaName } from "./per-o
 // DO loop held office A's tasks lock while it created and seeded every later office. The generic runner
 // below is the established repair: one explicit transaction per office, committed before the next schema
 // is touched. The runner executes the SQL file first because it installs the durable deferred
-// public.offices fence for an old API image that provisions during this scan; this helper then converges
-// all existing offices. The SQL file must not regain an existing-office loop.
+// public.offices fence for an old API image that provisions during this scan. That fence records offices
+// it repaired at COMMIT, so this helper seeds only the pre-fence historical set; otherwise a retry could
+// mistake a just-created office's first task for history. The SQL file must not regain an
+// existing-office loop.
 export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION = "0235_task_assignment_acknowledgements.sql";
+export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE =
+  "public._task_assignment_acknowledgements_fenced_offices";
+
+const FENCED_OFFICE_SCHEMAS_SQL = `
+  SELECT schema_name
+  FROM ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE}
+`;
 
 export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP = {
   label: "0235 task assignment acknowledgement setup",
@@ -45,9 +54,21 @@ export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP = {
   ],
 } as const;
 
-/** Create, index and seed 0235 one office transaction at a time. */
+/** Create, index and seed 0235's historical offices one transaction at a time. */
 export async function runTaskAssignmentAcknowledgementsMigration(client: pg.Client): Promise<void> {
-  await runPerOfficeTransactionalStep(client, TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP);
+  // The deferred public.offices fence writes this marker in the same transaction that creates a new
+  // office's empty acknowledgement table. It must be durable instead of a runner-local schema snapshot:
+  // a failed helper leaves the fence installed but not the migration ledger, and a retry must still know
+  // which offices were born after the cutover.
+  const markerResult = await client.query<{ schema_name: string }>(FENCED_OFFICE_SCHEMAS_SQL);
+  const fencedSchemas = new Set(
+    markerResult.rows.map((row) => validateOfficeSchemaName(row.schema_name))
+  );
+
+  await runPerOfficeTransactionalStep(client, {
+    ...TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP,
+    skipSchema: (schemaName) => fencedSchemas.has(schemaName),
+  });
 }
 
 export { validateOfficeSchemaName };

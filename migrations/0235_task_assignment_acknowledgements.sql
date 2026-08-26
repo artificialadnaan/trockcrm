@@ -69,6 +69,15 @@
 -- narrow, permanent fence on public.offices: it runs at the old transaction's COMMIT, after that
 -- provisioner has created tasks but before the incomplete office becomes visible.
 --
+-- Keep the fence's cutover set durable. The runner can retry after this file committed but before the
+-- per-office helper and migration ledger completed. A process-local schema snapshot would then see a
+-- post-fence office on retry and seed its brand-new tasks as if they were historical. The deferred
+-- fence records every office it repairs in the same provisioning transaction; the helper excludes those
+-- schemas from the historical table/index/seed pass.
+CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_fenced_offices (
+  schema_name text PRIMARY KEY
+);
+
 -- Install this trigger before runner.ts scans existing offices. CREATE TRIGGER locks public.offices, so
 -- an old provisioning transaction that inserted first must finish before installation can return; the
 -- immediately following scan then sees its schema. A transaction that inserts afterward receives this
@@ -78,7 +87,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $office_task_ack$
 DECLARE
-  schema_name text := 'office_' || NEW.slug;
+  office_schema_name text := 'office_' || NEW.slug;
   tasks_relation regclass;
 BEGIN
   -- createOffice accepts exactly this slug grammar. Fail closed because this trigger is attached to the
@@ -88,7 +97,7 @@ BEGIN
     RAISE EXCEPTION 'Cannot provision task-assignment acknowledgements for invalid office slug "%"', NEW.slug;
   END IF;
 
-  tasks_relation := to_regclass(format('%I.tasks', schema_name));
+  tasks_relation := to_regclass(format('%I.tasks', office_schema_name));
   IF tasks_relation IS NULL THEN
     RAISE EXCEPTION 'Office "%" was committed before its tasks table was provisioned', NEW.slug;
   END IF;
@@ -101,14 +110,21 @@ BEGIN
        acknowledged_at timestamptz NOT NULL DEFAULT now(),
        CONSTRAINT task_assignment_ack_uq UNIQUE (task_id, user_id)
      )',
-    schema_name
+    office_schema_name
   );
 
   EXECUTE format(
     'CREATE INDEX IF NOT EXISTS task_assignment_ack_user_idx
        ON %I.task_assignment_acknowledgements (user_id, acknowledged_at DESC)',
-    schema_name
+    office_schema_name
   );
+
+  -- This marker commits atomically with the newly provisioned office. It is deliberately permanent:
+  -- if the helper later fails before the 0235 ledger row is written, its retry still has to distinguish
+  -- this post-fence office from history and leave its first assignments unacknowledged.
+  INSERT INTO public._task_assignment_acknowledgements_fenced_offices (schema_name)
+  VALUES ('office_' || NEW.slug)
+  ON CONFLICT (schema_name) DO NOTHING;
 
   -- Do not seed here. This is a brand-new office at its transaction's COMMIT, so assignments created
   -- during provisioning are new assignments. The per-office runner step supplies the historical seed

@@ -75,6 +75,14 @@ export interface PerOfficeStep {
    * outcome and a loud failure is the recoverable one.
    */
   suspendTriggers?: readonly string[];
+  /**
+   * Omit an office schema that has already received this migration's provisioner-only shape.
+   *
+   * This is evaluated after the schema name has been validated but before the readiness counters or
+   * a tenant-table lock. It lets a migration keep a durable cutover boundary without making a new
+   * office look like a partially applied historical office on a retry.
+   */
+  skipSchema?: (schemaName: string) => boolean;
   /** Statements run inside each office's transaction. `schema` is already validated and quoted. */
   buildStatements: (schema: string) => readonly string[];
 }
@@ -134,6 +142,7 @@ export async function runPerOfficeTransactionalStep(
 
   for (const row of schemaResult.rows) {
     const schemaName = validateOfficeSchemaName(row.schema_name);
+    if (step.skipSchema?.(schemaName)) continue;
     const schema = quoteIdentifier(schemaName);
 
     if ((await countMatching(client, TABLE_EXISTS_SQL, [schemaName, step.table])) === 0) continue;
