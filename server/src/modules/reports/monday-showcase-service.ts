@@ -937,6 +937,13 @@ export interface MondayShowcaseOptions {
    * so all 8 variants slice the same narrowed figures and none can disagree.
    */
   routes?: readonly WorkflowRouteBucket[];
+  /**
+   * Internal consumer switch. `false` is only for callers such as the Rep 1:1 Pack that consume the
+   * canonical aggregate/reps slice but never return a Monday Showcase payload. It avoids materializing
+   * A1's office-wide project detail rows for a view that cannot render them; the public Showcase route
+   * always takes the default `true` and therefore always receives the full A1 report.
+   */
+  includeEstimatingReport?: boolean;
 }
 
 function shiftIsoDays(isoDate: string, days: number): string {
@@ -1040,6 +1047,7 @@ export async function getMondayShowcaseData(
 ): Promise<MondayShowcaseData> {
   const mode: WeekMode = options.mode ?? "to_date";
   const now = options.now ?? new Date();
+  const includeEstimatingReport = options.includeEstimatingReport ?? true;
   const { from, to } = getWtdPeriod(mode, now);
   const period: ShowcasePeriod = { from, to, mode, label: `${from} → ${to}` };
   // Resolve the route selection ONCE and pass the SAME value to every query below. Every deal-sourced
@@ -1064,11 +1072,29 @@ export async function getMondayShowcaseData(
   const estimatedRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, from, to, routes));
   const lastSentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, lastWeekFrom, lastWeekTo, routes));
   const lastEstRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, lastWeekFrom, lastWeekTo, routes));
-  // A1’s direct row sets. These are intentionally sequential with the rest of the Showcase: all queries
-  // share the request’s transaction-bound tenant connection.
-  const currentEstimatingRows = await tenantDb.execute(buildCurrentEstimatingProjectsSql(routes));
-  const rfpInitiatedRows = await tenantDb.execute(buildRfpInitiatedProjectsSql(from, to, routes));
-  const estimateSentRows = await tenantDb.execute(buildEstimateSentProjectsSql(from, to, routes));
+  // A1’s direct row sets are intentionally sequential with the rest of the Showcase: all queries share
+  // the request’s transaction-bound tenant connection. The Rep Pack asks for the canonical aggregates but
+  // does not render A1, so it deliberately takes the false branch and never materializes office-wide
+  // project detail for a consumer that discards it.
+  const estimatingReport = includeEstimatingReport
+    ? assembleEstimatingReport({
+        currentAsOf: now.toISOString(),
+        currentEstimatingRows: rowsFromExecute<CurrentEstimatingSqlRow>(
+          await tenantDb.execute(buildCurrentEstimatingProjectsSql(routes))
+        ),
+        rfpInitiatedRows: rowsFromExecute<RfpInitiatedSqlRow>(
+          await tenantDb.execute(buildRfpInitiatedProjectsSql(from, to, routes))
+        ),
+        estimateSentRows: rowsFromExecute<EstimateSentSqlRow>(
+          await tenantDb.execute(buildEstimateSentProjectsSql(from, to, routes))
+        ),
+      })
+    : assembleEstimatingReport({
+        currentAsOf: now.toISOString(),
+        currentEstimatingRows: [],
+        rfpInitiatedRows: [],
+        estimateSentRows: [],
+      });
   const projBandRows = await tenantDb.execute(buildProjectionBandsSql(routes));
   const projCovRows = await tenantDb.execute(buildProjectionCoverageSql(routes));
   // NOT route-narrowed -- the leads table has no workflow_route. See buildLeadStatusSql. routeFilter
@@ -1101,13 +1127,6 @@ export async function getMondayShowcaseData(
   const estimated = toCohort(estimatedRows);
   const lastSent = toCohort(lastSentRows);
   const lastEst = toCohort(lastEstRows);
-  const estimatingReport = assembleEstimatingReport({
-    currentAsOf: now.toISOString(),
-    currentEstimatingRows: rowsFromExecute<CurrentEstimatingSqlRow>(currentEstimatingRows),
-    rfpInitiatedRows: rowsFromExecute<RfpInitiatedSqlRow>(rfpInitiatedRows),
-    estimateSentRows: rowsFromExecute<EstimateSentSqlRow>(estimateSentRows),
-  });
-
   // Projection: fold band + coverage rows into per-rep ladders; office = SUM of per-rep (so office N/M
   // and bands equal the rep splits by construction).
   const repProjection = new Map<string | null, RepProjection>();
