@@ -168,6 +168,17 @@ async function ackRowCount(taskId: string, userId: string) {
   return result.rows[0]?.n ?? 0;
 }
 
+/** Render the stored timestamp as the same lossless UTC value issued to the browser. */
+async function acknowledgementTimestamp(taskId: string, userId: string) {
+  const result = await pg.query<{ acknowledged_at: string }>(
+    `SELECT to_char(acknowledged_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS acknowledged_at
+       FROM task_assignment_acknowledgements
+      WHERE task_id = $1::uuid AND user_id = $2::uuid`,
+    [taskId, userId]
+  );
+  return result.rows[0]?.acknowledged_at;
+}
+
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -883,6 +894,40 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
     expect(await ackRowCount(uid("1"), ALICE)).toBe(1);
   });
 
+  it("uses the locked future assignment timestamp exactly and never walks an acknowledgement backwards", async () => {
+    const taskId = uid("1");
+    const assignedAt = "2099-07-08T09:10:11.123456Z";
+    const laterAcknowledgement = "2100-08-09T10:11:12.654321Z";
+    await seed([{ id: taskId, assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    await pg.query(`UPDATE public.tasks SET assigned_at = $2::timestamptz WHERE id = $1::uuid`, [
+      taskId,
+      assignedAt,
+    ]);
+    const displayed = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
+
+    // This is deliberately far beyond the test machine's clock. A bare NOW() insert leaves the task
+    // unacknowledged, while a JS Date round trip changes .123456 to .123000.
+    await acknowledgeTaskAssignmentsService(tdb, ALICE, [
+      { taskId, assignmentVersion: displayed.assignmentVersion },
+    ]);
+    expect(await acknowledgementTimestamp(taskId, ALICE)).toBe(assignedAt);
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
+
+    // The same exact assignment is posted again after a prior acknowledgement has moved further ahead.
+    // The conflict branch must preserve that monotonic fact; setting it to NOW(), or merely to this
+    // assignment version, makes the acknowledgement move backward and is not idempotent.
+    await pg.query(
+      `UPDATE public.task_assignment_acknowledgements
+          SET acknowledged_at = $3::timestamptz
+        WHERE task_id = $1::uuid AND user_id = $2::uuid`,
+      [taskId, ALICE, laterAcknowledgement]
+    );
+    await acknowledgeTaskAssignmentsService(tdb, ALICE, [
+      { taskId, assignmentVersion: displayed.assignmentVersion },
+    ]);
+    expect(await acknowledgementTimestamp(taskId, ALICE)).toBe(laterAcknowledgement);
+  });
+
   it("timestamps an acknowledgement with PostgreSQL NOW(), not the application clock", async () => {
     await seed([{ id: uid("1"), priority: "normal" }]);
     const displayed = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
@@ -892,7 +937,7 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
       { taskId: displayed.id, assignmentVersion: displayed.assignmentVersion },
     ]);
 
-    const upsert = queries.find((query) => /insert into "task_assignment_acknowledgements"/i.test(query.text));
+    const upsert = queries.find((query) => /insert into\s+"?task_assignment_acknowledgements"?/i.test(query.text));
     expect(upsert?.text, "the conflict branch must use the database clock").toMatch(/now\(\)/i);
     // `new Date()` would arrive as a bound JS Date here. Values are ids/user ids only; the timestamp
     // lives in SQL so it shares the assigned_at comparison's clock even on a skewed API host.

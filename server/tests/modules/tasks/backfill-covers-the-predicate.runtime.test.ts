@@ -92,14 +92,14 @@ beforeAll(async () => {
     );
   }
 
-  // Both migrations in the exact order runner.ts applies them — INCLUDING BOTH runner steps. The 0235
-  // SQL file deliberately contains only the office-provisioner template; existing offices get their
-  // table and historical seed from its per-office step. Omitting that step would exercise a table with
-  // no historical acknowledgements, which is not a deployable 0235 state at all.
+  // Both migrations in the exact order runner.ts applies them — INCLUDING BOTH runner steps. 0235's
+  // SQL file first installs its durable old-container office-provisioning fence; existing offices then
+  // get their table and historical seed from the per-office step. Omitting that step would exercise a
+  // table with no historical acknowledgements, which is not a deployable 0235 state at all.
+  await pg.exec(migrationSql("0235_task_assignment_acknowledgements"));
   await runTaskAssignmentAcknowledgementsMigration(
     pg as unknown as Parameters<typeof runTaskAssignmentAcknowledgementsMigration>[0]
   );
-  await pg.exec(migrationSql("0235_task_assignment_acknowledgements"));
 
   // 0239's step is likewise not optional decoration: its file only adds the column, so skipping it
   // would leave every pre-existing row dated now() by the default, post-date 0235's seed, and make

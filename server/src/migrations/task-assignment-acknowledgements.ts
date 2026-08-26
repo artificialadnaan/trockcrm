@@ -7,8 +7,9 @@ import { runPerOfficeTransactionalStep, validateOfficeSchemaName } from "./per-o
 // and the seed reads that same hot table. A migration file is one implicit transaction, so its former
 // DO loop held office A's tasks lock while it created and seeded every later office. The generic runner
 // below is the established repair: one explicit transaction per office, committed before the next schema
-// is touched. The SQL file keeps only the TENANT_SCHEMA block the office provisioner needs for future
-// offices; it must not regain an existing-office loop.
+// is touched. The runner executes the SQL file first because it installs the durable deferred
+// public.offices fence for an old API image that provisions during this scan; this helper then converges
+// all existing offices. The SQL file must not regain an existing-office loop.
 export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION = "0235_task_assignment_acknowledgements.sql";
 
 export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP = {

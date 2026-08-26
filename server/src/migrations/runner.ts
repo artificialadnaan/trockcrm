@@ -134,11 +134,16 @@ async function runMigrations(): Promise<void> {
         // 0235 creates a table with a foreign key to `tasks`, creates its index, then seeds from
         // `tasks`. All three can lock the hot task table. Doing the old DO loop inside this SQL file
         // held every earlier office's lock until the last office finished; the shared step commits each
-        // office before beginning the next. Run it before the file because 0235 adds no prerequisite
-        // tasks column. The remaining tenant block in the file is only the provisioner template.
-        await runTaskAssignmentAcknowledgementsMigration(client);
+        // office before beginning the next.
+        //
+        // Run the file FIRST: it installs a permanent deferred public.offices fence for API containers
+        // that predate 0235. CREATE TRIGGER serializes an old provisioning transaction that inserted an
+        // office before this migration started; the helper scan below then sees it. An old container
+        // that inserts after installation is repaired at its own COMMIT. Scanning first leaves a
+        // scan-to-ledger window that can strand an office without the modal's table forever.
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
+        await runTaskAssignmentAcknowledgementsMigration(client);
       } else if (file === TASK_SOURCE_INDEX_MIGRATION) {
         // Same reason again: `tasks` is written by the rules engine, the email queue, two crons, deal
         // reassignment and every person using the New Task form, so a plain CREATE INDEX inside the

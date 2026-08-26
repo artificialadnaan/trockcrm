@@ -731,18 +731,60 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
     expect(consumeAssignmentModalSessionResetMock).toHaveBeenCalledWith(1);
   });
 
-  it("does interrupt after a reload if something NEW has arrived since", async () => {
-    setPendingByOffice({ "office-a": { tasks: [repeat({ id: "a1" })] } });
+  it("shows and acknowledges only the new card when a repeat shares its later batch", async () => {
+    setPendingByOffice({
+      "office-a": { tasks: [repeat({ id: "a1", title: "Already shown urgent work" })] },
+    });
     await render(true, { officeId: "office-a" });
     await click(buttonLabelled("Close"));
 
     // Adam assigns something while the tab is open; the person reloads.
     setPendingByOffice({
-      "office-a": { tasks: [task({ id: "a2", title: "Brand new work" }), repeat({ id: "a1" })] },
+      "office-a": {
+        tasks: [
+          task({ id: "a2", title: "Brand new work" }),
+          repeat({ id: "a1", title: "Already shown urgent work" }),
+        ],
+      },
     });
     await reload();
 
     expect(dialog()!.textContent).toContain("Brand new work");
+    expect(dialog()!.textContent).not.toContain("Already shown urgent work");
+    await click(buttonLabelled("Close"));
+    expect(acknowledgeCalls()).toHaveLength(2);
+    expect(acknowledgedTaskIds(acknowledgeCalls()[1]!)).toEqual(["a2"]);
+  });
+
+  it("does not count a previously shown new card after its acknowledgement retry failed", async () => {
+    setPendingByOffice({ "office-a": { tasks: [task({ id: "a1", title: "First new assignment" })] } });
+    await render(true, { officeId: "office-a" });
+
+    // Showing is intentionally session-local and survives an acknowledgement outage. When the server
+    // still returns that first NEW card with a later card, only the latter may affect this dialog's
+    // title and remaining-count copy.
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === "/tasks/acknowledge") throw new Error("acknowledgement network blip");
+      if (path === "/tasks/pending-acknowledgement") {
+        return {
+          tasks: [
+            task({ id: "a2", title: "Second new assignment" }),
+            task({ id: "a1", title: "First new assignment" }),
+          ],
+          total: 2,
+          newTotal: 2,
+        };
+      }
+      throw new Error(`unexpected api call: ${path}`);
+    });
+    await click(buttonLabelled("Close"));
+    await reload();
+
+    expect(dialog()!.textContent).toContain("Second new assignment");
+    expect(dialog()!.textContent).not.toContain("First new assignment");
+    expect(dialog()!.textContent).toContain("You have a new task");
+    expect(dialog()!.textContent).not.toContain("You have 2 new tasks");
+    expect(dialog()!.textContent).not.toContain("more waiting");
   });
 
   it("interrupts again when the same task id arrives as a newer assignment version", async () => {

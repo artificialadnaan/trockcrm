@@ -3,7 +3,6 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
   jobQueue,
-  taskAssignmentAcknowledgements,
   taskResolutionState,
   tasks,
 } from "@trock-crm/shared/schema";
@@ -1418,8 +1417,10 @@ const assignmentVersionSql = sql<string>`to_char(${tasks.assignedAt} AT TIME ZON
  *
  * ON CONFLICT UPDATE is the idempotency guarantee — a double click, a StrictMode double-invoke and a
  * retried request still leave one row, while a task handed away and back can replace its old acknowledgement
- * with one that answers the current assignment. `NOW()` is deliberately the database clock: it is compared
- * to assigned_at in PostgreSQL, so an application-machine clock must never be allowed to trail it.
+ * with one that answers the current assignment. The acknowledgement is derived entirely in PostgreSQL:
+ * `GREATEST(NOW(), tasks.assigned_at)` covers a handoff whose exact database timestamp is ahead of this
+ * transaction clock, and the conflict branch preserves an already-later acknowledgement. That keeps the
+ * acknowledgement monotonic without ever round-tripping `assigned_at` through a millisecond JS Date.
  */
 export async function acknowledgeTaskAssignments(
   tenantDb: TenantDb,
@@ -1471,19 +1472,28 @@ export async function acknowledgeTaskAssignments(
     .for("update");
   if (owned.length === 0) return 0;
 
-  await tenantDb
-    .insert(taskAssignmentAcknowledgements)
-    .values(owned.map((row) => ({ taskId: row.id, userId })))
-    // UPDATE the timestamp rather than DO NOTHING. The row is unique on (task, user), so after a task
-    // is taken away and handed back, DO NOTHING would leave the ORIGINAL acknowledgement in place —
-    // older than the new assignment, therefore permanently stale, and the modal would announce the
-    // same handoff on every login with no way for the person to make it stop. Re-acknowledging has to
-    // be able to answer the CURRENT assignment. Still idempotent: one row, and a duplicate POST just
-    // rewrites the same instant.
-    .onConflictDoUpdate({
-      target: [taskAssignmentAcknowledgements.taskId, taskAssignmentAcknowledgements.userId],
-      set: { acknowledgedAt: sql`NOW()` },
-    });
+  // Keep `assigned_at` inside this SQL statement. Drizzle decodes a timestamptz into a JS Date, which
+  // drops its final three microseconds; an acknowledgement must compare against the exact locked value.
+  // The first SELECT locked these ids until the tenant transaction commits, so this second read cannot
+  // observe a different handoff. A timestamp from a future/long-running transaction must still settle
+  // the modal, and an existing future acknowledgement must never be moved backwards on a duplicate POST.
+  await tenantDb.execute(sql`
+    INSERT INTO task_assignment_acknowledgements (task_id, user_id, acknowledged_at)
+    SELECT
+      ${tasks.id},
+      ${userId}::uuid,
+      GREATEST(NOW(), ${tasks.assignedAt})
+    FROM tasks
+    WHERE ${inArray(
+      tasks.id,
+      owned.map((row) => row.id)
+    )}
+    ON CONFLICT (task_id, user_id) DO UPDATE
+    SET acknowledged_at = GREATEST(
+      task_assignment_acknowledgements.acknowledged_at,
+      EXCLUDED.acknowledged_at
+    )
+  `);
 
   return owned.length;
 }

@@ -62,6 +62,67 @@
 -- Keep the existing-office work OUT of this file. The marked block below is retained only because the
 -- office provisioner clones it for schemas created after this deploy.
 
+-- A rolling deploy can overlap an API container whose baked-in migration directory ends before 0235.
+-- That old container inserts public.offices and provisions the tenant schema in one transaction. If it
+-- commits after the runner's ordinary existing-office scan, the 0235 ledger will be present on every
+-- later boot and that office would be stranded without the acknowledgement table forever. Keep this
+-- narrow, permanent fence on public.offices: it runs at the old transaction's COMMIT, after that
+-- provisioner has created tasks but before the incomplete office becomes visible.
+--
+-- Install this trigger before runner.ts scans existing offices. CREATE TRIGGER locks public.offices, so
+-- an old provisioning transaction that inserted first must finish before installation can return; the
+-- immediately following scan then sees its schema. A transaction that inserts afterward receives this
+-- deferred event instead. That closes both sides of the scan-to-ledger race.
+CREATE OR REPLACE FUNCTION public.provision_task_assignment_acknowledgements_after_office()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $office_task_ack$
+DECLARE
+  schema_name text := 'office_' || NEW.slug;
+  tasks_relation regclass;
+BEGIN
+  -- createOffice accepts exactly this slug grammar. Fail closed because this trigger is attached to the
+  -- table rather than only to that call site: consuming a malformed event would strand a ledger-hidden
+  -- office. format(%I) still quotes the validated identifier before every dynamic statement below.
+  IF NEW.slug IS NULL OR NEW.slug !~ '^[a-z][a-z0-9_]*$' THEN
+    RAISE EXCEPTION 'Cannot provision task-assignment acknowledgements for invalid office slug "%"', NEW.slug;
+  END IF;
+
+  tasks_relation := to_regclass(format('%I.tasks', schema_name));
+  IF tasks_relation IS NULL THEN
+    RAISE EXCEPTION 'Office "%" was committed before its tasks table was provisioned', NEW.slug;
+  END IF;
+
+  EXECUTE format(
+    'CREATE TABLE IF NOT EXISTS %1$I.task_assignment_acknowledgements (
+       id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+       task_id         uuid NOT NULL REFERENCES %1$I.tasks(id) ON DELETE CASCADE,
+       user_id         uuid NOT NULL,
+       acknowledged_at timestamptz NOT NULL DEFAULT now(),
+       CONSTRAINT task_assignment_ack_uq UNIQUE (task_id, user_id)
+     )',
+    schema_name
+  );
+
+  EXECUTE format(
+    'CREATE INDEX IF NOT EXISTS task_assignment_ack_user_idx
+       ON %I.task_assignment_acknowledgements (user_id, acknowledged_at DESC)',
+    schema_name
+  );
+
+  -- Do not seed here. This is a brand-new office at its transaction's COMMIT, so assignments created
+  -- during provisioning are new assignments. The per-office runner step supplies the historical seed
+  -- only for offices that existed when 0235 began.
+  RETURN NULL;
+END $office_task_ack$;
+
+DROP TRIGGER IF EXISTS task_assignment_acknowledgements_on_office_provision ON public.offices;
+CREATE CONSTRAINT TRIGGER task_assignment_acknowledgements_on_office_provision
+AFTER INSERT ON public.offices
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION public.provision_task_assignment_acknowledgements_after_office();
+
 -- New tenants: the office provisioner clones the marked block below (office_dallas -> new schema). No
 -- seed there -- a freshly provisioned office has no assignment history to mark as already-seen.
 -- TENANT_SCHEMA_START

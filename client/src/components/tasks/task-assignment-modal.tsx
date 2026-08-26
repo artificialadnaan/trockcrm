@@ -428,14 +428,6 @@ export function TaskAssignmentModal() {
         previouslyFocusedRef.current =
           document.activeElement instanceof HTMLElement ? document.activeElement : null;
         acknowledgedRef.current = false;
-        setFetchState({
-          office,
-          status: "loaded",
-          attempts: attempt,
-          tasks: result.tasks,
-          total: result.total,
-          newTotal: result.newTotal,
-        });
         // An empty list with the flag set is a real state, not an error: the flag and the list are two
         // queries against a moving table, and a task completed between them lands here. Assigned from
         // the result rather than only set to true, so an office whose answer is "nothing" closes a
@@ -449,6 +441,28 @@ export function TaskAssignmentModal() {
               shownTaskKey(office, candidate.id, candidate.assignmentVersion)
             )
         );
+        const hiddenCount = result.tasks.length - unshown.length;
+        const hiddenNewCount = result.tasks.filter(
+          (candidate) =>
+            candidate.isNew &&
+            shownTasksRef.current.keys.has(
+              shownTaskKey(office, candidate.id, candidate.assignmentVersion)
+            )
+        ).length;
+        // A later assignment can share a capped response with an urgent/high/overdue repeat already
+        // shown in this session. The repeat keeps the server's total true, but it must not return to
+        // the dialog just because its new neighbour opens one — nor be acknowledged again as part of
+        // that neighbour's batch. Remove just those returned cards from the count too: server totals
+        // include the whole capped response, while rows beyond it were never shown and still belong in
+        // "N more" / the new-work heading.
+        setFetchState({
+          office,
+          status: "loaded",
+          attempts: attempt,
+          tasks: unshown,
+          total: Math.max(result.total - hiddenCount, unshown.length),
+          newTotal: Math.max(result.newTotal - hiddenNewCount, unshown.filter((task) => task.isNew).length),
+        });
         const opening = unshown.length > 0;
         setOpen(opening);
       })
