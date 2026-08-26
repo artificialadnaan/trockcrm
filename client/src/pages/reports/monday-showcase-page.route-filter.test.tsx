@@ -392,6 +392,17 @@ describe("an open evidence drawer is pinned to the selection its number was clic
     expect(last(openCalls()).routes).toEqual(["service"]); // the open drill does not
   });
 
+  it("closes captured evidence when the tenant scope changes", () => {
+    renderAt("/reports/monday-showcase?officeId=office-a&routes=service");
+    openDrill();
+    expect(last(openCalls())).toEqual({ metric: "won", mode: DEFAULT_WEEK_MODE, routes: ["service"] });
+
+    act(() => navigateTo("/reports/monday-showcase?officeId=office-b&routes=service"));
+    // A tenant switch is different from a period or route change: the captured office-a record ids must
+    // never be navigated under office-b's live URL scope, so the unconditionally mounted drawer closes.
+    expect(last(evidenceCalls).metric).toBeNull();
+  });
+
   it("pins the PERIOD the same way — one rule, so the two cannot drift apart", () => {
     // `mode` is the page's other live control, and reading it late has the identical failure: the drawer
     // would refetch another period under the title of the number that was clicked. Captured together so a

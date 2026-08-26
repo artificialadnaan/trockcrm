@@ -354,6 +354,34 @@ describe("A1 Estimating Report", () => {
     expect(dialogText()).not.toContain("15.4% weighted margin");
   });
 
+  it("uses published DD aggregates rather than accumulating cent values in the dialog", () => {
+    const preciseDdData: MondayShowcaseData = {
+      ...data,
+      estimatingReport: {
+        ...data.estimatingReport,
+        currentEstimating: {
+          ...data.estimatingReport.currentEstimating,
+          ddValue: 1_982_694.5,
+          missingDdCount: 0,
+          projects: [
+            { ...data.estimatingReport.currentEstimating.projects[0], ddEstimate: 981_651.13 },
+            { ...data.estimatingReport.currentEstimating.projects[1], ddEstimate: 764_603.19 },
+            { ...data.estimatingReport.currentEstimating.projects[2], ddEstimate: 236_440.18 },
+          ],
+        },
+      },
+    };
+    renderA1(preciseDdData);
+
+    act(() => {
+      (container.querySelector('button[aria-label="Show supporting records for Current estimating"]') as HTMLButtonElement).click();
+    });
+    // This row order sums to 1,982,694.4999999998 in JavaScript. The dialog must display the same
+    // server-rounded $1,982,694.50 total as its headline, rather than a one-dollar-smaller value.
+    expect(dialogText()).toContain("$1,982,695 known DD");
+    expect(dialogText()).not.toContain("$1,982,694 known DD");
+  });
+
   it("sorts Request opened, DD Estimate, and Time in stage both directions with nulls last", () => {
     renderA1();
 

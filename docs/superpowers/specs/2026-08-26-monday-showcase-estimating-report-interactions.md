@@ -57,6 +57,8 @@ A second click reverses direction. Each sortable header has a 24px minimum hit t
 
 Every A1 project-row name is a native link to the corresponding CRM deal detail in a new tab. It uses `useDealHref()` so a cross-office `?officeId` scope survives. The link uses `target="_blank"` and `rel="noopener noreferrer"`.
 
+The Showcase request treats that same office scope as a cache key. When it changes, the previous payload is synchronously cleared and refetched before scoped A1 links can be painted, so a project id is never displayed from one office with a link targeting another.
+
 The project name is the explicit accessible affordance; the table also describes this interaction near the data so viewers do not have to infer it from styling. The report does not claim these deal ids are the separate Projects-module ids. It does not make a table row a fake link, which would weaken keyboard and screen-reader behavior.
 
 ## Verification
@@ -68,6 +70,7 @@ Focused client tests must prove:
 3. Project links target `/deals/:id`, open a new tab, and preserve `officeId`.
 4. Request-opened, DD Estimate, and Time-in-stage headers sort both directions, with correct `aria-sort` and nulls last.
 5. An open dialog closes when its underlying A1 payload changes.
-6. Dialog and table interactions preserve the existing visual data/caveats and do not request generic Showcase evidence.
+6. An office-scope switch clears the previous Showcase payload and starts a new scoped request before rows can be interacted with.
+7. Dialog and table interactions preserve the existing visual data/caveats and do not request generic Showcase evidence.
 
 The full client test suite, workspace typecheck, and the Codex review loop are required before merge.

@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState, type ComponentType } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { Loader2 } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { useMondayShowcase } from "@/hooks/use-reports";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import {
   SHOWCASE_VARIANTS,
   ROUTE_BUCKETS,
@@ -67,6 +68,18 @@ export function MondayShowcasePage() {
   const [mode, setMode] = useState<WeekMode>(DEFAULT_WEEK_MODE);
   const [variant, setVariant] = useState<ShowcaseVariantKey>("HERO");
   const [evidence, setEvidence] = useState<OpenDrill | null>(null);
+  const officeScopeId = useOfficeScopeId();
+  const isFirstOfficeScopeLayout = useRef(true);
+
+  // Evidence captures the scope behind a click and remains mounted outside the main payload branch. It
+  // must close before a tenant switch can pair office A's record ids with office B's URL/search scope.
+  useLayoutEffect(() => {
+    if (isFirstOfficeScopeLayout.current) {
+      isFirstOfficeScopeLayout.current = false;
+      return;
+    }
+    setEvidence(null);
+  }, [officeScopeId]);
 
   // The Service/Other selection lives in the URL (NOT component state): switching variants keeps it, and
   // the link a director pastes into Slack reproduces the exact slice they were looking at. `variant` and

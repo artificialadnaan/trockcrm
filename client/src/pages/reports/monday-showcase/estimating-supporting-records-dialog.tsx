@@ -69,10 +69,12 @@ function projectNoun(count: number): string {
   return count === 1 ? "project" : "projects";
 }
 
-function knownDdSummary<T extends { ddEstimate: number | null }>(rows: readonly T[]): string {
-  const known = rows.flatMap((row) => (row.ddEstimate == null ? [] : [row.ddEstimate]));
-  const missing = rows.length - known.length;
-  return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(known.reduce((sum, value) => sum + value, 0))} known DD${missing ? ` · ${int(missing)} missing DD` : ""}`;
+function knownDdSummary<T extends { ddEstimate: number | null }>(
+  rows: readonly T[],
+  publishedDdValue: number,
+): string {
+  const missing = rows.filter((row) => row.ddEstimate == null).length;
+  return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(publishedDdValue)} known DD${missing ? ` · ${int(missing)} missing DD` : ""}`;
 }
 
 /** The sent-report tiles each have a distinct eligibility rule. Use the server-published aggregates — the
@@ -119,7 +121,7 @@ function resolveDrill(request: A1DrillRequest, data: MondayShowcaseData): Resolv
           : "Current Estimating — missing DD";
     return {
       title,
-      description: `${knownDdSummary(rows)} · live current workload as of ${formatCentralTimestamp(report.currentAsOf)}.${routeScopeDescription(data)}`,
+      description: `${knownDdSummary(rows, request.scope === "missing_dd" ? 0 : report.currentEstimating.ddValue)} · live current workload as of ${formatCentralTimestamp(report.currentAsOf)}.${routeScopeDescription(data)}`,
       current: rows,
     };
   }
@@ -143,9 +145,15 @@ function resolveDrill(request: A1DrillRequest, data: MondayShowcaseData): Resolv
           ? " — missing DD"
           : "";
     const owner = isRepRfpDrill(request) ? `${request.repName} — ` : "";
+    const publishedDdValue =
+      scope === "missing_dd" || scope === "rep_missing_dd"
+        ? 0
+        : isRepRfpDrill(request)
+          ? report.rfpBySalesperson.find((row) => row.repId === request.repId)?.ddValue ?? 0
+          : report.newRfps.ddValue;
     return {
       title: `${owner}RFP submissions initiated${qualifier}`,
-      description: `${knownDdSummary(rows)} · current RFP-request cycle in ${data.period.label}.${routeScopeDescription(data)}`,
+      description: `${knownDdSummary(rows, publishedDdValue)} · current RFP-request cycle in ${data.period.label}.${routeScopeDescription(data)}`,
       rfps: rows,
     };
   }
