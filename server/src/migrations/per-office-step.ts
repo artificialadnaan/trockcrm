@@ -76,13 +76,14 @@ export interface PerOfficeStep {
    */
   suspendTriggers?: readonly string[];
   /**
-   * Omit an office schema that has already received this migration's provisioner-only shape.
+   * Optional one-statement snapshot of the office schemas this step should visit. It must return a
+   * `schema_name` column in the same shape as `OFFICE_SCHEMA_DISCOVERY_SQL`.
    *
-   * This is evaluated after the schema name has been validated but before the readiness counters or
-   * a tenant-table lock. It lets a migration keep a durable cutover boundary without making a new
-   * office look like a partially applied historical office on a retry.
+   * A migration with a provisioner cutover can join its durable marker here, so a newly committed
+   * office is atomically either excluded with its marker or absent from the snapshot. Do not perform
+   * a marker lookup separately and filter the default snapshot in application code.
    */
-  skipSchema?: (schemaName: string) => boolean;
+  schemaDiscoverySql?: string;
   /** Statements run inside each office's transaction. `schema` is already validated and quoted. */
   buildStatements: (schema: string) => readonly string[];
 }
@@ -134,7 +135,9 @@ export async function runPerOfficeTransactionalStep(
   client: pg.Client,
   step: PerOfficeStep
 ): Promise<PerOfficeStepResult> {
-  const schemaResult = await client.query<{ schema_name: string }>(OFFICE_SCHEMA_DISCOVERY_SQL);
+  const schemaResult = await client.query<{ schema_name: string }>(
+    step.schemaDiscoverySql ?? OFFICE_SCHEMA_DISCOVERY_SQL
+  );
 
   let officesWithTable = 0;
   let officesWithRequiredColumn = 0;
@@ -142,7 +145,6 @@ export async function runPerOfficeTransactionalStep(
 
   for (const row of schemaResult.rows) {
     const schemaName = validateOfficeSchemaName(row.schema_name);
-    if (step.skipSchema?.(schemaName)) continue;
     const schema = quoteIdentifier(schemaName);
 
     if ((await countMatching(client, TABLE_EXISTS_SQL, [schemaName, step.table])) === 0) continue;

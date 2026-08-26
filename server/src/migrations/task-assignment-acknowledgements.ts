@@ -16,9 +16,20 @@ export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION = "0235_task_assignment_
 export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE =
   "public._task_assignment_acknowledgements_fenced_offices";
 
-const FENCED_OFFICE_SCHEMAS_SQL = `
-  SELECT schema_name
-  FROM ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE}
+// This is deliberately ONE statement rather than loading fence rows and then doing ordinary discovery.
+// PostgreSQL takes one statement snapshot: an office committed by the deferred fence is visible with its
+// marker and excluded, while one committed after the snapshot is absent from both. Splitting those reads
+// can discover a newly committed schema using a stale marker set and historically seed its first task.
+export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL = `
+  SELECT schemas.schema_name
+  FROM information_schema.schemata AS schemas
+  WHERE schemas.schema_name LIKE 'office\\_%' ESCAPE '\\'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE} AS fenced_offices
+      WHERE fenced_offices.schema_name = schemas.schema_name
+    )
+  ORDER BY schemas.schema_name
 `;
 
 export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP = {
@@ -28,6 +39,7 @@ export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP = {
   // is the minimal invariant for a real tasks table and preserves the old migration's skip for an
   // incomplete office schema with no tasks table.
   requiredColumn: "id",
+  schemaDiscoverySql: TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL,
   buildStatements: (schema: string) => [
     `
       CREATE TABLE IF NOT EXISTS ${schema}.task_assignment_acknowledgements (
@@ -56,19 +68,7 @@ export const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP = {
 
 /** Create, index and seed 0235's historical offices one transaction at a time. */
 export async function runTaskAssignmentAcknowledgementsMigration(client: pg.Client): Promise<void> {
-  // The deferred public.offices fence writes this marker in the same transaction that creates a new
-  // office's empty acknowledgement table. It must be durable instead of a runner-local schema snapshot:
-  // a failed helper leaves the fence installed but not the migration ledger, and a retry must still know
-  // which offices were born after the cutover.
-  const markerResult = await client.query<{ schema_name: string }>(FENCED_OFFICE_SCHEMAS_SQL);
-  const fencedSchemas = new Set(
-    markerResult.rows.map((row) => validateOfficeSchemaName(row.schema_name))
-  );
-
-  await runPerOfficeTransactionalStep(client, {
-    ...TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP,
-    skipSchema: (schemaName) => fencedSchemas.has(schemaName),
-  });
+  await runPerOfficeTransactionalStep(client, TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_STEP);
 }
 
 export { validateOfficeSchemaName };

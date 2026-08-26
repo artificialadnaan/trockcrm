@@ -26,7 +26,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
-import { runTaskAssignmentAcknowledgementsMigration } from "../../src/migrations/task-assignment-acknowledgements.js";
+import {
+  TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE,
+  TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL,
+  runTaskAssignmentAcknowledgementsMigration,
+} from "../../src/migrations/task-assignment-acknowledgements.js";
 
 const MIGRATION = "0235_task_assignment_acknowledgements";
 const TABLE = "task_assignment_acknowledgements";
@@ -465,6 +469,17 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     });
 
     await runTaskAssignmentAcknowledgementsMigration({ query } as never);
+
+    // The fence marker and schema discovery must share one statement snapshot. A separate marker
+    // lookup followed by the generic discovery query lets an office commit in their gap: the schema is
+    // then visible, its marker is stale, and its first task gets incorrectly seeded as history.
+    const discovery = statements.find((statement) => statement.includes("information_schema.schemata"));
+    expect(discovery).toBe(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL.trim());
+    expect(discovery).toContain("NOT EXISTS");
+    expect(discovery).toContain(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE);
+    expect(
+      statements.filter((statement) => statement.includes(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE))
+    ).toEqual([discovery]);
 
     const kind = (statement: string) => {
       if (statement === "BEGIN" || statement === "COMMIT") return statement;
