@@ -151,6 +151,48 @@ const IDLE_FETCH_STATE: FetchState = {
  */
 export const MAX_FETCH_ATTEMPTS = 2;
 
+// A background assignment prompt must never land on top of an interaction the person has already
+// opened. These are the popup-content slots shared by the CRM's Base UI wrappers; checking content
+// rather than triggers means the request-time guard also covers nested menus and portals.
+const ACTIVE_INTERACTION_POPUP_SLOTS = [
+  "dialog-content",
+  "sheet-content",
+  "select-content",
+  "dropdown-menu-content",
+  "dropdown-menu-sub-content",
+  "popover-content",
+];
+const ACTIVE_INTERACTION_POPUP_SELECTOR = ACTIVE_INTERACTION_POPUP_SLOTS.map(
+  (slot) => `[data-slot="${slot}"]`
+).join(", ");
+
+// A click can close a portal before its queued recheck gets to inspect the DOM. Preserve the event's
+// origin too, including the trigger that begins opening a portal and the overlays that dismiss one.
+const INTERACTION_SURFACE_SELECTOR = [
+  ...ACTIVE_INTERACTION_POPUP_SLOTS,
+  "dialog-overlay",
+  "sheet-overlay",
+  "dialog-trigger",
+  "sheet-trigger",
+  "select-trigger",
+  "dropdown-menu-trigger",
+  "dropdown-menu-sub-trigger",
+  "popover-trigger",
+]
+  .map((slot) => `[data-slot="${slot}"]`)
+  .join(", ");
+
+function isInteractionSurface(target: EventTarget | null) {
+  return target instanceof Element && target.closest(INTERACTION_SURFACE_SELECTOR) !== null;
+}
+
+function isTextEntryOrNativePicker(target: EventTarget | null) {
+  return (
+    target instanceof Element &&
+    target.closest('input, textarea, select, [contenteditable], [role="textbox"]') !== null
+  );
+}
+
 /**
  * WHAT THIS PERSON HAS ALREADY BEEN INTERRUPTED WITH, FOR THE LIFE OF THIS BROWSING SESSION.
  *
@@ -282,10 +324,17 @@ export function TaskAssignmentModal() {
   const activeOfficeRef = useRef<string | null>(null);
   const openRef = useRef(open);
   const fetchStateRef = useRef(fetchState);
-  // A click and its keyboard-generated click can arrive before React commits the loading state. This
+  // A click and a focus/visibility resume can arrive before React commits the loading state. This
   // closes that tiny window so one deliberate interaction maps to at most one direct recheck.
   const interactionRecheckQueuedRef = useRef(false);
   const suppressNextInteractionRecheckRef = useRef(false);
+  // State updates are asynchronous, but a response may settle in the same turn as a newer click. This
+  // ref records the latest requested generation synchronously so that older answers never briefly
+  // render and get marked as shown before their replacement request starts.
+  const latestRequestedRecheckGenerationRef = useRef<Record<string, number>>({});
+  // A check may already be in flight when the person opens a picker or popup. That response is still
+  // useful cached state, but it must not interrupt the newly started interaction when it arrives.
+  const interactionDeferralGenerationRef = useRef(0);
 
   /**
    * Assignments already put on screen for this person, hydrated from sessionStorage.
@@ -314,8 +363,8 @@ export function TaskAssignmentModal() {
   const requestOfficeId = officeScopeId ?? user?.officeId ?? null;
 
   // Event handlers deliberately read refs instead of rendering-time values. A person's next click can
-  // happen between renders; the handler must check the current office and must not start a second
-  // request while the first one is still in flight.
+  // happen between renders; a later check is queued behind an in-flight one instead of cancelling its
+  // answer or losing that later interaction.
   useLayoutEffect(() => {
     openRef.current = open;
     fetchStateRef.current = fetchState;
@@ -327,20 +376,21 @@ export function TaskAssignmentModal() {
     if (
       !office ||
       openRef.current ||
-      fetchStateRef.current.status === "loading" ||
       interactionRecheckQueuedRef.current
     ) {
       return false;
     }
 
-    // Let an action dialog the person intentionally opened finish before a background assignment
-    // check can present its own interruption. The next interaction will check again after it closes.
-    if (document.querySelector('[data-slot="dialog-content"]')) return false;
+    // Let a popup the person intentionally opened finish before a background assignment check can
+    // present its own interruption. The next interaction will check again after it closes.
+    if (document.querySelector(ACTIVE_INTERACTION_POPUP_SELECTOR)) return false;
 
     interactionRecheckQueuedRef.current = true;
+    const nextGeneration = (latestRequestedRecheckGenerationRef.current[office] ?? 0) + 1;
+    latestRequestedRecheckGenerationRef.current[office] = nextGeneration;
     setRecheckGenerations((current) => ({
       ...current,
-      [office]: (current[office] ?? 0) + 1,
+      [office]: Math.max(current[office] ?? 0, nextGeneration),
     }));
     return true;
   }, []);
@@ -388,7 +438,7 @@ export function TaskAssignmentModal() {
   // API instance from the recipient's browser, so an in-memory real-time signal cannot be the source
   // of truth. Every deliberate interaction therefore performs one deduplicated, authoritative check.
   // This is event-driven rather than a timer: it never interrupts the action that is already underway,
-  // but it makes a newly assigned task visible on the next click or keyboard action.
+  // but it makes a newly assigned task visible on the next click.
   useEffect(() => {
     const recheckOnInteraction = () => {
       // The click that closes this modal is not a new work interaction. Without this one-event
@@ -400,23 +450,39 @@ export function TaskAssignmentModal() {
       }
       requestAssignmentRecheck();
     };
-    const onClick = () => queueMicrotask(recheckOnInteraction);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (event.key !== "Enter" && event.key !== " ") return;
-      // Enter/Space activates a dialog control with a synthesized click. While this modal is open,
-      // that keydown belongs to its own action (including Close, View all, and the header X), not to
-      // the person's next work interaction. Let its click take the one dismissal-suppressed path
-      // below; queuing both would consume the suppression once and then reopen the modal.
-      if (openRef.current) return;
+    const onClick = (event: MouseEvent) => {
+      // Native controls emit click only after their Enter/Space activation has taken effect. Listening
+      // here rather than to keydown avoids racing Space's keyup click and never mistakes text entry or
+      // IME composition for an interaction. A target-time guard catches a menu choice that unmounted
+      // its portal before this listener's microtask can inspect the DOM.
+      // Consume dismissal suppression first. A portal can commit its close before this document
+      // listener runs, leaving `openRef` false and the detached target looking like another popup;
+      // skipping it would incorrectly spend the recipient's next genuine click instead.
+      if (suppressNextInteractionRecheckRef.current) {
+        queueMicrotask(recheckOnInteraction);
+        return;
+      }
+      // A Base UI close handler normally runs before this document listener, but keeping the queued
+      // path for an open assignment dialog also covers the inverse event order: a subsequently set
+      // dismissal suppression is still consumed by this click rather than by the next real one.
+      if (openRef.current) {
+        queueMicrotask(recheckOnInteraction);
+        return;
+      }
+      const interactionSurfaceActive =
+        document.querySelector(ACTIVE_INTERACTION_POPUP_SELECTOR) ||
+        isInteractionSurface(event.target) ||
+        isTextEntryOrNativePicker(event.target);
+      if (interactionSurfaceActive) {
+        interactionDeferralGenerationRef.current += 1;
+        return;
+      }
       queueMicrotask(recheckOnInteraction);
     };
 
     document.addEventListener("click", onClick);
-    document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("click", onClick);
-      document.removeEventListener("keydown", onKeyDown);
     };
   }, [requestAssignmentRecheck]);
 
@@ -498,10 +564,12 @@ export function TaskAssignmentModal() {
 
   // Ask again when the answer we hold is not an answer for the office we are looking at: a different
   // office, nothing fetched yet, a requested live/session recheck, or a failure that has not used its
-  // retry. `loading` and `loaded` both mean "leave it alone" unless a later recheck cycle is queued.
+  // retry. A queued recheck waits for an in-flight answer to settle rather than aborting it; `loaded`
+  // then sees the newer generation and issues the one fresh authoritative request.
   const needsFetch =
     (shouldFetch || recheckAllowsFetch) &&
     requestOfficeId !== null &&
+    fetchState.status !== "loading" &&
     (hasQueuedRecheck ||
       fetchState.office !== requestOfficeId ||
       fetchState.status === "idle" ||
@@ -524,6 +592,7 @@ export function TaskAssignmentModal() {
     if (requestRef.current.key === key) return;
 
     const id = requestRef.current.id + 1;
+    const interactionDeferralGeneration = interactionDeferralGenerationRef.current;
     const controller = new AbortController();
     requestRef.current = { id, key, office, controller };
     setFetchState({
@@ -593,7 +662,15 @@ export function TaskAssignmentModal() {
           total: Math.max(result.total - hiddenCount, unshown.length),
           newTotal: Math.max(result.newTotal - hiddenNewCount, unshown.filter((task) => task.isNew).length),
         });
-        const opening = unshown.length > 0;
+        // A response can race with somebody opening a picker, editor, or Base UI popup after this
+        // request began. Keep its answer for a later authoritative recheck, but do not turn it into
+        // a new interruption over the work they are already doing.
+        const opening =
+          unshown.length > 0 &&
+          (latestRequestedRecheckGenerationRef.current[office] ?? 0) === recheckGeneration &&
+          interactionDeferralGeneration === interactionDeferralGenerationRef.current &&
+          !document.querySelector(ACTIVE_INTERACTION_POPUP_SELECTOR) &&
+          !isTextEntryOrNativePicker(document.activeElement);
         setOpen(opening);
       })
       .catch(() => {
