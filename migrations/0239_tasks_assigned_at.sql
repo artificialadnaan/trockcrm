@@ -74,6 +74,7 @@
 -- DEFAULT now() after the nullable ADD protects later inserts without filling history. Adding the column
 -- as NOT NULL DEFAULT now() here would make untouched history and a newly-stamped
 -- assignment indistinguishable to that backfill.
+-- TASKS_ASSIGNED_AT_VERSIONING_GLOBALS_START
 
 CREATE OR REPLACE FUNCTION public.stamp_task_assigned_at()
 RETURNS trigger
@@ -217,60 +218,15 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION public.repair_tasks_assigned_at_after_office_provision();
 
--- Existing tenants: add the column in every office_* schema. Dating the existing rows from their
--- creation happens in the runner step afterwards, per office.
-DO $tenant$
-DECLARE
-  schema_name text;
-BEGIN
-  FOR schema_name IN
-    SELECT nspname
-    FROM pg_namespace
-    WHERE nspname LIKE 'office\_%' ESCAPE '\'
-    ORDER BY nspname
-  LOOP
-    -- Skip a partially-provisioned office schema rather than aborting this migration, and every other
-    -- tenant with it, for one incomplete schema.
-    IF to_regclass(format('%I.tasks', schema_name)) IS NULL THEN
-      CONTINUE;
-    END IF;
+-- TASKS_ASSIGNED_AT_VERSIONING_GLOBALS_END
 
-    EXECUTE format(
-      $sql$
-        ALTER TABLE %1$I.tasks
-          ADD COLUMN IF NOT EXISTS assigned_at timestamptz;
-
-        ALTER TABLE %1$I.tasks
-          ALTER COLUMN assigned_at SET DEFAULT now();
-      $sql$,
-      schema_name
-    );
-
-    -- DROP + CREATE makes a partially-run migration retry converge. Both are in this same transaction as
-    -- ADD COLUMN, so no old API can observe the column without also getting the compatibility trigger.
-    EXECUTE format('DROP TRIGGER IF EXISTS stamp_tasks_assigned_at ON %I.tasks', schema_name);
-    EXECUTE format(
-      'CREATE TRIGGER stamp_tasks_assigned_at
-         BEFORE UPDATE OF assigned_to ON %I.tasks
-         FOR EACH ROW
-         WHEN (OLD.assigned_to IS DISTINCT FROM NEW.assigned_to)
-         EXECUTE FUNCTION public.stamp_task_assigned_at()',
-      schema_name
-    );
-
-    EXECUTE format('DROP TRIGGER IF EXISTS stabilize_tasks_assignment_actor ON %I.tasks', schema_name);
-    EXECUTE format(
-      'CREATE TRIGGER stabilize_tasks_assignment_actor
-         BEFORE UPDATE OF assigned_to ON %I.tasks
-         FOR EACH ROW
-         EXECUTE FUNCTION public.stabilize_task_assignment_actor()',
-      schema_name
-    );
-
-    -- Dating untouched history and restoring the final column contract is the runner step's job, one
-    -- transaction per office. It must not move back into this cross-tenant transaction.
-  END LOOP;
-END $tenant$;
+-- Existing tenants are staged by runTasksAssignedAtVersioning in the runner, one transaction per
+-- office. The nullable ADD/default and both compatibility triggers must share that short transaction,
+-- but DROP/CREATE TRIGGER conflicts with task writes. Keeping them in a migration-file DO loop would
+-- retain office A's lock while every later office is reached. The runner installs the marked global
+-- fence above before discovery, then stages each office, then runs the existing NULL-only backfill.
+-- It deliberately does not execute this full file at runtime: the tenant template below belongs only
+-- to provisionOfficeSchema. Do not reintroduce an existing-office loop here.
 
 -- New tenants: the office provisioner clones the marked block (office_dallas -> new schema). No
 -- backfill -- a freshly provisioned office has no task history to date.

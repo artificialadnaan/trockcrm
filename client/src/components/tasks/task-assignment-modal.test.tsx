@@ -33,6 +33,7 @@ import { TaskAssignmentModal, MAX_FETCH_ATTEMPTS as MAX_ATTEMPTS } from "./task-
 type PendingTask = {
   id: string;
   assignmentVersion: string;
+  acknowledgementToken: string;
   title: string;
   priority: string;
   dueDate: string | null;
@@ -41,9 +42,11 @@ type PendingTask = {
 };
 
 function task(overrides: Partial<PendingTask> = {}): PendingTask {
+  const id = overrides.id ?? "task-1";
   return {
-    id: overrides.id ?? "task-1",
+    id,
     assignmentVersion: overrides.assignmentVersion ?? "2026-08-25T12:34:56.123456Z",
+    acknowledgementToken: overrides.acknowledgementToken ?? `signed-receipt-${id}`,
     title: overrides.title ?? "Walk the Henderson roof",
     priority: overrides.priority ?? "normal",
     dueDate: overrides.dueDate ?? null,
@@ -72,7 +75,11 @@ function acknowledgeCalls() {
 }
 
 function acknowledgedTaskIds(call: unknown[]) {
-  return (call[1] as { json: { assignments: Array<{ taskId: string; assignmentVersion: string }> } })
+  return (call[1] as {
+    json: {
+      assignments: Array<{ taskId: string; assignmentVersion: string; acknowledgementToken: string }>;
+    };
+  })
     .json.assignments
     .map(({ taskId }) => taskId);
 }
@@ -371,8 +378,16 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
       method: "POST",
       json: {
         assignments: [
-          { taskId: "t1", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
-          { taskId: "t2", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
+          {
+            taskId: "t1",
+            assignmentVersion: "2026-08-25T12:34:56.123456Z",
+            acknowledgementToken: "signed-receipt-t1",
+          },
+          {
+            taskId: "t2",
+            assignmentVersion: "2026-08-25T12:34:56.123456Z",
+            acknowledgementToken: "signed-receipt-t2",
+          },
         ],
       },
     });
@@ -390,7 +405,15 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
 
     expect(acknowledgeCalls()).toHaveLength(1);
     expect(acknowledgeCalls()[0]![1]).toMatchObject({
-      json: { assignments: [{ taskId: "t1", assignmentVersion: "2026-08-25T12:34:56.123456Z" }] },
+      json: {
+        assignments: [
+          {
+            taskId: "t1",
+            assignmentVersion: "2026-08-25T12:34:56.123456Z",
+            acknowledgementToken: "signed-receipt-t1",
+          },
+        ],
+      },
     });
   });
 

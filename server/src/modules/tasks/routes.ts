@@ -382,7 +382,11 @@ router.get("/pending-acknowledgement", async (req, res, next) => {
   try {
     // Scoped to the authenticated caller and to nothing else. There is deliberately no userId
     // parameter: this is somebody's personal "have you seen this" record, not a manager report.
-    const result = await getPendingAssignmentTasks(req.tenantDb!, req.user!.id);
+    // The signed acknowledgement receipt is bound to the tenant that rendered the card. This must use
+    // the active office selected by auth middleware, rather than the person's home office, so a
+    // cross-office card cannot be acknowledged under another tenant's receipt scope.
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const result = await getPendingAssignmentTasks(req.tenantDb!, req.user!.id, officeId);
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -393,11 +397,12 @@ router.get("/pending-acknowledgement", async (req, res, next) => {
 // POST /api/tasks/acknowledge — record that the modal has shown these exact assignment versions to the caller.
 router.post("/acknowledge", async (req, res, next) => {
   try {
-    // 204 whatever the payload turns out to be. The service filters to assignments genuinely owned by
-    // the caller AT the version the modal rendered, and silently drops stale/malformed rows. A 400 or
-    // 403 would wedge a modal that lost a reassignment race into re-showing forever with no action
-    // available to it. Ownership and version binding are enforced; they just are not announced.
-    await acknowledgeTaskAssignments(req.tenantDb!, req.user!.id, req.body?.assignments);
+    // 204 whatever the payload turns out to be. The service requires its capped-page
+    // receipt, then filters to assignments genuinely owned by the caller AT the version the modal
+    // rendered, silently dropping stale/malformed rows. A 400 or 403 would wedge a modal that lost a
+    // reassignment race into re-showing forever with no action available to it.
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    await acknowledgeTaskAssignments(req.tenantDb!, req.user!.id, req.body?.assignments, officeId);
     await req.commitTransaction!();
     res.status(204).end();
   } catch (err) {

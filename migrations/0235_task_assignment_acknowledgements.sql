@@ -72,7 +72,7 @@
 --
 -- The cutover is a durable per-office state machine, not a timestamp or a process-local snapshot:
 --
---   captured   = phase 1 committed every historical (task, assignee) pair before DDL;
+--   captured   = phase 1 committed every historical (task, assignee, assignment-version) pair before DDL;
 --   seeded     = phase 2 committed that exact baseline, then removed its temporary pairs;
 --   post_fence = an old API image provisioned this office after the migration fence was installed.
 --
@@ -92,8 +92,26 @@ CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_baseline_pai
     REFERENCES public._task_assignment_acknowledgements_cutovers(schema_name) ON DELETE CASCADE,
   task_id uuid NOT NULL,
   user_id uuid NOT NULL,
+  -- 0239's preflight deliberately leaves history NULL until its later per-office backfill. Preserve
+  -- that NULL as a real assignment version: IS NOT DISTINCT FROM makes NULL-vs-NULL an exact match.
+  baseline_assigned_at timestamptz,
   baseline_ack_at timestamptz NOT NULL,
   PRIMARY KEY (schema_name, task_id, user_id)
+);
+
+-- An interrupted execution of the immediately preceding unledgered 0235 revision can already have
+-- created this durable table. Upgrade that shape before the helper captures or materializes anything.
+ALTER TABLE public._task_assignment_acknowledgements_baseline_pairs
+  ADD COLUMN IF NOT EXISTS baseline_assigned_at timestamptz;
+
+-- Phase 1 has one deployment-wide PostgreSQL snapshot, not one moving read per office. This singleton
+-- is inserted in that same transaction only after EVERY historical header/pair has been captured. Its
+-- presence is therefore the retry boundary: absent means no global baseline committed; present means
+-- phase 2 may resume the durable `captured` rows without ever re-reading live tasks.
+CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_global_cutover (
+  singleton boolean PRIMARY KEY DEFAULT true,
+  baseline_ack_at timestamptz NOT NULL,
+  CONSTRAINT task_assignment_ack_global_cutover_singleton_check CHECK (singleton)
 );
 
 -- Compatibility bridge for an interrupted deploy that executed the immediately preceding revision of

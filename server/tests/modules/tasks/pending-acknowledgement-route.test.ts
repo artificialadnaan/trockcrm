@@ -40,6 +40,8 @@ const { taskRoutes } = await import("../../../src/modules/tasks/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
 
 const CALLER = "11111111-1111-1111-1111-111111111111";
+const HOME_OFFICE = "office-home";
+const ACTIVE_OFFICE = "office-active";
 
 function createTestApp() {
   const app = express();
@@ -50,8 +52,8 @@ function createTestApp() {
       role: "rep",
       displayName: "Alice Rep",
       email: "alice@example.com",
-      officeId: "office-1",
-      activeOfficeId: "office-1",
+      officeId: HOME_OFFICE,
+      activeOfficeId: ACTIVE_OFFICE,
     };
     (req as any).tenantDb = { __tenant: true };
     (req as any).commitTransaction = vi.fn().mockResolvedValue(undefined);
@@ -86,7 +88,8 @@ describe("F6 task routes — reachable through the real router", () => {
 
     expect(taskServiceMocks.getPendingAssignmentTasks).toHaveBeenCalledWith(
       expect.anything(),
-      CALLER
+      CALLER,
+      ACTIVE_OFFICE
     );
   });
 
@@ -96,6 +99,7 @@ describe("F6 task routes — reachable through the real router", () => {
     const row = {
       id: "t1",
       assignmentVersion: "2026-08-25T12:34:56.123456Z",
+      acknowledgementToken: "signed-receipt-for-t1",
       title: "Call back",
       priority: "urgent",
       dueDate: null,
@@ -110,15 +114,23 @@ describe("F6 task routes — reachable through the real router", () => {
     expect(response.body).toEqual({ tasks: [row], total: 9, newTotal: 3 });
   });
 
-  it("forwards each displayed assignment version through POST /acknowledge and answers 204 with no body", async () => {
+  it("forwards each displayed assignment version and signed receipt through POST /acknowledge", async () => {
     taskServiceMocks.acknowledgeTaskAssignments.mockResolvedValue(2);
 
     const response = await request(createTestApp())
       .post("/api/tasks/acknowledge")
       .send({
         assignments: [
-          { taskId: "a", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
-          { taskId: "b", assignmentVersion: "2026-08-25T12:34:57.123456Z" },
+          {
+            taskId: "a",
+            assignmentVersion: "2026-08-25T12:34:56.123456Z",
+            acknowledgementToken: "signed-receipt-for-a",
+          },
+          {
+            taskId: "b",
+            assignmentVersion: "2026-08-25T12:34:57.123456Z",
+            acknowledgementToken: "signed-receipt-for-b",
+          },
         ],
       });
 
@@ -128,9 +140,18 @@ describe("F6 task routes — reachable through the real router", () => {
       expect.anything(),
       CALLER,
       [
-        { taskId: "a", assignmentVersion: "2026-08-25T12:34:56.123456Z" },
-        { taskId: "b", assignmentVersion: "2026-08-25T12:34:57.123456Z" },
-      ]
+        {
+          taskId: "a",
+          assignmentVersion: "2026-08-25T12:34:56.123456Z",
+          acknowledgementToken: "signed-receipt-for-a",
+        },
+        {
+          taskId: "b",
+          assignmentVersion: "2026-08-25T12:34:57.123456Z",
+          acknowledgementToken: "signed-receipt-for-b",
+        },
+      ],
+      ACTIVE_OFFICE
     );
   });
 

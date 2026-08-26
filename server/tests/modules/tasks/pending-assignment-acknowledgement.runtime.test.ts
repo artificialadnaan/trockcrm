@@ -13,7 +13,7 @@
 // The acknowledgement assertions all check the ACK ROW as well as the visibility, because "an urgent
 // task is still returned after acknowledging it" is also true when acknowledgement is broken and writes
 // nothing at all.
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { tasks, taskAssignmentAcknowledgements } from "@trock-crm/shared/schema";
@@ -180,35 +180,70 @@ async function acknowledgementTimestamp(taskId: string, userId: string) {
 }
 
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const acknowledgementReceipts = new Map<string, string>();
+
+function acknowledgementReceiptKey(userId: string, taskId: string, assignmentVersion: string): string {
+  return `${userId}:${taskId}:${assignmentVersion}`;
+}
 
 /**
  * Existing behavioural tests acknowledge the task they are currently exercising. Keep that intent
- * readable while making the production service receive the same lossless version the browser does.
- * Dedicated tests below deliberately bypass this helper for stale/malformed payloads.
+ * readable while making the production service receive the same lossless version AND signed capped-
+ * page receipt the browser does. A card that has disappeared after a previous acknowledgement retains
+ * its captured receipt so the duplicate-POST test still models an open tab rather than inventing a new
+ * GET response. Dedicated tests below deliberately bypass this helper for stale/malformed payloads.
  */
-async function acknowledgementPayload(taskIds: unknown) {
+async function acknowledgementPayload(taskIds: unknown, userId = ALICE) {
   if (!Array.isArray(taskIds)) return taskIds;
+  const page = await getPendingAssignmentTasks(tdb, userId);
+  for (const task of page.tasks) {
+    acknowledgementReceipts.set(
+      acknowledgementReceiptKey(userId, task.id, task.assignmentVersion),
+      task.acknowledgementToken
+    );
+  }
+
   return Promise.all(
     taskIds.map(async (taskId) => {
       if (typeof taskId !== "string" || !UUID_SHAPE.test(taskId)) {
-        return { taskId, assignmentVersion: "not-a-server-issued-version" };
+        return {
+          taskId,
+          assignmentVersion: "not-a-server-issued-version",
+          acknowledgementToken: "v1.0.invalid",
+        };
       }
+
+      const displayed = page.tasks.find((task) => task.id === taskId);
+      if (displayed) {
+        return {
+          taskId: displayed.id,
+          assignmentVersion: displayed.assignmentVersion,
+          acknowledgementToken: displayed.acknowledgementToken,
+        };
+      }
+
+      // This models a bare current version learned through an ordinary task PATCH. It must not become
+      // an acknowledgement unless an earlier capped GET issued a receipt for this exact assignment.
       const result = await pg.query<{ assignment_version: string }>(
         `SELECT to_char(assigned_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS assignment_version
            FROM public.tasks
           WHERE id = $1::uuid`,
         [taskId]
       );
+      const assignmentVersion = result.rows[0]?.assignment_version ?? "1970-01-01T00:00:00.000000Z";
       return {
         taskId,
-        assignmentVersion: result.rows[0]?.assignment_version ?? "1970-01-01T00:00:00.000000Z",
+        assignmentVersion,
+        acknowledgementToken:
+          acknowledgementReceipts.get(acknowledgementReceiptKey(userId, taskId, assignmentVersion)) ??
+          "v1.0.invalid",
       };
     })
   );
 }
 
 async function acknowledgeTaskAssignments(tenantDb: any, userId: string, taskIds: unknown) {
-  return acknowledgeTaskAssignmentsService(tenantDb, userId, await acknowledgementPayload(taskIds));
+  return acknowledgeTaskAssignmentsService(tenantDb, userId, await acknowledgementPayload(taskIds, userId));
 }
 
 beforeAll(async () => {
@@ -241,6 +276,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  acknowledgementReceipts.clear();
   await pg.exec(`DELETE FROM public.task_assignment_acknowledgements; DELETE FROM public.tasks;`);
 });
 
@@ -454,7 +490,11 @@ describe("an acknowledgement answers ONE assignment, not a task forever", () => 
     );
 
     const acknowledged = await acknowledgeTaskAssignmentsService(tdb, ALICE, [
-      { taskId, assignmentVersion: displayed.assignmentVersion },
+      {
+        taskId,
+        assignmentVersion: displayed.assignmentVersion,
+        acknowledgementToken: displayed.acknowledgementToken,
+      },
     ]);
 
     expect(acknowledged, "a stale displayed version must not write an acknowledgement").toBe(0);
@@ -884,6 +924,176 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
     expect(await ackRowCount(ids[PENDING_ASSIGNMENT_MODAL_LIMIT]!, ALICE)).toBe(0);
   });
 
+  it("does not let a raw assignment version pre-acknowledge normal page six", async () => {
+    const ids = Array.from({ length: PENDING_ASSIGNMENT_MODAL_LIMIT + 1 }, (_, index) => uid(String(index + 1)));
+    await seed(ids.map((id) => ({ id, priority: "normal" as const })));
+
+    const page = await getPendingAssignmentTasks(tdb, ALICE);
+    const sixthTaskId = ids[PENDING_ASSIGNMENT_MODAL_LIMIT]!;
+    const rawVersion = await pg.query<{ assignment_version: string }>(
+      `SELECT to_char(assigned_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS assignment_version
+         FROM public.tasks
+        WHERE id = $1::uuid`,
+      [sixthTaskId]
+    );
+    const firstCard = page.tasks[0]!;
+    expect(page.tasks.map((task) => task.id), "the target must really be beyond GET's five-card page").not.toContain(
+      sixthTaskId
+    );
+
+    // An empty PATCH can expose this exact current version, but it never creates the signed receipt
+    // that GET issued only for the capped page. Reusing a receipt from page one also fails because the
+    // HMAC is bound to both task id and assignment version.
+    await expect(
+      acknowledgeTaskAssignmentsService(tdb, ALICE, [
+        {
+          taskId: sixthTaskId,
+          assignmentVersion: rawVersion.rows[0]!.assignment_version,
+          acknowledgementToken: firstCard.acknowledgementToken,
+        },
+      ])
+    ).resolves.toBe(0);
+    expect(await ackRowCount(sixthTaskId, ALICE)).toBe(0);
+    expect((await getPendingAssignmentTasks(tdb, ALICE)).total).toBe(PENDING_ASSIGNMENT_MODAL_LIMIT + 1);
+
+    // A card that the capped GET actually issued is still acknowledged normally.
+    await expect(
+      acknowledgeTaskAssignmentsService(tdb, ALICE, [
+        {
+          taskId: firstCard.id,
+          assignmentVersion: firstCard.assignmentVersion,
+          acknowledgementToken: firstCard.acknowledgementToken,
+        },
+      ])
+    ).resolves.toBe(1);
+    expect(await ackRowCount(firstCard.id, ALICE)).toBe(1);
+  });
+
+  it("requires a canonical, unmodified receipt", async () => {
+    const taskId = uid("1");
+    await seed([{ id: taskId, priority: "normal" }]);
+    const displayed = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
+
+    // A missing field is the old-client shape. Appending `!` is deliberately more subtle: Node's
+    // base64url decoder would otherwise ignore it and decode the original valid HMAC bytes.
+    for (const acknowledgementToken of [undefined, `${displayed.acknowledgementToken}!`]) {
+      await expect(
+        acknowledgeTaskAssignmentsService(tdb, ALICE, [
+          { taskId, assignmentVersion: displayed.assignmentVersion, acknowledgementToken },
+        ])
+      ).resolves.toBe(0);
+    }
+    expect(await ackRowCount(taskId, ALICE)).toBe(0);
+  });
+
+  it("does not inspect a sixth raw card after five malformed receipts", async () => {
+    const taskId = uid("1");
+    await seed([{ id: taskId, priority: "normal" }]);
+    const displayed = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
+    const lastCharacter = displayed.acknowledgementToken.at(-1)!;
+    const malformedReceipt =
+      `${displayed.acknowledgementToken.slice(0, -1)}${lastCharacter === "A" ? "B" : "A"}`;
+
+    // The browser has no sixth card. Before the raw-entry bound, these first five would each be HMACed
+    // and rejected, then the valid sixth card would be accepted — so a crafted body could extend both
+    // receipt-verification work and the effective acknowledgement page beyond the UI's cap.
+    const payload = [
+      ...Array.from({ length: PENDING_ASSIGNMENT_MODAL_LIMIT }, () => ({
+        taskId,
+        assignmentVersion: displayed.assignmentVersion,
+        acknowledgementToken: malformedReceipt,
+      })),
+      {
+        taskId,
+        assignmentVersion: displayed.assignmentVersion,
+        acknowledgementToken: displayed.acknowledgementToken,
+      },
+    ];
+
+    await expect(acknowledgeTaskAssignmentsService(tdb, ALICE, payload)).resolves.toBe(0);
+    expect(await ackRowCount(taskId, ALICE)).toBe(0);
+  });
+
+  it("binds a receipt to both its caller and active-office scope", async () => {
+    const taskId = uid("1");
+    await seed([{ id: taskId, assignedTo: ALICE, createdBy: CARLA, priority: "normal" }]);
+    const aliceOfficeA = (await getPendingAssignmentTasks(tdb, ALICE, "office-a")).tasks[0]!;
+
+    // This single-schema fixture deliberately keeps the row otherwise eligible: changing only the
+    // passed office makes a missing office binding observable rather than hiding behind tenant lookup.
+    await expect(
+      acknowledgeTaskAssignmentsService(
+        tdb,
+        ALICE,
+        [
+          {
+            taskId,
+            assignmentVersion: aliceOfficeA.assignmentVersion,
+            acknowledgementToken: aliceOfficeA.acknowledgementToken,
+          },
+        ],
+        "office-b"
+      )
+    ).resolves.toBe(0);
+    expect(await ackRowCount(taskId, ALICE)).toBe(0);
+
+    // Preserve assigned_at on purpose. This isolates the receipt's caller binding from the separate
+    // locked owner/version re-check: without userId in the HMAC, Bob would now be able to use Alice's
+    // otherwise current receipt to acknowledge the row.
+    await pg.query(`UPDATE public.tasks SET assigned_to = $2::uuid WHERE id = $1::uuid`, [taskId, BOB]);
+    await expect(
+      acknowledgeTaskAssignmentsService(tdb, BOB, [
+        {
+          taskId,
+          assignmentVersion: aliceOfficeA.assignmentVersion,
+          acknowledgementToken: aliceOfficeA.acknowledgementToken,
+        },
+      ], "office-a")
+    ).resolves.toBe(0);
+    expect(await ackRowCount(taskId, BOB)).toBe(0);
+
+    // The same current row accepts Bob's own office-A receipt, proving the two negative cases are
+    // receipt binding rather than a malformed fixture.
+    const bobOfficeA = (await getPendingAssignmentTasks(tdb, BOB, "office-a")).tasks[0]!;
+    await expect(
+      acknowledgeTaskAssignmentsService(tdb, BOB, [
+        {
+          taskId,
+          assignmentVersion: bobOfficeA.assignmentVersion,
+          acknowledgementToken: bobOfficeA.acknowledgementToken,
+        },
+      ], "office-a")
+    ).resolves.toBe(1);
+    expect(await ackRowCount(taskId, BOB)).toBe(1);
+  });
+
+  it("records a card the person saw even after the modal stays open longer than fifteen minutes", async () => {
+    await seed([{ id: uid("1"), priority: "normal" }]);
+    const displayed = (await getPendingAssignmentTasks(tdb, ALICE)).tasks[0]!;
+
+    // A receipt is bound to the immutable user/office/task/version tuple, and the locked row check
+    // rejects it once that assignment changes. Time expiry would instead lose a real acknowledgement
+    // after the UI has stored the rendered cards for the session, so advance the browser clock beyond
+    // the old fifteen-minute window before closing this exact displayed card.
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(16 * 60 * 1000);
+      await expect(
+        acknowledgeTaskAssignmentsService(tdb, ALICE, [
+          {
+            taskId: displayed.id,
+            assignmentVersion: displayed.assignmentVersion,
+            acknowledgementToken: displayed.acknowledgementToken,
+          },
+        ])
+      ).resolves.toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(await ackRowCount(displayed.id, ALICE)).toBe(1);
+  });
+
   it("is a no-op on a duplicate acknowledge, not an error (StrictMode double-invoke, retries)", async () => {
     await seed([{ id: uid("1"), priority: "normal" }]);
 
@@ -908,7 +1118,11 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
     // This is deliberately far beyond the test machine's clock. A bare NOW() insert leaves the task
     // unacknowledged, while a JS Date round trip changes .123456 to .123000.
     await acknowledgeTaskAssignmentsService(tdb, ALICE, [
-      { taskId, assignmentVersion: displayed.assignmentVersion },
+      {
+        taskId,
+        assignmentVersion: displayed.assignmentVersion,
+        acknowledgementToken: displayed.acknowledgementToken,
+      },
     ]);
     expect(await acknowledgementTimestamp(taskId, ALICE)).toBe(assignedAt);
     expect((await getPendingAssignmentTasks(tdb, ALICE)).tasks).toEqual([]);
@@ -923,7 +1137,11 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
       [taskId, ALICE, laterAcknowledgement]
     );
     await acknowledgeTaskAssignmentsService(tdb, ALICE, [
-      { taskId, assignmentVersion: displayed.assignmentVersion },
+      {
+        taskId,
+        assignmentVersion: displayed.assignmentVersion,
+        acknowledgementToken: displayed.acknowledgementToken,
+      },
     ]);
     expect(await acknowledgementTimestamp(taskId, ALICE)).toBe(laterAcknowledgement);
   });
@@ -934,7 +1152,11 @@ describe("acknowledgement — once per task, with urgent/high/overdue repeats", 
     const { tenantDb, queries } = tenantDbWithQueryCapture();
 
     await acknowledgeTaskAssignmentsService(tenantDb as any, ALICE, [
-      { taskId: displayed.id, assignmentVersion: displayed.assignmentVersion },
+      {
+        taskId: displayed.id,
+        assignmentVersion: displayed.assignmentVersion,
+        acknowledgementToken: displayed.acknowledgementToken,
+      },
     ]);
 
     const upsert = queries.find((query) => /insert into\s+"?task_assignment_acknowledgements"?/i.test(query.text));

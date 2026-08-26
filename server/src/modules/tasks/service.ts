@@ -1,5 +1,6 @@
 import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import crypto from "crypto";
 import {
   deals,
   jobQueue,
@@ -1299,6 +1300,14 @@ export type PendingAssignmentTask = {
    * six fractional digits and is accepted only as an optimistic-concurrency version by /acknowledge.
    */
   assignmentVersion: string;
+  /**
+   * Server-signed receipt for this exact card on the capped modal page.
+   *
+   * A user can read assignedAt from ordinary task APIs, so a bare id/version pair is not evidence that
+   * this assignment was actually put in front of them. The acknowledgement endpoint requires this
+   * receipt in addition to re-checking owner/version under a row lock.
+   */
+  acknowledgementToken: string;
   title: string;
   priority: string;
   dueDate: string | null;
@@ -1343,11 +1352,13 @@ export type PendingAssignmentTask = {
  */
 export async function getPendingAssignmentTasks(
   tenantDb: TenantDb,
-  userId: string
+  userId: string,
+  officeId?: string
 ): Promise<{ tasks: PendingAssignmentTask[]; total: number; newTotal: number }> {
   const todayCt = pendingAssignmentTodayCt();
   const predicate = buildPendingAssignmentPredicate({ userId, todayCt });
   const unseen = buildUnseenAssignmentSql({ userId });
+  const acknowledgementOfficeId = acknowledgementOfficeScope(officeId);
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -1373,15 +1384,25 @@ export async function getPendingAssignmentTasks(
   const rows = ((result as any).rows ?? result) as Array<Record<string, unknown>>;
 
   return {
-    tasks: rows.map((row) => ({
-      id: String(row.id),
-      assignmentVersion: String(row.assignment_version),
-      title: String(row.title),
-      priority: String(row.priority),
-      dueDate: (row.due_date as string | null) ?? null,
-      assignedByName: (row.assigned_by_name as string | null) ?? null,
-      isNew: row.is_new === true,
-    })),
+    tasks: rows.map((row) => {
+      const id = String(row.id);
+      const assignmentVersion = String(row.assignment_version);
+      return {
+        id,
+        assignmentVersion,
+        acknowledgementToken: createAcknowledgementToken({
+          userId,
+          officeId: acknowledgementOfficeId,
+          taskId: id,
+          assignmentVersion,
+        }),
+        title: String(row.title),
+        priority: String(row.priority),
+        dueDate: (row.due_date as string | null) ?? null,
+        assignedByName: (row.assigned_by_name as string | null) ?? null,
+        isNew: row.is_new === true,
+      };
+    }),
     total: Number(rows[0]?.total ?? 0),
     newTotal: Number(rows[0]?.new_total ?? 0),
   };
@@ -1401,16 +1422,100 @@ type AssignmentAcknowledgementCandidate = {
 /** Keep the exact server-issued assigned_at version in SQL rather than round-tripping through JS Date. */
 const assignmentVersionSql = sql<string>`to_char(${tasks.assignedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION = "v1";
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TEST_OFFICE = "test-office";
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX =
+  `${TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION}.`;
+// SHA-256 is 32 bytes, whose unpadded base64url encoding is always 43 ASCII characters.
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_LENGTH = 43;
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_SHAPE = /^[A-Za-z0-9_-]{43}$/;
+
+function acknowledgementTokenSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+    throw new Error("JWT_SECRET must be set before issuing task-assignment acknowledgement receipts");
+  }
+  return "dev-secret-change-in-production";
+}
+
+function acknowledgementOfficeScope(officeId: string | undefined): string {
+  // Direct service tests have no authenticated request/office context. Production routes always pass the
+  // active office id, which binds a receipt to the tenant it was rendered from.
+  return officeId ?? TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TEST_OFFICE;
+}
+
+function acknowledgementTokenPayload({
+  userId,
+  officeId,
+  taskId,
+  assignmentVersion,
+}: {
+  userId: string;
+  officeId: string;
+  taskId: string;
+  assignmentVersion: string;
+}): string {
+  return [
+    "trockcrm:task-assignment-acknowledgement",
+    TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION,
+    userId,
+    officeId,
+    taskId,
+    assignmentVersion,
+  ].join("\u0000");
+}
+
+function signAcknowledgementToken(input: Parameters<typeof acknowledgementTokenPayload>[0]): string {
+  return crypto
+    .createHmac("sha256", acknowledgementTokenSecret())
+    .update(acknowledgementTokenPayload(input), "utf8")
+    .digest("base64url");
+}
+
+function createAcknowledgementToken(input: Parameters<typeof acknowledgementTokenPayload>[0]): string {
+  return `${TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION}.${signAcknowledgementToken(input)}`;
+}
+
+function hasValidAcknowledgementToken(
+  token: string,
+  input: Parameters<typeof acknowledgementTokenPayload>[0]
+): boolean {
+  // Do the fixed-size, canonical wire-shape check BEFORE signing or allocating a Buffer. Node's
+  // base64url decoder intentionally ignores non-alphabet characters, so decoding first would accept a
+  // valid signature padded with arbitrary junk and make a malformed 10 MB request allocate needlessly.
+  if (
+    token.length !==
+      TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX.length +
+        TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_LENGTH ||
+    !token.startsWith(TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX)
+  ) {
+    return false;
+  }
+  const signature = token.slice(TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX.length);
+  if (!TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_SHAPE.test(signature)) return false;
+
+  // This receipt stays valid for the exact assignment it names. Expiry would create a lost-ack window
+  // after a person has actually seen a card but before they close the modal; its user/office/task/version
+  // binding and the locked version re-check make a stale receipt harmless once the assignment changes.
+  const expected = signAcknowledgementToken(input);
+  return crypto.timingSafeEqual(Buffer.from(signature, "ascii"), Buffer.from(expected, "ascii"));
+}
+
 /**
  * Record that `userId` has been shown these assignments. Returns how many displayed assignments were
  * still theirs at the exact assignment version the modal rendered.
  *
- * OWNERSHIP AND THE DISPLAYED ASSIGNMENT VERSION ARE RE-DERIVED SERVER-SIDE, never trusted from the
- * payload. A task can leave Alice and come back before she closes an old modal; checking only its id and
- * current owner would acknowledge the NEW handoff with the OLD modal. The qualifying rows are locked
- * through the request's tenant transaction, so no reassignment can land between the version check and
- * upsert. Stale rows are dropped SILENTLY rather than 403'd: the modal posts whatever it last rendered,
- * and a stale modal should close then reappear on the next login with the current assignment.
+ * A SERVER-SIGNED RECEIPT must bind the caller, active office, task and displayed version before a row
+ * is eligible at all. `assigned_at` is readable through ordinary task APIs, so ownership + version alone
+ * would let a caller silently pre-acknowledge a normal task the capped modal never put in front of them.
+ * The receipt is issued only by the capped GET page and remains valid for that exact assignment: expiry
+ * would lose a legitimate acknowledgement when somebody leaves the modal open, while a reassignment
+ * invalidates it through the locked version re-check. OWNERSHIP AND THE DISPLAYED VERSION are then
+ * re-derived under a row lock: a task can leave Alice and come back before she closes an old modal, and
+ * checking only id/current owner would acknowledge the NEW handoff with the OLD modal. Stale or malformed
+ * receipts are dropped SILENTLY rather than 403'd, so the modal can close and reappear at the next login
+ * with the current assignment.
  *
  * Non-uuid ids are filtered before the query, not caught after it: `invalid input syntax for type uuid`
  * is a 22P02 that surfaces as a 500 on a path whose entire contract is to fail quietly.
@@ -1425,17 +1530,27 @@ const assignmentVersionSql = sql<string>`to_char(${tasks.assignedAt} AT TIME ZON
 export async function acknowledgeTaskAssignments(
   tenantDb: TenantDb,
   userId: string,
-  assignments: unknown
+  assignments: unknown,
+  officeId?: string
 ): Promise<number> {
   const candidates: AssignmentAcknowledgementCandidate[] = [];
   const seen = new Set<string>();
-  for (const value of Array.isArray(assignments) ? assignments : []) {
+  const acknowledgementOfficeId = acknowledgementOfficeScope(officeId);
+  // The browser can send only the five cards from its capped GET page. Bound raw entries BEFORE token
+  // verification too: a crafted body full of unique, plausible ids and bogus signatures must not turn
+  // this quiet no-op endpoint into unbounded HMAC work or Buffer allocation.
+  const rawAssignments = Array.isArray(assignments) ? assignments : [];
+  const entriesToInspect = Math.min(rawAssignments.length, PENDING_ASSIGNMENT_MODAL_LIMIT);
+  for (let index = 0; index < entriesToInspect; index += 1) {
+    const value = rawAssignments[index];
     if (!value || typeof value !== "object") continue;
     const taskId = (value as Record<string, unknown>).taskId;
     const assignmentVersion = (value as Record<string, unknown>).assignmentVersion;
+    const acknowledgementToken = (value as Record<string, unknown>).acknowledgementToken;
     if (
       typeof taskId !== "string" ||
       typeof assignmentVersion !== "string" ||
+      typeof acknowledgementToken !== "string" ||
       !UUID_SHAPE.test(taskId.trim()) ||
       !ASSIGNMENT_VERSION_SHAPE.test(assignmentVersion)
     ) {
@@ -1444,11 +1559,20 @@ export async function acknowledgeTaskAssignments(
     const normalizedTaskId = taskId.trim();
     const key = `${normalizedTaskId}:${assignmentVersion}`;
     if (seen.has(key)) continue;
+    // The receipt is emitted only for rows in the GET endpoint's ordered five-card page. A task's
+    // assigned_at is visible through ordinary task APIs, so ownership + version alone would let a user
+    // manufacture an acknowledgement for a normal task they have not been shown, including page six.
+    if (
+      !hasValidAcknowledgementToken(acknowledgementToken, {
+        userId,
+        officeId: acknowledgementOfficeId,
+        taskId: normalizedTaskId,
+        assignmentVersion,
+      })
+    ) {
+      continue;
+    }
     seen.add(key);
-    // The UI can render at most this many cards. Enforce the same boundary at the trust edge after
-    // deduplication: a crafted POST must not turn one acknowledgement into an unbounded OR predicate
-    // (or an unbounded set of row locks) merely because the browser itself sends a capped page.
-    if (candidates.length >= PENDING_ASSIGNMENT_MODAL_LIMIT) break;
     candidates.push({ taskId: normalizedTaskId, assignmentVersion });
   }
   if (candidates.length === 0) return 0;

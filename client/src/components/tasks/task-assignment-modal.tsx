@@ -537,7 +537,11 @@ export function TaskAssignmentModal() {
       // ever relaxed. The alternative is correctness that depends entirely on a condition twenty
       // lines away.
       void acknowledgeTaskAssignments(
-        fetchState.tasks.map(({ id, assignmentVersion }) => ({ id, assignmentVersion })),
+        fetchState.tasks.map(({ id, assignmentVersion, acknowledgementToken }) => ({
+          id,
+          assignmentVersion,
+          acknowledgementToken,
+        })),
         fetchState.office
       ).catch(() => {
         // A failed acknowledgement costs one repeat of this modal. Trapping the user inside a dialog

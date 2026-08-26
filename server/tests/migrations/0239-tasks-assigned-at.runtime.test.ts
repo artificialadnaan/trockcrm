@@ -3,8 +3,8 @@
 // 0239 adds `tasks.assigned_at` — when the task last changed hands — which is what lets an
 // acknowledgement answer ONE assignment rather than a task forever.
 //
-// THE FILE ADDS THE NULLABLE COLUMN, its default and its rolling-deploy trigger. Dating untouched rows
-// and restoring NOT NULL is a runner step
+// THE RUNNER installs the file's global fence, then adds the nullable column, its default and its
+// rolling-deploy trigger one office at a time. Dating untouched rows and restoring NOT NULL is a runner step
 // (server/src/migrations/tasks-assigned-at-backfill.ts, covered by its own suite) because the backfill
 // must disable set_tasks_updated_at and audit_tasks around itself, and `ALTER TABLE ... DISABLE
 // TRIGGER` takes a lock that conflicts with every task write. runner.ts sends each .sql as ONE
@@ -18,7 +18,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
-import { runTasksAssignedAtBackfill } from "../../src/migrations/tasks-assigned-at-backfill.js";
+import {
+  extractTasksAssignedAtVersioningGlobals,
+  runTasksAssignedAtBackfill,
+  runTasksAssignedAtVersioning,
+} from "../../src/migrations/tasks-assigned-at-backfill.js";
 
 const MIGRATION = "0239_tasks_assigned_at";
 const OFFICES = ["office_dallas", "office_atlanta", "office_houston"] as const;
@@ -101,6 +105,14 @@ function legacyProvisionSql(slug: string) {
 
 const asBackfillClient = () =>
   pg as unknown as Parameters<typeof runTasksAssignedAtBackfill>[0];
+const asVersioningClient = () =>
+  pg as unknown as Parameters<typeof runTasksAssignedAtVersioning>[0];
+
+/** The runner path: globals/fence first, then bounded existing-office versioning. */
+async function applyVersioningMigration() {
+  await pg.exec(extractTasksAssignedAtVersioningGlobals(migrationSql(MIGRATION)));
+  await runTasksAssignedAtVersioning(asVersioningClient());
+}
 
 beforeEach(async () => {
   pg = new PGlite();
@@ -109,7 +121,7 @@ beforeEach(async () => {
 describe("migration 0239 — tasks.assigned_at", () => {
   it("adds the column to EVERY office schema, not just the first", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     for (const schema of OFFICES) {
       const result = await pg.query<{ n: number }>(
@@ -123,7 +135,7 @@ describe("migration 0239 — tasks.assigned_at", () => {
 
   it("lets an old-image worker INSERT before the runner restores the final default", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     for (const schema of OFFICES) {
       // Both columns use the transaction-stable now(), so an old insert remains self-creation-shaped.
@@ -139,7 +151,7 @@ describe("migration 0239 — tasks.assigned_at", () => {
 
   it("installs the assignment-stamp trigger in EVERY existing office", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     for (const schema of OFFICES) {
       const result = await pg.query<{ n: number }>(
@@ -155,7 +167,7 @@ describe("migration 0239 — tasks.assigned_at", () => {
 
   it("installs the rolling-image actor guard in EVERY existing office", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     for (const schema of OFFICES) {
       const result = await pg.query<{ n: number }>(
@@ -169,20 +181,21 @@ describe("migration 0239 — tasks.assigned_at", () => {
     }
   });
 
-  it("installs a deferred provisioning fence BEFORE the existing-office scan", () => {
+  it("keeps the preflight globals separate from the new-office template", () => {
     const source = migrationSql(MIGRATION);
+    const globals = extractTasksAssignedAtVersioningGlobals(source);
     const guard = source.indexOf("CREATE CONSTRAINT TRIGGER tasks_assigned_at_on_office_provision");
-    const scan = source.indexOf("DO $tenant$");
 
     expect(guard).toBeGreaterThanOrEqual(0);
-    expect(source.slice(guard, scan)).toContain("AFTER INSERT ON public.offices");
-    expect(source.slice(guard, scan)).toContain("DEFERRABLE INITIALLY DEFERRED");
-    expect(guard, "the scan can miss a legacy provisioner that committed while guard DDL waited").toBeLessThan(scan);
+    expect(globals).toContain("AFTER INSERT ON public.offices");
+    expect(globals).toContain("DEFERRABLE INITIALLY DEFERRED");
+    expect(globals).not.toContain("-- TENANT_SCHEMA_START");
+    expect(source).not.toMatch(/\bDO\s+\$tenant\$/i);
   });
 
   it("repairs a legacy #1107 provisioner at COMMIT, then converges with the runner scan", async () => {
     await seedOffices(["office_dallas"]);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     // The INSERT is intentionally first, matching createOffice. If the constraint trigger becomes
     // immediate, it fires here before `tasks` exists and this transaction fails. The old image then
@@ -284,7 +297,7 @@ describe("migration 0239 — tasks.assigned_at", () => {
 
   it("fails closed when constraints are forced before a tenant tasks table exists", async () => {
     await seedOffices(["office_dallas"]);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     await pg.exec("BEGIN");
     await pg.exec(`INSERT INTO public.offices (slug) VALUES ('too_early')`);
@@ -299,45 +312,32 @@ describe("migration 0239 — tasks.assigned_at", () => {
     expect(visible.rows[0]?.n).toBe(0);
   });
 
-  // AN ALLOWLIST, NOT A DENYLIST — mirroring 0233's guard, and for the reason that one was rewritten.
-  // A denylist names the statements seen to be dangerous so far; a bare `ADD CONSTRAINT ... CHECK`
-  // walked past 0233's first version while doing exactly what it forbade. So the question is inverted:
-  // every lock-taking action this file performs must be named here as safe, and anything new fails
-  // until somebody has justified it. Trigger DDL shares the ADD COLUMN transaction and performs no row
-  // scan; the row-writing backfill and final constraint still stay in the per-office runner.
-  //
-  // ADD COLUMN is nullable and metadata-only. SET DEFAULT now() affects only later inserts, so existing
-  // rows remain NULL for the runner while old-image inserts are safe immediately.
-  const crossTenantAndProvisionerSource = () => {
+  // The migration file is now global functions/fence plus the one-office template. Existing-office
+  // trigger DDL is deliberately absent: it is lock-conflicting and belongs to the per-office helper.
+  const tenantTemplateSource = () => {
     const source = migrationSql(MIGRATION);
-    const scanStart = source.indexOf("DO $tenant$");
-    const scanEnd = source.indexOf("END $tenant$;", scanStart) + "END $tenant$;".length;
     const markerStart = source.indexOf("-- TENANT_SCHEMA_START");
     const markerEnd = source.indexOf("-- TENANT_SCHEMA_END", markerStart);
-    return `${source.slice(scanStart, scanEnd)}\n${source.slice(markerStart, markerEnd)}`;
+    return source.slice(markerStart, markerEnd);
   };
 
   const alterTableActions = () => {
     const actions: string[] = [];
     const re = /ALTER\s+TABLE\s+[^\s]+\s+([\s\S]*?);/gi;
     let match: RegExpExecArray | null;
-    while ((match = re.exec(crossTenantAndProvisionerSource())) !== null) {
+    while ((match = re.exec(tenantTemplateSource())) !== null) {
       actions.push(match[1].replace(/\s+/g, " ").trim());
     }
     return actions;
   };
 
   const ALLOWED_ACTIONS = [
-    /^ADD COLUMN IF NOT EXISTS assigned_at timestamptz$/i,
-    /^ALTER COLUMN assigned_at SET DEFAULT now\(\)$/i,
     /^ADD COLUMN IF NOT EXISTS assigned_at timestamptz NOT NULL DEFAULT now\(\)$/i,
   ];
 
-  it("performs ONLY allowlisted, lock-safe ALTER TABLE actions", () => {
+  it("keeps the migration file to the one-office template ALTER", () => {
     const actions = alterTableActions();
-    // Nullable ADD + default in the tenant loop, plus strict ADD in the new-office block. If this count
-    // moves, a statement was added or removed and a reviewer should look at it.
-    expect(actions, "expected the existing-office and provisioner ALTERs").toHaveLength(3);
+    expect(actions, "expected only the new-office template ALTER").toHaveLength(1);
 
     for (const action of actions) {
       const allowed = ALLOWED_ACTIONS.some((pattern) => pattern.test(action));
@@ -352,7 +352,7 @@ describe("migration 0239 — tasks.assigned_at", () => {
     await seedOffices(OFFICES);
     await pg.exec(`INSERT INTO office_dallas.tasks (title) VALUES ('pre-existing row')`);
 
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     const result = await pg.query<{ nulls: number; atthasmissing: boolean }>(
       `SELECT
@@ -365,28 +365,50 @@ describe("migration 0239 — tasks.assigned_at", () => {
     expect(result.rows[0]?.atthasmissing, "the staged column unexpectedly carries a missing default").toBe(false);
   });
 
-  // THE CROSS-TENANT BACKFILL MUST NOT COME BACK. The deferred guard is deliberately allowed to fill
-  // one still-uncommitted tenant; this assertion isolates the deployment scan and provisioner marker,
-  // where an UPDATE or trigger suspension would hold locks across existing offices again.
-  it("keeps UPDATE and row-trigger suspension out of the cross-tenant scan", async () => {
-    const source = crossTenantAndProvisionerSource()
+  it("contains no existing-office cross-tenant loop", () => {
+    const source = migrationSql(MIGRATION)
       .split("\n")
       .filter((line) => !line.trimStart().startsWith("--"))
       .join("\n");
 
-    expect(source, "a row UPDATE here runs inside one transaction spanning every office").not.toMatch(
-      /\bUPDATE\s+(?!OF\b)/i
+    expect(source).not.toMatch(/\bDO\s+\$tenant\$/i);
+  });
+
+  it("runs existing-office setup in one short transaction per office", async () => {
+    const statements: string[] = [];
+    const query = async (statement: string) => {
+      statements.push(statement.trim());
+      if (statement.includes("information_schema.schemata")) {
+        return { rows: [{ schema_name: "office_dallas" }, { schema_name: "office_atlanta" }] };
+      }
+      if (statement.includes("information_schema.tables") || statement.includes("information_schema.columns")) {
+        return { rows: [{ n: 1 }] };
+      }
+      return { rows: [] };
+    };
+
+    await runTasksAssignedAtVersioning({ query } as never);
+
+    const shape = statements.filter((statement) =>
+      statement === "BEGIN" || statement === "COMMIT" || statement.startsWith("ALTER TABLE") ||
+      statement.startsWith("DROP TRIGGER") || statement.startsWith("CREATE TRIGGER")
     );
-    expect(source, "this lock is held across every tenant").not.toMatch(/\bDISABLE\s+TRIGGER\b/i);
-    expect(source).not.toMatch(/\bENABLE\s+TRIGGER\b/i);
-    expect(source, "an index build would be held across every tenant").not.toMatch(
-      /\bCREATE\s+(UNIQUE\s+)?INDEX\b/i
-    );
+    expect(shape.filter((statement) => statement === "BEGIN")).toHaveLength(2);
+    expect(shape.filter((statement) => statement === "COMMIT")).toHaveLength(2);
+    let open = 0;
+    for (const statement of shape) {
+      if (statement === "BEGIN") open += 1;
+      if (statement === "COMMIT") open -= 1;
+      expect(open, statement).toBeGreaterThanOrEqual(0);
+      expect(open, statement).toBeLessThanOrEqual(1);
+    }
+    expect(shape.filter((statement) => statement.startsWith("DROP TRIGGER"))).toHaveLength(4);
+    expect(shape.filter((statement) => statement.startsWith("CREATE TRIGGER"))).toHaveLength(4);
   });
 
   it("leaves updated_at alone, because it writes no rows at all", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     for (const schema of OFFICES) {
       const result = await pg.query<{ unchanged: boolean }>(
@@ -399,7 +421,7 @@ describe("migration 0239 — tasks.assigned_at", () => {
 
   it("writes no audit rows", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
+    await applyVersioningMigration();
 
     const result = await pg.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM public.audit_log_probe`);
     expect(result.rows[0]?.n).toBe(0);
@@ -407,8 +429,8 @@ describe("migration 0239 — tasks.assigned_at", () => {
 
   it("is idempotent — a second run neither errors nor touches a row", async () => {
     await seedOffices(OFFICES);
-    await pg.exec(migrationSql(MIGRATION));
-    await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
+    await applyVersioningMigration();
+    await expect(applyVersioningMigration()).resolves.toBeUndefined();
 
     for (const schema of OFFICES) {
       const result = await pg.query<{ unchanged: boolean }>(
@@ -433,7 +455,7 @@ describe("migration 0239 — tasks.assigned_at", () => {
     // In production the global trigger function was installed when 0239 ran. Model that before the
     // office provisioner later replays only the tenant block.
     await seedOffices(["office_dallas"]);
-    await pg.exec(source);
+    await applyVersioningMigration();
     await seedOffices(["office_tulsa"]);
     await pg.exec(`DELETE FROM office_tulsa.tasks`);
     await pg.exec(block.replace(/office_dallas/g, "office_tulsa"));
@@ -490,6 +512,25 @@ describe("migration 0239 — tasks.assigned_at", () => {
     await seedOffices(OFFICES);
     await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_halfbuilt;`);
 
-    await expect(pg.exec(migrationSql(MIGRATION))).resolves.toBeDefined();
+    await expect(applyVersioningMigration()).resolves.toBeUndefined();
+  });
+
+  it("skips a malformed tasks table without assigned_to before taking a DDL lock", async () => {
+    await seedOffices(["office_dallas"]);
+    await pg.exec(`
+      CREATE SCHEMA office_halfbuilt;
+      CREATE TABLE office_halfbuilt.tasks (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
+    `);
+
+    await expect(applyVersioningMigration()).resolves.toBeUndefined();
+
+    const result = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n
+         FROM information_schema.columns
+        WHERE table_schema = 'office_halfbuilt'
+          AND table_name = 'tasks'
+          AND column_name = 'assigned_at'`
+    );
+    expect(result.rows[0]?.n).toBe(0);
   });
 });

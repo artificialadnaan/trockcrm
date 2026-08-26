@@ -25,7 +25,11 @@ import { getPendingAssignmentTasks } from "../../../src/modules/tasks/service.js
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { runTaskAssignmentAcknowledgementsMigration } from "../../../src/migrations/task-assignment-acknowledgements.js";
-import { runTasksAssignedAtBackfill } from "../../../src/migrations/tasks-assigned-at-backfill.js";
+import {
+  extractTasksAssignedAtVersioningGlobals,
+  runTasksAssignedAtVersioning,
+  runTasksAssignedAtBackfill,
+} from "../../../src/migrations/tasks-assigned-at-backfill.js";
 
 const SCHEMA = "office_dallas";
 
@@ -92,20 +96,27 @@ beforeAll(async () => {
     );
   }
 
-  // Both migrations in the exact order runner.ts applies them — INCLUDING BOTH runner steps. 0235's
-  // SQL file first installs its durable old-container office-provisioning fence; existing offices then
-  // get their table and historical seed from the per-office step. Omitting that step would exercise a
+  // Runner now stages 0239's nullable column/default/compatibility trigger before 0235 snapshots any
+  // history. That preflight protects an old API handoff during the rolling-deploy window; its expensive
+  // NULL-only backfill stays at 0239's normal later position below.
+  await pg.exec(
+    extractTasksAssignedAtVersioningGlobals(migrationSql("0239_tasks_assigned_at"))
+  );
+  await runTasksAssignedAtVersioning(
+    pg as unknown as Parameters<typeof runTasksAssignedAtVersioning>[0]
+  );
+
+  // 0235's SQL file installs its durable old-container office-provisioning fence; existing offices
+  // then get their table and historical seed from the runner step. Omitting that step would exercise a
   // table with no historical acknowledgements, which is not a deployable 0235 state at all.
   await pg.exec(migrationSql("0235_task_assignment_acknowledgements"));
   await runTaskAssignmentAcknowledgementsMigration(
     pg as unknown as Parameters<typeof runTaskAssignmentAcknowledgementsMigration>[0]
   );
 
-  // 0239's step is likewise not optional decoration: its file only adds the column, so skipping it
-  // would leave every pre-existing row dated now() by the default, post-date 0235's seed, and make
-  // every historical acknowledgement stale. Running without it would prove nothing about the deployed
-  // sequence.
-  await pg.exec(migrationSql("0239_tasks_assigned_at"));
+  // The normal later 0239 pass sees this same-run preflight and performs only the NULL-only backfill.
+  // The step is not optional decoration: skipping it would leave every historical row NULL and make
+  // the final NOT NULL contract impossible to restore.
   await runTasksAssignedAtBackfill(pg as unknown as Parameters<typeof runTasksAssignedAtBackfill>[0]);
 
   await pg.exec(`SET search_path = ${SCHEMA}, public;`);

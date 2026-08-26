@@ -20,6 +20,8 @@ import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
 import {
   buildAssignedAtConstraintStatement,
+  extractTasksAssignedAtVersioningGlobals,
+  runTasksAssignedAtVersioning,
   runTasksAssignedAtBackfill,
   TASKS_ASSIGNED_AT_BACKFILL_STEP,
   ASSIGNED_AT_SUSPENDED_TRIGGERS,
@@ -76,9 +78,12 @@ async function seedOffices(schemas: readonly string[]) {
   await pg.exec(`DELETE FROM public.audit_log_probe;`);
 }
 
-/** The file half: adds the nullable column, its default, and the compatibility trigger. */
+/** PGlite equivalent of the runner's global prelude plus bounded versioning step. */
 async function applyColumnMigration() {
-  await pg.exec(migrationSql(COLUMN_MIGRATION));
+  await pg.exec(extractTasksAssignedAtVersioningGlobals(migrationSql(COLUMN_MIGRATION)));
+  await runTasksAssignedAtVersioning(
+    pg as unknown as Parameters<typeof runTasksAssignedAtVersioning>[0]
+  );
 }
 
 beforeEach(async () => {
@@ -317,6 +322,41 @@ describe("tasks.assigned_at backfill — what it writes", () => {
     expect(dallas.rows[0]?.same).toBe(true);
   });
 
+  it("skips a legacy assigned_at shape without created_at instead of aborting healthy offices", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+    // This has reached the 0239 surface but cannot be dated from history. Install the ordinary row
+    // triggers too, so the old guard reaches its `created_at` read and proves the capability check—not
+    // a missing trigger—is what keeps it from aborting the healthy offices.
+    await pg.exec(`
+      CREATE SCHEMA office_missing_created_at;
+      CREATE TABLE office_missing_created_at.tasks (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        assigned_to uuid,
+        assigned_at timestamptz
+      );
+      CREATE TRIGGER set_tasks_updated_at
+        BEFORE UPDATE ON office_missing_created_at.tasks
+        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+      CREATE TRIGGER audit_tasks
+        AFTER INSERT OR UPDATE OR DELETE ON office_missing_created_at.tasks
+        FOR EACH ROW EXECUTE FUNCTION audit_trigger_probe();
+      INSERT INTO office_missing_created_at.tasks (assigned_to)
+      VALUES ('${USER_A}');
+    `);
+
+    await expect(runTasksAssignedAtBackfill(asClient())).resolves.toBeUndefined();
+
+    const healthy = await pg.query<{ same: boolean }>(
+      `SELECT assigned_at = created_at AS same FROM office_dallas.tasks`
+    );
+    expect(healthy.rows[0]?.same, "healthy offices must still complete their history backfill").toBe(true);
+    const malformed = await pg.query<{ untouched: boolean }>(
+      `SELECT assigned_at IS NULL AS untouched FROM office_missing_created_at.tasks`
+    );
+    expect(malformed.rows[0]?.untouched, "a missing created_at shape is skipped before its UPDATE").toBe(true);
+  });
+
   // The silent no-op the index pre-step actually shipped once: called before the column exists, every
   // office fails the readiness test, nothing is written, and the migration is recorded as applied.
   it("refuses to run before the column exists rather than quietly doing nothing", async () => {
@@ -336,6 +376,7 @@ describe("tasks.assigned_at backfill — what it writes", () => {
   it("is configured against the tasks table, its own column, and both triggers", () => {
     expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.table).toBe("tasks");
     expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.requiredColumn).toBe("assigned_at");
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.capabilityColumns).toEqual(["assigned_to", "created_at"]);
     expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.suspendTriggers).toEqual([
       "set_tasks_updated_at",
       "audit_tasks",

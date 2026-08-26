@@ -731,6 +731,8 @@ export interface PendingAssignmentTask {
   id: string;
   /** Opaque assigned_at version for the exact handoff this modal rendered. */
   assignmentVersion: string;
+  /** Server-signed receipt proving this exact card was rendered to this user. */
+  acknowledgementToken: string;
   title: string;
   priority: string;
   dueDate: string | null;
@@ -785,7 +787,7 @@ export async function fetchPendingAssignmentTasks(
  */
 export type PendingAssignmentAcknowledgement = Pick<
   PendingAssignmentTask,
-  "id" | "assignmentVersion"
+  "id" | "assignmentVersion" | "acknowledgementToken"
 >;
 
 export async function acknowledgeTaskAssignments(
@@ -794,11 +796,16 @@ export async function acknowledgeTaskAssignments(
 ) {
   return api<void>("/tasks/acknowledge", {
     method: "POST",
-    // `assignmentVersion` is the server-issued, lossless assigned_at value from the card. Posting it
-    // back binds this acknowledgement to the handoff the person actually saw: if a task leaves them
-    // and comes back before close, the stale card cannot acknowledge the newer assignment.
+    // `assignmentVersion` is the server-issued, lossless assigned_at value from the card, and the
+    // receipt is scoped to this person and office. Together they prove the acknowledgement belongs to
+    // the exact card the modal rendered; a task that leaves and comes back before close cannot have its
+    // newer assignment acknowledged by this stale card.
     json: {
-      assignments: assignments.map(({ id, assignmentVersion }) => ({ taskId: id, assignmentVersion })),
+      assignments: assignments.map(({ id, assignmentVersion, acknowledgementToken }) => ({
+        taskId: id,
+        assignmentVersion,
+        acknowledgementToken,
+      })),
     },
     // MUST be the office the ids were READ from, not the one in the URL now. Ids belong to exactly one
     // tenant schema; posted against another, the server's ownership re-derivation matches nothing and
