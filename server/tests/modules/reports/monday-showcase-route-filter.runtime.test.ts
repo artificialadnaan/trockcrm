@@ -78,7 +78,11 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, project_number text, name text NOT NULL, stage_id uuid NOT NULL,
       assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text,
-      dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,
+      is_bid_board_owned boolean NOT NULL DEFAULT false, bid_board_stage_entered_at timestamptz,
+      on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint NOT NULL DEFAULT 0,
+      on_hold_accumulated_seconds_at_stage_entry bigint NOT NULL DEFAULT 0,
+      dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric, bid_board_profit_margin_pct numeric,
+      rfp_approval_requested_at timestamptz, rfp_approval_status text,
       company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz,
       win_probability integer, workflow_route text
     );
@@ -139,12 +143,15 @@ beforeAll(async () => {
       ('${D.t5}','DFW-9-04130-AI','Won unknown-type routed-service','${ST.won}','${REP_B}','2026-05-25', 155000, false, false, 'service', 'not a real type', '${PT.uncoded}');
 
     -- ===== SENT / ESTIMATED: stage-entry cohorts, mixed routes (s1 enters twice -> still ONE deal). =====
-    INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, bid_board_total_sales, on_hold, is_test_data, workflow_route) VALUES
-      ('${D.s1}','S-1','Sent service A','${ST.open}','${REP_A}', 30000, false, false, 'service'),
-      ('${D.s2}','S-2','Sent normal B','${ST.open}','${REP_B}', 45000, false, false, 'normal'),
-      ('${D.s3}','S-3','Sent null-route A','${ST.open}','${REP_A}', 25000, false, false, NULL),
-      ('${D.e1}','E-1','Est service A','${ST.open}','${REP_A}', 60000, false, false, 'service'),
-      ('${D.e2}','E-2','Est normal B','${ST.open}','${REP_B}', 70000, false, false, 'normal');
+    INSERT INTO deals (
+      id, deal_number, name, stage_id, assigned_rep_id, bid_board_total_sales, bid_board_profit_margin_pct,
+      dd_estimate, rfp_approval_requested_at, rfp_approval_status, stage_entered_at, on_hold, is_test_data, workflow_route
+    ) VALUES
+      ('${D.s1}','S-1','Sent service A','${ST.open}','${REP_A}', 30000, 20, 24000, NULL, NULL, '2026-05-20T15:00:00Z', false, false, 'service'),
+      ('${D.s2}','S-2','Sent normal B','${ST.open}','${REP_B}', 45000, 10, 40000, NULL, NULL, '2026-05-20T15:00:00Z', false, false, 'normal'),
+      ('${D.s3}','S-3','Sent null-route A','${ST.open}','${REP_A}', 25000, 30, 0, NULL, NULL, '2026-05-20T15:00:00Z', false, false, NULL),
+      ('${D.e1}','E-1','Est service A','${ST.estimating}','${REP_A}', 60000, 25, 55000, '2026-05-25T17:00:00Z', 'approved', '2026-05-19T15:00:00Z', false, false, 'service'),
+      ('${D.e2}','E-2','Est normal B','${ST.estimating}','${REP_B}', 70000, 15, 65000, '2026-05-26T17:00:00Z', 'pending', '2026-05-23T15:00:00Z', false, false, 'normal');
     INSERT INTO deal_stage_history (deal_id, to_stage_id, created_at) VALUES
       ('${D.s1}','${ST.sent}','2026-05-25T15:00:00Z'),
       ('${D.s1}','${ST.sent}','2026-05-26T15:00:00Z'),
@@ -184,6 +191,21 @@ const OTHER: WorkflowRouteBucket[] = ["other"];
 function showcase(routes?: readonly WorkflowRouteBucket[]): Promise<MondayShowcaseData> {
   return getMondayShowcaseData(tdb, { mode: "to_date", now: NOW, routes });
 }
+
+describe("A1 period semantics", () => {
+  it("keeps Current Estimating live while the RFP and sent cohorts follow the selected period", async () => {
+    const weekToDate = await getMondayShowcaseData(tdb, { mode: "to_date", now: NOW });
+    const lastFullWeek = await getMondayShowcaseData(tdb, { mode: "completed", now: NOW });
+    // The live snapshot does NOT pretend an older reporting period is an as-of reconstruction.
+    expect(lastFullWeek.estimatingReport.currentAsOf).toBe(weekToDate.estimatingReport.currentAsOf);
+    expect(lastFullWeek.estimatingReport.currentEstimating).toEqual(weekToDate.estimatingReport.currentEstimating);
+    // The activity rows were deliberately seeded on May 25/26, inside WTD but outside the prior full week.
+    expect(weekToDate.estimatingReport.newRfps.count).toBe(2);
+    expect(lastFullWeek.estimatingReport.newRfps.count).toBe(0);
+    expect(weekToDate.estimatingReport.estimatesSent.count).toBe(3);
+    expect(lastFullWeek.estimatingReport.estimatesSent.count).toBe(0);
+  });
+});
 
 /** The evidence COUNT for one metric/scope under one selection -- what the drawer would show. */
 async function evidenceCount(
@@ -310,6 +332,44 @@ describe("additivity: service-only + other-only === both-selected", () => {
     );
   });
 
+  it("holds for every A1 count and dollar input, including weighted-margin coverage", async () => {
+    const both = await showcase(BOTH);
+    const service = await showcase(SERVICE);
+    const other = await showcase(OTHER);
+    const values = (data: MondayShowcaseData) => {
+      const a1 = data.estimatingReport;
+      return {
+        currentCount: a1.currentEstimating.count,
+        currentDd: a1.currentEstimating.ddValue,
+        rfpCount: a1.newRfps.count,
+        rfpDd: a1.newRfps.ddValue,
+        sentCount: a1.estimatesSent.count,
+        sentTotal: a1.estimatesSent.latestBidBoardTotalSales,
+        dollarComparable: a1.estimatesSent.comparison.dollarComparableCount,
+        dollarDd: a1.estimatesSent.comparison.dollarComparableDdValue,
+        dollarLatest: a1.estimatesSent.comparison.dollarComparableLatestBidBoardTotalSales,
+        dollarVariance: a1.estimatesSent.comparison.varianceAmount,
+        marginCount: a1.estimatesSent.margin.projectCount,
+        marginValue: a1.estimatesSent.margin.latestBidBoardTotalSales,
+      };
+    };
+    const all = values(both);
+    const svc = values(service);
+    const oth = values(other);
+    for (const key of Object.keys(all) as Array<keyof typeof all>) {
+      expect(`A1.${key}: service+other=${svc[key] + oth[key]}`).toBe(`A1.${key}: service+other=${all[key]}`);
+    }
+    // The published blended percentage is a ratio, so partitioning its numerators/denominators is the
+    // meaningful additivity check — a simple average of the two bucket percentages would be wrong.
+    const weighted =
+      (service.estimatingReport.estimatesSent.margin.blendedPercent ?? 0) * svc.marginValue +
+      (other.estimatingReport.estimatesSent.margin.blendedPercent ?? 0) * oth.marginValue;
+    expect(both.estimatingReport.estimatesSent.margin.blendedPercent).toBeCloseTo(weighted / all.marginValue, 2);
+    // The salesperson table is derived from exactly the RFP list: its canonical footer cannot drift.
+    expect(both.estimatingReport.rfpBySalesperson.reduce((sum, row) => sum + row.count, 0)).toBe(all.rfpCount);
+    expect(both.estimatingReport.rfpBySalesperson.reduce((sum, row) => sum + row.ddValue, 0)).toBe(all.rfpDd);
+  });
+
   it("is NON-TRIVIAL: each bucket is a real, strictly smaller slice of a non-zero whole", async () => {
     const both = await showcase(BOTH);
     const service = await showcase(SERVICE);
@@ -330,6 +390,15 @@ describe("additivity: service-only + other-only === both-selected", () => {
     expect(bands(both)).toBe(4);
     expect(bands(service)).toBe(2);
     expect(bands(other)).toBe(2);
+    expect(both.estimatingReport.currentEstimating.count).toBe(2);
+    expect(service.estimatingReport.currentEstimating.count).toBe(1);
+    expect(other.estimatingReport.currentEstimating.count).toBe(1);
+    expect(both.estimatingReport.newRfps.count).toBe(2);
+    expect(service.estimatingReport.newRfps.count).toBe(1);
+    expect(other.estimatingReport.newRfps.count).toBe(1);
+    expect(both.estimatingReport.estimatesSent.count).toBe(3);
+    expect(service.estimatingReport.estimatesSent.count).toBe(1);
+    expect(other.estimatingReport.estimatesSent.count).toBe(2);
   });
 
   it("does NOT hold for Active leads -- the ONE unfilterable figure, asserted rather than skipped", async () => {

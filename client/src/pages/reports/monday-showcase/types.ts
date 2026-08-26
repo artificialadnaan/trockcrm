@@ -99,6 +99,82 @@ export interface ShowcaseRouteFilter {
   unfilterable: string[];
 }
 
+export interface EstimatingMetric {
+  count: number;
+  ddValue: number;
+  missingDdCount: number;
+}
+
+export interface CurrentEstimatingProject {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  stageLabel: string;
+  ddEstimate: number | null;
+  daysInStage: number | null;
+}
+
+export interface RfpInitiatedProject {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  requestedAt: string;
+  currentRfpStatus: string | null;
+  assignedRepId: string | null;
+  assignedRepName: string;
+  ddEstimate: number | null;
+}
+
+export interface EstimateSentProject {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  sentAt: string;
+  ddEstimate: number | null;
+  latestBidBoardTotalSales: number | null;
+  varianceAmount: number | null;
+  variancePercent: number | null;
+  marginPercent: number | null;
+}
+
+export interface RfpBySalesperson {
+  repId: string | null;
+  repName: string;
+  count: number;
+  ddValue: number;
+  missingDdCount: number;
+}
+
+export interface EstimateSentComparison {
+  dollarComparableCount: number;
+  percentageComparableCount: number;
+  dollarComparableDdValue: number;
+  dollarComparableLatestBidBoardTotalSales: number;
+  varianceAmount: number;
+  percentageComparableDdValue: number;
+  percentageComparableLatestBidBoardTotalSales: number;
+  variancePercent: number | null;
+}
+
+export interface EstimatingReport {
+  currentAsOf: string;
+  currentEstimating: EstimatingMetric & { projects: CurrentEstimatingProject[] };
+  newRfps: EstimatingMetric & { projects: RfpInitiatedProject[] };
+  rfpBySalesperson: RfpBySalesperson[];
+  estimatesSent: {
+    count: number;
+    latestBidBoardTotalSales: number;
+    projects: EstimateSentProject[];
+    comparison: EstimateSentComparison;
+    margin: { projectCount: number; latestBidBoardTotalSales: number; blendedPercent: number | null };
+    missingSentValueCount: number;
+    missingMarginCount: number;
+  };
+}
+
 /** The default (both buckets) descriptor: nothing narrowed, nothing to disclaim — what the server returns
  *  when no ?routes is sent. Handy as the "unchanged report" baseline in fixtures. */
 export const UNFILTERED_ROUTE_FILTER: ShowcaseRouteFilter = {
@@ -115,6 +191,7 @@ export interface MondayShowcaseData {
   officeProjection: ProjectionLadder;
   weeklyTrend: ShowcaseWeek[];
   valueBases: Record<"won_awarded_first" | "open_best_estimate", string>;
+  estimatingReport: EstimatingReport;
   routeFilter: ShowcaseRouteFilter;
   notes: string[];
 }
@@ -219,6 +296,7 @@ export const SHOWCASE_VARIANTS = [
   // is a deferred placeholder (no chip/sparkline) until a finance source is wired. A3 stays as a distinct
   // momentum view.
   { key: "HERO", group: "Exec", label: "Exec · One Glance" },
+  { key: "A1", group: "Report A", label: "A1 · Estimating Report" },
   { key: "A3", group: "Report A", label: "A3 · Momentum Lanes" },
   // B1 (Roll-Call Scorecards) was removed; its per-rep Sent + lead-status content lives on in B2/B3.
   { key: "B2", group: "Report B", label: "B2 · Leaderboard" },

@@ -31,7 +31,10 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid,
       is_test_data boolean NOT NULL DEFAULT false, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
       won_closed_date date, expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, stage_entered_at timestamptz,
-      dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric
+      project_number text, is_bid_board_owned boolean NOT NULL DEFAULT false, bid_board_stage_entered_at timestamptz,
+      on_hold_accumulated_seconds_at_stage_entry numeric, on_hold_accumulated_seconds numeric NOT NULL DEFAULT 0, on_hold_started_at timestamptz,
+      rfp_approval_requested_at timestamptz, rfp_approval_status text,
+      dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric, bid_board_profit_margin_pct numeric
     );
     CREATE TABLE deal_stage_history (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, to_stage_id uuid NOT NULL, created_at timestamptz NOT NULL);
     CREATE TABLE leads (id uuid PRIMARY KEY, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid, status text NOT NULL DEFAULT 'open', is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
