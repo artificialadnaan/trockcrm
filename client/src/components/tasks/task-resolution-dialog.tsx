@@ -19,7 +19,8 @@ interface TaskResolutionDialogProps {
   open: boolean;
   taskTitle: string;
   onOpenChange: (open: boolean) => void;
-  onResolve: (resolutionNote: string) => Promise<void>;
+  /** Return false only when the request succeeded but the surrounding task UI has moved on. */
+  onResolve: (resolutionNote: string) => Promise<void | false>;
   onResolved?: () => void;
 }
 
@@ -97,7 +98,10 @@ export function TaskResolutionDialog({
     setSubmitting(true);
     setError(null);
     try {
-      await onResolve(trimmedNote);
+      const shouldFinishHere = await onResolve(trimmedNote);
+      // A drawer can switch from task A to task B while A's close request is in flight. The request
+      // still succeeded for A, but it must not close or refetch B when it comes back.
+      if (shouldFinishHere === false) return;
       onOpenChange(false);
       onResolved?.();
     } catch (reason: unknown) {

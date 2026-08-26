@@ -99,4 +99,31 @@ describe("TaskResolutionDialog", () => {
     expect(container.textContent).toContain("The task could not be closed");
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
+
+  it("does not close a newer task context after an earlier resolution succeeds", async () => {
+    const onResolve = vi.fn().mockResolvedValue(false);
+    const onOpenChange = vi.fn();
+    const onResolved = vi.fn();
+    act(() => {
+      root.render(
+        <TaskResolutionDialog
+          action="complete"
+          open
+          taskTitle="Call Palm Villas"
+          onOpenChange={onOpenChange}
+          onResolve={onResolve}
+          onResolved={onResolved}
+        />
+      );
+    });
+
+    setTextareaValue("Verified the delivery with the customer.");
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(onResolve).toHaveBeenCalledWith("Verified the delivery with the customer.");
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(onResolved).not.toHaveBeenCalled();
+  });
 });
