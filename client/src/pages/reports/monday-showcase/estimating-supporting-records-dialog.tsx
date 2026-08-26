@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useDealHref } from "@/hooks/use-office-scope";
 import { formatDayShort, int, usd } from "../evidence-kit";
@@ -310,14 +310,15 @@ export function EstimatingSupportingRecordsDialog({
   data: MondayShowcaseData;
   onClose: () => void;
 }) {
-  const payloadKey = `${data.period.from}|${data.period.to}|${data.period.mode}|${data.estimatingReport.currentAsOf}|${data.routeFilter.selected.join(",")}`;
-  const previousPayloadKey = useRef(payloadKey);
-  useEffect(() => {
-    if (previousPayloadKey.current !== payloadKey) {
-      previousPayloadKey.current = payloadKey;
+  const previousData = useRef(data);
+  // A supporting-record dialog is a snapshot of the report a viewer clicked. Close it before a changed
+  // payload can paint different rows under that same selection, including future same-period refreshes.
+  useLayoutEffect(() => {
+    if (previousData.current !== data) {
+      previousData.current = data;
       if (request != null) onClose();
     }
-  }, [onClose, payloadKey, request]);
+  }, [data, onClose, request]);
 
   const resolved = useMemo(() => (request == null ? null : resolveDrill(request, data)), [data, request]);
   return (

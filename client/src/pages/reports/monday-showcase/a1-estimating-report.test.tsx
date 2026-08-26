@@ -419,7 +419,18 @@ describe("A1 Estimating Report", () => {
       (container.querySelector('button[aria-label="Show supporting records for Current estimating"]') as HTMLButtonElement).click();
     });
     expect(document.body.querySelector('[data-slot="dialog-content"]')).not.toBeNull();
-    renderA1({ ...data, period: { ...data.period, to: "2026-08-29", label: "2026-08-16 → 2026-08-29" } }, "/reports/monday-showcase?officeId=office-b");
+    renderA1({
+      ...data,
+      estimatingReport: {
+        ...data.estimatingReport,
+        currentEstimating: {
+          ...data.estimatingReport.currentEstimating,
+          projects: data.estimatingReport.currentEstimating.projects.map((project) =>
+            project.id === "current-1" ? { ...project, name: "Updated Riverside Center" } : project,
+          ),
+        },
+      },
+    }, "/reports/monday-showcase?officeId=office-b");
     expect(document.body.querySelector('[data-slot="dialog-content"]')).toBeNull();
   });
 });
