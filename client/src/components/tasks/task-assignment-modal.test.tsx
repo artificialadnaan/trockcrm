@@ -519,6 +519,29 @@ describe("TaskAssignmentModal — assignments after login", () => {
     expect(acknowledgeCalls()).toHaveLength(1);
   });
 
+  it("does not reopen after Enter activates Close, but accepts the next independent click", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+    setPending([task({ id: "later", title: "Review the final measurements" })]);
+
+    const close = buttonLabelled("Close");
+    await act(async () => {
+      // Browsers dispatch a click after an Enter activation. Both events reach the document-level
+      // recheck listeners, but they are one dismissal gesture rather than two future interactions.
+      close?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      close?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await settle();
+
+    expect(dialog()).toBeNull();
+    expect(pendingFetches()).toHaveLength(1);
+
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(2);
+    expect(dialog()?.textContent).toContain("Review the final measurements");
+  });
+
   it("does not use the backdrop dismissal click as a follow-up check", async () => {
     setPending([task({ id: "first" })]);
     await render(true);

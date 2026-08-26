@@ -404,6 +404,11 @@ export function TaskAssignmentModal() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.key !== "Enter" && event.key !== " ") return;
+      // Enter/Space activates a dialog control with a synthesized click. While this modal is open,
+      // that keydown belongs to its own action (including Close, View all, and the header X), not to
+      // the person's next work interaction. Let its click take the one dismissal-suppressed path
+      // below; queuing both would consume the suppression once and then reopen the modal.
+      if (openRef.current) return;
       queueMicrotask(recheckOnInteraction);
     };
 
