@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import type { ReactNode } from "react";
 import { api, clearCsrfTokenOverride } from "./api";
+import { clearTaskAssignmentModalShownTasks } from "./task-assignment-modal-shown";
 
 type Role = "admin" | "director" | "sales_manager" | "rep" | "construction";
 
@@ -43,11 +44,30 @@ interface User {
    * same allowlist, so treating a missing flag as "no" only hides an action that would have 403'd.
    */
   canMoveDealBackToOpportunity?: boolean;
+  /**
+   * True iff this person has a task assignment the new-assignment modal has not shown them yet (or an
+   * urgent/high/overdue one that re-shows until it leaves `pending`). Drives <TaskAssignmentModal/>.
+   *
+   * It rides EVERY auth response — dev login, local login, mobile login, /auth/me and, critically,
+   * /local/change-password — because `localLogin` sets `user` in place and never refetches /auth/me,
+   * and a newly provisioned person is held on the force-password-change screen until that last one
+   * answers. A flag present only on /auth/me is invisible on the login it is about.
+   */
+  hasPendingTaskAssignments?: boolean;
 }
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
+  /**
+   * A successful interactive authentication gets a new token. The task-assignment modal uses it to
+   * forget the previous login's temporary "shown" set for this person. `/auth/me` deliberately does
+   * not advance it: restoring a cookie-backed session on F5 is not another login.
+   */
+  assignmentModalSession: number;
+  /** True until the modal has applied the reset for `assignmentModalSession`. */
+  assignmentModalSessionResetPending: boolean;
+  consumeAssignmentModalSessionReset: (session: number) => void;
   login: (email: string, returnTo?: string | null) => Promise<{ returnTo?: string | null; mustChangePassword?: boolean }>;
   localLogin: (email: string, password: string, returnTo?: string | null) => Promise<{ returnTo?: string | null; mustChangePassword?: boolean }>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
@@ -60,6 +80,26 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [assignmentModalSession, setAssignmentModalSession] = useState({ token: 0, resetPending: false });
+
+  // Only an affirmative web-auth action starts a new modal session. `fetchUser` runs on boot and on
+  // refreshUser(), so advancing this from every setUser would turn an ordinary F5 into a fresh login
+  // and re-open urgent repeats forever.
+  const beginAssignmentModalSession = useCallback((userId: string) => {
+    // This clear MUST be synchronous and happen before login() / localLogin() returns. AuthEntryScreen
+    // follows a successful `returnTo` with window.location.replace(), which destroys this provider before
+    // the modal can consume its in-memory reset token. Leaving the previous shown-set in sessionStorage
+    // would make that full-page navigation recreate it and suppress the first modal of the new login.
+    // fetchUser()/refreshUser() never call this: restoring a cookie on F5 is not another login.
+    clearTaskAssignmentModalShownTasks(userId);
+    setAssignmentModalSession((current) => ({ token: current.token + 1, resetPending: true }));
+  }, []);
+
+  const consumeAssignmentModalSessionReset = useCallback((token: number) => {
+    setAssignmentModalSession((current) =>
+      current.token === token && current.resetPending ? { ...current, resetPending: false } : current
+    );
+  }, []);
 
   const fetchUser = useCallback(async () => {
     try {
@@ -81,6 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { email, returnTo },
     });
+    beginAssignmentModalSession(data.user.id);
     if (!data.returnTo) setUser(data.user);
     return { returnTo: data.returnTo };
   };
@@ -90,6 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { email, password, returnTo },
     });
+    beginAssignmentModalSession(data.user.id);
     setUser(data.user);
     return { returnTo: data.returnTo, mustChangePassword: Boolean(data.user.mustChangePassword) };
   };
@@ -99,6 +141,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { currentPassword, newPassword },
     });
+    beginAssignmentModalSession(data.user.id);
     setUser(data.user);
   };
 
@@ -116,6 +159,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         loading,
+        assignmentModalSession: assignmentModalSession.token,
+        assignmentModalSessionResetPending: assignmentModalSession.resetPending,
+        consumeAssignmentModalSessionReset,
         login,
         localLogin,
         changePassword,

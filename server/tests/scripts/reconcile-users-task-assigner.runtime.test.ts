@@ -55,6 +55,9 @@ beforeAll(async () => {
       assigned_to uuid,
       created_by uuid,
       last_assigned_by uuid,
+      -- The shared reconciliation writer also stamps the handoff moment (0239). This fixture executes
+      -- that exact UPDATE, so it must model the production table rather than a pre-0239 subset.
+      assigned_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now()
     );
   `);

@@ -35,6 +35,15 @@ import {
   FILES_ASSOCIATION_CHECK_REPAIR_MIGRATION,
   runFilesAssociationCheckRepair,
 } from "./files-association-check-repair.js";
+import {
+  TASKS_ASSIGNED_AT_BACKFILL_MIGRATION,
+  installTasksAssignedAtVersioning,
+  runTasksAssignedAtBackfill,
+} from "./tasks-assigned-at-backfill.js";
+import {
+  TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION,
+  runTaskAssignmentAcknowledgementsMigration,
+} from "./task-assignment-acknowledgements.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -42,10 +51,142 @@ dotenv.config({
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "../../../migrations");
+// 0235 deliberately commits each office separately, so this must be a SESSION advisory lock rather
+// than pg_advisory_xact_lock: the lock has to survive those commits until the migration ledger is
+// written. It serializes only competing migration runners; application task writes never take it.
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION_LOCK =
+  "trockcrm:migration:0235_task-assignment-acknowledgements";
+// 0239 has its own global fence plus two per-office passes. Its ledger must not become visible while
+// another runner is still in either pass, and a session lock (not an xact lock) must survive each
+// office commit until the ledger write completes.
+const TASKS_ASSIGNED_AT_MIGRATION_LOCK = "trockcrm:migration:0239_tasks-assigned-at";
+
+/**
+ * 0235's global acknowledgement baseline needs the 0239 assignment-version compatibility trigger
+ * BEFORE it takes its snapshot. The filenames cannot express that dependency: 0239's expensive
+ * per-office NULL backfill must still run at its normal position, after 0235 has created/seeded the
+ * acknowledgement table. This preflight installs only 0239's marked global fence, then stages the
+ * nullable column/default/triggers ONE office transaction at a time. It deliberately does not run its
+ * NULL backfill or write the 0239 ledger; both remain at 0239's normal later position.
+ */
+async function installTasksAssignedAtVersioningBeforeAcknowledgementCutover(
+  client: pg.Client
+): Promise<boolean> {
+  const { rows } = await client.query(
+    "SELECT id FROM public._migrations WHERE name = $1",
+    [TASKS_ASSIGNED_AT_BACKFILL_MIGRATION]
+  );
+  if (rows.length > 0) return false;
+
+  console.log(
+    `Staging ${TASKS_ASSIGNED_AT_BACKFILL_MIGRATION} assignment versioning before ` +
+      `${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION}...`
+  );
+  const sql = readFileSync(join(MIGRATIONS_DIR, TASKS_ASSIGNED_AT_BACKFILL_MIGRATION), "utf-8");
+  await installTasksAssignedAtVersioning(client, sql);
+  return true;
+}
+
+/**
+ * A captured baseline without a ledger is intentionally retryable. Two runners must not, however,
+ * interleave the SQL file, the two per-office passes and the ledger write: runner B could otherwise see
+ * a ledger written by runner A while its own captured state was still incomplete. Keep this lock narrow
+ * to #0235, recheck the ledger after acquiring it, and release it on both success and failure.
+ */
+async function runTaskAssignmentAcknowledgementsMigrationUnderLock(
+  client: pg.Client,
+  file: string,
+  stagedInThisRun: Set<string>
+): Promise<boolean> {
+  await client.query("SELECT pg_advisory_lock(hashtext($1))", [
+    TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION_LOCK,
+  ]);
+
+  try {
+    const { rows } = await client.query(
+      "SELECT id FROM public._migrations WHERE name = $1",
+      [file]
+    );
+    if (rows.length > 0) {
+      console.log(`Skipping ${file} (already executed by another migration runner)`);
+      return false;
+    }
+
+    // An old API can keep assigning tasks while a new container migrates. Install 0239's nullable
+    // assignment-versioning surface first, so every handoff after 0235's snapshot is stamped and a
+    // later 0239 backfill cannot mistake it for untouched history. Do NOT run the backfill or record
+    // 0239 here: it needs the normal later position, after acknowledgement materialization.
+    if (await installTasksAssignedAtVersioningBeforeAcknowledgementCutover(client)) {
+      stagedInThisRun.add(TASKS_ASSIGNED_AT_BACKFILL_MIGRATION);
+    }
+
+    console.log(`Running ${file}...`);
+    const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+    // File first: install the deferred post-fence trigger before either historical phase discovers an
+    // office. The helper's captured baseline then runs before materialization, all under this same
+    // session lock and before the ledger can make a retry skip it.
+    await client.query(sql);
+    await runTaskAssignmentAcknowledgementsMigration(client);
+    await client.query(
+      "INSERT INTO public._migrations (name) VALUES ($1)",
+      [file]
+    );
+    return true;
+  } finally {
+    await client.query("SELECT pg_advisory_unlock(hashtext($1))", [
+      TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION_LOCK,
+    ]);
+  }
+}
+
+/**
+ * 0239 stages versioning and then backfills it in separate per-office transactions. Serialize the
+ * whole sequence through its ledger write: without this, a second runner that arrives after #0235's
+ * lock is released can repeat both passes and then fail its duplicate ledger INSERT.
+ */
+async function runTasksAssignedAtMigrationUnderLock(
+  client: pg.Client,
+  file: string,
+  stagedInThisRun: Set<string>
+): Promise<boolean> {
+  await client.query("SELECT pg_advisory_lock(hashtext($1))", [TASKS_ASSIGNED_AT_MIGRATION_LOCK]);
+
+  try {
+    const { rows } = await client.query(
+      "SELECT id FROM public._migrations WHERE name = $1",
+      [file]
+    );
+    if (rows.length > 0) {
+      console.log(`Skipping ${file} (already executed by another migration runner)`);
+      return false;
+    }
+
+    const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+    // If #0235 staged versioning in this same runner, do not take a second round of per-office DDL
+    // locks. If a process restarted after #0235's ledger but before #0239's, the set is empty and
+    // this safely stages it again. The helper runs only the marked global fence plus the bounded
+    // per-office step; it never sends the tenant template or the old cross-tenant trigger-DDL loop.
+    if (!stagedInThisRun.has(file)) {
+      await installTasksAssignedAtVersioning(client, sql);
+    }
+    await runTasksAssignedAtBackfill(client);
+    await client.query(
+      "INSERT INTO public._migrations (name) VALUES ($1)",
+      [file]
+    );
+    return true;
+  } finally {
+    await client.query("SELECT pg_advisory_unlock(hashtext($1))", [TASKS_ASSIGNED_AT_MIGRATION_LOCK]);
+  }
+}
 
 async function runMigrations(): Promise<void> {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
+  // Preflight and normal 0239 in this process can share the staged surface. A restart starts with an
+  // empty set and deliberately runs the idempotent PER-OFFICE stage before its later backfill, so a
+  // #0235 ledger without a #0239 ledger never depends on process memory for correctness.
+  const stagedInThisRun = new Set<string>();
 
   try {
     // Create migrations tracking table
@@ -70,6 +211,22 @@ async function runMigrations(): Promise<void> {
       );
       if (rows.length > 0) {
         console.log(`Skipping ${file} (already executed)`);
+        continue;
+      }
+
+      if (file === TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION) {
+        const completed = await runTaskAssignmentAcknowledgementsMigrationUnderLock(
+          client,
+          file,
+          stagedInThisRun
+        );
+        if (completed) console.log(`Completed ${file}`);
+        continue;
+      }
+
+      if (file === TASKS_ASSIGNED_AT_BACKFILL_MIGRATION) {
+        const completed = await runTasksAssignedAtMigrationUnderLock(client, file, stagedInThisRun);
+        if (completed) console.log(`Completed ${file}`);
         continue;
       }
 

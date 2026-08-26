@@ -1,0 +1,478 @@
+// The 0239 assigned_at backfill: its CONFIGURATION, and the fact that it is wired to the shared
+// per-office mechanism.
+//
+// WHAT THIS SUITE OWNS. tasks-assigned-at-backfill.ts is configuration — a table, a required column,
+// two suspended triggers and two statements — handed to runPerOfficeTransactionalStep. So this proves
+// that the configuration is RIGHT: the dating goes in the safe direction, updated_at survives, no audit
+// rows are written, and an office that never received the column is skipped rather than erroring.
+//
+// WHAT IT DOES NOT OWN. The mechanism itself — transaction per office, trigger restore order, rollback
+// on failure, the schema-name guard, the ordering error — belongs to per-office-step.ts and is covered
+// by per-office-step.runtime.test.ts against a deliberately different table. Re-testing it here would
+// be a second copy of somebody else's guarantee, which drifts the moment theirs changes. The one
+// structural assertion kept below is the WIRING: that this step really does go through that mechanism
+// and not around it, which no test of theirs can show.
+//
+// THREE offices, because office_dallas is also written by the literal tenant block at the foot of the
+// migration file and so comes out correct even with the loop broken. A third has no second source.
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { migrationSql } from "../helpers/migration-sql.js";
+import {
+  buildAssignedAtConstraintStatement,
+  extractTasksAssignedAtVersioningGlobals,
+  runTasksAssignedAtVersioning,
+  runTasksAssignedAtBackfill,
+  TASKS_ASSIGNED_AT_BACKFILL_STEP,
+  ASSIGNED_AT_SUSPENDED_TRIGGERS,
+} from "../../src/migrations/tasks-assigned-at-backfill.js";
+
+const COLUMN_MIGRATION = "0239_tasks_assigned_at";
+const OFFICES = ["office_dallas", "office_atlanta", "office_houston"] as const;
+
+/** Years before the migration, so a backfill that used now() cannot pass by coincidence. */
+const SEEDED_CREATED_AT = "2019-06-07 08:09:10+00";
+/** Any trigger firing during the backfill moves this. */
+const SEEDED_UPDATED_AT = "2020-01-02 03:04:05+00";
+const USER_A = "00000000-0000-4000-8000-000000000001";
+const USER_B = "00000000-0000-4000-8000-000000000002";
+const USER_C = "00000000-0000-4000-8000-000000000003";
+
+let pg: PGlite;
+const asClient = () => pg as unknown as Parameters<typeof runTasksAssignedAtBackfill>[0];
+
+async function seedOffices(schemas: readonly string[]) {
+  await pg.exec(`
+    CREATE OR REPLACE FUNCTION set_updated_at()
+    RETURNS TRIGGER AS $fn$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $fn$ LANGUAGE plpgsql;
+
+    CREATE TABLE IF NOT EXISTS public.offices (slug text PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS public.audit_log_probe (id bigserial PRIMARY KEY, action text NOT NULL);
+    CREATE OR REPLACE FUNCTION audit_trigger_probe()
+    RETURNS TRIGGER AS $fn$
+    BEGIN INSERT INTO public.audit_log_probe (action) VALUES (TG_OP); RETURN NEW; END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+
+  for (const schema of schemas) {
+    await pg.exec(`
+      CREATE SCHEMA IF NOT EXISTS ${schema};
+      CREATE TABLE ${schema}.tasks (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        title varchar(500) NOT NULL,
+        assigned_to uuid,
+        source text NOT NULL DEFAULT 'manual',
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TRIGGER set_tasks_updated_at
+        BEFORE UPDATE ON ${schema}.tasks FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+      CREATE TRIGGER audit_tasks
+        AFTER INSERT OR UPDATE OR DELETE ON ${schema}.tasks
+        FOR EACH ROW EXECUTE FUNCTION audit_trigger_probe();
+
+      INSERT INTO ${schema}.tasks (title, assigned_to, created_at, updated_at)
+        VALUES ('historic task', '${USER_A}', '${SEEDED_CREATED_AT}', '${SEEDED_UPDATED_AT}');
+    `);
+  }
+  await pg.exec(`DELETE FROM public.audit_log_probe;`);
+}
+
+/** PGlite equivalent of the runner's global prelude plus bounded versioning step. */
+async function applyColumnMigration() {
+  await pg.exec(extractTasksAssignedAtVersioningGlobals(migrationSql(COLUMN_MIGRATION)));
+  await runTasksAssignedAtVersioning(
+    pg as unknown as Parameters<typeof runTasksAssignedAtVersioning>[0]
+  );
+}
+
+beforeEach(async () => {
+  pg = new PGlite();
+});
+
+describe("tasks.assigned_at backfill — what it writes", () => {
+  it("dates an existing task from its CREATION, in every office", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+
+    await runTasksAssignedAtBackfill(asClient());
+
+    for (const schema of OFFICES) {
+      const result = await pg.query<{ same: boolean; hasSeededCreationTime: boolean }>(
+        `SELECT
+           assigned_at = created_at AS same,
+           assigned_at = $1::timestamptz AS "hasSeededCreationTime"
+         FROM ${schema}.tasks`,
+        [SEEDED_CREATED_AT]
+      );
+      expect(result.rows[0]?.same, `${schema}: assigned_at must equal created_at`).toBe(true);
+      // Named explicitly: the DIRECTION of the guess is the decision. now() would post-date every
+      // acknowledgement 0235 seeded and re-notify the company about work they have already seen.
+      expect(result.rows[0]?.hasSeededCreationTime, `${schema}: assigned_at must use the historical creation time`).toBe(true);
+    }
+  });
+
+  it("preserves a legacy-API handoff that lands after the column but before the backfill", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+
+    // The assigned_at portion of the old-image shape: assigned_to changes while the unknown column is
+    // omitted. (The merge-base image also supplies last_assigned_by; that path and its races are pinned
+    // separately below.) The trigger must make the row non-NULL before the runner reaches it, and the
+    // NULL-only backfill must leave that version alone.
+    await pg.exec(`UPDATE office_atlanta.tasks SET assigned_to = '${USER_B}'`);
+    const before = await pg.query<{ assignedAt: string }>(
+      `SELECT assigned_at::text AS "assignedAt" FROM office_atlanta.tasks`
+    );
+
+    await runTasksAssignedAtBackfill(asClient());
+
+    const after = await pg.query<{ assignedAt: string; newer: boolean }>(
+      `SELECT assigned_at::text AS "assignedAt", assigned_at > created_at AS newer
+         FROM office_atlanta.tasks`
+    );
+    expect(after.rows[0]?.assignedAt).toBe(before.rows[0]?.assignedAt);
+    expect(after.rows[0]?.newer, "the deploy-window handoff was dated as untouched history").toBe(true);
+  });
+
+  it("advances a legacy handoff past its prior acknowledgement, but not on a no-op", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+    await runTasksAssignedAtBackfill(asClient());
+
+    const acknowledged = await pg.query<{ version: string }>(
+      `SELECT assigned_at::text AS version FROM office_dallas.tasks`
+    );
+    await pg.exec(`UPDATE office_dallas.tasks SET assigned_to = '${USER_B}'`);
+
+    const handedOff = await pg.query<{ version: string; newerThanAck: boolean }>(
+      `SELECT assigned_at::text AS version,
+              assigned_at > $1::timestamptz AS "newerThanAck"
+         FROM office_dallas.tasks`,
+      [acknowledged.rows[0]?.version]
+    );
+    expect(handedOff.rows[0]?.newerThanAck).toBe(true);
+
+    await pg.exec(`UPDATE office_dallas.tasks SET assigned_to = '${USER_B}'`);
+    const noOp = await pg.query<{ version: string }>(
+      `SELECT assigned_at::text AS version FROM office_dallas.tasks`
+    );
+    expect(noOp.rows[0]?.version).toBe(handedOff.rows[0]?.version);
+  });
+
+  it("stabilizes the legacy API actor across both stale-pre-read interleavings", async () => {
+    await seedOffices(OFFICES);
+    // 0240 is already deployed in the rolling-upgrade case. A clean database instead adds this after
+    // 0239, which the column-tolerant trigger and the new-office provisioning test cover.
+    await pg.exec(`ALTER TABLE office_dallas.tasks ADD COLUMN last_assigned_by uuid`);
+    await applyColumnMigration();
+    await runTasksAssignedAtBackfill(asClient());
+
+    // Ordinary merge-base SQL supplies its actor explicitly. Even with a different session actor, the
+    // explicit value is authoritative and must survive the compatibility guard.
+    await pg.exec(`SELECT set_config('app.current_user_id', '${USER_C}', false)`);
+    await pg.exec(
+      `UPDATE office_dallas.tasks
+          SET assigned_to = '${USER_B}', last_assigned_by = '${USER_A}'`
+    );
+    const ordinary = await pg.query<{ actor: string; version: string }>(
+      `SELECT last_assigned_by AS actor, assigned_at::text AS version FROM office_dallas.tasks`
+    );
+    expect(ordinary.rows[0]?.actor).toBe(USER_A);
+
+    // Race 1: the old image read A and thought assigning A was a no-op, but another request moved the
+    // database row to B first. Its SQL omits last_assigned_by while actually handing B -> A; the trigger
+    // must recover the authenticated actor from the request transaction.
+    await pg.exec(`UPDATE office_dallas.tasks SET assigned_to = '${USER_A}'`);
+    const repaired = await pg.query<{ actor: string; version: string; newer: boolean }>(
+      `SELECT last_assigned_by AS actor,
+              assigned_at::text AS version,
+              assigned_at > $1::timestamptz AS newer
+         FROM office_dallas.tasks`,
+      [ordinary.rows[0]?.version]
+    );
+    expect(repaired.rows[0]?.actor).toBe(USER_C);
+    expect(repaired.rows[0]?.newer).toBe(true);
+
+    // Race 2: the old image read B and planned a move to A, but another request got A there first. Its
+    // UPDATE now re-sends A while still supplying an actor. Neither half of the assignment event may
+    // move on that database no-op.
+    await pg.exec(
+      `UPDATE office_dallas.tasks
+          SET assigned_to = '${USER_A}', last_assigned_by = '${USER_B}'`
+    );
+    const noOp = await pg.query<{ actor: string; version: string }>(
+      `SELECT last_assigned_by AS actor, assigned_at::text AS version FROM office_dallas.tasks`
+    );
+    expect(noOp.rows[0]?.actor).toBe(USER_C);
+    expect(noOp.rows[0]?.version).toBe(repaired.rows[0]?.version);
+  });
+
+  it("preserves an explicit newer stamp supplied by the upgraded API", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+    await runTasksAssignedAtBackfill(asClient());
+
+    const explicit = "2099-01-02 03:04:05.123456+00";
+    await pg.query(
+      `UPDATE office_dallas.tasks
+          SET assigned_to = $1::uuid, assigned_at = $2::timestamptz`,
+      [USER_B, explicit]
+    );
+    const result = await pg.query<{ preserved: boolean }>(
+      `SELECT assigned_at = $1::timestamptz AS preserved FROM office_dallas.tasks`,
+      [explicit]
+    );
+    expect(result.rows[0]?.preserved).toBe(true);
+  });
+
+  it("finishes with DEFAULT now() and NOT NULL after every historical row is dated", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+    await runTasksAssignedAtBackfill(asClient());
+
+    for (const schema of OFFICES) {
+      const result = await pg.query<{ isNullable: string; hasDefault: boolean }>(
+        `SELECT is_nullable AS "isNullable", column_default IS NOT NULL AS "hasDefault"
+           FROM information_schema.columns
+          WHERE table_schema = $1 AND table_name = 'tasks' AND column_name = 'assigned_at'`,
+        [schema]
+      );
+      expect(result.rows[0]?.isNullable, schema).toBe("NO");
+      expect(result.rows[0]?.hasDefault, schema).toBe(true);
+    }
+  });
+
+  // Asserted on a historical NULL the backfill DOES rewrite. Asserting on a row it skips would pass
+  // whatever the code did.
+  it("leaves updated_at untouched — the contacts 'Last touch' column depends on it", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+
+    await runTasksAssignedAtBackfill(asClient());
+
+    for (const schema of OFFICES) {
+      const result = await pg.query<{ unchanged: boolean }>(
+        `SELECT updated_at = $1::timestamptz AS unchanged FROM ${schema}.tasks`,
+        [SEEDED_UPDATED_AT]
+      );
+      expect(result.rows[0]?.unchanged, `${schema}: set_tasks_updated_at fired`).toBe(true);
+    }
+  });
+
+  it("writes no audit rows for a column no person edited", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+
+    await runTasksAssignedAtBackfill(asClient());
+
+    const result = await pg.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM public.audit_log_probe`);
+    expect(result.rows[0]?.n).toBe(0);
+  });
+
+  it("re-enables both triggers afterwards", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+
+    await runTasksAssignedAtBackfill(asClient());
+
+    for (const schema of OFFICES) {
+      const result = await pg.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM pg_trigger
+          WHERE tgrelid = '${schema}.tasks'::regclass AND tgenabled = 'D'`
+      );
+      expect(result.rows[0]?.n, `${schema}: a trigger was left disabled`).toBe(0);
+    }
+  });
+
+  it("is idempotent — a second run rewrites nothing and moves no dates", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+    await runTasksAssignedAtBackfill(asClient());
+
+    await expect(runTasksAssignedAtBackfill(asClient())).resolves.toBeUndefined();
+
+    for (const schema of OFFICES) {
+      const result = await pg.query<{ same: boolean; unchanged: boolean }>(
+        `SELECT
+           assigned_at = created_at AS same,
+           updated_at = $1::timestamptz AS unchanged
+         FROM ${schema}.tasks`,
+        [SEEDED_UPDATED_AT]
+      );
+      expect(result.rows[0]?.same, schema).toBe(true);
+      expect(result.rows[0]?.unchanged, `${schema}: a second backfill changed updated_at`).toBe(true);
+    }
+  });
+
+  it("skips a partially-provisioned office instead of taking the others down with it", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+    // Has a tasks table but never received the column — 0239's own loop skips such a schema too.
+    await pg.exec(`
+      CREATE SCHEMA IF NOT EXISTS office_halfbuilt;
+      CREATE TABLE office_halfbuilt.tasks (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
+    `);
+
+    await expect(runTasksAssignedAtBackfill(asClient())).resolves.toBeUndefined();
+
+    const dallas = await pg.query<{ same: boolean }>(
+      `SELECT assigned_at = created_at AS same FROM office_dallas.tasks`
+    );
+    expect(dallas.rows[0]?.same).toBe(true);
+  });
+
+  it("skips a legacy assigned_at shape without created_at instead of aborting healthy offices", async () => {
+    await seedOffices(OFFICES);
+    await applyColumnMigration();
+    // This has reached the 0239 surface but cannot be dated from history. Install the ordinary row
+    // triggers too, so the old guard reaches its `created_at` read and proves the capability check—not
+    // a missing trigger—is what keeps it from aborting the healthy offices.
+    await pg.exec(`
+      CREATE SCHEMA office_missing_created_at;
+      CREATE TABLE office_missing_created_at.tasks (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        assigned_to uuid,
+        assigned_at timestamptz
+      );
+      CREATE TRIGGER set_tasks_updated_at
+        BEFORE UPDATE ON office_missing_created_at.tasks
+        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+      CREATE TRIGGER audit_tasks
+        AFTER INSERT OR UPDATE OR DELETE ON office_missing_created_at.tasks
+        FOR EACH ROW EXECUTE FUNCTION audit_trigger_probe();
+      INSERT INTO office_missing_created_at.tasks (assigned_to)
+      VALUES ('${USER_A}');
+    `);
+
+    await expect(runTasksAssignedAtBackfill(asClient())).resolves.toBeUndefined();
+
+    const healthy = await pg.query<{ same: boolean }>(
+      `SELECT assigned_at = created_at AS same FROM office_dallas.tasks`
+    );
+    expect(healthy.rows[0]?.same, "healthy offices must still complete their history backfill").toBe(true);
+    const malformed = await pg.query<{ untouched: boolean }>(
+      `SELECT assigned_at IS NULL AS untouched FROM office_missing_created_at.tasks`
+    );
+    expect(malformed.rows[0]?.untouched, "a missing created_at shape is skipped before its UPDATE").toBe(true);
+  });
+
+  // The silent no-op the index pre-step actually shipped once: called before the column exists, every
+  // office fails the readiness test, nothing is written, and the migration is recorded as applied.
+  it("refuses to run before the column exists rather than quietly doing nothing", async () => {
+    await seedOffices(OFFICES);
+
+    await expect(runTasksAssignedAtBackfill(asClient())).rejects.toThrow(/must run AFTER/);
+  });
+
+  it("does not raise when there are no office schemas at all", async () => {
+    await expect(runTasksAssignedAtBackfill(asClient())).resolves.toBeUndefined();
+  });
+
+  // Configuration, asserted as configuration. These four values are what the shared mechanism is
+  // driven by, and each is a different way to be silently wrong: the wrong table locks the wrong
+  // thing, the wrong requiredColumn turns the ordering guard into a no-op, a missing trigger corrupts
+  // "Last touch" unrecoverably.
+  it("is configured against the tasks table, its own column, and both triggers", () => {
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.table).toBe("tasks");
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.requiredColumn).toBe("assigned_at");
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.capabilityColumns).toEqual(["assigned_to", "created_at"]);
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.suspendTriggers).toEqual([
+      "set_tasks_updated_at",
+      "audit_tasks",
+    ]);
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.buildStatements('"office_dallas"')).toEqual([
+      expect.stringContaining("assigned_at IS NULL"),
+      buildAssignedAtConstraintStatement('"office_dallas"'),
+    ]);
+    expect(TASKS_ASSIGNED_AT_BACKFILL_STEP.label).toContain("0239");
+  });
+});
+
+describe("tasks.assigned_at backfill — wired to the shared mechanism", () => {
+  /**
+   * A client that records the statement SEQUENCE without executing it.
+   *
+   * This is the ONE structural assertion this suite keeps. per-office-step.runtime.test.ts already
+   * proves the mechanism commits per office; what it cannot prove is that THIS step goes through it
+   * rather than around it. A future edit that reintroduced a hand-rolled loop here would leave every
+   * behavioural test above green — the rows would still come out right — while restoring the
+   * cross-tenant lock hold the whole restructure was for.
+   */
+  function recordingClient(schemas: string[]) {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      statements.push(sql.trim());
+      if (sql.includes("information_schema.schemata")) {
+        return { rows: schemas.map((schema_name) => ({ schema_name })) };
+      }
+      if (sql.includes("information_schema.columns") || sql.includes("information_schema.tables")) {
+        void params;
+        return { rows: [{ n: 1 }] };
+      }
+      return { rows: [] };
+    });
+    return { client: { query } as never, statements };
+  }
+
+  const kind = (sql: string) => {
+    if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return sql;
+    if (sql.includes("DISABLE TRIGGER")) return "DISABLE";
+    if (sql.includes("ENABLE TRIGGER")) return "ENABLE";
+    if (sql.startsWith("UPDATE")) return "UPDATE";
+    if (sql.startsWith("ALTER TABLE") && sql.includes("SET NOT NULL")) return "CONSTRAIN";
+    return null;
+  };
+
+  it("opens and commits one transaction per office, never one spanning them", async () => {
+    const { client, statements } = recordingClient([...OFFICES]);
+
+    await runTasksAssignedAtBackfill(client);
+
+    const shape = statements.map(kind).filter(Boolean) as string[];
+    expect(shape.filter((s) => s === "BEGIN")).toHaveLength(OFFICES.length);
+    expect(shape.filter((s) => s === "COMMIT")).toHaveLength(OFFICES.length);
+
+    let open = 0;
+    for (const s of shape) {
+      if (s === "BEGIN") open += 1;
+      if (s === "COMMIT") open -= 1;
+      // Two open at once would mean one transaction spanning offices — the thing this is all for.
+      expect(open, `after ${s}: ${shape.join(",")}`).toBeLessThanOrEqual(1);
+      expect(open).toBeGreaterThanOrEqual(0);
+    }
+    expect(open).toBe(0);
+  });
+
+  it("runs its UPDATE and final constraint, against each office, inside those transactions", async () => {
+    const { client, statements } = recordingClient(["office_dallas", "office_atlanta"]);
+
+    await runTasksAssignedAtBackfill(client);
+
+    expect(statements.some((s) => s.includes('"office_dallas".tasks'))).toBe(true);
+    expect(statements.some((s) => s.includes('"office_atlanta".tasks'))).toBe(true);
+    expect(statements.filter((s) => s.startsWith("UPDATE")).every((s) => s.includes("assigned_at"))).toBe(
+      true
+    );
+    expect(statements.filter((s) => s.includes("SET NOT NULL"))).toHaveLength(2);
+  });
+
+  it("suspends and restores both triggers in mirrored order", async () => {
+    const { client, statements } = recordingClient(["office_dallas"]);
+
+    await runTasksAssignedAtBackfill(client);
+
+    const triggers = statements
+      .filter((s) => s.includes("TRIGGER"))
+      .map(
+        (s) =>
+          `${s.includes("DISABLE") ? "off" : "on"}:${ASSIGNED_AT_SUSPENDED_TRIGGERS.find((t) => s.includes(t))}`
+      );
+    expect(triggers).toEqual([
+      "off:set_tasks_updated_at",
+      "off:audit_tasks",
+      "on:audit_tasks",
+      "on:set_tasks_updated_at",
+    ]);
+  });
+});

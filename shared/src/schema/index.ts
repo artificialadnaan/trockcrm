@@ -155,6 +155,7 @@ export {
 export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/tasks.js";
 export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-resolution-state.js";
 export { taskComments, TASK_COMMENT_KINDS, type TaskCommentKind } from "./tenant/task-comments.js";
+export { taskAssignmentAcknowledgements } from "./tenant/task-assignment-acknowledgements.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
 export { auditLog, auditActionEnum } from "./tenant/audit-log.js";
 export { dealTeamMembers, dealTeamRoleEnum } from "./tenant/deal-team-members.js";

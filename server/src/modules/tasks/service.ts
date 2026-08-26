@@ -1,9 +1,20 @@
 import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, jobQueue, taskResolutionState, tasks } from "@trock-crm/shared/schema";
+import crypto from "crypto";
+import {
+  deals,
+  jobQueue,
+  taskResolutionState,
+  tasks,
+} from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { TASK_RULES } from "./rules/config.js";
+import {
+  buildPendingAssignmentPredicate,
+  buildUnseenAssignmentSql,
+  pendingAssignmentTodayCt,
+} from "./pending-assignment-predicate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -1116,13 +1127,26 @@ export async function updateTask(
   if (input.remindAt !== undefined) updates.remindAt = input.remindAt ? new Date(input.remindAt) : null;
   if (input.assignedTo !== undefined) {
     updates.assignedTo = input.assignedTo;
-    // THE ACTOR becomes the assigner -- but only when the assignment actually MOVES. A PATCH that
-    // re-sends the same assignee is not a reassignment, and re-stamping on it would quietly transfer
-    // "who is waiting on this" to whoever last touched the task. This is the same identity the
-    // assignment email names as the assigner, so the mail and the reply loop now agree.
-    if (input.assignedTo !== existing.assignedTo) {
-      updates.lastAssignedBy = userId;
-    }
+    // A CHANGE OF HANDS IS AN EVENT, and this is the only place it is recorded. The comparisons have
+    // to happen INSIDE this UPDATE rather than against `existing`: another PATCH can move the task
+    // between that permission/status read and this write. In that race, a stale comparison can either
+    // invent a new assignment (invalidating a valid acknowledgement), miss a real hand-back, or transfer
+    // the reply loop's assigner to somebody who only touched an already-current assignment. The database
+    // sees the row this statement actually writes, so both fields move only when that assignee moves.
+    updates.lastAssignedBy = sql`CASE
+      WHEN ${tasks.assignedTo} IS DISTINCT FROM ${input.assignedTo} THEN ${userId}
+      ELSE ${tasks.lastAssignedBy}
+    END`;
+    // `NOW()` is the TRANSACTION-start timestamp in PostgreSQL: a request that sat open while another
+    // assignment was acknowledged could stamp this new handoff before that acknowledgement and silently
+    // make it look seen. clock_timestamp() is volatile and evaluates at the actual row change instead.
+    // A title edit still omits assignedAt entirely — re-stamping on every PATCH would make the login
+    // modal repeat forever. Migration 0239 explains why an acknowledgement must answer this specific
+    // assignment, rather than an earlier time the task belonged to the same person.
+    updates.assignedAt = sql`CASE
+      WHEN ${tasks.assignedTo} IS DISTINCT FROM ${input.assignedTo} THEN clock_timestamp()
+      ELSE ${tasks.assignedAt}
+    END`;
   }
 
   if (Object.keys(updates).length === 0) return existing;
@@ -1248,4 +1272,352 @@ export async function snoozeTask(
     .returning();
 
   return result[0];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// F6 — new-assignment login modal
+//
+// Reads and writes the per-office `task_assignment_acknowledgements` table (migration 0235). The
+// SELECT half decides what interrupts somebody at login; the INSERT half records that it did.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * How many assignments the modal shows at once.
+ *
+ * Five, with an "and N more" line, because a modal listing forty tasks is a wall and a wall is what
+ * gets reflex-dismissed. The number is exported so the test that proves urgent work survives the cap
+ * cannot drift away from the cap it is proving.
+ */
+export const PENDING_ASSIGNMENT_MODAL_LIMIT = 5;
+
+export type PendingAssignmentTask = {
+  id: string;
+  /**
+   * Opaque, lossless rendering of assigned_at for the assignment this modal displayed.
+   *
+   * JavaScript Dates lose Postgres microseconds, so returning assignedAt as a Date and posting it back
+   * would make an equality check fail for perfectly current assignments. This UTC text form retains all
+   * six fractional digits and is accepted only as an optimistic-concurrency version by /acknowledge.
+   */
+  assignmentVersion: string;
+  /**
+   * Server-signed receipt for this exact card on the capped modal page.
+   *
+   * A user can read assignedAt from ordinary task APIs, so a bare id/version pair is not evidence that
+   * this assignment was actually put in front of them. The acknowledgement endpoint requires this
+   * receipt in addition to re-checking owner/version under a row lock.
+   */
+  acknowledgementToken: string;
+  title: string;
+  priority: string;
+  dueDate: string | null;
+  /**
+   * Display name of the person who last handed this task to the recipient.
+   *
+   * `lastAssignedBy` records every reassignment; before the first one, the creator is necessarily
+   * the assigner. Resolving `COALESCE(lastAssignedBy, createdBy)` therefore preserves the creator
+   * fallback without misattributing a later handoff to the original author.
+   */
+  assignedByName: string | null;
+  /**
+   * TRUE when this person has never been shown this task; FALSE when it is a repeat of something they
+   * have already acknowledged. Drives both the ordering below and the modal's copy — without it the
+   * modal calls a months-old urgent task a new assignment.
+   */
+  isNew: boolean;
+};
+
+/**
+ * The assignments to put in front of `userId` at login, most urgent first, capped at five.
+ *
+ * ⚠️ TWO ORDERING RULES, AND THEY HAVE TO BE IN THIS ORDER.
+ *
+ * UNSEEN FIRST. `LIMIT 5` and the urgent/high/overdue repeat rule are each reasonable and together
+ * they invert the feature: repeats stay eligible on every login, so once somebody holds five of them
+ * those five fill every slot forever and a genuinely new assignment is never shown at all. The modal
+ * becomes a permanent display of things the user has already seen while the one thing they have not
+ * stays invisible. The invariant that fixes it is that a never-acknowledged assignment is never
+ * displaced by an already-seen one — repeats get only the slots unseen work does not need.
+ *
+ * THEN PRIORITY, WITHIN each group. `priority` is a Postgres ENUM declared
+ * ('urgent','high','normal','low') and enum comparison follows DECLARATION order, so the obvious
+ * `ORDER BY priority DESC` sorts low → normal → high → urgent and, at LIMIT 5, drops urgent and high
+ * off the end entirely. `taskPriorityRankSql()` (rank 0 = urgent) ordered ASC is the fix, reused rather
+ * than re-derived because the CASE already exists twice in this file. Keeping it SECOND is what stops
+ * the correct urgent-first ordering from becoming the mechanism that buries new work.
+ *
+ * `total` counts everything matching, not the page — it feeds the "and N more" line, and counting the
+ * returned array would just report the limit. `newTotal` counts the unseen ones, so the modal can say
+ * how many are actually new instead of calling a months-old repeat a new assignment.
+ */
+export async function getPendingAssignmentTasks(
+  tenantDb: TenantDb,
+  userId: string,
+  officeId?: string
+): Promise<{ tasks: PendingAssignmentTask[]; total: number; newTotal: number }> {
+  const todayCt = pendingAssignmentTodayCt();
+  const predicate = buildPendingAssignmentPredicate({ userId, todayCt });
+  const unseen = buildUnseenAssignmentSql({ userId });
+  const acknowledgementOfficeId = acknowledgementOfficeScope(officeId);
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      ${tasks.id}                AS id,
+      to_char(${tasks.assignedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS assignment_version,
+      ${tasks.title}             AS title,
+      ${tasks.priority}::text    AS priority,
+      ${tasks.dueDate}::text     AS due_date,
+      (SELECT display_name
+         FROM public.users
+        WHERE id = COALESCE(${tasks.lastAssignedBy}, ${tasks.createdBy})) AS assigned_by_name,
+      ${unseen}                  AS is_new,
+      -- Computed over the full matching set BEFORE the LIMIT applies, so one round trip answers all of
+      -- "what do we show", "how many more are there" and "how many of those are actually new".
+      COUNT(*) OVER ()::int      AS total,
+      COUNT(*) FILTER (WHERE ${unseen}) OVER ()::int AS new_total
+    FROM tasks
+    WHERE ${predicate}
+    ORDER BY is_new DESC, ${taskPriorityRankSql()} ASC, ${tasks.dueDate} ASC NULLS LAST, ${taskIdSqlRaw} ASC
+    LIMIT ${PENDING_ASSIGNMENT_MODAL_LIMIT}
+  `);
+
+  const rows = ((result as any).rows ?? result) as Array<Record<string, unknown>>;
+
+  return {
+    tasks: rows.map((row) => {
+      const id = String(row.id);
+      const assignmentVersion = String(row.assignment_version);
+      return {
+        id,
+        assignmentVersion,
+        acknowledgementToken: createAcknowledgementToken({
+          userId,
+          officeId: acknowledgementOfficeId,
+          taskId: id,
+          assignmentVersion,
+        }),
+        title: String(row.title),
+        priority: String(row.priority),
+        dueDate: (row.due_date as string | null) ?? null,
+        assignedByName: (row.assigned_by_name as string | null) ?? null,
+        isNew: row.is_new === true,
+      };
+    }),
+    total: Number(rows[0]?.total ?? 0),
+    newTotal: Number(rows[0]?.new_total ?? 0),
+  };
+}
+
+/** A task id we are willing to hand to Postgres. Anything else is dropped before it can raise 22P02. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The only lossless timestamp representation this endpoint issues and accepts as an assignment version. */
+const ASSIGNMENT_VERSION_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
+type AssignmentAcknowledgementCandidate = {
+  taskId: string;
+  assignmentVersion: string;
+};
+
+/** Keep the exact server-issued assigned_at version in SQL rather than round-tripping through JS Date. */
+const assignmentVersionSql = sql<string>`to_char(${tasks.assignedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION = "v1";
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TEST_OFFICE = "test-office";
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX =
+  `${TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION}.`;
+// SHA-256 is 32 bytes, whose unpadded base64url encoding is always 43 ASCII characters.
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_LENGTH = 43;
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_SHAPE = /^[A-Za-z0-9_-]{43}$/;
+
+function acknowledgementTokenSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+    throw new Error("JWT_SECRET must be set before issuing task-assignment acknowledgement receipts");
+  }
+  return "dev-secret-change-in-production";
+}
+
+function acknowledgementOfficeScope(officeId: string | undefined): string {
+  // Direct service tests have no authenticated request/office context. Production routes always pass the
+  // active office id, which binds a receipt to the tenant it was rendered from.
+  return officeId ?? TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TEST_OFFICE;
+}
+
+function acknowledgementTokenPayload({
+  userId,
+  officeId,
+  taskId,
+  assignmentVersion,
+}: {
+  userId: string;
+  officeId: string;
+  taskId: string;
+  assignmentVersion: string;
+}): string {
+  return [
+    "trockcrm:task-assignment-acknowledgement",
+    TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION,
+    userId,
+    officeId,
+    taskId,
+    assignmentVersion,
+  ].join("\u0000");
+}
+
+function signAcknowledgementToken(input: Parameters<typeof acknowledgementTokenPayload>[0]): string {
+  return crypto
+    .createHmac("sha256", acknowledgementTokenSecret())
+    .update(acknowledgementTokenPayload(input), "utf8")
+    .digest("base64url");
+}
+
+function createAcknowledgementToken(input: Parameters<typeof acknowledgementTokenPayload>[0]): string {
+  return `${TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_VERSION}.${signAcknowledgementToken(input)}`;
+}
+
+function hasValidAcknowledgementToken(
+  token: string,
+  input: Parameters<typeof acknowledgementTokenPayload>[0]
+): boolean {
+  // Do the fixed-size, canonical wire-shape check BEFORE signing or allocating a Buffer. Node's
+  // base64url decoder intentionally ignores non-alphabet characters, so decoding first would accept a
+  // valid signature padded with arbitrary junk and make a malformed 10 MB request allocate needlessly.
+  if (
+    token.length !==
+      TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX.length +
+        TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_LENGTH ||
+    !token.startsWith(TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX)
+  ) {
+    return false;
+  }
+  const signature = token.slice(TASK_ASSIGNMENT_ACKNOWLEDGEMENT_TOKEN_PREFIX.length);
+  if (!TASK_ASSIGNMENT_ACKNOWLEDGEMENT_SIGNATURE_SHAPE.test(signature)) return false;
+
+  // This receipt stays valid for the exact assignment it names. Expiry would create a lost-ack window
+  // after a person has actually seen a card but before they close the modal; its user/office/task/version
+  // binding and the locked version re-check make a stale receipt harmless once the assignment changes.
+  const expected = signAcknowledgementToken(input);
+  return crypto.timingSafeEqual(Buffer.from(signature, "ascii"), Buffer.from(expected, "ascii"));
+}
+
+/**
+ * Record that `userId` has been shown these assignments. Returns how many displayed assignments were
+ * still theirs at the exact assignment version the modal rendered.
+ *
+ * A SERVER-SIGNED RECEIPT must bind the caller, active office, task and displayed version before a row
+ * is eligible at all. `assigned_at` is readable through ordinary task APIs, so ownership + version alone
+ * would let a caller silently pre-acknowledge a normal task the capped modal never put in front of them.
+ * The receipt is issued only by the capped GET page and remains valid for that exact assignment: expiry
+ * would lose a legitimate acknowledgement when somebody leaves the modal open, while a reassignment
+ * invalidates it through the locked version re-check. OWNERSHIP AND THE DISPLAYED VERSION are then
+ * re-derived under a row lock: a task can leave Alice and come back before she closes an old modal, and
+ * checking only id/current owner would acknowledge the NEW handoff with the OLD modal. Stale or malformed
+ * receipts are dropped SILENTLY rather than 403'd, so the modal can close and reappear at the next login
+ * with the current assignment.
+ *
+ * Non-uuid ids are filtered before the query, not caught after it: `invalid input syntax for type uuid`
+ * is a 22P02 that surfaces as a 500 on a path whose entire contract is to fail quietly.
+ *
+ * ON CONFLICT UPDATE is the idempotency guarantee — a double click, a StrictMode double-invoke and a
+ * retried request still leave one row, while a task handed away and back can replace its old acknowledgement
+ * with one that answers the current assignment. The acknowledgement is derived entirely in PostgreSQL:
+ * `GREATEST(NOW(), tasks.assigned_at)` covers a handoff whose exact database timestamp is ahead of this
+ * transaction clock, and the conflict branch preserves an already-later acknowledgement. That keeps the
+ * acknowledgement monotonic without ever round-tripping `assigned_at` through a millisecond JS Date.
+ */
+export async function acknowledgeTaskAssignments(
+  tenantDb: TenantDb,
+  userId: string,
+  assignments: unknown,
+  officeId?: string
+): Promise<number> {
+  const candidates: AssignmentAcknowledgementCandidate[] = [];
+  const seen = new Set<string>();
+  const acknowledgementOfficeId = acknowledgementOfficeScope(officeId);
+  // The browser can send only the five cards from its capped GET page. Bound raw entries BEFORE token
+  // verification too: a crafted body full of unique, plausible ids and bogus signatures must not turn
+  // this quiet no-op endpoint into unbounded HMAC work or Buffer allocation.
+  const rawAssignments = Array.isArray(assignments) ? assignments : [];
+  const entriesToInspect = Math.min(rawAssignments.length, PENDING_ASSIGNMENT_MODAL_LIMIT);
+  for (let index = 0; index < entriesToInspect; index += 1) {
+    const value = rawAssignments[index];
+    if (!value || typeof value !== "object") continue;
+    const taskId = (value as Record<string, unknown>).taskId;
+    const assignmentVersion = (value as Record<string, unknown>).assignmentVersion;
+    const acknowledgementToken = (value as Record<string, unknown>).acknowledgementToken;
+    if (
+      typeof taskId !== "string" ||
+      typeof assignmentVersion !== "string" ||
+      typeof acknowledgementToken !== "string" ||
+      !UUID_SHAPE.test(taskId.trim()) ||
+      !ASSIGNMENT_VERSION_SHAPE.test(assignmentVersion)
+    ) {
+      continue;
+    }
+    const normalizedTaskId = taskId.trim();
+    const key = `${normalizedTaskId}:${assignmentVersion}`;
+    if (seen.has(key)) continue;
+    // The receipt is emitted only for rows in the GET endpoint's ordered five-card page. A task's
+    // assigned_at is visible through ordinary task APIs, so ownership + version alone would let a user
+    // manufacture an acknowledgement for a normal task they have not been shown, including page six.
+    if (
+      !hasValidAcknowledgementToken(acknowledgementToken, {
+        userId,
+        officeId: acknowledgementOfficeId,
+        taskId: normalizedTaskId,
+        assignmentVersion,
+      })
+    ) {
+      continue;
+    }
+    seen.add(key);
+    candidates.push({ taskId: normalizedTaskId, assignmentVersion });
+  }
+  if (candidates.length === 0) return 0;
+
+  // This runs inside the tenant middleware's BEGIN/COMMIT transaction. FOR UPDATE retains each row lock
+  // through the following upsert and the route's commit, so another assignment PATCH cannot slip a new
+  // assigned_at between the test below and the acknowledgement write.
+  const owned = await tenantDb
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(
+      and(
+        eq(tasks.assignedTo, userId),
+        or(
+          ...candidates.map(({ taskId, assignmentVersion }) =>
+            and(eq(tasks.id, taskId), sql`${assignmentVersionSql} = ${assignmentVersion}`)
+          )
+        )
+      )
+    )
+    .for("update");
+  if (owned.length === 0) return 0;
+
+  // Keep `assigned_at` inside this SQL statement. Drizzle decodes a timestamptz into a JS Date, which
+  // drops its final three microseconds; an acknowledgement must compare against the exact locked value.
+  // The first SELECT locked these ids until the tenant transaction commits, so this second read cannot
+  // observe a different handoff. A timestamp from a future/long-running transaction must still settle
+  // the modal, and an existing future acknowledgement must never be moved backwards on a duplicate POST.
+  await tenantDb.execute(sql`
+    INSERT INTO task_assignment_acknowledgements (task_id, user_id, acknowledged_at)
+    SELECT
+      ${tasks.id},
+      ${userId}::uuid,
+      GREATEST(NOW(), ${tasks.assignedAt})
+    FROM tasks
+    WHERE ${inArray(
+      tasks.id,
+      owned.map((row) => row.id)
+    )}
+    ON CONFLICT (task_id, user_id) DO UPDATE
+    SET acknowledged_at = GREATEST(
+      task_assignment_acknowledgements.acknowledged_at,
+      EXCLUDED.acknowledged_at
+    )
+  `);
+
+  return owned.length;
 }

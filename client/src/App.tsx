@@ -7,6 +7,9 @@ import { RequireRole, RequireGlobalAdmin } from "@/components/auth/require-role"
 import { REPORT_VIEWER_ROLES } from "@/lib/roles";
 import { AppShell } from "@/components/layout/app-shell";
 import { BoardAliasRedirect } from "@/components/shared/board-alias-redirect";
+// Statically imported on purpose. A lazy() modal cannot render until its own chunk arrives, which
+// defeats the point of firing it at the moment of login.
+import { TaskAssignmentModal } from "@/components/tasks/task-assignment-modal";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { PendingRfpPage } from "@/pages/deals/pending-rfp-page";
 import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
@@ -176,7 +179,27 @@ function AuthGate({ children }: { children: ReactNode }) {
   if (user.requiresOnboarding && location.pathname !== "/onboarding-required") {
     return <Navigate to="/onboarding-required" replace />;
   }
-  return <>{children}</>;
+  // The new-assignment modal mounts HERE, and both halves of that are deliberate.
+  //
+  // Inside AuthGate, in the FINAL return: every public/tokenized path above has already returned, so
+  // the modal is a structural no-op on /p/, /daily-summary/, /scorecards/:id/corrective-action and
+  // /reset-password. Those are deliberately unauthenticated pages — a signed-in person opening a client
+  // photo link must not get an interrupting task dialog over one — and doing it structurally beats a
+  // second copy of that path list living inside the component.
+  //
+  // A SIBLING of `children`, not inside it: `children` is the <Suspense> boundary that wraps <Routes>,
+  // and the post-login landing route is lazy(). A modal declared inside that boundary cannot render
+  // until the dashboard chunk resolves, which is precisely the moment it needs to be on screen.
+  // <Toaster/> is the precedent for a route-independent global, not for the boundary it sits in.
+  //
+  // Declaration position is otherwise irrelevant to DOM and focus order: DialogContent portals to
+  // document.body, so nothing here competes with the app shell's skip link.
+  return (
+    <>
+      {children}
+      <TaskAssignmentModal />
+    </>
+  );
 }
 
 function OnboardingRequiredPage() {

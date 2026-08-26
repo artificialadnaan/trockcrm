@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider, useAuth } from "./auth";
 import { api } from "./api";
+import { taskAssignmentModalShownStorageKey } from "./task-assignment-modal-shown";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -20,7 +21,16 @@ let container: HTMLDivElement;
 let root: Root;
 
 function Probe() {
-  const { user, loading, localLogin } = useAuth();
+  const {
+    user,
+    loading,
+    localLogin,
+    login,
+    changePassword,
+    refreshUser,
+    assignmentModalSession,
+    assignmentModalSessionResetPending,
+  } = useAuth();
   const [result, setResult] = React.useState<Record<string, unknown> | null>(null);
 
   return (
@@ -28,7 +38,11 @@ function Probe() {
       <div data-testid="loading">{String(loading)}</div>
       <div data-testid="user-state">{user ? `${user.email}:${String(user.mustChangePassword)}` : "none"}</div>
       <div data-testid="result">{result ? JSON.stringify(result) : "none"}</div>
+      <div data-testid="assignment-modal-session">
+        {`${assignmentModalSession}:${String(assignmentModalSessionResetPending)}`}
+      </div>
       <button
+        data-testid="local-login"
         type="button"
         onClick={async () => {
           const loginResult = await localLogin("rep@example.com", "temporary", "https://onboarding.trockcrm.com/cleanup");
@@ -36,6 +50,33 @@ function Probe() {
         }}
       >
         login
+      </button>
+      <button
+        data-testid="dev-login"
+        type="button"
+        onClick={async () => {
+          await login("rep@trock.dev");
+        }}
+      >
+        dev login
+      </button>
+      <button
+        data-testid="change-password"
+        type="button"
+        onClick={async () => {
+          await changePassword("temporary", "new-password");
+        }}
+      >
+        change password
+      </button>
+      <button
+        data-testid="refresh-user"
+        type="button"
+        onClick={async () => {
+          await refreshUser();
+        }}
+      >
+        refresh user
       </button>
     </div>
   );
@@ -96,5 +137,72 @@ describe("AuthProvider local login", () => {
     expect(container.querySelector('[data-testid="user-state"]')?.textContent).toBe("rep@example.com:true");
     expect(container.querySelector('[data-testid="result"]')?.textContent).toContain('"mustChangePassword":true');
     expect(container.querySelector('[data-testid="result"]')?.textContent).toContain('"returnTo":"https://onboarding.trockcrm.com/cleanup"');
+  });
+
+  it("durably clears the assignment shown-set only after explicit web auth, before a returnTo can navigate", async () => {
+    const user = {
+      id: "user-1",
+      email: "rep@example.com",
+      displayName: "Rep Example",
+      role: "rep" as const,
+      officeId: "office-1",
+      mustChangePassword: false,
+    };
+    mockedApi.mockImplementation(async (path) => {
+      if (path === "/auth/me") return { user };
+      if (path === "/auth/dev/login") return { user: { ...user, email: "rep@trock.dev" } };
+      if (path === "/auth/local/login") return { user, returnTo: "https://onboarding.trockcrm.com/cleanup" };
+      if (path === "/auth/local/change-password") return { user };
+      throw new Error(`Unexpected API call: ${path}`);
+    });
+
+    await act(async () => {
+      root.render(
+        <AuthProvider>
+          <Probe />
+        </AuthProvider>,
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+
+    const session = () => container.querySelector('[data-testid="assignment-modal-session"]')?.textContent;
+    const click = async (testId: string) => {
+      await act(async () => {
+        container.querySelector(`[data-testid="${testId}"]`)?.dispatchEvent(
+          new MouseEvent("click", { bubbles: true }),
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+    };
+
+    const shownKey = taskAssignmentModalShownStorageKey(user.id);
+    window.sessionStorage.setItem(shownKey, JSON.stringify(["office-1:task-1"]));
+
+    // Boot and a /auth/me refresh restore the cookie-backed login. They must preserve the shown-set
+    // that makes F5 quiet, rather than manufacturing a new session for the modal.
+    expect(session()).toBe("0:false");
+    await click("refresh-user");
+    expect(session()).toBe("0:false");
+    expect(window.sessionStorage.getItem(shownKey)).not.toBeNull();
+
+    await click("dev-login");
+    expect(session()).toBe("1:true");
+    expect(window.sessionStorage.getItem(shownKey)).toBeNull();
+    await click("refresh-user");
+    expect(session()).toBe("1:true");
+
+    window.sessionStorage.setItem(shownKey, JSON.stringify(["office-1:task-1"]));
+    await click("local-login");
+    expect(session()).toBe("2:true");
+    // Probe receives localLogin's resolved result at this point. AuthEntryScreen follows this exact
+    // `returnTo` with window.location.replace(), so the storage clear has to precede this resolution
+    // rather than wait for a task modal effect that the navigation would destroy.
+    expect(container.querySelector('[data-testid="result"]')?.textContent).toContain("onboarding.trockcrm.com");
+    expect(window.sessionStorage.getItem(shownKey)).toBeNull();
+
+    window.sessionStorage.setItem(shownKey, JSON.stringify(["office-1:task-1"]));
+    await click("change-password");
+    expect(session()).toBe("3:true");
+    expect(window.sessionStorage.getItem(shownKey)).toBeNull();
   });
 });

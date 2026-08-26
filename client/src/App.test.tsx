@@ -69,6 +69,50 @@ describe("App route guards", () => {
     expect(source).toContain('if (location.pathname === "/reset-password") return <>{children}</>;');
   });
 
+  // The new-assignment modal's mount POINT is the whole design, and both halves of it are load-bearing:
+  //
+  //   INSIDE AuthGate, in its final return. AuthGate short-circuits to `children` for /p/,
+  //   /daily-summary/, /scorecards/:id/corrective-action and /reset-password before it ever looks at
+  //   the user, so mounting here is what makes the modal a structural no-op on those pages. Those are
+  //   deliberately unauthenticated surfaces — a signed-in person opening a client photo link must not
+  //   get an interrupting task dialog over one — and a path check inside the component would be a
+  //   second list to keep in sync with AuthGate's.
+  //
+  //   OUTSIDE <Suspense>. The boundary wraps <Routes>, and the post-login landing route is lazy(), so
+  //   a modal declared inside it cannot render until the dashboard chunk resolves — which is exactly
+  //   the moment it is supposed to be on screen. <Toaster/> sits inside that boundary; it is the
+  //   precedent for "route-independent global", not for the boundary.
+  it("mounts the new-assignment modal inside AuthGate and OUTSIDE the Suspense boundary", () => {
+    // The final return of AuthGate — after every public-path short-circuit and after the !user,
+    // mustChangePassword and requiresOnboarding takeovers.
+    expect(source).toContain("return ( <> {children} <TaskAssignmentModal /> </> );");
+
+    // ...and NOT beside <Toaster/>, which is inside the boundary.
+    expect(source).not.toContain("<Toaster position=\"top-right\" richColors /> <TaskAssignmentModal />");
+    expect(source).not.toContain("<TaskAssignmentModal /> <Toaster");
+  });
+
+  it("keeps the four public routes short-circuiting BEFORE the modal can mount", () => {
+    // If any of these moved below the final return, the modal would render over a tokenized page.
+    const gate = source.slice(source.indexOf("function AuthGate"), source.indexOf("function OnboardingRequiredPage"));
+    const modalAt = gate.indexOf("<TaskAssignmentModal />");
+    expect(modalAt).toBeGreaterThan(-1);
+    for (const publicPath of [
+      'location.pathname.startsWith("/p/")',
+      'location.pathname.startsWith("/daily-summary/")',
+      "/^\\/scorecards\\/[^/]+\\/corrective-action$/.test(location.pathname)",
+      'location.pathname === "/reset-password"',
+    ]) {
+      expect(gate.indexOf(publicPath), publicPath).toBeGreaterThan(-1);
+      expect(gate.indexOf(publicPath), publicPath).toBeLessThan(modalAt);
+    }
+  });
+
+  it("does not lazy-load the modal — a lazy() modal cannot fire before its own chunk resolves", () => {
+    expect(source).toContain('import { TaskAssignmentModal } from "@/components/tasks/task-assignment-modal";');
+    expect(source).not.toContain("const TaskAssignmentModal = lazy(");
+  });
+
   it("opens the Reports by Region route to all authenticated users (no role guard)", () => {
     // Region is now available to every CRM role (server /api/reports/region dropped requireDirector too),
     // so it is mounted like the open analytics reports — with no RequireRole wrapper.

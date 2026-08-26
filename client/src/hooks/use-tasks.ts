@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
+import { getOfficeRequestOptions } from "@/lib/office-selection";
 
 export type TaskStatus =
   | "pending"
@@ -715,4 +716,101 @@ export async function ackTaskReplies(taskId: string, seenUpTo: string) {
     `/tasks/${encodeURIComponent(taskId)}/ack`,
     { method: "POST", json: { seenUpTo } }
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// F6 — new-assignment login modal
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A row in the login modal. Deliberately NOT `Task`: the endpoint returns the five fields the modal
+ * renders and nothing else, and widening it to the full task shape would invite the modal to grow into
+ * a second task list — which is the wall-of-tasks outcome the five-row cap exists to prevent.
+ */
+export interface PendingAssignmentTask {
+  id: string;
+  /** Opaque assigned_at version for the exact handoff this modal rendered. */
+  assignmentVersion: string;
+  /** Server-signed receipt proving this exact card was rendered to this user. */
+  acknowledgementToken: string;
+  title: string;
+  priority: string;
+  dueDate: string | null;
+  /**
+   * Who last handed this task to the recipient, or its creator before the first reassignment.
+   * Null only when neither resolved user has a display name.
+   */
+  assignedByName: string | null;
+  /**
+   * True when this person has never been shown this task. False for a repeat — urgent, high or overdue
+   * work the server returns again on every login until it leaves pending. The modal groups on it, so a
+   * repeat is never counted or captioned as a new assignment.
+   */
+  isNew: boolean;
+}
+
+export interface PendingAssignmentTasksResponse {
+  tasks: PendingAssignmentTask[];
+  /** Everything matching, not just what was returned — feeds the "and N more" line. */
+  total: number;
+  /** How many of those have never been shown. What the headline is allowed to call "new". */
+  newTotal: number;
+}
+
+/**
+ * `officeId` is PINNED on the request rather than left to api()'s ambient fallback.
+ *
+ * Office scope is URL-driven: api() reads ?officeId out of window.location on every call and turns it
+ * into x-office-id, which decides the tenant schema the request lands in. Leaving it ambient means the
+ * tenant is whatever the URL happens to say at the moment the request fires, which is not necessarily
+ * the office the caller meant — an in-app navigation between the decision and the call silently
+ * redirects it. Naming the office makes the request self-contained; hasOfficeHeader() in api() then
+ * leaves the explicit header alone.
+ */
+export async function fetchPendingAssignmentTasks(
+  officeId?: string | null,
+  signal?: AbortSignal
+) {
+  return api<PendingAssignmentTasksResponse>(
+    "/tasks/pending-acknowledgement",
+    { ...getOfficeRequestOptions(officeId), signal }
+  );
+}
+
+/**
+ * Record that the modal has shown these assignments to the signed-in user.
+ *
+ * Fire-and-forget by design: the server filters each displayed id/version pair to the caller's CURRENT
+ * assignment and answers 204 whatever happens, and the modal must close on the user's click rather than
+ * on a round trip. Rejections are the caller's to swallow — a failed acknowledgement costs one repeat of
+ * the modal, whereas a dialog that stays open because the network blinked is a trapped user.
+ */
+export type PendingAssignmentAcknowledgement = Pick<
+  PendingAssignmentTask,
+  "id" | "assignmentVersion" | "acknowledgementToken"
+>;
+
+export async function acknowledgeTaskAssignments(
+  assignments: PendingAssignmentAcknowledgement[],
+  officeId?: string | null
+) {
+  return api<void>("/tasks/acknowledge", {
+    method: "POST",
+    // `assignmentVersion` is the server-issued, lossless assigned_at value from the card, and the
+    // receipt is scoped to this person and office. Together they prove the acknowledgement belongs to
+    // the exact card the modal rendered; a task that leaves and comes back before close cannot have its
+    // newer assignment acknowledged by this stale card.
+    json: {
+      assignments: assignments.map(({ id, assignmentVersion, acknowledgementToken }) => ({
+        taskId: id,
+        assignmentVersion,
+        acknowledgementToken,
+      })),
+    },
+    // MUST be the office the ids were READ from, not the one in the URL now. Ids belong to exactly one
+    // tenant schema; posted against another, the server's ownership re-derivation matches nothing and
+    // the write is a silent no-op that still answers 204. The user sees the modal close and the tasks
+    // come back at the next login with nothing anywhere explaining why.
+    ...getOfficeRequestOptions(officeId),
+  });
 }

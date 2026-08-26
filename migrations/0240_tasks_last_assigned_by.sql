@@ -21,8 +21,9 @@
 --     created_by         WHO TYPED IT INTO EXISTENCE.        Never moves. (0001)
 --     assigned_at        WHEN it last changed hands.         (0239, feat/task-assignment-modal)
 --     last_assigned_by   WHO last handed it over.            (here)
--- Checked feat/task-assignment-modal before adding this: its 0239 adds `assigned_at` and nothing
--- else, and 0235's task_assignment_acknowledgements records the ACKNOWLEDGER (the assignee). Neither
+-- Checked feat/task-assignment-modal before adding this: its 0239 adds `assigned_at`, maintains its
+-- timestamp, and supplies a rolling-deploy database guard for this actor from app.current_user_id;
+-- 0235's task_assignment_acknowledgements records the ACKNOWLEDGER (the assignee). Neither
 -- carries the actor, so this is not a second column answering a question already answered — it is the
 -- identity half of the same event their timestamp describes. The two are written at the SAME sites so
 -- they can never disagree about whether an assignment happened.

@@ -34,8 +34,9 @@ import type pg from "pg";
 //   await client.query(sql);                              // adds the column
 //   await runPerOfficeTransactionalStep(client, MY_STEP);  // then the locking work, per office
 //
-// `buildStatements` receives the schema name ALREADY validated and quoted, so interpolating it is safe;
-// nothing else from the database is interpolated anywhere in this file.
+// `buildStatements` receives the schema name ALREADY validated and quoted, plus the same validated raw
+// name for durable public-state keys. Interpolate the quoted name as an identifier; quote the raw name as
+// a SQL literal before using it in a statement. Nothing unvalidated from the database is interpolated.
 //
 // Index builds are the one case this does NOT cover: `CREATE INDEX CONCURRENTLY` cannot run inside a
 // transaction at all, so it needs the sibling pattern in task-source-index.ts (no BEGIN/COMMIT, one
@@ -75,8 +76,30 @@ export interface PerOfficeStep {
    * outcome and a loud failure is the recoverable one.
    */
   suspendTriggers?: readonly string[];
-  /** Statements run inside each office's transaction. `schema` is already validated and quoted. */
-  buildStatements: (schema: string) => readonly string[];
+  /**
+   * Optional one-statement snapshot of the office schemas this step should visit. It must return a
+   * `schema_name` column in the same shape as `OFFICE_SCHEMA_DISCOVERY_SQL`.
+   *
+   * A migration with a provisioner cutover can join its durable marker here, so a newly committed
+   * office is atomically either excluded with its marker or absent from the snapshot. Do not perform
+   * a marker lookup separately and filter the default snapshot in application code.
+   */
+  schemaDiscoverySql?: string;
+  /**
+   * Runs after BEGIN but before any trigger or migration statement. It can take a row lock / verify a
+   * durable per-office state machine and return false to commit a deliberate no-op for this schema.
+   * `schema` is validated and quoted; `schemaName` is the same validated identifier without quotes.
+   */
+  beforeStatements?: (
+    client: pg.Client,
+    schema: string,
+    schemaName: string
+  ) => boolean | Promise<boolean>;
+  /**
+   * Statements run inside each office's transaction. `schema` is already validated and quoted;
+   * `schemaName` is the same validated identifier without quotes for durable public-state keys.
+   */
+  buildStatements: (schema: string, schemaName: string) => readonly string[];
 }
 
 export interface PerOfficeStepResult {
@@ -126,7 +149,9 @@ export async function runPerOfficeTransactionalStep(
   client: pg.Client,
   step: PerOfficeStep
 ): Promise<PerOfficeStepResult> {
-  const schemaResult = await client.query<{ schema_name: string }>(OFFICE_SCHEMA_DISCOVERY_SQL);
+  const schemaResult = await client.query<{ schema_name: string }>(
+    step.schemaDiscoverySql ?? OFFICE_SCHEMA_DISCOVERY_SQL
+  );
 
   let officesWithTable = 0;
   let officesWithRequiredColumn = 0;
@@ -161,15 +186,23 @@ export async function runPerOfficeTransactionalStep(
       }
     }
     if (!capable) continue;
-    officesProcessed += 1;
-
     await client.query("BEGIN");
     try {
+      // A stateful migration can claim its durable per-office row here. Keeping that claim inside the
+      // same short transaction as its DDL/backfill gives it a real rollback boundary; a stale discovery
+      // snapshot must never make this runner perform work after the state has moved on.
+      if (step.beforeStatements && !(await step.beforeStatements(client, schema, schemaName))) {
+        await client.query("COMMIT");
+        continue;
+      }
+
+      officesProcessed += 1;
+
       for (const trigger of step.suspendTriggers ?? []) {
         await client.query(`ALTER TABLE ${schema}.${step.table} DISABLE TRIGGER ${trigger}`);
       }
 
-      for (const statement of step.buildStatements(schema)) {
+      for (const statement of step.buildStatements(schema, schemaName)) {
         await client.query(statement);
       }
 
