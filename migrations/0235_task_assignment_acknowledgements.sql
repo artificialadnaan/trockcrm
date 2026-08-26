@@ -15,7 +15,7 @@
 -- survive a new device, a cleared browser profile and a second browser, which is what rules out
 -- sessionStorage: this exists so "I never saw that assignment" is answerable from the database.
 --
--- ⚠️ THE SEED AT THE BOTTOM OF THE LOOP IS THE MOST IMPORTANT STATEMENT IN THIS FILE.
+-- ⚠️ THE DURABLE HISTORICAL SNAPSHOT/MATERIALIZATION RUNNER IS THE MOST IMPORTANT PART OF THIS MIGRATION.
 -- The modal's query treats "no ack row" as "never shown". An empty table therefore means the ENTIRE
 -- history of open assignments is unshown, and the modal serves them five at a time: a user holding 200
 -- open tasks would meet an interrupting dialog on roughly forty consecutive logins, showing work they
@@ -54,10 +54,11 @@
 
 -- Existing tenants are intentionally NOT handled in this file. runner.ts dispatches 0235 to
 -- server/src/migrations/task-assignment-acknowledgements.ts, which uses the shared per-office
--- transactional mechanism: CREATE TABLE (with its FK lock), CREATE INDEX, and the historical seed each
--- run for one office and COMMIT before the next begins. A DO loop here would make runner.ts send all of
--- that work as one implicit transaction and hold the first office's tasks lock while it touches every
--- later office — exactly the deploy-wide write stall this migration must avoid.
+-- transactional mechanism: it first captures each office's exact historical pairs, then creates/indexes
+-- and materializes each captured office in its own transaction before the next begins. A DO loop here
+-- would make runner.ts send all of that work as one implicit transaction and hold the first office's
+-- tasks lock while it touches every later office — exactly the deploy-wide write stall this migration
+-- must avoid.
 --
 -- Keep the existing-office work OUT of this file. The marked block below is retained only because the
 -- office provisioner clones it for schemas created after this deploy.
@@ -69,14 +70,45 @@
 -- narrow, permanent fence on public.offices: it runs at the old transaction's COMMIT, after that
 -- provisioner has created tasks but before the incomplete office becomes visible.
 --
--- Keep the fence's cutover set durable. The runner can retry after this file committed but before the
--- per-office helper and migration ledger completed. A process-local schema snapshot would then see a
--- post-fence office on retry and seed its brand-new tasks as if they were historical. The deferred
--- fence records every office it repairs in the same provisioning transaction; the helper excludes those
--- schemas from the historical table/index/seed pass.
+-- The cutover is a durable per-office state machine, not a timestamp or a process-local snapshot:
+--
+--   captured   = phase 1 committed every historical (task, assignee) pair before DDL;
+--   seeded     = phase 2 committed that exact baseline, then removed its temporary pairs;
+--   post_fence = an old API image provisioned this office after the migration fence was installed.
+--
+-- A retry includes `captured` so it can finish phase 2, but it never samples tasks again for either
+-- `captured` or `seeded`; an office committed by the deferred fence is atomically visible with
+-- `post_fence` and is excluded. The header's state and the exact pairs are intentionally public because
+-- the migration runner commits each tenant independently to avoid holding hot-table locks across offices.
+CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_cutovers (
+  schema_name text PRIMARY KEY,
+  state text NOT NULL,
+  CONSTRAINT task_assignment_ack_cutover_state_check
+    CHECK (state IN ('captured', 'seeded', 'post_fence'))
+);
+
+CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_baseline_pairs (
+  schema_name text NOT NULL
+    REFERENCES public._task_assignment_acknowledgements_cutovers(schema_name) ON DELETE CASCADE,
+  task_id uuid NOT NULL,
+  user_id uuid NOT NULL,
+  baseline_ack_at timestamptz NOT NULL,
+  PRIMARY KEY (schema_name, task_id, user_id)
+);
+
+-- Compatibility bridge for an interrupted deploy that executed the immediately preceding revision of
+-- this same unledgered migration: it had only this post-fence table. Copying it before the trigger is
+-- replaced preserves those genuinely new offices as post_fence rather than reclassifying their first
+-- assignments as history. New executions use the cutover header below; this table is not consulted by
+-- the helper.
 CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_fenced_offices (
   schema_name text PRIMARY KEY
 );
+
+INSERT INTO public._task_assignment_acknowledgements_cutovers (schema_name, state)
+SELECT schema_name, 'post_fence'
+FROM public._task_assignment_acknowledgements_fenced_offices
+ON CONFLICT (schema_name) DO NOTHING;
 
 -- Install this trigger before runner.ts scans existing offices. CREATE TRIGGER locks public.offices, so
 -- an old provisioning transaction that inserted first must finish before installation can return; the
@@ -119,11 +151,11 @@ BEGIN
     office_schema_name
   );
 
-  -- This marker commits atomically with the newly provisioned office. It is deliberately permanent:
-  -- if the helper later fails before the 0235 ledger row is written, its retry still has to distinguish
-  -- this post-fence office from history and leave its first assignments unacknowledged.
-  INSERT INTO public._task_assignment_acknowledgements_fenced_offices (schema_name)
-  VALUES ('office_' || NEW.slug)
+  -- This header commits atomically with the newly provisioned office. The helper's one-statement
+  -- discovery excludes post_fence rows, so a retry after a later helper failure cannot sample this
+  -- new office's first assignments as historical work.
+  INSERT INTO public._task_assignment_acknowledgements_cutovers (schema_name, state)
+  VALUES ('office_' || NEW.slug, 'post_fence')
   ON CONFLICT (schema_name) DO NOTHING;
 
   -- Do not seed here. This is a brand-new office at its transaction's COMMIT, so assignments created

@@ -27,8 +27,11 @@ import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { migrationSql } from "../helpers/migration-sql.js";
 import {
-  TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE,
+  TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_BASELINE_PAIRS_TABLE,
+  TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_CUTOVERS_TABLE,
   TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL,
+  captureTaskAssignmentAcknowledgementBaselines,
+  materializeTaskAssignmentAcknowledgementBaselines,
   runTaskAssignmentAcknowledgementsMigration,
 } from "../../src/migrations/task-assignment-acknowledgements.js";
 
@@ -124,6 +127,24 @@ async function tableExists(schema: string, table: string) {
     [schema, table]
   );
   return (result.rows[0]?.n ?? 0) > 0;
+}
+
+async function cutoverState(schema: string) {
+  const result = await pg.query<{ state: string }>(
+    `SELECT state FROM ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_CUTOVERS_TABLE} WHERE schema_name = $1`,
+    [schema]
+  );
+  return result.rows[0]?.state;
+}
+
+async function baselinePairCount(schema: string) {
+  const result = await pg.query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+       FROM ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_BASELINE_PAIRS_TABLE}
+      WHERE schema_name = $1`,
+    [schema]
+  );
+  return result.rows[0]?.n ?? 0;
 }
 
 beforeEach(async () => {
@@ -239,43 +260,113 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     }
   });
 
-  it("is idempotent — a second run neither errors nor duplicates the seed", async () => {
+  it("marks completed offices seeded, so a retry never acknowledges tasks created after their cutover", async () => {
     await seedOffices(OFFICES);
     for (const schema of OFFICES) await seedTasks(schema);
     await applyMigration();
 
-    // A task created BETWEEN the two runs must not be retro-acked by the replay either... except that
-    // the replay cannot tell it apart from history, so it will be. What matters is that the replay is
-    // safe: no error, no duplicate rows. (The runner never replays an applied migration; this covers a
-    // hand re-run against a restored dump.)
+    // Model a retry after another office failed later in the migration. These are normal assignments
+    // created after each completed office's durable baseline; replaying the helper must not sample them.
+    for (const schema of OFFICES) {
+      await pg.exec(`
+        INSERT INTO ${schema}.tasks (id, title, status, assigned_to, source)
+        VALUES ('aaaaaaaa-0000-0000-0000-000000000099', 'after cutover', 'pending', '${ALICE}', 'manual');
+      `);
+    }
+
     await expect(applyMigration()).resolves.toBeUndefined();
 
     for (const schema of OFFICES) {
       const rows = await pg.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${schema}.${TABLE}`);
       expect(rows.rows[0]?.n, schema).toBe(3);
+      const late = await pg.query<{ n: number }>(`
+        SELECT COUNT(*)::int AS n FROM ${schema}.${TABLE}
+        WHERE task_id = 'aaaaaaaa-0000-0000-0000-000000000099' AND user_id = '${ALICE}'
+      `);
+      expect(late.rows[0]?.n, `${schema} post-cutover task`).toBe(0);
+      expect(await cutoverState(schema), schema).toBe("seeded");
+      expect(await baselinePairCount(schema), schema).toBe(0);
     }
   });
 
-  it("installs the deferred old-provisioner fence before the existing-office scan and ledger", () => {
+  it("materializes only the exact pre-DDL baseline when a task arrives between phases", async () => {
+    await seedOffices(["office_dallas"]);
+    await seedTasks("office_dallas");
+    await pg.exec(migrationSql(MIGRATION));
+
+    await captureTaskAssignmentAcknowledgementBaselines(
+      pg as unknown as Parameters<typeof captureTaskAssignmentAcknowledgementBaselines>[0]
+    );
+    expect(await cutoverState("office_dallas")).toBe("captured");
+    expect(await baselinePairCount("office_dallas")).toBe(3);
+
+    // This assignment is after phase 1 but before phase 2's table DDL. The old current-table seed
+    // would silently acknowledge it; the durable pair table must not contain it.
+    await pg.exec(`
+      -- Pin a deliberately old baseline time. The materializer must copy this exact stored value,
+      -- rather than evaluating now() while it later obtains the DDL lock.
+      UPDATE ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_BASELINE_PAIRS_TABLE}
+      SET baseline_ack_at = '2001-01-01T00:00:00Z'
+      WHERE schema_name = 'office_dallas';
+      -- A reassignment after capture belongs to BOB, not the captured assignee ALICE. The materializer
+      -- joins the pair to current tasks only by task id, so it must not derive its user from this row.
+      UPDATE office_dallas.tasks
+      SET assigned_to = '${BOB}'
+      WHERE id = 'aaaaaaaa-0000-0000-0000-000000000001';
+      INSERT INTO office_dallas.tasks (id, title, status, assigned_to, source)
+      VALUES ('aaaaaaaa-0000-0000-0000-000000000099', 'between phases', 'pending', '${ALICE}', 'manual');
+    `);
+
+    await materializeTaskAssignmentAcknowledgementBaselines(
+      pg as unknown as Parameters<typeof materializeTaskAssignmentAcknowledgementBaselines>[0]
+    );
+
+    const seeded = await pg.query<{ task_id: string }>(
+      `SELECT task_id FROM office_dallas.${TABLE} ORDER BY task_id`
+    );
+    expect(seeded.rows.map((row) => row.task_id)).toEqual([
+      "aaaaaaaa-0000-0000-0000-000000000001",
+      "aaaaaaaa-0000-0000-0000-000000000002",
+      "aaaaaaaa-0000-0000-0000-000000000004",
+    ]);
+    const preserved = await pg.query<{ user_id: string; acknowledged_at: Date }>(`
+      SELECT user_id, acknowledged_at
+      FROM office_dallas.${TABLE}
+      WHERE task_id = 'aaaaaaaa-0000-0000-0000-000000000001'
+    `);
+    expect(preserved.rows[0]?.user_id, "the captured assignee, not current tasks.assigned_to").toBe(ALICE);
+    expect(new Date(preserved.rows[0]!.acknowledged_at).toISOString()).toBe("2001-01-01T00:00:00.000Z");
+    expect(await cutoverState("office_dallas")).toBe("seeded");
+    expect(await baselinePairCount("office_dallas")).toBe(0);
+  });
+
+  it("serializes 0235's fence, two phases and ledger behind one session lock", () => {
     const source = migrationSql(MIGRATION);
     const guard = source.indexOf(
       "CREATE CONSTRAINT TRIGGER task_assignment_acknowledgements_on_office_provision"
     );
     const tenantBlock = source.indexOf("-- TENANT_SCHEMA_START");
-    const branch = runnerSource.indexOf(`file === TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION`);
-    const sql = runnerSource.indexOf("await client.query(sql)", branch);
-    const scan = runnerSource.indexOf("await runTaskAssignmentAcknowledgementsMigration(client)", sql);
-    const ledger = runnerSource.indexOf('"INSERT INTO public._migrations (name) VALUES ($1)"', branch);
+    const lock = runnerSource.indexOf("SELECT pg_advisory_lock(hashtext($1))");
+    const recheck = runnerSource.indexOf("SELECT id FROM public._migrations WHERE name = $1", lock);
+    const sql = runnerSource.indexOf("await client.query(sql)", recheck);
+    const phases = runnerSource.indexOf("await runTaskAssignmentAcknowledgementsMigration(client)", sql);
+    const ledger = runnerSource.indexOf('"INSERT INTO public._migrations (name) VALUES ($1)"', phases);
+    const unlock = runnerSource.indexOf("SELECT pg_advisory_unlock(hashtext($1))", ledger);
 
     expect(guard).toBeGreaterThanOrEqual(0);
     expect(source.slice(guard, tenantBlock)).toContain("AFTER INSERT ON public.offices");
     expect(source.slice(guard, tenantBlock)).toContain("DEFERRABLE INITIALLY DEFERRED");
     expect(guard, "the guard must exist before the provisioner-only template").toBeLessThan(tenantBlock);
 
-    expect(branch).toBeGreaterThanOrEqual(0);
-    expect(sql, "the SQL file installs the durable fence").toBeGreaterThan(branch);
-    expect(scan, "the existing-office scan must run after the fence").toBeGreaterThan(sql);
-    expect(ledger, "never record 0235 until both the fence and scan completed").toBeGreaterThan(scan);
+    // A transaction-scoped advisory lock would release on every per-office COMMIT; only the session
+    // variant makes a concurrent runner wait through SQL + capture + materialization + ledger.
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(recheck, "recheck the ledger after acquiring the lock").toBeGreaterThan(lock);
+    expect(sql, "the SQL file installs the deferred fence under the lock").toBeGreaterThan(recheck);
+    expect(phases, "both historical phases run after the fence").toBeGreaterThan(sql);
+    expect(ledger, "ledger is written only after both phases").toBeGreaterThan(phases);
+    expect(unlock, "release only after the ledger decision").toBeGreaterThan(ledger);
+    expect(runnerSource.slice(lock, unlock)).not.toContain("pg_advisory_xact_lock");
   });
 
   it("repairs a legacy #1107 provisioner at COMMIT without seeding its post-fence tasks on retry", async () => {
@@ -303,12 +394,13 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     `);
     expect(guarded.rows[0]).toMatchObject({ indexes: 1, constraints: 1, rows: 0 });
 
-    const fenced = await pg.query<{ schema_name: string }>(`
-      SELECT schema_name
-        FROM public._task_assignment_acknowledgements_fenced_offices
+    const fenced = await pg.query<{ schema_name: string; state: string }>(`
+      SELECT schema_name, state
+        FROM ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_CUTOVERS_TABLE}
+       WHERE state = 'post_fence'
        ORDER BY schema_name
     `);
-    expect(fenced.rows.map((row) => row.schema_name)).toEqual(["office_tulsa"]);
+    expect(fenced.rows).toEqual([{ schema_name: "office_tulsa", state: "post_fence" }]);
 
     // This task lands after the fenced office commits but before a failed deployment's helper retries.
     // It is a normal, brand-new assignment: if the retry walks every visible office schema and seeds it,
@@ -372,6 +464,128 @@ describe("migration 0235 — task assignment acknowledgements", () => {
       `SELECT COUNT(*)::int AS n FROM office_tulsa.${TABLE}`
     );
     expect(cascaded.rows[0]?.n).toBe(0);
+  });
+
+  it("keeps captured pairs and state when phase 2 rolls back, then resumes from those exact pairs", async () => {
+    // office_dallas is the literal new-office template at the foot of 0235's SQL file; use Atlanta so
+    // this failure probe exercises only the helper's existing-office path.
+    await seedOffices(["office_dallas", "office_atlanta"]);
+    await seedTasks("office_atlanta");
+    await pg.exec(migrationSql(MIGRATION));
+    await captureTaskAssignmentAcknowledgementBaselines(
+      pg as unknown as Parameters<typeof captureTaskAssignmentAcknowledgementBaselines>[0]
+    );
+
+    // Make the materialization INSERT fail after it has locked the captured header. The acknowledgement
+    // table is pre-created only to attach this failure probe; phase 2's real CREATE IF NOT EXISTS and
+    // index still execute before the seed.
+    await pg.exec(`
+      CREATE TABLE office_atlanta.${TABLE} (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        task_id uuid NOT NULL REFERENCES office_atlanta.tasks(id) ON DELETE CASCADE,
+        user_id uuid NOT NULL,
+        acknowledged_at timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT ${UNIQUE_NAME} UNIQUE (task_id, user_id)
+      );
+      CREATE OR REPLACE FUNCTION public.fail_task_assignment_ack_phase_two()
+      RETURNS trigger AS $fn$
+      BEGIN
+        RAISE EXCEPTION 'phase two seed failure';
+      END;
+      $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER fail_task_assignment_ack_phase_two
+        BEFORE INSERT ON office_atlanta.${TABLE}
+        FOR EACH ROW EXECUTE FUNCTION public.fail_task_assignment_ack_phase_two();
+    `);
+
+    await expect(
+      materializeTaskAssignmentAcknowledgementBaselines(
+        pg as unknown as Parameters<typeof materializeTaskAssignmentAcknowledgementBaselines>[0]
+      )
+    ).rejects.toThrow(/phase two seed failure/);
+
+    // DELETE pairs + state=seeded sit after the seed in the SAME transaction. A rollback must leave
+    // both durable capture artifacts intact, not convert a retry into a current-table sample.
+    expect(await cutoverState("office_atlanta")).toBe("captured");
+    expect(await baselinePairCount("office_atlanta")).toBe(3);
+    const failedSeedRows = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM office_atlanta.${TABLE}`
+    );
+    expect(failedSeedRows.rows[0]?.n).toBe(0);
+
+    await pg.exec(`
+      DROP TRIGGER fail_task_assignment_ack_phase_two ON office_atlanta.${TABLE};
+      DROP FUNCTION public.fail_task_assignment_ack_phase_two();
+    `);
+    await materializeTaskAssignmentAcknowledgementBaselines(
+      pg as unknown as Parameters<typeof materializeTaskAssignmentAcknowledgementBaselines>[0]
+    );
+
+    expect(await cutoverState("office_atlanta")).toBe("seeded");
+    expect(await baselinePairCount("office_atlanta")).toBe(0);
+    const resumedRows = await pg.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM office_atlanta.${TABLE}`
+    );
+    expect(resumedRows.rows[0]?.n).toBe(3);
+  });
+
+  it("rolls back phase 1's header and pairs together when baseline capture fails", async () => {
+    await seedOffices(["office_dallas", "office_atlanta"]);
+    await seedTasks("office_atlanta");
+    await pg.exec(migrationSql(MIGRATION));
+
+    // The trigger fires from phase 1's actual CTE INSERT. If either the header or pair write moves into
+    // another transaction, this leaves an observable stranded captured row and the retry test below
+    // cannot converge honestly.
+    await pg.exec(`
+      CREATE OR REPLACE FUNCTION public.fail_task_assignment_ack_capture()
+      RETURNS trigger AS $fn$
+      BEGIN
+        RAISE EXCEPTION 'phase one capture failure';
+      END;
+      $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER fail_task_assignment_ack_capture
+        BEFORE INSERT ON ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_BASELINE_PAIRS_TABLE}
+        FOR EACH ROW EXECUTE FUNCTION public.fail_task_assignment_ack_capture();
+    `);
+
+    await expect(
+      captureTaskAssignmentAcknowledgementBaselines(
+        pg as unknown as Parameters<typeof captureTaskAssignmentAcknowledgementBaselines>[0]
+      )
+    ).rejects.toThrow(/phase one capture failure/);
+
+    expect(await cutoverState("office_atlanta")).toBeUndefined();
+    expect(await baselinePairCount("office_atlanta")).toBe(0);
+    expect(await tableExists("office_atlanta", TABLE)).toBe(false);
+
+    await pg.exec(`
+      DROP TRIGGER fail_task_assignment_ack_capture ON ${TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_BASELINE_PAIRS_TABLE};
+      DROP FUNCTION public.fail_task_assignment_ack_capture();
+    `);
+    await runTaskAssignmentAcknowledgementsMigration(
+      pg as unknown as Parameters<typeof runTaskAssignmentAcknowledgementsMigration>[0]
+    );
+    expect(await cutoverState("office_atlanta")).toBe("seeded");
+    expect(await baselinePairCount("office_atlanta")).toBe(0);
+  });
+
+  it("records and completes a cutover for terminal-only and empty historical offices", async () => {
+    await seedOffices(["office_dallas", "office_atlanta"]);
+    await pg.exec(`
+      INSERT INTO office_dallas.tasks (id, title, status, assigned_to, source)
+      VALUES ('aaaaaaaa-0000-0000-0000-000000000003', 'already done', 'completed', '${ALICE}', 'manual');
+    `);
+
+    await applyMigration();
+
+    for (const schema of ["office_dallas", "office_atlanta"]) {
+      expect(await tableExists(schema, TABLE), schema).toBe(true);
+      expect(await cutoverState(schema), schema).toBe("seeded");
+      expect(await baselinePairCount(schema), schema).toBe(0);
+      const acks = await pg.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${schema}.${TABLE}`);
+      expect(acks.rows[0]?.n, schema).toBe(0);
+    }
   });
 
   it("fails closed if a caller forces the deferred guard before tasks exists", async () => {
@@ -449,18 +663,32 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     expect(await tableExists("office_houston", TABLE)).toBe(true);
   });
 
-  it("keeps the lock-taking existing-office work out of the SQL file and commits each office before the next", async () => {
+  it("skips a legacy tasks shape missing baseline capabilities without blocking healthy offices", async () => {
+    await seedOffices(OFFICES);
+    await pg.exec(`ALTER TABLE office_houston.tasks DROP COLUMN assigned_to;`);
+
+    await expect(applyMigration()).resolves.toBeUndefined();
+    expect(await tableExists("office_houston", TABLE)).toBe(false);
+    expect(await tableExists("office_atlanta", TABLE)).toBe(true);
+    expect(await cutoverState("office_houston")).toBeUndefined();
+  });
+
+  it("keeps lock-taking work out of the SQL file and records the two-phase cutover order", async () => {
     const source = migrationSql(MIGRATION);
-    // Mutating the old DO loop back into the file would return to runner.ts's one implicit migration
-    // transaction. The PGlite behaviour tests above cannot observe locks; this source assertion makes
-    // the boundary explicit while the recording client below proves the replacement's transaction shape.
+    // Mutating the old tenant-wide DO loop back into the file would return to one implicit transaction.
+    // PGlite cannot observe live contention, so this source assertion plus the recording transcript
+    // below pins the actual transaction boundary and the state-machine order.
     expect(source).not.toMatch(/\bDO\s+\$tenant\$/i);
 
     const statements: string[] = [];
     const query = vi.fn(async (text: string) => {
-      statements.push(text.trim());
+      const statement = text.trim();
+      statements.push(statement);
       if (text.includes("information_schema.schemata")) {
         return { rows: [{ schema_name: "office_dallas" }, { schema_name: "office_atlanta" }] };
+      }
+      if (text.includes("FOR UPDATE") && text.includes(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_CUTOVERS_TABLE)) {
+        return { rows: [{ state: "captured" }] };
       }
       if (text.includes("information_schema.tables") || text.includes("information_schema.columns")) {
         return { rows: [{ n: 1 }] };
@@ -470,27 +698,51 @@ describe("migration 0235 — task assignment acknowledgements", () => {
 
     await runTaskAssignmentAcknowledgementsMigration({ query } as never);
 
-    // The fence marker and schema discovery must share one statement snapshot. A separate marker
-    // lookup followed by the generic discovery query lets an office commit in their gap: the schema is
-    // then visible, its marker is stale, and its first task gets incorrectly seeded as history.
-    const discovery = statements.find((statement) => statement.includes("information_schema.schemata"));
-    expect(discovery).toBe(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL.trim());
-    expect(discovery).toContain("NOT EXISTS");
-    expect(discovery).toContain(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE);
-    expect(
-      statements.filter((statement) => statement.includes(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_FENCED_OFFICES_TABLE))
-    ).toEqual([discovery]);
+    // Discovery is one SQL snapshot in BOTH passes. It includes durable captured rows for phase 2 but
+    // excludes durable post_fence/seeded rows; there is no preloaded marker Set or stale side lookup.
+    const discoveries = statements.filter((statement) => statement.includes("information_schema.schemata"));
+    expect(discoveries).toEqual([
+      TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL.trim(),
+      TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL.trim(),
+    ]);
+    for (const discovery of discoveries) {
+      expect(discovery).toContain("LEFT JOIN");
+      expect(discovery).toContain(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_CUTOVERS_TABLE);
+      expect(discovery).toContain("cutovers.state = 'captured'");
+      expect(discovery).not.toContain("_fenced_offices");
+    }
 
     const kind = (statement: string) => {
       if (statement === "BEGIN" || statement === "COMMIT") return statement;
+      if (/^WITH newly_captured/i.test(statement)) return "CAPTURE PAIRS";
+      if (statement.includes("FOR UPDATE") && statement.includes(TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_CUTOVERS_TABLE)) {
+        return "CLAIM CAPTURED";
+      }
       if (/^CREATE TABLE/i.test(statement)) return "CREATE TABLE";
       if (/^CREATE INDEX/i.test(statement)) return "CREATE INDEX";
-      if (/^INSERT INTO/i.test(statement)) return "SEED";
+      if (/^INSERT INTO .*task_assignment_acknowledgements/i.test(statement)) return "SEED PAIRS";
+      if (/^DELETE FROM .*baseline_pairs/i.test(statement)) return "DELETE PAIRS";
+      if (/^UPDATE .*cutovers/i.test(statement)) return "MARK SEEDED";
       return null;
     };
     expect(statements.map(kind).filter(Boolean)).toEqual([
-      "BEGIN", "CREATE TABLE", "CREATE INDEX", "SEED", "COMMIT",
-      "BEGIN", "CREATE TABLE", "CREATE INDEX", "SEED", "COMMIT",
+      "BEGIN", "CAPTURE PAIRS", "COMMIT",
+      "BEGIN", "CAPTURE PAIRS", "COMMIT",
+      "BEGIN", "CLAIM CAPTURED", "CREATE TABLE", "CREATE INDEX", "SEED PAIRS", "DELETE PAIRS", "MARK SEEDED", "COMMIT",
+      "BEGIN", "CLAIM CAPTURED", "CREATE TABLE", "CREATE INDEX", "SEED PAIRS", "DELETE PAIRS", "MARK SEEDED", "COMMIT",
     ]);
+
+    // Exercise the actual materialization query rather than a prose invariant: only stored pair values
+    // are seeded, current tasks is joined by id solely to skip deleted tasks, and cleanup precedes the
+    // terminal seeded state in the same transaction.
+    const seed = statements.find((statement) => /^INSERT INTO .*task_assignment_acknowledgements/i.test(statement));
+    expect(seed).toContain("baseline.user_id, baseline.baseline_ack_at");
+    expect(seed).toContain('JOIN "office_dallas".tasks AS tasks ON tasks.id = baseline.task_id');
+    expect(seed).not.toContain("tasks.assigned_to");
+    const deletePairs = statements.findIndex((statement) => /^DELETE FROM .*baseline_pairs/i.test(statement));
+    const markSeeded = statements.findIndex((statement) => /^UPDATE .*cutovers/i.test(statement));
+    expect(deletePairs).toBeGreaterThan(-1);
+    expect(markSeeded).toBeGreaterThan(deletePairs);
+    expect(statements[markSeeded + 1]).toBe("COMMIT");
   });
 });

@@ -50,6 +50,54 @@ dotenv.config({
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "../../../migrations");
+// 0235 deliberately commits each office separately, so this must be a SESSION advisory lock rather
+// than pg_advisory_xact_lock: the lock has to survive those commits until the migration ledger is
+// written. It serializes only competing migration runners; application task writes never take it.
+const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION_LOCK =
+  "trockcrm:migration:0235_task-assignment-acknowledgements";
+
+/**
+ * A captured baseline without a ledger is intentionally retryable. Two runners must not, however,
+ * interleave the SQL file, the two per-office passes and the ledger write: runner B could otherwise see
+ * a ledger written by runner A while its own captured state was still incomplete. Keep this lock narrow
+ * to #0235, recheck the ledger after acquiring it, and release it on both success and failure.
+ */
+async function runTaskAssignmentAcknowledgementsMigrationUnderLock(
+  client: pg.Client,
+  file: string
+): Promise<boolean> {
+  await client.query("SELECT pg_advisory_lock(hashtext($1))", [
+    TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION_LOCK,
+  ]);
+
+  try {
+    const { rows } = await client.query(
+      "SELECT id FROM public._migrations WHERE name = $1",
+      [file]
+    );
+    if (rows.length > 0) {
+      console.log(`Skipping ${file} (already executed by another migration runner)`);
+      return false;
+    }
+
+    console.log(`Running ${file}...`);
+    const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+    // File first: install the deferred post-fence trigger before either historical phase discovers an
+    // office. The helper's captured baseline then runs before materialization, all under this same
+    // session lock and before the ledger can make a retry skip it.
+    await client.query(sql);
+    await runTaskAssignmentAcknowledgementsMigration(client);
+    await client.query(
+      "INSERT INTO public._migrations (name) VALUES ($1)",
+      [file]
+    );
+    return true;
+  } finally {
+    await client.query("SELECT pg_advisory_unlock(hashtext($1))", [
+      TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION_LOCK,
+    ]);
+  }
+}
 
 async function runMigrations(): Promise<void> {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
@@ -78,6 +126,12 @@ async function runMigrations(): Promise<void> {
       );
       if (rows.length > 0) {
         console.log(`Skipping ${file} (already executed)`);
+        continue;
+      }
+
+      if (file === TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION) {
+        const completed = await runTaskAssignmentAcknowledgementsMigrationUnderLock(client, file);
+        if (completed) console.log(`Completed ${file}`);
         continue;
       }
 
@@ -130,20 +184,6 @@ async function runMigrations(): Promise<void> {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
         await runTasksAssignedAtBackfill(client);
-      } else if (file === TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION) {
-        // 0235 creates a table with a foreign key to `tasks`, creates its index, then seeds from
-        // `tasks`. All three can lock the hot task table. Doing the old DO loop inside this SQL file
-        // held every earlier office's lock until the last office finished; the shared step commits each
-        // office before beginning the next.
-        //
-        // Run the file FIRST: it installs a permanent deferred public.offices fence for API containers
-        // that predate 0235. CREATE TRIGGER serializes an old provisioning transaction that inserted an
-        // office before this migration started; the helper scan below then sees it. An old container
-        // that inserts after installation is repaired at its own COMMIT. Scanning first leaves a
-        // scan-to-ledger window that can strand an office without the modal's table forever.
-        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
-        await client.query(sql);
-        await runTaskAssignmentAcknowledgementsMigration(client);
       } else if (file === TASK_SOURCE_INDEX_MIGRATION) {
         // Same reason again: `tasks` is written by the rules engine, the email queue, two crons, deal
         // reassignment and every person using the New Task form, so a plain CREATE INDEX inside the
