@@ -48,6 +48,7 @@ import {
   type ProjectionBand,
   type ProjectionCoverage,
 } from "./foundations.js";
+import { aliasedEffectiveStageAgeDaysSql } from "../deals/deal-filter-predicates.js";
 
 // Open (Sent/Estimated/Projected) $ -- the F3 best-estimate basis, on-hold-zeroed via the foundation.
 const openValueSql = (alias: string) => dealValueSqlForBasis(alias, "open_best_estimate");
@@ -174,6 +175,91 @@ export interface ShowcaseRouteFilter {
   unfilterable: string[];
 }
 
+/** A direct-DD metric. A null DD is a data-quality gap, never a zero-valued project. */
+export interface EstimatingMetric {
+  count: number;
+  ddValue: number;
+  missingDdCount: number;
+}
+
+export interface CurrentEstimatingProject {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  stageLabel: string;
+  ddEstimate: number | null;
+  daysInStage: number | null;
+}
+
+/** A current RFP-request cycle, deliberately not represented as an immutable delivery event. */
+export interface RfpInitiatedProject {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  requestedAt: string;
+  currentRfpStatus: string | null;
+  assignedRepId: string | null;
+  assignedRepName: string;
+  ddEstimate: number | null;
+}
+
+/** A selected-period sent-stage entry with the latest mutable CRM / Bid Board values. */
+export interface EstimateSentProject {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  sentAt: string;
+  ddEstimate: number | null;
+  latestBidBoardTotalSales: number | null;
+  varianceAmount: number | null;
+  variancePercent: number | null;
+  marginPercent: number | null;
+}
+
+export interface RfpBySalesperson {
+  repId: string | null;
+  /** Current owner, not the actor who opened the RFP request or a historical owner snapshot. */
+  repName: string;
+  count: number;
+  ddValue: number;
+  missingDdCount: number;
+}
+
+export interface EstimateSentComparison {
+  dollarComparableCount: number;
+  percentageComparableCount: number;
+  dollarComparableDdValue: number;
+  dollarComparableLatestBidBoardTotalSales: number;
+  varianceAmount: number;
+  percentageComparableDdValue: number;
+  percentageComparableLatestBidBoardTotalSales: number;
+  variancePercent: number | null;
+}
+
+export interface EstimatingReport {
+  /** The live queue's as-of moment. It is intentionally independent from the selected period. */
+  currentAsOf: string;
+  currentEstimating: EstimatingMetric & { projects: CurrentEstimatingProject[] };
+  newRfps: EstimatingMetric & { projects: RfpInitiatedProject[] };
+  rfpBySalesperson: RfpBySalesperson[];
+  estimatesSent: {
+    count: number;
+    latestBidBoardTotalSales: number;
+    projects: EstimateSentProject[];
+    comparison: EstimateSentComparison;
+    margin: {
+      projectCount: number;
+      latestBidBoardTotalSales: number;
+      blendedPercent: number | null;
+    };
+    missingSentValueCount: number;
+    missingMarginCount: number;
+  };
+}
+
 export interface MondayShowcaseData {
   period: ShowcasePeriod;
   departments: DepartmentMetric[];
@@ -182,6 +268,7 @@ export interface MondayShowcaseData {
   officeProjection: ProjectionLadder;
   weeklyTrend: ShowcaseWeek[];
   valueBases: Record<"won_awarded_first" | "open_best_estimate", string>;
+  estimatingReport: EstimatingReport;
   routeFilter: ShowcaseRouteFilter;
   notes: string[];
 }
@@ -245,8 +332,50 @@ export interface AssembleInput {
   /** last-completed-week counts per department, for the WoW delta chip. */
   lastWeek: Record<"estimating" | "sent" | "won", number>;
   repNames: Map<string | null, string>;
+  /** A1’s independently-defined operational workload / activity report. */
+  estimatingReport: EstimatingReport;
   /** What the Service/Other selection did to these figures. Omitted = unfiltered (the default). */
   routeFilter?: ShowcaseRouteFilter;
+}
+
+interface CurrentEstimatingSqlRow {
+  id: string;
+  name: string;
+  deal_number: string | null;
+  project_number: string | null;
+  stage_slug: string;
+  dd_estimate: unknown;
+  days_in_stage: unknown;
+}
+
+interface RfpInitiatedSqlRow {
+  id: string;
+  name: string;
+  deal_number: string | null;
+  project_number: string | null;
+  requested_at: unknown;
+  rfp_approval_status: string | null;
+  assigned_rep_id: string | null;
+  assigned_rep_name: string | null;
+  dd_estimate: unknown;
+}
+
+interface EstimateSentSqlRow {
+  id: string;
+  name: string;
+  deal_number: string | null;
+  project_number: string | null;
+  sent_at: unknown;
+  dd_estimate: unknown;
+  latest_bid_board_total_sales: unknown;
+  margin_percent: unknown;
+}
+
+export interface EstimatingReportInput {
+  currentAsOf: string;
+  currentEstimatingRows: CurrentEstimatingSqlRow[];
+  rfpInitiatedRows: RfpInitiatedSqlRow[];
+  estimateSentRows: EstimateSentSqlRow[];
 }
 
 const WON_BASIS_LABEL = DEAL_VALUE_BASIS_LABEL.won_awarded_first;
@@ -258,6 +387,177 @@ const DEPARTMENT_NOTES = [
   "Collected is deferred (no finance source yet) -- shown as a placeholder, never zero-filled.",
   "Won $ uses the awarded-first basis; open (Sent/Estimated/Projected) $ uses best-estimate -- different bases, never summed.",
 ];
+
+const ESTIMATING_REPORT_NOTES = [
+  "A1 Current Estimating is a live operational snapshot; its as-of time is independent of the selected activity period.",
+  "A1 New RFP submissions initiated uses the current RFP-request cycle. Cancelled or restarted cycles are not retained as a historic event ledger.",
+  "A1 Projects sent to client is a sent-stage-entry cohort; DD, Bid Board total sales, and margin are latest current values, not immutable values at send time.",
+];
+
+/** Preserve null as missing. In particular, a stored zero is a valid value and must survive into A1. */
+function nullableNum(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function rounded(value: number, digits = 2): number {
+  const factor = 10 ** digits;
+  const roundedValue = Math.round((value + Number.EPSILON) * factor) / factor;
+  return Object.is(roundedValue, -0) ? 0 : roundedValue;
+}
+
+function isoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  const text = String(value);
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
+}
+
+function estimatingStageLabel(stageSlug: string): string {
+  return stageSlug === "service_estimating" ? "Service estimating" : "Estimating";
+}
+
+function foldDdMetric<T extends { ddEstimate: number | null }>(projects: readonly T[]): EstimatingMetric {
+  const values = projects.flatMap((project) => (project.ddEstimate == null ? [] : [project.ddEstimate]));
+  return {
+    count: projects.length,
+    ddValue: rounded(values.reduce((sum, value) => sum + value, 0)),
+    missingDdCount: projects.length - values.length,
+  };
+}
+
+/**
+ * Fold the three A1 row sets on the server, so every published total and visible table are derived from
+ * one input. This is intentionally separate from SQL: it makes null/zero, variance, and weighted-margin
+ * rules directly testable without depending on a database driver’s numeric representation.
+ */
+export function assembleEstimatingReport(input: EstimatingReportInput): EstimatingReport {
+  const currentEstimating = input.currentEstimatingRows.map(
+    (row): CurrentEstimatingProject => ({
+      id: row.id,
+      name: row.name,
+      dealNumber: row.deal_number,
+      projectNumber: row.project_number,
+      stageLabel: estimatingStageLabel(row.stage_slug),
+      ddEstimate: nullableNum(row.dd_estimate),
+      daysInStage: nullableNum(row.days_in_stage),
+    })
+  );
+
+  const newRfps = input.rfpInitiatedRows.map(
+    (row): RfpInitiatedProject => ({
+      id: row.id,
+      name: row.name,
+      dealNumber: row.deal_number,
+      projectNumber: row.project_number,
+      requestedAt: isoTimestamp(row.requested_at),
+      currentRfpStatus: row.rfp_approval_status,
+      assignedRepId: row.assigned_rep_id,
+      assignedRepName: row.assigned_rep_id == null ? "Unassigned" : row.assigned_rep_name || "Unknown rep",
+      ddEstimate: nullableNum(row.dd_estimate),
+    })
+  );
+
+  const rfpBySalesperson = [...newRfps
+    .reduce((byRep, project) => {
+      const existing = byRep.get(project.assignedRepId) ?? {
+        repId: project.assignedRepId,
+        repName: project.assignedRepName,
+        count: 0,
+        ddValue: 0,
+        missingDdCount: 0,
+      };
+      existing.count += 1;
+      if (project.ddEstimate == null) existing.missingDdCount += 1;
+      else existing.ddValue += project.ddEstimate;
+      byRep.set(project.assignedRepId, existing);
+      return byRep;
+    }, new Map<string | null, RfpBySalesperson>())
+    .values()]
+    .map((row) => ({ ...row, ddValue: rounded(row.ddValue) }))
+    .sort((a, b) => b.ddValue - a.ddValue || a.repName.localeCompare(b.repName));
+
+  const sentProjects = input.estimateSentRows.map((row): EstimateSentProject => {
+    const ddEstimate = nullableNum(row.dd_estimate);
+    const latestBidBoardTotalSales = nullableNum(row.latest_bid_board_total_sales);
+    const varianceAmount =
+      ddEstimate == null || latestBidBoardTotalSales == null ? null : rounded(latestBidBoardTotalSales - ddEstimate);
+    const variancePercent =
+      ddEstimate == null || ddEstimate <= 0 || latestBidBoardTotalSales == null
+        ? null
+        : rounded((latestBidBoardTotalSales / ddEstimate - 1) * 100, 2);
+    return {
+      id: row.id,
+      name: row.name,
+      dealNumber: row.deal_number,
+      projectNumber: row.project_number,
+      sentAt: isoTimestamp(row.sent_at),
+      ddEstimate,
+      latestBidBoardTotalSales,
+      varianceAmount,
+      variancePercent,
+      marginPercent: nullableNum(row.margin_percent),
+    };
+  });
+
+  const dollarComparable = sentProjects.filter(
+    (project) => project.ddEstimate != null && project.latestBidBoardTotalSales != null
+  );
+  const percentageComparable = dollarComparable.filter((project) => (project.ddEstimate ?? 0) > 0);
+  const dollarComparableDdValue = dollarComparable.reduce((sum, project) => sum + (project.ddEstimate ?? 0), 0);
+  const dollarComparableLatestBidBoardTotalSales = dollarComparable.reduce(
+    (sum, project) => sum + (project.latestBidBoardTotalSales ?? 0),
+    0
+  );
+  const percentageComparableDdValue = percentageComparable.reduce((sum, project) => sum + (project.ddEstimate ?? 0), 0);
+  const percentageComparableLatestBidBoardTotalSales = percentageComparable.reduce(
+    (sum, project) => sum + (project.latestBidBoardTotalSales ?? 0),
+    0
+  );
+  const marginRows = sentProjects.filter(
+    (project) => project.latestBidBoardTotalSales != null && project.latestBidBoardTotalSales > 0 && project.marginPercent != null
+  );
+  const marginValue = marginRows.reduce((sum, project) => sum + (project.latestBidBoardTotalSales ?? 0), 0);
+  const weightedMarginNumerator = marginRows.reduce(
+    (sum, project) => sum + (project.latestBidBoardTotalSales ?? 0) * (project.marginPercent ?? 0),
+    0
+  );
+
+  return {
+    currentAsOf: input.currentAsOf,
+    currentEstimating: { ...foldDdMetric(currentEstimating), projects: currentEstimating },
+    newRfps: { ...foldDdMetric(newRfps), projects: newRfps },
+    rfpBySalesperson,
+    estimatesSent: {
+      count: sentProjects.length,
+      latestBidBoardTotalSales: rounded(
+        sentProjects.reduce((sum, project) => sum + (project.latestBidBoardTotalSales ?? 0), 0)
+      ),
+      projects: sentProjects,
+      comparison: {
+        dollarComparableCount: dollarComparable.length,
+        percentageComparableCount: percentageComparable.length,
+        dollarComparableDdValue: rounded(dollarComparableDdValue),
+        dollarComparableLatestBidBoardTotalSales: rounded(dollarComparableLatestBidBoardTotalSales),
+        varianceAmount: rounded(dollarComparableLatestBidBoardTotalSales - dollarComparableDdValue),
+        percentageComparableDdValue: rounded(percentageComparableDdValue),
+        percentageComparableLatestBidBoardTotalSales: rounded(percentageComparableLatestBidBoardTotalSales),
+        variancePercent:
+          percentageComparableDdValue > 0
+            ? rounded((percentageComparableLatestBidBoardTotalSales / percentageComparableDdValue - 1) * 100, 2)
+            : null,
+      },
+      margin: {
+        projectCount: marginRows.length,
+        latestBidBoardTotalSales: rounded(marginValue),
+        blendedPercent: marginValue > 0 ? rounded(weightedMarginNumerator / marginValue, 2) : null,
+      },
+      missingSentValueCount: sentProjects.filter((project) => project.latestBidBoardTotalSales == null).length,
+      missingMarginCount: sentProjects.filter((project) => project.marginPercent == null).length,
+    },
+  };
+}
 
 function emptyLadder(): ProjectionLadder {
   const bands = projectionBandKeys().map((band) => ({ band, count: 0, value: 0 }));
@@ -371,10 +671,11 @@ export function assembleMondayShowcase(input: AssembleInput): MondayShowcaseData
     officeProjection: ladderFrom(input.officeProjection),
     weeklyTrend: input.weeklyTrend,
     valueBases: { won_awarded_first: WON_BASIS_LABEL, open_best_estimate: OPEN_BASIS_LABEL },
+    estimatingReport: input.estimatingReport,
     routeFilter,
     // When the selection narrows, the source notes carry the caveat too -- so a printed/exported copy of
     // this report still states which figures the filter could not reach. Same object as the field above.
-    notes: [...DEPARTMENT_NOTES, ...routeFilterNotes(routeFilter)],
+    notes: [...DEPARTMENT_NOTES, ...ESTIMATING_REPORT_NOTES, ...routeFilterNotes(routeFilter)],
   };
 }
 
@@ -402,6 +703,98 @@ function ctDateInWindowSql(tsExpr: string, from: string, to: string): SQL {
     `((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}')::date >= '${from}'::date AND ` +
       `((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}')::date <= '${to}'::date`
   );
+}
+
+/** Bid Board stage wins when present; an empty mirror slug is deliberately treated as absent. */
+function effectiveStageSlugSql(dealAlias: string, stageAlias: string): SQL {
+  return sql`COALESCE(NULLIF(${sql.raw(dealAlias)}.bid_board_stage_slug, ''), ${sql.raw(stageAlias)}.slug)`;
+}
+
+/**
+ * A1 current workload. This is deliberately a live state query instead of a stage-entry cohort: applying
+ * the selected historical period here would make “currently in estimating” mean something else entirely.
+ */
+export function buildCurrentEstimatingProjectsSql(routes?: readonly WorkflowRouteBucket[]): SQL {
+  const effectiveStage = effectiveStageSlugSql("d", "psc");
+  return sql`
+    SELECT d.id AS id,
+           d.name AS name,
+           d.deal_number AS deal_number,
+           d.project_number AS project_number,
+           ${effectiveStage} AS stage_slug,
+           d.dd_estimate AS dd_estimate,
+           ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
+      AND ${effectiveStage} IN (${slugInList(ESTIMATED_STAGE_SLUGS)})${aliasedWorkflowRouteFilterSql("d", routes)}
+    ORDER BY days_in_stage DESC NULLS LAST, d.name ASC
+  `;
+}
+
+/**
+ * A1 current-cycle RFP requests. `rfp_approval_requested_at` is the established request-opened timestamp;
+ * it is not presented as a durable external-delivery event because cancellation/retry can replace it.
+ */
+export function buildRfpInitiatedProjectsSql(
+  from: string,
+  to: string,
+  routes?: readonly WorkflowRouteBucket[]
+): SQL {
+  return sql`
+    SELECT d.id AS id,
+           d.name AS name,
+           d.deal_number AS deal_number,
+           d.project_number AS project_number,
+           d.rfp_approval_requested_at AS requested_at,
+           d.rfp_approval_status AS rfp_approval_status,
+           d.assigned_rep_id AS assigned_rep_id,
+           u.display_name AS assigned_rep_name,
+           d.dd_estimate AS dd_estimate
+    FROM ${deals} d
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.rfp_approval_requested_at IS NOT NULL
+      AND ${ctDateInWindowSql("d.rfp_approval_requested_at", from, to)}${aliasedWorkflowRouteFilterSql("d", routes)}
+    ORDER BY d.rfp_approval_requested_at DESC, d.name ASC
+  `;
+}
+
+/**
+ * A1 sent projects. The CTE collapses re-entry/revision loops to one project and carries the earliest
+ * qualifying sent-stage timestamp. Financial fields intentionally come from the current/latest mirror;
+ * they are not silently passed off as an immutable at-send snapshot.
+ */
+export function buildEstimateSentProjectsSql(
+  from: string,
+  to: string,
+  routes?: readonly WorkflowRouteBucket[]
+): SQL {
+  return sql`
+    SELECT d.id AS id,
+           d.name AS name,
+           d.deal_number AS deal_number,
+           d.project_number AS project_number,
+           entered.sent_at AS sent_at,
+           d.dd_estimate AS dd_estimate,
+           d.bid_board_total_sales AS latest_bid_board_total_sales,
+           d.bid_board_profit_margin_pct AS margin_percent
+    FROM ${deals} d
+    JOIN (
+      SELECT dsh.deal_id, MIN(dsh.created_at) AS sent_at
+      FROM ${dealStageHistory} dsh
+      JOIN ${pipelineStageConfig} sent_stage ON sent_stage.id = dsh.to_stage_id
+      WHERE sent_stage.slug IN (${slugInList(SENT_STAGE_SLUGS)})
+        AND ${ctDateInWindowSql("dsh.created_at", from, to)}
+      GROUP BY dsh.deal_id
+    ) entered ON entered.deal_id = d.id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}${aliasedWorkflowRouteFilterSql("d", routes)}
+    ORDER BY entered.sent_at DESC, d.name ASC
+  `;
 }
 
 /**
@@ -544,6 +937,13 @@ export interface MondayShowcaseOptions {
    * so all 8 variants slice the same narrowed figures and none can disagree.
    */
   routes?: readonly WorkflowRouteBucket[];
+  /**
+   * Internal consumer switch. `false` is only for callers such as the Rep 1:1 Pack that consume the
+   * canonical aggregate/reps slice but never return a Monday Showcase payload. It avoids materializing
+   * A1's office-wide project detail rows for a view that cannot render them; the public Showcase route
+   * always takes the default `true` and therefore always receives the full A1 report.
+   */
+  includeEstimatingReport?: boolean;
 }
 
 function shiftIsoDays(isoDate: string, days: number): string {
@@ -647,6 +1047,7 @@ export async function getMondayShowcaseData(
 ): Promise<MondayShowcaseData> {
   const mode: WeekMode = options.mode ?? "to_date";
   const now = options.now ?? new Date();
+  const includeEstimatingReport = options.includeEstimatingReport ?? true;
   const { from, to } = getWtdPeriod(mode, now);
   const period: ShowcasePeriod = { from, to, mode, label: `${from} → ${to}` };
   // Resolve the route selection ONCE and pass the SAME value to every query below. Every deal-sourced
@@ -671,6 +1072,29 @@ export async function getMondayShowcaseData(
   const estimatedRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, from, to, routes));
   const lastSentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, lastWeekFrom, lastWeekTo, routes));
   const lastEstRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, lastWeekFrom, lastWeekTo, routes));
+  // A1’s direct row sets are intentionally sequential with the rest of the Showcase: all queries share
+  // the request’s transaction-bound tenant connection. The Rep Pack asks for the canonical aggregates but
+  // does not render A1, so it deliberately takes the false branch and never materializes office-wide
+  // project detail for a consumer that discards it.
+  const estimatingReport = includeEstimatingReport
+    ? assembleEstimatingReport({
+        currentAsOf: now.toISOString(),
+        currentEstimatingRows: rowsFromExecute<CurrentEstimatingSqlRow>(
+          await tenantDb.execute(buildCurrentEstimatingProjectsSql(routes))
+        ),
+        rfpInitiatedRows: rowsFromExecute<RfpInitiatedSqlRow>(
+          await tenantDb.execute(buildRfpInitiatedProjectsSql(from, to, routes))
+        ),
+        estimateSentRows: rowsFromExecute<EstimateSentSqlRow>(
+          await tenantDb.execute(buildEstimateSentProjectsSql(from, to, routes))
+        ),
+      })
+    : assembleEstimatingReport({
+        currentAsOf: now.toISOString(),
+        currentEstimatingRows: [],
+        rfpInitiatedRows: [],
+        estimateSentRows: [],
+      });
   const projBandRows = await tenantDb.execute(buildProjectionBandsSql(routes));
   const projCovRows = await tenantDb.execute(buildProjectionCoverageSql(routes));
   // NOT route-narrowed -- the leads table has no workflow_route. See buildLeadStatusSql. routeFilter
@@ -703,7 +1127,6 @@ export async function getMondayShowcaseData(
   const estimated = toCohort(estimatedRows);
   const lastSent = toCohort(lastSentRows);
   const lastEst = toCohort(lastEstRows);
-
   // Projection: fold band + coverage rows into per-rep ladders; office = SUM of per-rep (so office N/M
   // and bands equal the rep splits by construction).
   const repProjection = new Map<string | null, RepProjection>();
@@ -761,6 +1184,7 @@ export async function getMondayShowcaseData(
     sparklines,
     lastWeek: { estimating: lastEst.count, sent: lastSent.count, won: lastWonSummary.count },
     repNames,
+    estimatingReport,
     routeFilter,
   });
 }

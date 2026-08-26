@@ -7,6 +7,7 @@ import { DrillProvider } from "./drill";
 import type { WeekMode } from "../week-mode";
 import { UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, ShowcaseWeek, EvidenceRequest } from "./types";
+import { emptyEstimatingReport } from "./test-fixtures";
 
 // CodeRabbit P2 (reconciliation drift): A3 "Momentum Lanes" renders weeklyTrend, whose displayed value is
 // the LAST bucket — always ONE Sunday-week, never the page-period total. In weekly modes (to_date/completed)
@@ -50,6 +51,7 @@ const dataFor = (mode: WeekMode): MondayShowcaseData => ({
   officeProjection: { bands: [], coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: "" },
   weeklyTrend: TREND,
   valueBases: { won_awarded_first: "x", open_best_estimate: "y" },
+  estimatingReport: emptyEstimatingReport(),
   routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 });

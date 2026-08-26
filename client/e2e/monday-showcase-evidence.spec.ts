@@ -5,8 +5,8 @@ import { SHOWCASE_VARIANTS } from "../src/pages/reports/monday-showcase/types";
 // Reports Part 3 -- drill-to-evidence + richer visuals. Mocks the showcase + evidence endpoints so the
 // real components render with representative data (DB-independent), asserts a clicked number opens a
 // drawer whose total reconciles to it, and captures every consolidated variant + the drawer for design
-// review. The variant list is sourced from SHOWCASE_VARIANTS so it can't drift from the registry (the
-// 8->5 consolidation removed A1/A2/B1; the Exec survivor is now labeled "Exec · One Glance").
+// review. The variant list is sourced from SHOWCASE_VARIANTS so it cannot drift from the registry. A1 is
+// the estimating report; A2/B1 remain removed from the earlier consolidation.
 
 // Screenshots are opt-in (design-review capture); the assertions below run in CI regardless.
 const SHOT_DIR = process.env.SHOWCASE_SHOT_DIR;
@@ -81,6 +81,48 @@ const showcase = {
     { weekStart: "2026-05-24", estimating: 18, sent: 13, won: 12, spikeExcluded: false },
   ],
   valueBases: { won_awarded_first: BASIS_WON, open_best_estimate: BASIS_OPEN },
+  estimatingReport: {
+    currentAsOf: "2026-05-27T18:00:00.000Z",
+    currentEstimating: {
+      count: 2,
+      ddValue: 350_000,
+      missingDdCount: 0,
+      projects: [
+        { id: "a1-current-1", name: "Cedar Ridge HOA", dealNumber: "d-100", projectNumber: "DFW-3-100", stageLabel: "Estimating", ddEstimate: 200_000, daysInStage: 9 },
+        { id: "a1-current-2", name: "Harbor Point Plaza", dealNumber: "d-101", projectNumber: "DFW-4-101", stageLabel: "Service estimating", ddEstimate: 150_000, daysInStage: 3 },
+      ],
+    },
+    newRfps: {
+      count: 1,
+      ddValue: 120_000,
+      missingDdCount: 0,
+      projects: [
+        { id: "a1-rfp-1", name: "Lakeside Tower", dealNumber: "d-102", projectNumber: "DFW-3-102", requestedAt: "2026-05-26T17:00:00.000Z", currentRfpStatus: "pending", assignedRepId: "rep-1", assignedRepName: "Alexis Stone", ddEstimate: 120_000 },
+      ],
+    },
+    rfpBySalesperson: [{ repId: "rep-1", repName: "Alexis Stone", count: 1, ddValue: 120_000, missingDdCount: 0 }],
+    estimatesSent: {
+      count: 1,
+      latestBidBoardTotalSales: 175_000,
+      projects: [
+        { id: "a1-sent-1", name: "Maple Court Apartments", dealNumber: "d-103", projectNumber: "DFW-3-103", sentAt: "2026-05-26T17:00:00.000Z", ddEstimate: 150_000, latestBidBoardTotalSales: 175_000, varianceAmount: 25_000, variancePercent: 16.67, marginPercent: 22.5 },
+      ],
+      comparison: {
+        dollarComparableCount: 1,
+        percentageComparableCount: 1,
+        dollarComparableDdValue: 150_000,
+        dollarComparableLatestBidBoardTotalSales: 175_000,
+        varianceAmount: 25_000,
+        percentageComparableDdValue: 150_000,
+        percentageComparableLatestBidBoardTotalSales: 175_000,
+        variancePercent: 16.67,
+      },
+      margin: { projectCount: 1, latestBidBoardTotalSales: 175_000, blendedPercent: 22.5 },
+      missingSentValueCount: 0,
+      missingMarginCount: 0,
+    },
+  },
+  routeFilter: { selected: ["service", "other"], active: false, unfilterable: [] },
   notes: [
     "Estimated/Sent are stage-entry cohorts (a proxy; Estimated is weak — no dedicated event date).",
     "Won is a close-date cohort — different cohort from the stage-entry ones.",
@@ -132,8 +174,8 @@ async function setup(page: Page) {
   await page.setViewportSize({ width: 1440, height: 1000 });
 }
 
-// Sourced from the registry so the spec tracks the consolidated 5-variant set (HERO "Exec · One Glance",
-// A3, B2, B3, B4) and never drifts back to the removed A1/A2/B1 buttons.
+// Sourced from the registry so the spec tracks A1 plus the consolidated survivors and never drifts back
+// to the removed A2/B1 buttons.
 const VARIANTS = SHOWCASE_VARIANTS.map((v) => v.label);
 const HERO_LABEL = SHOWCASE_VARIANTS.find((v) => v.key === "HERO")!.label;
 
@@ -151,6 +193,15 @@ test("Monday showcase: all variants render + drill opens a reconciling drawer", 
       await page.screenshot({ path: `${SHOT_DIR}/variant-${slug}.png`, fullPage: true });
     }
   }
+
+  // A1 has direct project evidence instead of a generic drawer, so assert its leadership-facing contract
+  // separately rather than merely proving the chip rendered in the loop above.
+  await page.getByRole("button", { name: "A1 · Estimating Report", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Estimating Report" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects sent to client" })).toBeVisible();
+  await expect(page.getByText("latest Bid Board / CRM values as of page refresh")).toBeVisible();
+  await expect(page.getByText("+$25,000")).toBeVisible();
+  await expect(page.getByText("22.5%")).toBeVisible();
 
   // Drill: open the exec hero Won tile -> drawer with a reconciliation banner.
   await page.getByRole("button", { name: HERO_LABEL, exact: true }).click();

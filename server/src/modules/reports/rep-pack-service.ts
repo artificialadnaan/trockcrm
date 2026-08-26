@@ -40,7 +40,9 @@ export interface RepPackOptions {
  */
 export async function getRepPackData(tenantDb: TenantDb, options: RepPackOptions = {}): Promise<RepPackData | null> {
   const mode: WeekMode = options.mode ?? "to_date";
-  const showcase = await getMondayShowcaseData(tenantDb, { mode, now: options.now });
+  // The pack needs only the canonical aggregate/reps slice. It cannot render A1, so avoid loading every
+  // office-wide estimating/RFP/sent detail row only to discard it below.
+  const showcase = await getMondayShowcaseData(tenantDb, { mode, now: options.now, includeEstimatingReport: false });
 
   // reps[] is already sorted by closed value desc; keep only the named reps for the picker.
   const namedReps = showcase.reps.filter((r): r is RepShowcaseRow & { repId: string } => r.repId != null);

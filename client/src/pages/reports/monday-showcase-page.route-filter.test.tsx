@@ -9,6 +9,7 @@ import {
   type MondayShowcaseData,
   type RouteBucket,
 } from "./monday-showcase/types";
+import { emptyEstimatingReport } from "./monday-showcase/test-fixtures";
 import { DEFAULT_WEEK_MODE, WEEK_MODE_LABELS, type WeekMode } from "./week-mode";
 
 /**
@@ -75,6 +76,7 @@ const payload: MondayShowcaseData = {
   },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  estimatingReport: emptyEstimatingReport(),
   routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 };

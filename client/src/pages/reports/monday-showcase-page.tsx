@@ -32,9 +32,11 @@ import {
   VariantB3LoadLane,
   VariantB4ForecastLadder,
 } from "./monday-showcase/variants";
+import { VariantA1EstimatingReport } from "./monday-showcase/estimating-report";
 
 const VARIANT_COMPONENT: Record<ShowcaseVariantKey, ComponentType<{ data: MondayShowcaseData }>> = {
   HERO: VariantExecHero,
+  A1: VariantA1EstimatingReport,
   A3: VariantA3Lanes,
   B2: VariantB2Leaderboard,
   B3: VariantB3LoadLane,

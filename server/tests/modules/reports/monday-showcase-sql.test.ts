@@ -13,6 +13,9 @@ import {
   buildNoDateEvidenceSql,
   buildPipelineEvidenceSql,
   buildLeadEvidenceSql,
+  buildCurrentEstimatingProjectsSql,
+  buildRfpInitiatedProjectsSql,
+  buildEstimateSentProjectsSql,
   eightWeekStartsEndingAt,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
@@ -84,6 +87,30 @@ describe("Monday showcase SQL builders compose F1-F5", () => {
     expect(trend).toContain(filterText); // trend now matches the cohort basis
   });
 
+  it("A1 current estimating is a live effective-stage snapshot with direct DD and hold-aware stage age", () => {
+    const text = extractSqlText(buildCurrentEstimatingProjectsSql());
+    expect(text).toContain("COALESCE(NULLIF");
+    expect(text).toContain("bid_board_stage_slug");
+    expect(text).toContain("estimate_in_progress"); // legacy estimating alias stays visible
+    expect(text).toContain("d.dd_estimate");
+    expect(text).toContain("d.is_active = true");
+    expect(text).toContain("on_hold_accumulated_seconds"); // aliasedEffectiveStageAgeDaysSql, not raw age
+  });
+
+  it("A1 RFP and sent cohorts use their distinct CT date sources and raw latest Bid Board fields", () => {
+    const rfp = extractSqlText(buildRfpInitiatedProjectsSql("2026-05-24", "2026-05-30"));
+    expect(rfp).toContain("rfp_approval_requested_at");
+    expect(rfp).toContain("America/Chicago");
+    expect(rfp).toContain("assigned_rep_id");
+
+    const sent = extractSqlText(buildEstimateSentProjectsSql("2026-05-24", "2026-05-30"));
+    expect(sent).toContain("dsh.to_stage_id");
+    expect(sent).toContain("MIN(dsh.created_at)");
+    expect(sent).toContain("bid_board_total_sales");
+    expect(sent).toContain("bid_board_profit_margin_pct");
+    expect(sent).not.toContain("d.bid_estimate AS latest_bid_board_total_sales");
+  });
+
   it("lead status: active (open) leads grouped by stage, per rep", () => {
     const text = extractSqlText(buildLeadStatusSql());
     expect(text).toContain("l.stage_id"); // grouped by lead stage
@@ -120,6 +147,9 @@ describe("the Service / Other route filter reaches every deal-sourced builder", 
   const DEAL_BUILDERS: Array<[string, (routes?: readonly ("service" | "other")[]) => unknown]> = [
     ["stageEntryCohort(sent)", (r) => buildStageEntryCohortSql(SENT_STAGE_SLUGS, "2026-06-01", "2026-06-07", r)],
     ["stageEntryCohort(estimated)", (r) => buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, "2026-06-01", "2026-06-07", r)],
+    ["a1CurrentEstimating", (r) => buildCurrentEstimatingProjectsSql(r)],
+    ["a1RfpInitiated", (r) => buildRfpInitiatedProjectsSql("2026-06-01", "2026-06-07", r)],
+    ["a1EstimateSent", (r) => buildEstimateSentProjectsSql("2026-06-01", "2026-06-07", r)],
     ["projectionBands", (r) => buildProjectionBandsSql(r)],
     ["projectionCoverage", (r) => buildProjectionCoverageSql(r)],
     ["weeklyCohortTrend", (r) => buildWeeklyCohortTrendSql("2026-05-01", "2026-06-07", undefined, r)],
