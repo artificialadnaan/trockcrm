@@ -129,6 +129,12 @@ export interface WeeklyReportProject {
   cadenceStartDate: string;
   cadenceEndDate: string | null;
   status: WeeklyReportProjectStatus;
+  /**
+   * False once "Stop reporting" has removed the setup — a different question from `status`, which is
+   * active/paused/completed. Only the `includeInactive` list can return a false; every other read
+   * filters the column, so it is permanently true for them.
+   */
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
   summary?: WeeklyReportProjectSummary | null;
@@ -181,6 +187,42 @@ export interface WeeklyReportDetail {
   photos: WeeklyReportPhoto[];
 }
 
+/**
+ * What THIS user may do with THIS report, decided by the server.
+ *
+ * Never re-derived here. The predicates consult the report's status, the project's two assignment slots
+ * and the actor's role, and the mutations enforce them — so a second implementation in the browser is a
+ * second set of answers, and the visible failure is a button that 403s. The CRM and T-Rock Cam read the
+ * same envelope for the same reason.
+ */
+export interface WeeklyReportPermissions {
+  canEdit: boolean;
+  canSubmit: boolean;
+  canApprove: boolean;
+  canReturnToDraft: boolean;
+  /**
+   * Admin and director only. Does NOT promise the delete will succeed: a report that replaced an earlier
+   * live version is refused server-side, because answering that per row would cost a query per row.
+   */
+  canDelete: boolean;
+}
+
+/** A History row — the report, plus the capability envelope the list endpoint attaches to each one. */
+export interface WeeklyReportHistoryEntry extends WeeklyReportDetail {
+  permissions: WeeklyReportPermissions;
+  /**
+   * The SETUP behind this report has been stopped, so everything that goes through the send path —
+   * Send, Retry send, Send correction — answers 404 "Weekly report project not found".
+   *
+   * A fact rather than a permission, which is why it is here and not in `permissions`: it is the same
+   * for every reader of the row. One field rather than one per action because there is one cause —
+   * `loadSendTarget` filters `wrp.is_active` — and the extra conditions each action carries (an
+   * `approved` status, an undelivered send, being the newest version) are product rules that stay in
+   * the panel. Delete is the deliberate exception and keeps working.
+   */
+  reportingStopped: boolean;
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
@@ -218,19 +260,41 @@ export function useWeeklyReportDashboard(options: { asOf?: string } = {}) {
   return { data, rows: data?.rows ?? [], loading, error, refetch };
 }
 
-export function useWeeklyReportProjects(filters: { status?: string; search?: string } = {}) {
+export function useWeeklyReportProjects(
+  filters: {
+    status?: string;
+    search?: string;
+    /**
+     * Include setups that have been STOPPED. Off everywhere but History's opt-in toggle: these are
+     * finished jobs, and the reports under them stay readable and deletable by design — which is the
+     * only reason to ask for them.
+     */
+    includeInactive?: boolean;
+    /**
+     * Whether to fetch at all. Same idiom as `useWeeklyReportEligibleDeals`: History mounts this hook
+     * unconditionally for the stopped list and only pays for it once somebody ticks the box.
+     */
+    enabled?: boolean;
+  } = {},
+) {
   const [projects, setProjects] = useState<WeeklyReportProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const { status, search } = filters;
+  const { status, search, includeInactive, enabled = true } = filters;
   const refetch = useCallback(async () => {
+    if (!enabled) {
+      setProjects([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       if (status) params.set("status", status);
       if (search) params.set("search", search);
+      if (includeInactive) params.set("includeInactive", "true");
       const query = params.toString() ? `?${params.toString()}` : "";
       const response = await api<{ projects: WeeklyReportProject[] }>(`/weekly-reports/projects${query}`);
       setProjects(response.projects ?? []);
@@ -239,7 +303,7 @@ export function useWeeklyReportProjects(filters: { status?: string; search?: str
     } finally {
       setLoading(false);
     }
-  }, [status, search]);
+  }, [status, search, includeInactive, enabled]);
 
   useEffect(() => {
     void refetch();
@@ -249,7 +313,7 @@ export function useWeeklyReportProjects(filters: { status?: string; search?: str
 }
 
 export function useWeeklyReportHistory(projectId: string | null) {
-  const [reports, setReports] = useState<WeeklyReportDetail[]>([]);
+  const [reports, setReports] = useState<WeeklyReportHistoryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -261,7 +325,7 @@ export function useWeeklyReportHistory(projectId: string | null) {
     setLoading(true);
     setError(null);
     try {
-      const response = await api<{ reports: WeeklyReportDetail[] }>(
+      const response = await api<{ reports: WeeklyReportHistoryEntry[] }>(
         `/weekly-reports/reports?projectId=${encodeURIComponent(projectId)}`,
       );
       setReports(response.reports ?? []);
@@ -320,6 +384,35 @@ export function dismissWeeklyReportWeek(projectId: string, weekOf: string, reaso
     method: "POST",
     json: { weekOf, reason },
   });
+}
+
+/**
+ * The five content fields `PATCH /reports/:id` accepts, and only those five.
+ *
+ * Everything else on a report is written by an act rather than typed: the status by a transition, the
+ * timestamps and actor ids by the write that stamped them, `remaining_weeks` on submit, the snapshot on
+ * send. An omitted key is left alone; an explicit `null` clears it.
+ */
+export interface WeeklyReportContentPatch {
+  workCompleted?: string | null;
+  nextWeekLookAhead?: string | null;
+  issuesConcerns?: string | null;
+  completionPercent?: number | null;
+  weatherDelayDays?: number | null;
+}
+
+export function updateWeeklyReportContent(reportId: string, patch: WeeklyReportContentPatch) {
+  return api<WeeklyReportDetail>(`/weekly-reports/reports/${reportId}`, { method: "PATCH", json: patch });
+}
+
+/**
+ * Remove a report from the record. Admin and director only, and the server says so — see `canDelete`.
+ *
+ * `confirmWeekOf` is required for a SENT report and is the report's own `week_of` typed back, ISO. There
+ * is no un-delete: the column supports one and no surface offers it.
+ */
+export function deleteWeeklyReport(reportId: string, input: { reason: string; confirmWeekOf?: string }) {
+  return api<void>(`/weekly-reports/reports/${reportId}`, { method: "DELETE", json: input });
 }
 
 export function transitionWeeklyReport(reportId: string, to: WeeklyReportStatus) {
@@ -452,6 +545,15 @@ export interface WeeklyReportAuditReport {
   deliveryStatus: string | null;
   /** The CRM has no evidence the client received this one. A bounce counts — see the server's note. */
   undelivered: boolean;
+  /**
+   * False when somebody removed this version. The audit trail keeps the row on purpose — a removal is
+   * part of what happened — so this is what tells a removed week apart from a filed one.
+   */
+  isActive: boolean;
+  /** Who removed it, when and why, off the soft-delete audit row. Null on a live report. */
+  deletedAt: string | null;
+  deletedByName: string | null;
+  deletedReason: string | null;
   /**
    * A delivery problem somebody still has to act on. Decided by the server, and the audit dialog's
    * count, chip and border all read THIS rather than each deriving their own — see the server's note

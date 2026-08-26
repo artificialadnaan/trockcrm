@@ -590,7 +590,7 @@ describe("draft creation", () => {
     expect(first.created).toBe(true);
     expect(retry.created).toBe(false);
     expect(retry.report.id).toBe(first.report.id);
-    expect(await listWeeklyReports(db, { projectId: project.id })).toHaveLength(1);
+    expect(await listWeeklyReports(db, { projectId: project.id }, DIRECTOR_ACTOR)).toHaveLength(1);
   });
 
   it("treats a DIFFERENT submission id for the same week as a conflict, not a retry", async () => {

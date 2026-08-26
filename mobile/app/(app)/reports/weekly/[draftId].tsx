@@ -41,8 +41,10 @@ import {
 import { retryWeeklyReportPhotoUploads } from "../../../../src/weekly-reports/photo-import";
 import { weeklyReportServerReportId } from "../../../../src/weekly-reports/hub";
 import { isWeeklyReportWeekTakenError } from "../../../../src/weekly-reports/reconcile";
+import { newSubmissionId } from "../../../../src/scorecards/ids";
 import {
   adoptWeeklyReportWeekRow,
+  resolveWeeklyReportDraftRow,
   runWeeklyReportSubmit,
 } from "../../../../src/weekly-reports/submit";
 import {
@@ -50,6 +52,7 @@ import {
   MAX_WEEKLY_REPORT_PHOTOS,
   MAX_WEEKLY_REPORT_SECTION_CHARS,
   WEEKLY_REPORT_STEPS,
+  enqueueWeeklyReportAutosave,
   isImportedWeeklyReportPhoto,
   weeklyReportDraftBlocker,
   weeklyReportDraftPendingUploads,
@@ -202,6 +205,10 @@ function Wizard({
   // and resurrect a report that was already filed. `finalized` stops saves once the draft is gone.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
+  // A passive autosave can retain the pre-renewal draft while the replacement submission id reaches disk.
+  // Read this only from INSIDE the queued save so delayed autosaves retain newer prose but never put the
+  // retired key (or its row-bound lifecycle state) back after the durable renewal.
+  const renewedClientSubmissionId = useRef<string | null>(null);
   // `importing` is React state and does not update before a second rapid tap re-reads it, so a ref is what
   // actually bars the double-tap before the picker opens.
   const importInFlight = useRef(false);
@@ -228,9 +235,13 @@ function Wizard({
 
   useEffect(() => {
     if (finalized.current) return;
-    saveChain.current = saveChain.current
-      .then(() => (finalized.current ? undefined : saveWeeklyReportDraft(ownerKey, draft, Date.now())))
-      .catch(() => undefined);
+    saveChain.current = enqueueWeeklyReportAutosave(saveChain.current, draft, {
+      finalized: () => finalized.current,
+      // A renewal may be immediately ahead of this autosave in `saveChain`, even though this render
+      // still holds its retired key. The helper reads this when the queued callback executes.
+      renewedClientSubmissionId: () => renewedClientSubmissionId.current,
+      save: (snapshot) => saveWeeklyReportDraft(ownerKey, snapshot, Date.now()),
+    });
   }, [draft, ownerKey]);
 
   const anyVoiceBusy = voiceBusyKeys.size > 0;
@@ -279,6 +290,43 @@ function Wizard({
   }, []);
 
   /**
+   * Replace a key the server retired and make that replacement durable before another create can use it.
+   *
+   * This is deliberately a read-modify-write through `saveChain`, rather than an autosave of this render's
+   * `draft`: the renewal clears the former row's identity and lifecycle state, while another queued write
+   * may carry newer prose or photos. Reading after every earlier save has settled preserves both. More
+   * importantly, the caller AWAITS this promise before its retry; a React dispatch alone vanishes with an
+   * app kill.
+   */
+  const persistRenewedClientSubmissionId = useCallback(
+    async (clientSubmissionId: string): Promise<void> => {
+      const persisted = saveChain.current.then(async () => {
+        if (finalized.current) throw new Error("This weekly report draft has already been finalized.");
+        const stored = await loadWeeklyReportDraft(ownerKey, draftId);
+        if (!stored) throw new Error("This weekly report draft is no longer available.");
+        await saveWeeklyReportDraft(
+          ownerKey,
+          weeklyReportDraftReducer(stored, { type: "renewClientSubmissionId", clientSubmissionId }),
+          Date.now(),
+        );
+        // Set before this queued write resolves. Any autosave already appended behind it must normalize
+        // its stale render snapshot before touching disk, while a failed renewal leaves the old key alone.
+        renewedClientSubmissionId.current = clientSubmissionId;
+      });
+
+      // Let a failed durable save stop THIS retry, but leave the serialization chain usable for a later
+      // user retry. Swallowing it before the await would create a report under a key the next app launch
+      // cannot know, which is the exact orphan this recovery is meant to prevent.
+      saveChain.current = persisted.catch(() => undefined);
+      await persisted;
+      // Do not leave a volatile renewed key in React state when its disk write failed. If the user retries
+      // after that error, the old key is retried and this same durable renewal path runs again.
+      dispatch({ type: "renewClientSubmissionId", clientSubmissionId });
+    },
+    [ownerKey, draftId],
+  );
+
+  /**
    * The week already has a row, created under a DIFFERENT submission id — i.e. started on another device.
    *
    * Adopting it is the only way forward: without this the create 409s identically on every retry, the
@@ -316,36 +364,61 @@ function Wizard({
    * create whose response was lost returns the SAME report on the next attempt instead of a duplicate for
    * the week. A report opened for review already has an id and never reaches the POST.
    */
-  const ensureReport = useCallback(async (): Promise<string> => {
-    if (draft.reportId) return draft.reportId;
-    let created;
-    try {
-      created = await createWeeklyReport(fetcher, {
-        clientSubmissionId: draft.clientSubmissionId,
-        weeklyReportProjectId: draft.weeklyReportProjectId,
-        weekOf: draft.weekOf,
+  const ensureReport = useCallback(
+    async (): Promise<{ reportId: string; replacesExistingReport: boolean }> => {
+      let resolved;
+      try {
+        // A saved report id is only a hint, not proof: leadership may have deleted the row while this phone
+        // was on Photos. The resolver acts only on the server's explicit author-recovery signal — a field
+        // 404 may instead conceal a live report after reassignment, and author-mode UI is not authorship —
+        // then durably resets the old row state and renews its submission key before creating a replacement.
+        resolved = await resolveWeeklyReportDraftRow(
+          { reportId: draft.reportId, clientSubmissionId: draft.clientSubmissionId },
+          {
+            read: (reportId) => getWeeklyReport(fetcher, reportId),
+            create: (clientSubmissionId) =>
+              createWeeklyReport(fetcher, {
+                clientSubmissionId,
+                weeklyReportProjectId: draft.weeklyReportProjectId,
+                weekOf: draft.weekOf,
+              }),
+            newClientSubmissionId: newSubmissionId,
+            // Awaited through the save chain BEFORE the retry leaves, so a create whose reply is lost on the
+            // way back is still idempotent under this new key after an app death.
+            onRenewed: persistRenewedClientSubmissionId,
+          },
+        );
+      } catch (error) {
+        if (!isWeeklyReportWeekTakenError(error)) throw error;
+        return { reportId: await adoptExistingWeekRow(), replacesExistingReport: false };
+      }
+      if (resolved.kind === "existing") {
+        return { reportId: resolved.reportId, replacesExistingReport: false };
+      }
+      if (resolved.kind === "replacement-week-taken") {
+        return { reportId: await adoptExistingWeekRow(), replacesExistingReport: true };
+      }
+      const created = resolved.created;
+      // Stamp what the server actually handed back rather than assuming an empty row: the create is
+      // idempotent, so this can be a row that already exists, and the provenance every later freshness
+      // check reads has to describe the row that is really there.
+      dispatch({
+        type: "setReportId",
+        reportId: created.report.id,
+        seededFrom: weeklyReportSeedStateFromDetail(created.report),
       });
-    } catch (error) {
-      if (!isWeeklyReportWeekTakenError(error)) throw error;
-      return await adoptExistingWeekRow();
-    }
-    // Stamp what the server actually handed back rather than assuming an empty row: the create is
-    // idempotent, so this can be a row that already exists, and the provenance every later freshness
-    // check reads has to describe the row that is really there.
-    dispatch({
-      type: "setReportId",
-      reportId: created.report.id,
-      seededFrom: weeklyReportSeedStateFromDetail(created.report),
-    });
-    return created.report.id;
-  }, [
-    draft.reportId,
-    draft.clientSubmissionId,
-    draft.weeklyReportProjectId,
-    draft.weekOf,
-    fetcher,
-    adoptExistingWeekRow,
-  ]);
+      return { reportId: created.report.id, replacesExistingReport: resolved.replacesExistingReport };
+    },
+    [
+      draft.reportId,
+      draft.clientSubmissionId,
+      draft.weeklyReportProjectId,
+      draft.weekOf,
+      fetcher,
+      adoptExistingWeekRow,
+      persistRenewedClientSubmissionId,
+    ],
+  );
 
   // The report row has to exist before the picker can ask what photos fall in its window, so create it
   // when the user reaches the photos step rather than at submit. Failure is left silent here: the step
@@ -353,9 +426,9 @@ function Wizard({
   // simply walked through the wizard while offline.
   const onPhotosStep = draft.step === "photos";
   useEffect(() => {
-    if (!onPhotosStep || draft.reportId) return;
+    if (!onPhotosStep) return;
     void ensureReport().catch(() => undefined);
-  }, [onPhotosStep, draft.reportId, ensureReport]);
+  }, [onPhotosStep, ensureReport]);
 
   const candidates = useQuery({
     queryKey: ["weekly-report-candidates", draft.reportId ?? "none"],
@@ -487,7 +560,7 @@ function Wizard({
     setImporting(true);
     setNotice(null);
     try {
-      const reportId = await ensureReport();
+      const { reportId } = await ensureReport();
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) {
         setNotice({ tone: "error", text: "Photo library permission is required to import." });

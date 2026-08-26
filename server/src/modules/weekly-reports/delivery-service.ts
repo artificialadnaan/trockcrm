@@ -119,7 +119,12 @@ export type WeeklyReportDeliveryOutcome =
   | "applied"
   /** A verdict the provider dated later is already there. Includes an exact replay of this same event. */
   | "superseded"
-  /** No row matches this key — the report was hard-deleted, or the key has been rotated out from under it. */
+  /**
+   * No row matches this key — the report was HARD-deleted, or the key has been rotated out from under it.
+   *
+   * A SOFT-deleted report does not land here: its verdict is still recorded, because what the provider
+   * did is a fact about the outside world and our removal flag has no bearing on it.
+   */
   | "unmatched";
 
 /**
@@ -134,6 +139,17 @@ export type WeeklyReportDeliveryOutcome =
  * Locked with FOR UPDATE because the decision is read-then-write. Two events for the same send arriving on
  * two connections — which is exactly what a provider retry alongside a fresh event looks like — would
  * otherwise both read the old verdict and both pass the supersede test, and the loser would land last.
+ *
+ * NO `is_active` FILTER, and its absence is the point. This records what the PROVIDER DID with a message
+ * that has already left the building; deleting our row does not un-bounce the client's email. The window
+ * is ordinary — the provider accepts, leadership removes the report, the bounce lands seconds later — and
+ * with the filter that verdict was dropped as `unmatched`, silently. Two consequences, both bad: the
+ * audit trail keeps the removed row AS EVIDENCE and would have shown it as a permanent question mark,
+ * and `markOutstanding` carries a removed row's FAILURE onto its week, so a week whose only delivery
+ * evidence was that bounce would report nothing outstanding at all.
+ *
+ * The `send_delivery_key` predicate is what isolates this write, and it still does — see above. That is
+ * the guard that matters here; `is_active` was never doing that job.
  */
 export async function applyWeeklyReportDeliveryEvent(
   client: QueryExecutor,
@@ -142,7 +158,7 @@ export async function applyWeeklyReportDeliveryEvent(
   const locked = await client.query(
     `SELECT id, send_delivery_status, send_delivery_status_at
        FROM weekly_reports
-      WHERE id = $1::uuid AND send_delivery_key = $2::uuid AND is_active
+      WHERE id = $1::uuid AND send_delivery_key = $2::uuid
       FOR UPDATE`,
     [input.weeklyReportId, input.deliveryKey],
   );
@@ -165,7 +181,7 @@ export async function applyWeeklyReportDeliveryEvent(
         SET send_delivery_status = $3,
             send_delivery_status_at = $4::timestamptz,
             send_delivery_detail = $5::jsonb
-      WHERE id = $1::uuid AND send_delivery_key = $2::uuid AND is_active`,
+      WHERE id = $1::uuid AND send_delivery_key = $2::uuid`,
     [
       input.weeklyReportId,
       input.deliveryKey,

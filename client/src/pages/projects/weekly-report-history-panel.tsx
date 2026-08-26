@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CalendarClock, Loader2 } from "lucide-react";
+import { AlertTriangle, CalendarClock, Loader2, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   weeklyReportRetryDuplicateRiskPrompt,
@@ -19,9 +25,13 @@ import {
   fetchWeeklyReportDetail,
   retryWeeklyReportSend,
   useWeeklyReportHistory,
+  useWeeklyReportProjects,
   type WeeklyReportDetail,
+  type WeeklyReportHistoryEntry,
   type WeeklyReportProject,
 } from "@/hooks/use-weekly-reports";
+import { WeeklyReportDeleteDialog } from "./weekly-report-delete-dialog";
+import { WeeklyReportEditDialog } from "./weekly-report-edit-dialog";
 
 const STATUS_BADGE: Record<string, string> = {
   draft: "border-amber-200 bg-amber-50 text-amber-700",
@@ -68,6 +78,7 @@ export function WeeklyReportHistoryPanel({
   refreshSignal,
   onSend,
   onChanged,
+  onOpenAudit,
 }: {
   projects: WeeklyReportProject[];
   /** Incremented by the page's Refresh button. This panel's request belongs to no one else. */
@@ -76,18 +87,53 @@ export function WeeklyReportHistoryPanel({
   onSend: (reportId: string) => void;
   /** Fired after a correction is created, so the board picks up the new version. */
   onChanged: () => void;
+  /**
+   * Opens the per-project audit dialog. Optional so the panel still renders without it, but the page
+   * should pass it: for a stopped setup this is the only surface that can reach that project's record.
+   */
+  onOpenAudit?: (projectId: string) => void;
 }) {
   const [projectId, setProjectId] = useState<string>("");
 
+  /**
+   * REPORTS UNDER A STOPPED SETUP, which this selector could not otherwise reach.
+   *
+   * "Stop reporting" soft-deletes the setup row, and `listWeeklyReportProjects` filters `wrp.is_active`
+   * — so the setup leaves the `projects` prop and takes every report under it with it. Those reports
+   * stay readable and deletable on purpose (the delete deliberately opts out of the project's
+   * `is_active` filter, because a stopped setup is exactly where leftover test data comes to rest), and
+   * without this there was no way to select one. Opt-in, and not fetched until it is asked for: the tab
+   * is live work by default.
+   */
+  const [showStopped, setShowStopped] = useState(false);
+  const {
+    projects: withStopped,
+    // LOADING AND ERROR ARE NOT THE SAME AS ZERO, and dropping them made a failed fetch render as "this
+    // office has no weekly report setups at all" — while hiding the live history that was on screen a
+    // moment before, with no retry and nothing saying anything had gone wrong.
+    loading: stoppedLoading,
+    error: stoppedError,
+  } = useWeeklyReportProjects({ includeInactive: true, enabled: showStopped });
+  const selectable = showStopped ? withStopped : projects;
+
   // Default to the first project once the list arrives, so the tab isn't an empty prompt on open.
+  //
+  // AND FALL BACK when the selected one leaves the list — which is what unticking "include stopped
+  // setups" does to a stopped project. A `<select>` bound to a value none of its options carry renders
+  // blank, and the table under it empties, with nothing on screen saying why.
   useEffect(() => {
-    if (!projectId && projects.length > 0) setProjectId(projects[0]!.id);
-  }, [projects, projectId]);
+    if (selectable.length === 0) return;
+    if (!projectId || !selectable.some((p) => p.id === projectId)) setProjectId(selectable[0]!.id);
+  }, [selectable, projectId]);
 
   const { reports, loading, error, refetch } = useWeeklyReportHistory(projectId || null);
   const [detail, setDetail] = useState<WeeklyReportDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // ONE dialog for the whole table, holding the row it was opened from — not a dialog per row. Fifty-two
+  // weeks of a job is fifty-two mounted forms otherwise, each with its own state.
+  const [editing, setEditing] = useState<WeeklyReportHistoryEntry | null>(null);
+  const [deleting, setDeleting] = useState<WeeklyReportHistoryEntry | null>(null);
 
   // Re-run the history request when the page refreshes, but NOT on mount — the hook already loads on
   // mount and on every project change, so an unguarded effect would fire a second, identical request
@@ -99,7 +145,10 @@ export function WeeklyReportHistoryPanel({
     void refetch();
   }, [refreshSignal, refetch]);
 
-  const selected = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
+  const selected = useMemo(
+    () => selectable.find((p) => p.id === projectId) ?? null,
+    [selectable, projectId],
+  );
 
   // The highest live version per week. "Send correction" is offered on the newest version of a week and
   // nowhere else: a report is only marked superseded when its replacement is SENT, so a PM who drafts a
@@ -128,15 +177,6 @@ export function WeeklyReportHistoryPanel({
     }
   };
 
-  if (projects.length === 0) {
-    return (
-      <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
-        <CalendarClock className="h-4 w-4 text-slate-400" />
-        Add a weekly report project first — history appears here once reports start going out.
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
@@ -147,18 +187,64 @@ export function WeeklyReportHistoryPanel({
           aria-label="Project"
           className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[13px] font-semibold text-slate-700"
         >
-          {projects.map((project) => (
+          {selectable.map((project) => (
             <option key={project.id} value={project.id}>
               {project.propertyDisplayName ?? project.dealName ?? "Untitled project"}
+              {/* MARKED, not merely listed. A stopped job shown identically to a live one reads as
+                  though reporting were still running on it. */}
+              {project.isActive === false ? " · stopped" : ""}
             </option>
           ))}
         </select>
         {selected?.clientName && (
-          <span className="text-[12.5px] font-semibold text-slate-400">for {selected.clientName}</span>
+          <span className="text-[12.5px] font-semibold text-slate-500">for {selected.clientName}</span>
         )}
+        {/* THE ONLY ROUTE TO A DELETION RECORD under a stopped setup. The actor, timestamp and reason
+            live in `audit_log` and nowhere else, and a stopped setup is absent from both surfaces that
+            otherwise open this dialog — the Projects tab and the dashboard. */}
+        {onOpenAudit && selected && (
+          <button
+            type="button"
+            onClick={() => onOpenAudit(selected.id)}
+            className="rounded-lg border border-slate-200 px-2.5 py-1 text-[12.5px] font-semibold text-slate-600 hover:border-brand-red hover:text-brand-red"
+          >
+            Audit trail
+          </button>
+        )}
+        <label className="ml-auto flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-500">
+          <input
+            type="checkbox"
+            aria-label="Include stopped setups"
+            checked={showStopped}
+            onChange={(event) => setShowStopped(event.target.checked)}
+            className="h-3.5 w-3.5 accent-brand-red"
+          />
+          Include stopped setups
+        </label>
       </div>
 
-      {loading ? (
+      {showStopped && stoppedError ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
+          <AlertTriangle className="h-4 w-4 text-brand-red" />
+          {stoppedError} — untick “include stopped setups” to get back to the live ones.
+        </div>
+      ) : showStopped && stoppedLoading ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
+          <Loader2 className="h-4 w-4 animate-spin text-slate-500" /> Loading stopped setups…
+        </div>
+      ) : selectable.length === 0 ? (
+        // BELOW THE SELECTOR, not instead of it. This used to be an early return, so an office that had
+        // stopped ALL of its setups saw "add a project first" and no way to disagree — the one state
+        // where "include stopped setups" is the only route to anything is the state where the control
+        // was not rendered. The message now depends on which list is empty, because "you have none" and
+        // "you have none that are still running" are different things to be told.
+        <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
+          <CalendarClock className="h-4 w-4 text-slate-500" />
+          {showStopped
+            ? "No weekly report setups at all — add one and history appears here once reports start going out."
+            : "No live weekly report setups. Tick “include stopped setups” to reach reports from finished jobs."}
+        </div>
+      ) : loading ? (
         <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white p-6 text-[13.5px] font-semibold text-slate-500">
           <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> Loading history…
         </div>
@@ -221,7 +307,13 @@ export function WeeklyReportHistoryPanel({
                       >
                         View
                       </button>
-                      {report.status === "approved" && (
+                      {/* NOTHING THAT GOES THROUGH THE SEND PATH, once the setup is stopped.
+                          `loadSendTarget` resolves the project with `wrp.is_active` and throws 404
+                          "Weekly report project not found", so Send, Retry and Send correction all fail
+                          for one reason — which is why the server sends one fact rather than three
+                          near-identical booleans. Delete is the deliberate exception and stays below;
+                          reaching it is the whole point of showing stopped setups here at all. */}
+                      {!report.reportingStopped && report.status === "approved" && (
                         <Button size="sm" onClick={() => onSend(report.id)}>
                           Send
                         </Button>
@@ -242,7 +334,10 @@ export function WeeklyReportHistoryPanel({
                           that row by construction; History was the one surface that offered the action.
                           The server and the worker each refuse it independently — this only stops the CRM
                           inviting it. */}
-                      {report.status === "sent" && !report.sendDeliveredAt && !report.supersededById && (
+                      {!report.reportingStopped &&
+                        report.status === "sent" &&
+                        !report.sendDeliveredAt &&
+                        !report.supersededById && (
                         <RetryButton
                           reportId={report.id}
                           sentAt={report.sentAt}
@@ -253,7 +348,8 @@ export function WeeklyReportHistoryPanel({
                       {/* Only on the LIVE, NEWEST version. A report already superseded by a correction has
                           nothing left to correct — the fix is on the version that replaced it — and an
                           older version with a newer one already drafted has the same problem. */}
-                      {report.status === "sent" &&
+                      {!report.reportingStopped &&
+                        report.status === "sent" &&
                         !report.supersededById &&
                         report.version >= (latestVersionByWeek.get(report.weekOf) ?? report.version) && (
                           <CorrectionButton
@@ -277,6 +373,17 @@ export function WeeklyReportHistoryPanel({
                             }}
                           />
                         )}
+                      {/* EDIT AND DELETE GO IN THE OVERFLOW, not beside the four above. A row that can
+                          be sent, retried and corrected already carries four controls; six inline
+                          buttons is a wall, and the destructive one has no business being the easiest
+                          thing on the row to hit. This is the house row-destructive idiom — see
+                          file-row.tsx, where Delete is a red DropdownMenuItem and not an inline
+                          button. */}
+                      <RowActions
+                        report={report}
+                        onEdit={() => setEditing(report)}
+                        onDelete={() => setDeleting(report)}
+                      />
                     </div>
                   </td>
                 </tr>
@@ -353,7 +460,90 @@ export function WeeklyReportHistoryPanel({
           ) : null}
         </SheetContent>
       </Sheet>
+
+      {editing && (
+        <WeeklyReportEditDialog
+          report={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            void refetch();
+            // The board reads the same rows: a completion percentage or a cleared work-completed section
+            // changes what This Week says about the project, not only what History shows.
+            onChanged();
+          }}
+        />
+      )}
+      {deleting && (
+        <WeeklyReportDeleteDialog
+          report={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => {
+            void refetch();
+            onChanged();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * The row's overflow menu: Edit, then Delete last and red.
+ *
+ * GATED ON THE SERVER'S ANSWER, never on a role read from the session. `canEdit` consults the report's
+ * status and the project's two assignment slots as well as the role — a sent report is closed to
+ * everyone, an approved one only to the PM — and the CRM re-deriving any of that is how a button that
+ * 403s reaches a user.
+ *
+ * Renders NOTHING when neither is offered, rather than an empty menu. An overflow button that opens onto
+ * nothing reads as a broken control, and for a rep — who can open this whole tab and act on none of it —
+ * that would be every row.
+ */
+function RowActions({
+  report,
+  onEdit,
+  onDelete,
+}: {
+  report: WeeklyReportHistoryEntry;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  // Optional-chained because the envelope arrives from the API: a browser that loaded before the deploy
+  // that added it would otherwise throw here and blank the entire History tab, which is a far worse
+  // outcome than a row that briefly offers no actions.
+  const canEdit = report.permissions?.canEdit === true;
+  const canDelete = report.permissions?.canDelete === true;
+  if (!canEdit && !canDelete) return null;
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label={`More actions for the week of ${fmtWeek(report.weekOf)}`}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end">
+        {canEdit && (
+          <DropdownMenuItem onClick={onEdit}>
+            <Pencil className="mr-2 h-4 w-4" />
+            Edit report
+          </DropdownMenuItem>
+        )}
+        {canDelete && (
+          <DropdownMenuItem onClick={onDelete} className="text-red-600">
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete report
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

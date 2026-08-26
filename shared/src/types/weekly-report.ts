@@ -107,6 +107,27 @@ export const WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS = 250;
  */
 export const WEEKLY_REPORT_MAX_PHOTOS = 60;
 
+/**
+ * Most weather-delay days one report may claim — the API's validation limit AND the form's.
+ *
+ * 3650 is ten years, i.e. "this is a typo, not a delay". Shared rather than repeated because the form had
+ * only the `>= 0` half of the rule: anything larger was accepted by the dialog, refused by the API, and
+ * reported to the user as "must be a whole number of days" — a message describing a rule they had not
+ * broken, on a value they could not tell was wrong.
+ */
+export const WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS = 3650;
+
+/**
+ * Longest reason a delete may carry — the API's validation limit AND the dialog's.
+ *
+ * The reason is the entire explanation of why a report is gone, and `audit_log` is the ONLY place it is
+ * kept: `weekly_reports` has no deleted_by/deleted_at/reason columns, so what is not stored here is not
+ * recorded anywhere. It was previously truncated to this length server-side while the user was shown a
+ * success toast — the forensic record silently losing the half of the sentence that explained the removal.
+ * Refused rather than trimmed, and stated in the form, so the two cannot disagree about the same click.
+ */
+export const WEEKLY_REPORT_DELETE_REASON_MAX_CHARS = 500;
+
 /** Days before the due date that each reminder fires. `due_digest` fires ON the due date. */
 export const WEEKLY_REPORT_REMINDER_OFFSET_DAYS: Record<WeeklyReportLeadDayReminderKind, number> = {
   t_minus_2: 2,

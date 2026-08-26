@@ -189,6 +189,19 @@ function senderFrom(projectRow: Record<string, any>): WeeklyReportSenderContact 
  *
  * `complained` is deliberately NOT excluded: a spam complaint can only follow a delivery, so that client
  * does have the report and the replacement wording is correct for them.
+ *
+ * NO `is_active` FILTER, and its absence is the point. This asks what the CLIENT HOLDS, which is a fact
+ * about the outside world — deleting our row does not recall their email. With the filter, removing a
+ * delivered v1 made the v2 that follows introduce itself as an ordinary first report to somebody already
+ * holding last Thursday's copy, which is the single sentence the correction wording exists to prevent.
+ * Every other predicate in this module that asks about OUR records keeps the filter; this one asks about
+ * theirs. Same rule the audit page applies to a removed bounce: a removal is not a re-write of history.
+ *
+ * The remaining ambiguity is pre-existing and unchanged: a v1 delivered to the WRONG recipient and then
+ * removed still counts, so a v2 addressed elsewhere tells a first-time reader it replaces a copy they
+ * never had. That is already true of a live v1 in the same situation — recipients are per-send and this
+ * predicate does not compare them — so including removed rows makes them behave like live ones rather
+ * than introducing a new way to be wrong.
  */
 async function priorVersionReachedClient(
   client: QueryExecutor,
@@ -200,7 +213,6 @@ async function priorVersionReachedClient(
       WHERE weekly_report_project_id = $1::uuid
         AND week_of = $2::date
         AND version < $3
-        AND is_active
         AND status = 'sent'
         AND send_delivered_at IS NOT NULL
         AND (send_delivery_status IS NULL OR NOT (send_delivery_status = ANY($4::text[])))
@@ -761,19 +773,22 @@ export async function createWeeklyReportCorrection(
   }
 
   const weekOf = toIsoDate(reportRow.week_of)!;
-  // The highest version for this week, taken under the report lock we already hold on the source row.
-  // MAX rather than `source.version + 1`: correcting v1 twice would otherwise collide with the live v2 on
-  // weekly_reports_project_week_version_uidx and surface as a raw 23505.
-  const latest = await client.query(
-    `SELECT COALESCE(MAX(version), 0) AS version
+  // Keep the two version questions separate. A newer LIVE correction means this source must not make
+  // another one, while a deleted correction is still part of the week's immutable history and its number
+  // must never be reused. The partial unique index only protects live rows, so using its predicate for
+  // allocation would otherwise create two historical v2s after an unsent v2 is deleted.
+  const versions = await client.query(
+    `SELECT COALESCE(MAX(version), 0) AS historical_version,
+            COALESCE(MAX(CASE WHEN is_active THEN version END), 0) AS active_version
        FROM weekly_reports
-      WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date AND is_active`,
+      WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date`,
     [reportRow.weekly_report_project_id, weekOf],
   );
-  const latestVersion = Number(latest.rows[0]?.version ?? 0);
+  const latestHistoricalVersion = Number(versions.rows[0]?.historical_version ?? 0);
+  const latestActiveVersion = Number(versions.rows[0]?.active_version ?? 0);
   const sourceVersion = Number(reportRow.version ?? 1);
 
-  // REFUSED when a newer version already exists, which is the difference between one correction and a
+  // REFUSED when a newer LIVE version already exists, which is the difference between one correction and a
   // pile of them. History offers "Send correction" on any sent row that is not yet superseded, and a row
   // is only superseded when its replacement is SENT — so a PM who drafts a v2 and comes back to the same
   // v1 row is offered the button again and gets a v3. Both land `approved`, sending v2 supersedes only v1,
@@ -782,14 +797,14 @@ export async function createWeeklyReportCorrection(
   // because the live row is v3.
   //
   // Refusing names the version to work on instead, which is what the PM actually wants.
-  if (latestVersion > sourceVersion) {
+  if (latestActiveVersion > sourceVersion) {
     throw new AppError(
       409,
-      `Version ${latestVersion} of this week's report already exists — finish and send that one instead ` +
+      `Version ${latestActiveVersion} of this week's report already exists — finish and send that one instead ` +
         "of starting another correction",
     );
   }
-  const nextVersion = latestVersion + 1;
+  const nextVersion = latestHistoricalVersion + 1;
 
   const inserted = await client.query(
     `INSERT INTO weekly_reports (

@@ -301,6 +301,22 @@ export type WeeklyReportDraftAction =
    * conflict dialog naming a colleague who does not exist — whose destructive button then drops the
    * photos this phone had just successfully uploaded.
    */
+  /**
+   * The server has permanently retired this draft's submission key, so give it a new one.
+   *
+   * `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial one: once the
+   * report a phone created is DELETED, that key can never produce a row again and every retry gets the
+   * same 409 for the rest of time. The writing on the draft is untouched by any of that — only its key
+   * is spent — so the recovery is a fresh key over the same words, and the alternative the field user
+   * had was discarding a week's work and starting again on a jobsite.
+   *
+   * The report id, provenance, lifecycle status and lost-transition marker go WITH the row. A replacement
+   * is a new AUTHOR draft, not the deleted row wearing a new id: retaining `approved` would turn its final
+   * action into "Save changes" and leave the new row unfiled, while retaining a marker could call somebody
+   * else's replacement transition this phone's own lost reply. `ensureReport` also short-circuits on
+   * `reportId`, so leaving that dead id behind would hand back the deleted row forever.
+   */
+  | { type: "renewClientSubmissionId"; clientSubmissionId: string }
   | { type: "setSeededFrom"; seededFrom: WeeklyReportSeedState | null }
   /** The server moved the report; record it so the final button stops asking for a transition it made. */
   | { type: "setServerStatus"; status: WeeklyReportStatusValue }
@@ -402,6 +418,17 @@ export function weeklyReportDraftReducer(
         // `undefined` means "leave the provenance alone"; an explicit null clears it.
         seededFrom: action.seededFrom === undefined ? draft.seededFrom : action.seededFrom,
       };
+    case "renewClientSubmissionId":
+      return {
+        ...draft,
+        clientSubmissionId: action.clientSubmissionId,
+        // Row-bound state is cleared deliberately — see the action note. The writing stays exactly as it is.
+        reportId: null,
+        seededFrom: null,
+        mode: "author",
+        serverStatus: null,
+        pendingTransitionTo: null,
+      };
     case "setSeededFrom":
       return { ...draft, seededFrom: action.seededFrom };
     case "setServerStatus":
@@ -461,6 +488,55 @@ export function weeklyReportDraftReducer(
     default:
       return draft;
   }
+}
+
+/**
+ * Reconcile an autosave snapshot with a submission key that became durable after that snapshot rendered.
+ *
+ * React effects retain the draft from their render. A renewal deliberately waits for its own
+ * read-modify-write before it dispatches, so an edit made while that write is pending can queue an
+ * autosave carrying the RETIRED key behind it. Letting that snapshot write unchanged would erase the
+ * durable replacement key in the narrow window before the renewed render's autosave runs. Apply the
+ * same reducer transition at save time: it preserves that later edit, but cannot resurrect identity or
+ * lifecycle state belonging to the deleted row.
+ */
+export function weeklyReportDraftForAutosave(
+  draft: WeeklyReportDraft,
+  renewedClientSubmissionId: string | null,
+): WeeklyReportDraft {
+  if (!renewedClientSubmissionId || draft.clientSubmissionId === renewedClientSubmissionId) return draft;
+  return weeklyReportDraftReducer(draft, {
+    type: "renewClientSubmissionId",
+    clientSubmissionId: renewedClientSubmissionId,
+  });
+}
+
+/** Effects the wizard needs to serialize its whole-draft autosaves. Kept pure/native-free for race tests. */
+export interface WeeklyReportAutosavePort {
+  finalized(): boolean;
+  /** Read when this save RUNS, not when the effect queues it. */
+  renewedClientSubmissionId(): string | null;
+  save(draft: WeeklyReportDraft): Promise<void>;
+}
+
+/**
+ * Append a snapshot to the wizard's save chain without letting a renewal immediately ahead of it regress.
+ *
+ * The deferred `renewedClientSubmissionId` read is intentional and test-covered: this autosave may be
+ * appended while the renewal is in flight, but its callback does not run until that renewal has made the
+ * replacement key durable.
+ */
+export function enqueueWeeklyReportAutosave(
+  saveChain: Promise<unknown>,
+  draft: WeeklyReportDraft,
+  port: WeeklyReportAutosavePort,
+): Promise<unknown> {
+  return saveChain
+    .then(() => {
+      if (port.finalized()) return;
+      return port.save(weeklyReportDraftForAutosave(draft, port.renewedClientSubmissionId()));
+    })
+    .catch(() => undefined);
 }
 
 // ── Selectors ────────────────────────────────────────────────────────────────

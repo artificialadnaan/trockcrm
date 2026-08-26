@@ -289,6 +289,9 @@ function existingProject(overrides: Record<string, unknown> = {}) {
     cadenceStartDate: "2026-07-27",
     cadenceEndDate: null,
     status: "active" as const,
+    // Whether the setup EXISTS, as opposed to `status`, which is how it is running. Only History's
+    // "include stopped setups" list can carry a false; every other read filters the column out.
+    isActive: true,
     createdAt: "2026-07-27T00:00:00Z",
     updatedAt: "2026-07-27T00:00:00Z",
     ...overrides,

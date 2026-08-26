@@ -12,6 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   reports: [] as any[],
+  stoppedProjects: [] as any[],
+  stoppedProjectsLoading: false,
+  stoppedProjectsError: null as string | null,
+  /** WHICH project's history was actually requested — the observable consequence of the selection. */
+  historyFor: [] as (string | null)[],
   refetch: vi.fn(),
   fetchWeeklyReportDetail: vi.fn(),
   createWeeklyReportCorrection: vi.fn(),
@@ -21,11 +26,17 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
-  useWeeklyReportHistory: () => ({
-    reports: mocks.reports,
-    loading: false,
-    error: null,
-    refetch: mocks.refetch,
+  useWeeklyReportHistory: (projectId: string | null) => {
+    mocks.historyFor.push(projectId);
+    return { reports: mocks.reports, loading: false, error: null, refetch: mocks.refetch };
+  },
+  // The opt-in feed of setups that have been STOPPED. Live setups reach the panel as a prop; these do
+  // not, because `listWeeklyReportProjects` filters them out of every ordinary list.
+  useWeeklyReportProjects: (filters: any) => ({
+    projects: filters?.enabled ? mocks.stoppedProjects : [],
+    loading: filters?.enabled ? mocks.stoppedProjectsLoading : false,
+    error: filters?.enabled ? mocks.stoppedProjectsError : null,
+    refetch: vi.fn(),
   }),
   fetchWeeklyReportDetail: mocks.fetchWeeklyReportDetail,
   createWeeklyReportCorrection: mocks.createWeeklyReportCorrection,
@@ -73,6 +84,19 @@ function report(overrides: Record<string, unknown> = {}) {
     sendDeliveryDetail: null,
     sendError: null,
     sendAttempts: 0,
+    // The SERVER's answer to "what may this reader do with this row". The default here is a rep's — the
+    // broadest audience this tab has — so a row that acquires an edit or delete control has to say so
+    // explicitly, rather than inheriting one from the fixture.
+    permissions: {
+      canEdit: false,
+      canSubmit: false,
+      canApprove: false,
+      canReturnToDraft: false,
+      canDelete: false,
+    },
+    // The setup behind the report is LIVE by default — the ordinary case, and the one every existing
+    // assertion in this file was written against.
+    reportingStopped: false,
     ...overrides,
   };
 }
@@ -97,6 +121,10 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   mocks.reports = [];
+  mocks.stoppedProjects = [];
+  mocks.stoppedProjectsLoading = false;
+  mocks.stoppedProjectsError = null;
+  mocks.historyFor = [];
   mocks.refetch.mockReset();
   mocks.createWeeklyReportCorrection.mockReset();
   mocks.retryWeeklyReportSend.mockReset();
@@ -530,5 +558,393 @@ describe("the detail sheet", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("could not be loaded");
     expect(text).toContain("Weekly report not found");
+  });
+});
+
+describe("the row's overflow menu", () => {
+  // GATED ON THE SERVER'S FLAGS, never on a role the browser reads for itself. `canEdit` depends on the
+  // report's status and the project's two assignment slots as well as the role — a sent report is closed
+  // to everyone, an approved one only to the PM — so a client-side re-derivation would eventually offer a
+  // control the API refuses, which the user meets as a 403 on a button that looked live.
+  function trigger(): HTMLButtonElement | undefined {
+    return Array.from(document.querySelectorAll("button")).find((element) =>
+      element.getAttribute("aria-label")?.startsWith("More actions"),
+    ) as HTMLButtonElement | undefined;
+  }
+
+  it("is not rendered at all for a reader who may do neither", () => {
+    // An overflow button that opens onto nothing reads as a broken control, and for a rep — who can open
+    // this whole tab and act on none of it — that would be every row on the page.
+    mocks.reports = [report()];
+    render();
+    expect(trigger()).toBeUndefined();
+  });
+
+  it("appears once the server says this reader may edit", () => {
+    mocks.reports = [report({ permissions: { canEdit: true, canDelete: false } })];
+    render();
+    expect(trigger()).toBeDefined();
+  });
+
+  it("appears once the server says this reader may delete", () => {
+    mocks.reports = [report({ permissions: { canEdit: false, canDelete: true } })];
+    render();
+    expect(trigger()).toBeDefined();
+  });
+
+  async function menuLabels(): Promise<(string | undefined)[]> {
+    await act(async () => {
+      trigger()!.click();
+    });
+    return Array.from(document.querySelectorAll('[role="menuitem"]')).map((element) =>
+      element.textContent?.trim(),
+    );
+  }
+
+  // THE MENU'S EXISTENCE AND EACH ITEM'S ARE SEPARATE GATES, and only these two assert the second. The
+  // reader who may do neither gets no menu at all, so an item that ignored its own flag would pass every
+  // other test in this block — and hand a rep-shaped reader a control the API refuses.
+  it("offers Edit alone when that is all the server allowed", async () => {
+    mocks.reports = [report({ status: "draft", permissions: { canEdit: true, canDelete: false } })];
+    render();
+    const labels = await menuLabels();
+    expect(labels).toContain("Edit report");
+    expect(labels).not.toContain("Delete report");
+  });
+
+  it("offers Delete alone when that is all the server allowed", async () => {
+    // The ordinary case for a sent report: leadership may remove it and nobody may edit it.
+    mocks.reports = [report({ permissions: { canEdit: false, canDelete: true } })];
+    render();
+    const labels = await menuLabels();
+    expect(labels).toContain("Delete report");
+    expect(labels).not.toContain("Edit report");
+  });
+
+  it("offers Delete report, and opens the reason dialog rather than deleting on the click", async () => {
+    // A row-destructive action that fires on the menu click is a one-click irreversible delete. The
+    // dialog is what makes the reason mandatory — and the reason is the whole difference between a
+    // removal somebody can account for and a row that quietly stopped existing.
+    mocks.reports = [report({ status: "draft", permissions: { canEdit: false, canDelete: true } })];
+    render();
+    await act(async () => {
+      trigger()!.click();
+    });
+
+    const item = Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+      (element) => element.textContent?.trim() === "Delete report",
+    ) as HTMLElement | undefined;
+    expect(item).toBeDefined();
+
+    await act(async () => {
+      item!.click();
+    });
+    expect(document.body.textContent).toContain("There is no undo");
+  });
+
+  it("offers Edit report, and opens the form on what the row already says", async () => {
+    mocks.reports = [
+      report({ status: "draft", workCompleted: "Framing on level 3", permissions: { canEdit: true, canDelete: false } }),
+    ];
+    render();
+    await act(async () => {
+      trigger()!.click();
+    });
+
+    const item = Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+      (element) => element.textContent?.trim() === "Edit report",
+    ) as HTMLElement | undefined;
+    expect(item).toBeDefined();
+
+    await act(async () => {
+      item!.click();
+    });
+    const textarea = document.querySelector<HTMLTextAreaElement>('[aria-label="Work completed"]');
+    expect(textarea?.value).toBe("Framing on level 3");
+  });
+});
+
+describe("reports under a setup that has been stopped", () => {
+  // WHERE LEFTOVER TEST DATA ACTUALLY SITS, and until now the one place the delete could not reach.
+  //
+  // "Stop reporting" soft-deletes the setup, `listWeeklyReportProjects` filters `wrp.is_active`, and this
+  // selector is fed by that list — so the setup left the dropdown and took every report under it with it.
+  // The service supports deleting those reports (it deliberately opts out of the project's `is_active`
+  // filter for exactly this reason); there was simply no way to select one.
+  const STOPPED = {
+    id: "p2",
+    propertyDisplayName: "1900 Pearl — finished",
+    dealName: "1900 Pearl",
+    isActive: false,
+  } as any;
+
+  function toggle(): HTMLInputElement | undefined {
+    return document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]') ?? undefined;
+  }
+  function optionLabels(): string[] {
+    return Array.from(container.querySelectorAll("option")).map((o) => o.textContent?.trim() ?? "");
+  }
+
+  it("keeps them out of the selector by default — the tab is live work", () => {
+    mocks.stoppedProjects = [PROJECT, STOPPED];
+    render();
+    expect(optionLabels()).toEqual(["4123 Cedar Springs"]);
+  });
+
+  it("brings them in when asked, and says which ones are stopped", async () => {
+    mocks.stoppedProjects = [PROJECT, STOPPED];
+    render();
+    await act(async () => {
+      toggle()!.click();
+    });
+
+    const labels = optionLabels();
+    expect(labels).toContain("4123 Cedar Springs");
+    // Marked, not merely present. A stopped job listed identically to a live one reads as though
+    // reporting were still running on it.
+    expect(labels.some((label) => /1900 Pearl — finished/.test(label) && /stopped/i.test(label))).toBe(true);
+  });
+
+  it("falls back to a live setup when the stopped one is hidden again", async () => {
+    // Unticking with a stopped project selected would otherwise leave the selector bound to an id that is
+    // no longer among its options — which renders as a blank dropdown and an empty table, with nothing
+    // saying why.
+    mocks.stoppedProjects = [PROJECT, STOPPED];
+    render();
+    await act(async () => {
+      toggle()!.click();
+    });
+    const select = container.querySelector("select")!;
+    await act(async () => {
+      select.value = "p2";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(mocks.historyFor[mocks.historyFor.length - 1]).toBe("p2");
+
+    await act(async () => {
+      toggle()!.click();
+    });
+    // Asserted on WHICH HISTORY IS FETCHED, not on `select.value`. A `<select>` bound to a value none of
+    // its options carry reports "" in the DOM regardless of what the component thinks is selected, so
+    // reading the control back cannot tell "fell back to the live project" from "left pointing at a
+    // project that is no longer listed" — which is the whole difference this test exists for.
+    expect(mocks.historyFor[mocks.historyFor.length - 1]).toBe("p1");
+  });
+});
+
+describe("a report whose reporting setup has been stopped", () => {
+  // THE MIRROR OF THE LAST ROUND'S FINDING. That one was "the server allows it and the UI cannot reach
+  // it"; this is "the UI offers it and the server refuses it". Both come from the project's `is_active`
+  // meaning different things to different operations — send, retry and correction resolve the project
+  // through `loadSendTarget`, which filters it and 404s, while delete deliberately does not.
+  const STOPPED = { reportingStopped: true };
+
+  function labels(): string[] {
+    return Array.from(container.querySelectorAll("button")).map((b) => b.textContent?.trim() ?? "");
+  }
+
+  it("offers no Retry, because the send endpoints cannot resolve the setup at all", () => {
+    mocks.reports = [report({ ...STOPPED, sendError: REJECTED_ERROR })];
+    render();
+    expect(button("Retry send")).toBeUndefined();
+  });
+
+  it("offers no Send correction either — same 404, same cause", () => {
+    mocks.reports = [report({ ...STOPPED, sendDeliveredAt: "2026-08-13T22:00:00.000Z" })];
+    render();
+    expect(button("Send correction")).toBeUndefined();
+  });
+
+  it("offers no Send on an approved week", () => {
+    mocks.reports = [report({ ...STOPPED, status: "approved" })];
+    render();
+    expect(button("Send")).toBeUndefined();
+  });
+
+  it("keeps View and Delete, which are exactly the two that still work", async () => {
+    // View reads the report alone; delete opts out of the project filter on purpose, because a stopped
+    // setup is where leftover test data comes to rest. Suppressing everything would take the one action
+    // this whole affordance exists to reach.
+    mocks.reports = [report({ ...STOPPED, permissions: { canEdit: false, canDelete: true } })];
+    render();
+    expect(labels()).toContain("View");
+
+    const trigger = Array.from(document.querySelectorAll("button")).find((element) =>
+      element.getAttribute("aria-label")?.startsWith("More actions"),
+    ) as HTMLButtonElement | undefined;
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      trigger!.click();
+    });
+    const items = Array.from(document.querySelectorAll('[role="menuitem"]')).map((e) =>
+      e.textContent?.trim(),
+    );
+    expect(items).toContain("Delete report");
+  });
+
+  it("still offers all three on a LIVE setup — the control", () => {
+    // Without this the suppression above would pass for a panel that renders no actions at all.
+    mocks.reports = [
+      report({ sendError: REJECTED_ERROR }),
+      report({ id: "r2", weekOf: "2026-08-06", status: "approved" }),
+    ];
+    render();
+    expect(button("Retry send")).toBeDefined();
+    expect(button("Send correction")).toBeDefined();
+    expect(button("Send")).toBeDefined();
+  });
+});
+
+describe("an office that has stopped every setup it has", () => {
+  it("still offers the toggle, which is the only way back to anything", async () => {
+    // THE STATE THE AFFORDANCE EXISTS FOR, and the one it used to be unreachable in: with no live
+    // setups the panel returned an "add a project first" card and stopped, so the control that reveals
+    // the stopped ones was never rendered. The office is then told it has no weekly reports at all,
+    // while every report it has ever filed sits one tick away.
+    mocks.stoppedProjects = [
+      { id: "p2", propertyDisplayName: "1900 Pearl — finished", dealName: "1900 Pearl", isActive: false },
+    ];
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel projects={[]} refreshSignal={0} onSend={vi.fn()} onChanged={vi.fn()} />,
+      );
+    });
+
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    expect(toggle).not.toBeNull();
+
+    await act(async () => {
+      toggle!.click();
+    });
+    expect(Array.from(container.querySelectorAll("option")).map((o) => o.textContent?.trim() ?? "")).toEqual(
+      ["1900 Pearl — finished · stopped"],
+    );
+  });
+
+  it("does not claim there are none while it has not looked", () => {
+    // With the toggle unticked the stopped list has not been fetched, so "you have no weekly reports"
+    // would be an assertion the panel cannot support — and it is the exact wrong thing to tell an office
+    // whose reports are all sitting behind the tick.
+    mocks.stoppedProjects = [];
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel projects={[]} refreshSignal={0} onSend={vi.fn()} onChanged={vi.fn()} />,
+      );
+    });
+    expect(document.body.textContent).toMatch(/No live weekly report setups/i);
+    expect(document.body.textContent).toMatch(/include stopped setups/i);
+  });
+
+  it("says there are genuinely none once it HAS looked", async () => {
+    mocks.stoppedProjects = [];
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel projects={[]} refreshSignal={0} onSend={vi.fn()} onChanged={vi.fn()} />,
+      );
+    });
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    await act(async () => {
+      toggle!.click();
+    });
+    expect(document.body.textContent).toMatch(/No weekly report setups at all/i);
+  });
+});
+
+describe("reaching the audit trail from History", () => {
+  // AFTER A DELETION UNDER A STOPPED SETUP, this is the only route to the record of it. The actor,
+  // timestamp and reason live in `audit_log` and nowhere else, and a stopped setup appears in neither the
+  // Projects tab nor the dashboard — the two surfaces that otherwise open the audit dialog.
+  it("offers the audit trail for the selected project", async () => {
+    mocks.reports = [report()];
+    const onOpenAudit = vi.fn();
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel
+          projects={[PROJECT]}
+          refreshSignal={0}
+          onSend={vi.fn()}
+          onChanged={vi.fn()}
+          onOpenAudit={onOpenAudit}
+        />,
+      );
+    });
+
+    const trail = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Audit trail",
+    ) as HTMLButtonElement | undefined;
+    expect(trail).toBeDefined();
+
+    await act(async () => {
+      trail!.click();
+    });
+    expect(onOpenAudit).toHaveBeenCalledWith("p1");
+  });
+
+  it("opens it for a STOPPED setup too, which is the case with no other way in", async () => {
+    mocks.stoppedProjects = [
+      { id: "p2", propertyDisplayName: "1900 Pearl — finished", dealName: "1900 Pearl", isActive: false },
+    ];
+    const onOpenAudit = vi.fn();
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel
+          projects={[]}
+          refreshSignal={0}
+          onSend={vi.fn()}
+          onChanged={vi.fn()}
+          onOpenAudit={onOpenAudit}
+        />,
+      );
+    });
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    await act(async () => {
+      toggle!.click();
+    });
+
+    const trail = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Audit trail",
+    ) as HTMLButtonElement | undefined;
+    await act(async () => {
+      trail!.click();
+    });
+    expect(onOpenAudit).toHaveBeenCalledWith("p2");
+  });
+});
+
+describe("the stopped-setup request failing", () => {
+  // SILENCE, ZERO AND ERROR ARE THREE DIFFERENT RENDERINGS. A failed opt-in fetch left `selectable`
+  // empty, which the panel then reported as "no weekly report setups at all" — the same overclaim the
+  // not-yet-fetched case was already fixed for, arriving by a different road. It also hid the live
+  // history that was on screen a moment earlier, with no retry and nothing saying anything had failed.
+  it("says the request failed rather than reporting an empty office", async () => {
+    mocks.stoppedProjectsError = "Network request failed";
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel projects={[]} refreshSignal={0} onSend={vi.fn()} onChanged={vi.fn()} />,
+      );
+    });
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(document.body.textContent).toContain("Network request failed");
+    expect(document.body.textContent).not.toMatch(/No weekly report setups at all/i);
+  });
+
+  it("says it is still loading rather than reporting an empty office", async () => {
+    mocks.stoppedProjectsLoading = true;
+    act(() => {
+      root.render(
+        <WeeklyReportHistoryPanel projects={[]} refreshSignal={0} onSend={vi.fn()} onChanged={vi.fn()} />,
+      );
+    });
+    const toggle = document.querySelector<HTMLInputElement>('input[aria-label="Include stopped setups"]');
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(document.body.textContent).toMatch(/Loading/i);
+    expect(document.body.textContent).not.toMatch(/No weekly report setups at all/i);
   });
 });

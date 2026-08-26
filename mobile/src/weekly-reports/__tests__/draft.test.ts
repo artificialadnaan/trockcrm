@@ -4,10 +4,12 @@ import {
   MAX_WEEKLY_REPORT_SECTION_CHARS,
   WEEKLY_REPORT_EMPTY_SIGNATURE,
   createWeeklyReportDraft,
+  enqueueWeeklyReportAutosave,
   parseWeeklyReportDelayDays,
   parseWeeklyReportPercent,
   weeklyReportContentSignature,
   weeklyReportDraftBlocker,
+  weeklyReportDraftForAutosave,
   weeklyReportDraftFromDetail,
   weeklyReportDraftPendingUploads,
   weeklyReportDraftReducer,
@@ -584,5 +586,129 @@ describe("the picker's grid", () => {
   it("never duplicates a photo, whatever the draft holds twice", () => {
     const merged = weeklyReportPickerCandidates([], [galleryPhoto("a"), galleryPhoto("a", { key: "a2" })]);
     expect(merged.map((c) => c.fileId)).toEqual(["a"]);
+  });
+});
+
+describe("a submission key the server has permanently retired", () => {
+  // `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial one. Once
+  // leadership deletes the report a phone created, that key can never produce a row again — every retry
+  // gets the same 409 forever. The draft's writing is fine; only its key is spent.
+  it("mints a new key and keeps every word of the draft", () => {
+    const draft = newDraft({
+      clientSubmissionId: "spent-key",
+      workCompleted: "Framing on level 3",
+      nextWeekLookAhead: "Drywall",
+      completionPercent: "42",
+    });
+
+    const renewed = weeklyReportDraftReducer(draft, {
+      type: "renewClientSubmissionId",
+      clientSubmissionId: "fresh-key",
+    });
+
+    expect(renewed.clientSubmissionId).toBe("fresh-key");
+    // THE WRITING IS THE WHOLE POINT. The alternative the field user had was discarding it and starting
+    // the week again from an empty form, on a phone, on a jobsite.
+    expect(renewed.workCompleted).toBe("Framing on level 3");
+    expect(renewed.nextWeekLookAhead).toBe("Drywall");
+    expect(renewed.completionPercent).toBe("42");
+  });
+
+  it("drops every row-bound field, so the replacement follows authoring semantics", () => {
+    // `ensureReport` short-circuits on `draft.reportId`. Renewing the key while leaving a stale id behind
+    // would hand back the id of the report that was deleted and never retry at all. The old status and
+    // transition marker are just as bound to that row: retaining `approved` makes a new draft look like
+    // "Save changes", and retaining a lost-reply marker can accept another user's replacement transition.
+    const renewed = weeklyReportDraftReducer(
+      newDraft({
+        clientSubmissionId: "spent-key",
+        reportId: "deleted-report",
+        mode: "review",
+        serverStatus: "approved",
+        pendingTransitionTo: "approved",
+        seededFrom: { status: "approved", signature: "old-row-signature" },
+      }),
+      { type: "renewClientSubmissionId", clientSubmissionId: "fresh-key" },
+    );
+
+    expect(renewed.reportId).toBeNull();
+    // And the provenance goes with it: `seededFrom` describes a row that no longer exists, and leaving it
+    // would make the next open compare this draft against a report nobody can read.
+    expect(renewed.seededFrom).toBeNull();
+    expect(renewed.mode).toBe("author");
+    expect(renewed.serverStatus).toBeNull();
+    expect(renewed.pendingTransitionTo).toBeNull();
+  });
+
+  it("keeps a late autosave's newer writing while re-stamping its retired submission key", () => {
+    // The snapshot was captured before the renewal completed, then queued behind the renewal while the
+    // super kept typing. It must not overwrite the newly durable id, but it MUST keep those later words.
+    const staleAutosave = newDraft({
+      clientSubmissionId: "spent-key",
+      reportId: "deleted-report",
+      mode: "review",
+      serverStatus: "approved",
+      pendingTransitionTo: "approved",
+      seededFrom: { status: "approved", signature: "deleted-row" },
+      workCompleted: "Framing finished while the retry was pending",
+      photos: [galleryPhoto("new-photo", { caption: "Late upload caption" })],
+    });
+
+    const persisted = weeklyReportDraftForAutosave(staleAutosave, "fresh-key");
+
+    expect(persisted).toMatchObject({
+      clientSubmissionId: "fresh-key",
+      reportId: null,
+      mode: "author",
+      serverStatus: null,
+      seededFrom: null,
+      pendingTransitionTo: null,
+      workCompleted: "Framing finished while the retry was pending",
+    });
+    expect(persisted.photos).toEqual([galleryPhoto("new-photo", { caption: "Late upload caption" })]);
+  });
+
+  it("leaves an autosave that already carries the durable key alone", () => {
+    const current = newDraft({ clientSubmissionId: "fresh-key", workCompleted: "Current draft" });
+    expect(weeklyReportDraftForAutosave(current, "fresh-key")).toBe(current);
+  });
+
+  it("reads a renewed key after the preceding renewal settles, not when the autosave queues", async () => {
+    let releaseRenewal!: () => void;
+    let renewedClientSubmissionId: string | null = null;
+    const renewal = new Promise<void>((resolve) => {
+      releaseRenewal = resolve;
+    }).then(() => {
+      // This happens after the renewal's read-modify-write, immediately before it resolves its chain link.
+      renewedClientSubmissionId = "fresh-key";
+    });
+    const saved: WeeklyReportDraft[] = [];
+    const autosave = enqueueWeeklyReportAutosave(
+      renewal,
+      newDraft({
+        clientSubmissionId: "spent-key",
+        reportId: "deleted-report",
+        workCompleted: "Words typed while renewal was in flight",
+      }),
+      {
+        finalized: () => false,
+        renewedClientSubmissionId: () => renewedClientSubmissionId,
+        save: async (snapshot) => {
+          saved.push(snapshot);
+        },
+      },
+    );
+
+    releaseRenewal();
+    await autosave;
+
+    // A queue-time read sees null and would persist `spent-key`; this proves the queued callback reads
+    // AFTER the durable renewal and still retains the edit captured by this autosave.
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({
+      clientSubmissionId: "fresh-key",
+      reportId: null,
+      workCompleted: "Words typed while renewal was in flight",
+    });
   });
 });

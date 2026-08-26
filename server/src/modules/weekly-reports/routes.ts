@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import { businessToday } from "../../lib/period.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireRole } from "../../middleware/rbac.js";
 import { getWeeklyReportProjectAudit } from "./project-audit-service.js";
@@ -19,6 +20,7 @@ import {
 import {
   canPublishWeeklyReport,
   createWeeklyReportDraft,
+  deleteWeeklyReport,
   getWeeklyReportDetail,
   listWeeklyReportPhotoCandidates,
   listWeeklyReports,
@@ -178,6 +180,9 @@ router.get("/projects", async (req, res, next) => {
       listWeeklyReportProjects(req.tenantClient!, {
         status: readQueryString(req.query.status),
         search: readQueryString(req.query.search),
+        // Opt-in, so the Projects tab and every picker keep showing live work only. History asks for it
+        // to reach the reports under a stopped setup, which stay readable and deletable by design.
+        includeInactive: readQueryString(req.query.includeInactive) === "true",
       }),
       listWeeklyReportProjectSummaries(req.tenantClient!, asOf),
     ]);
@@ -360,12 +365,19 @@ router.get("/reports", async (req, res, next) => {
     // UUID-guarded like every path and body id: listWeeklyReports casts this with ::uuid, so a
     // malformed filter raised 22P02 and answered 500 instead of a 400 the caller can act on.
     const projectIdFilter = readQueryString(req.query.projectId);
-    const reports = await listWeeklyReports(req.tenantClient!, {
-      projectId: projectIdFilter ? requireUuid(projectIdFilter, "projectId") : null,
-      status: readQueryString(req.query.status),
-      from: readQueryString(req.query.from),
-      to: readQueryString(req.query.to),
-    });
+    const reports = await listWeeklyReports(
+      req.tenantClient!,
+      {
+        projectId: projectIdFilter ? requireUuid(projectIdFilter, "projectId") : null,
+        status: readQueryString(req.query.status),
+        from: readQueryString(req.query.from),
+        to: readQueryString(req.query.to),
+      },
+      // Each row carries what THIS reader may do with it. Resolved here, by the same predicates the
+      // mutations enforce, because a client deriving authorisation from a role string is how a button
+      // that 403s reaches a user.
+      actorFrom(req),
+    );
     await req.commitTransaction!();
     res.json({ reports });
   } catch (error) {
@@ -415,6 +427,51 @@ router.patch("/reports/:id", async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json(report);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Remove a report from the record.
+ *
+ * ADMIN AND DIRECTOR ONLY, narrowed from the router's own `admin | director | rep`. A rep can read every
+ * project's History; removing a week is a different act, and the service's 403 is not a substitute for
+ * refusing here — a gate that fires inside the handler has already loaded the report for somebody who was
+ * never allowed to ask. Not on the field router at all: `client-field` has no delete surface and the
+ * field roster contains no admins.
+ *
+ * NO SHARE-TOKEN REVOCATION, deliberately. `pdf-service`'s viewer query already carries `AND wr.is_active`
+ * and both `/wr/:token` and `/wr/:token/pdf` reach it, so a deleted report's link stops resolving on its
+ * own; revoking would additionally show the client "this link was turned off by the project team, usually
+ * because a corrected version was issued", which is false for a report that was simply removed.
+ */
+router.delete("/reports/:id", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const id = requireUuid(req.params.id, "id");
+    const actor = actorFrom(req);
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+    const deleted = await deleteWeeklyReport(req.tenantClient!, id, actor, {
+      reason,
+      confirmWeekOf: readQueryString(req.body?.confirmWeekOf) ?? undefined,
+    });
+    // THE FORENSIC RECORD, written from the route because `writeSoftDeleteAuditLog` takes the Drizzle
+    // handle rather than a query executor — the same call the other five soft-deleting modules make, and
+    // the one this module has been the only exception to. `req.tenantDb` is bound to `req.tenantClient`,
+    // so the row lands inside the same transaction as the delete and cannot outlive a rollback.
+    await writeSoftDeleteAuditLog(req.tenantDb!, {
+      actorUserId: actor.id,
+      entityType: "weekly_report",
+      entityId: deleted.id,
+      // Trimmed to what the service validated, and NOT truncated. The length ceiling is enforced in the
+      // service as a 400, because this sentence is the whole explanation of why a report is gone and
+      // `audit_log` is the only place it is kept — cutting it here would answer 204 while discarding the
+      // half that mattered.
+      reason: reason.trim(),
+      ...requestAuditContext(req),
+    });
+    await req.commitTransaction!();
+    res.status(204).end();
   } catch (error) {
     next(error);
   }

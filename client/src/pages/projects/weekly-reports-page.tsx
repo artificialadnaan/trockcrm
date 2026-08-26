@@ -188,6 +188,10 @@ export default function WeeklyReportsPage() {
           refreshSignal={historyRefreshSignal}
           onSend={setSendingReportId}
           onChanged={refreshAll}
+          // The SAME dialog the Projects tab opens. Passed through because History is the only tab that
+          // can reach a STOPPED setup, and after a deletion under one this is the only surface that can
+          // show who removed the report, when, and why.
+          onOpenAudit={setAuditProjectId}
         />
       )}
 

@@ -11,7 +11,15 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import {
+  auditLog,
+  deals,
+  fieldResponders,
+  files,
+  offices,
+  userOfficeAccess,
+  users,
+} from "@trock-crm/shared/schema";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -35,7 +43,9 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
+  // `audit_log` is where a deletion's WHO, WHEN and WHY live — `weekly_reports` carries no such columns
+  // and this feature needed no migration. The audit page joins it, so the suite needs it.
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files, auditLog]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
 
   await pg.exec(migrationSql("0222_weekly_reports"));
@@ -77,6 +87,7 @@ beforeEach(async () => {
     DELETE FROM office_dallas.weekly_report_pauses;
     DELETE FROM office_dallas.weekly_reports;
     DELETE FROM office_dallas.weekly_report_projects;
+    DELETE FROM office_dallas.audit_log;
     DELETE FROM public.weekly_report_views;
   `);
   await pg.query(
@@ -391,6 +402,67 @@ describe("the per-project audit trail", () => {
   });
 
   /**
+   * A version refiled AFTER the failed one was removed, which is a chain with no `superseded_by_id` in it.
+   *
+   * `sendWeeklyReport`'s supersede UPDATE carries `AND is_active`, so a v1 that was deleted first is never
+   * stamped — the replacement goes out with nothing pointing anywhere. Every other fixture in this block
+   * chains, which is why this state had no coverage.
+   */
+  async function seedRefiledAfterRemoval(removed: { deliveryStatus: string | null }) {
+    await seedFullySentReport({ send_delivery_status: removed.deliveryStatus, is_active: false });
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_reports
+         (id, client_submission_id, weekly_report_project_id, deal_id, week_of, version, status,
+          created_at, sent_by, sent_at, send_delivered_at, send_request)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-08-13'::date, 2, 'sent',
+               '2026-08-15T09:00:00Z'::timestamptz, $5::uuid, '2026-08-15T10:00:00Z'::timestamptz,
+               '2026-08-15T10:00:30Z'::timestamptz, $6::jsonb)`,
+      [U("66662"), U("77772"), PROJECT, DEAL, PM, JSON.stringify({ to: ["jay@mackre.com"] })],
+    );
+    return U("66662");
+  }
+
+  it("keeps a week flagged when the version that BOUNCED was deleted before its replacement existed", async () => {
+    // DELETING THE EVIDENCE MUST NOT CLEAR THE WARNING, and this is the case where it did.
+    //
+    // A bounced report removed before any replacement exists has `superseded_by_id` null — nothing ever
+    // stamped it — so the failure was never carried onto the week, and the row's own flag is suppressed
+    // because a removed report is nobody's job. The refiled v2 is merely provider-accepted, which is not
+    // evidence of receipt and deliberately does not flag on its own. Net result: a week whose only
+    // delivery verdict on record is a bounce reported nothing outstanding at all.
+    const v2 = await seedRefiledAfterRemoval({ deliveryStatus: "bounced" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    const replacement = audit.reports.find((r) => r.id === v2)!;
+    // Not undelivered on its own account — the provider took it and has said nothing since, which is the
+    // ordinary pre-verdict state. The week is unresolved because of what came BEFORE it.
+    expect(replacement.undelivered).toBe(false);
+    expect(replacement.outstanding).toBe(true);
+  });
+
+  it("leaves the replacement alone when the removed version had actually been delivered", async () => {
+    // The control that keeps the fix narrow. Removal is not itself a failure: a version the client
+    // demonstrably received, then removed, settles its week exactly as it did while it was live.
+    const v2 = await seedRefiledAfterRemoval({ deliveryStatus: "delivered" });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.find((r) => r.id === v2)!.outstanding).toBe(false);
+  });
+
+  it("leaves it alone when the removed version had no verdict either way", async () => {
+    // THE CONTROL THAT ACTUALLY BINDS, and the one the delivered case above cannot be: a delivered row
+    // bumps `lastConfirmed` as well, so it settles the week even if removal were wrongly treated as a
+    // failure. This row is neither — accepted by the provider, nothing said since, then deleted — so it
+    // is the only fixture where "carry removals onto the week" and "carry FAILED removals onto the week"
+    // give different answers. Deleting an ordinary in-flight report must not make its replacement look
+    // like it is chasing a failure that never happened.
+    const v2 = await seedRefiledAfterRemoval({ deliveryStatus: null });
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports.find((r) => r.id === v2)!.outstanding).toBe(false);
+  });
+
+  /**
    * The control that keeps the fix narrow. Without the requirement that a PREVIOUS version FAILED, this
    * is the case that turns every report on the platform red for the minutes between the provider taking
    * it and the webhook coming back — which is precisely why `undelivered` does not flag it either.
@@ -515,10 +587,92 @@ describe("the per-project audit trail", () => {
     });
   });
 
-  it("includes a soft-deleted report, because an audit trail that hides removals is not one", async () => {
+  it("says a report was REMOVED, and by whom, rather than rendering it as a live one", async () => {
+    // Including the row was never the hard part — the query has no `is_active` filter, on purpose. The
+    // gap was that nothing in the payload said which rows those were, so a removed week rendered
+    // identically to a filed one on the single page built to be quoted back to a client. The WHO, WHEN
+    // and WHY come off `audit_log`: `weekly_reports` has no deleted_by/deleted_at columns and this
+    // feature deliberately shipped without a migration.
     await seedFullySentReport({ is_active: false });
+    await pg.query(
+      `INSERT INTO office_dallas.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ('weekly_report', $1::uuid, 'soft_delete', $2::uuid, $3::jsonb, '2026-08-20T09:00:00Z'::timestamptz)`,
+      [REPORT, DIRECTOR, JSON.stringify({ reason: "Duplicate of the corrected version" })],
+    );
+
     const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
     expect(audit.reports).toHaveLength(1);
+    expect(audit.reports[0]).toMatchObject({
+      isActive: false,
+      deletedAt: "2026-08-20T09:00:00.000Z",
+      deletedByName: "Takashi",
+      deletedReason: "Duplicate of the corrected version",
+    });
+  });
+
+  it("reports a live row as live, so `isActive` is not simply always false", async () => {
+    // The control. Without it the assertion above passes for a payload that hardcodes the deletion.
+    await seedFullySentReport();
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]).toMatchObject({
+      isActive: true,
+      deletedAt: null,
+      deletedByName: null,
+      deletedReason: null,
+    });
+  });
+
+  it("stops calling a removed report outstanding — it is nobody's job any more", async () => {
+    // A `sent` report with no delivery evidence is outstanding forever, and deleting it does not change
+    // that: the flag is computed from status and delivery columns alone, so a removed week went on
+    // driving the summary count, the chip and the card's red border with an action nobody can take.
+    await seedFullySentReport({ send_delivered_at: null, is_active: false });
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.undelivered).toBe(true);
+    expect(audit.reports[0]!.outstanding).toBe(false);
+  });
+
+  it("still calls the SAME row outstanding while it is live, so the exclusion is not blanket", async () => {
+    await seedFullySentReport({ send_delivered_at: null });
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports[0]!.outstanding).toBe(true);
+  });
+
+  it("still loads once the SETUP has been stopped, or a deletion becomes unreadable the moment it happens", async () => {
+    // THE RECORD HAS TO OUTLIVE THE THING IT DESCRIBES. Deleting a report under a stopped setup is a
+    // supported path — it is where leftover test data comes to rest — and `audit_log` is the only place
+    // the actor, timestamp and reason are kept. With the active-only project load, this endpoint 404'd
+    // for exactly those setups, and they are absent from the Projects tab and the dashboard too, so the
+    // deletion evidence was unreachable from every surface the instant it was written.
+    await seedFullySentReport({ is_active: false });
+    await pg.query(
+      `INSERT INTO office_dallas.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ('weekly_report', $1::uuid, 'soft_delete', $2::uuid, $3::jsonb, '2026-08-20T09:00:00Z'::timestamptz)`,
+      [REPORT, DIRECTOR, JSON.stringify({ reason: "Leftover from the e2e runbook" })],
+    );
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects SET is_active = false WHERE id = $1::uuid`,
+      [PROJECT],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, PROJECT);
+    expect(audit.reports).toHaveLength(1);
+    expect(audit.reports[0]).toMatchObject({
+      isActive: false,
+      deletedByName: "Takashi",
+      deletedReason: "Leftover from the e2e runbook",
+    });
+    // And the page can say the reporting itself has stopped, rather than presenting a finished job as
+    // though Thursdays were still owed.
+    expect(audit.project.isActive).toBe(false);
+  });
+
+  it("still 404s a project that does not exist at all — the control", async () => {
+    // Loading stopped setups must not become loading anything. Without this the change above would pass
+    // for a service that had dropped its existence check entirely.
+    await expect(getWeeklyReportProjectAudit(db as any, U("99999"))).rejects.toMatchObject({
+      statusCode: 404,
+    });
   });
 
   it("never returns the stored send request, which carries the RAW share token", async () => {

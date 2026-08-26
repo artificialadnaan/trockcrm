@@ -22,10 +22,13 @@ import {
 } from "../../../src/modules/weekly-reports/projects-service.js";
 import {
   createWeeklyReportDraft,
+  deleteWeeklyReport,
   getWeeklyReportForActor,
   replaceWeeklyReportPhotos,
   transitionWeeklyReport,
   updateWeeklyReportContent,
+  WEEKLY_REPORT_AUTHOR_DELETED_CODE,
+  WEEKLY_REPORT_DELETED_CODE,
 } from "../../../src/modules/weekly-reports/reports-service.js";
 import {
   APP_OUTSTANDING_WEEK_LIMIT,
@@ -837,6 +840,49 @@ describe("who may open a report by id", () => {
     await expectAppError(getWeeklyReportForActor(db, id, OTHER_SUPER_ACTOR), 404, /not found/i);
   });
 
+  it("distinguishes an author-recoverable deleted report from every other viewer", async () => {
+    // A field 404 is deliberately ambiguous: it also means a live report belongs to a project this user
+    // cannot view. The phone may replace a deleted author draft, so it needs a definite signal without
+    // turning arbitrary ids into a deletion oracle for every field user in the office.
+    const project = await seedProject();
+    const id = await seedDraft(project.id, WEEK_OF);
+    await deleteWeeklyReport(db, id, DIRECTOR_ACTOR, { reason: "Removing a test draft" });
+
+    const deleted = await getWeeklyReportForActor(db, id, SUPER_ACTOR).catch((error) => error);
+    expect(deleted).toBeInstanceOf(AppError);
+    expect((deleted as AppError).statusCode).toBe(410);
+    expect((deleted as AppError).code).toBe(WEEKLY_REPORT_AUTHOR_DELETED_CODE);
+
+    // An assigned PM may read the same draft, and the app may display it in author mode, but did not
+    // author it. Its generic signal must never be usable to recreate the superintendent's removed row.
+    const pmDeleted = await getWeeklyReportForActor(db, id, PM_ACTOR).catch((error) => error);
+    expect(pmDeleted).toBeInstanceOf(AppError);
+    expect((pmDeleted as AppError).statusCode).toBe(410);
+    expect((pmDeleted as AppError).code).toBe(WEEKLY_REPORT_DELETED_CODE);
+
+    // Different actor, same id: still a generic not-found response. This is the access concealment a bare
+    // status-404 recovery branch would have defeated on the phone.
+    await expectAppError(getWeeklyReportForActor(db, id, OTHER_SUPER_ACTOR), 404, /not found/i);
+  });
+
+  it.each(["paused", "completed"] as const)(
+    "does not tell an author to recreate a deleted report after reporting is %s",
+    async (status) => {
+      const project = await seedProject();
+      const id = await seedDraft(project.id, WEEK_OF);
+      await deleteWeeklyReport(db, id, DIRECTOR_ACTOR, { reason: "Removing a test draft" });
+      // The setup can stop after the deletion but before a phone learns about it. The recovery answer
+      // must describe what `createWeeklyReportDraft` can do NOW, not the permission it had when the row
+      // was first written.
+      await updateWeeklyReportProject(db, project.id, { status }, OFFICE);
+
+      const deleted = await getWeeklyReportForActor(db, id, SUPER_ACTOR).catch((error) => error);
+      expect(deleted).toBeInstanceOf(AppError);
+      expect((deleted as AppError).statusCode).toBe(410);
+      expect((deleted as AppError).code).toBe(WEEKLY_REPORT_DELETED_CODE);
+    },
+  );
+
   it("lets the assigned super, the assigned PM and a director in", async () => {
     const id = await seedSubmitted();
     for (const actor of [SUPER_ACTOR, PM_ACTOR, DIRECTOR_ACTOR]) {
@@ -860,6 +906,11 @@ describe("who may open a report by id", () => {
       canSubmit: true,
       canApprove: false,
       canReturnToDraft: false,
+      // FALSE FOR THE WHOLE FIELD SURFACE. Delete is admin/director only and both actors here are
+      // `construction`, which is what the assigned PM and superintendent actually are — so the phone
+      // reads `canDelete: false` on every report it will ever be shown, and there is no delete route on
+      // /api/field to reach even if it did not.
+      canDelete: false,
     });
 
     await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
@@ -869,6 +920,7 @@ describe("who may open a report by id", () => {
       canSubmit: false,
       canApprove: true,
       canReturnToDraft: true,
+      canDelete: false,
     });
   });
 
@@ -937,6 +989,19 @@ describe("an author reassigned off the project mid-draft", () => {
     await expect(transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR)).resolves.toMatchObject({
       status: "pending_review",
     });
+  });
+
+  it("does not let a former author renew a deleted row they can no longer create", async () => {
+    // Authorship preserves the in-flight draft's PATCH/submit rights, but it is not a standing right to
+    // start a fresh report after reassignment. If the old row is deleted, the generic gone code leaves the
+    // local work intact rather than rotating its durable key into a replacement POST that must 403.
+    const { id } = await seedReassignedDraft();
+    await deleteWeeklyReport(db, id, DIRECTOR_ACTOR, { reason: "Removing reassigned draft" });
+
+    const deleted = await getWeeklyReportForActor(db, id, SUPER_ACTOR).catch((error) => error);
+    expect(deleted).toBeInstanceOf(AppError);
+    expect((deleted as AppError).statusCode).toBe(410);
+    expect((deleted as AppError).code).toBe(WEEKLY_REPORT_DELETED_CODE);
   });
 
   it("loses the edit the moment the report leaves draft", async () => {

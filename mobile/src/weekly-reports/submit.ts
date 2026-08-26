@@ -25,7 +25,10 @@ import {
   type WeeklyReportSeedableReport,
 } from "./draft";
 import {
+  isWeeklyReportAuthorDeletedError,
+  isWeeklyReportWeekTakenError,
   WeeklyReportWeekTakenError,
+  isWeeklyReportSubmissionDeletedError,
   weeklyReportWeekRowIsUntouched,
   weeklyReportWeekTakenMessage,
 } from "./reconcile";
@@ -88,11 +91,130 @@ export async function adoptWeeklyReportWeekRow(
   return existingId;
 }
 
+/**
+ * Create the report, and if this draft's submission key has been RETIRED, mint a new one and try again.
+ *
+ * `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial one. Once the
+ * report a phone created is deleted, that key is spent for good — every retry answers the same 409 for
+ * the rest of time, and the phone's only remaining move used to be discarding a week's writing and
+ * starting the form again on a jobsite.
+ *
+ * The draft's CONTENT is untouched by any of this; only its key is dead. So the recovery is a fresh key
+ * over the same words, and `onRenewed` is how it reaches storage — a key minted and not persisted would
+ * be re-minted on the next attempt, throwing away the idempotency the key exists to provide.
+ *
+ * EXACTLY ONE RETRY. A second refusal means something other than a spent key is answering that way, and
+ * a phone that kept minting ids against it would create a report per attempt on a flaky connection —
+ * which is the failure the idempotency key was introduced to prevent, arriving from the other side.
+ */
+export interface WeeklyReportCreateWithRenewedSubmissionPort<T> {
+  create(clientSubmissionId: string): Promise<T>;
+  newClientSubmissionId(): string;
+  /**
+   * Persist the replacement key before the retry leaves the phone. A React dispatch by itself is not
+   * enough: an app death after the renewed POST commits but before an autosave runs would lose the key
+   * and make the next launch mint another one, stranding the report under the first replacement.
+   */
+  onRenewed(clientSubmissionId: string): Promise<void>;
+}
+
+export async function createWeeklyReportWithRenewedSubmission<T>(
+  clientSubmissionId: string,
+  port: WeeklyReportCreateWithRenewedSubmissionPort<T>,
+): Promise<T> {
+  try {
+    return await port.create(clientSubmissionId);
+  } catch (error) {
+    if (!isWeeklyReportSubmissionDeletedError(error)) throw error;
+    const renewed = port.newClientSubmissionId();
+    // Do not let the replacement request out until the replacement key is durable. Its whole value is
+    // that a lost response can be retried with THIS exact key after a process death.
+    await port.onRenewed(renewed);
+    return await port.create(renewed);
+  }
+}
+
+export type WeeklyReportDraftRowResolution<T> =
+  | { kind: "existing"; reportId: string }
+  | { kind: "created"; created: T; replacesExistingReport: boolean }
+  /** Another device recreated the deleted week; adoption must retain replacement semantics. */
+  | { kind: "replacement-week-taken" };
+
+/**
+ * Resolve the row a local weekly-report draft should write to.
+ *
+ * A persisted `reportId` used to be treated as proof that its row still existed. Leadership can delete
+ * the report after the phone reaches Photos, though, and that leaves the draft with BOTH an inactive id
+ * and a submission key the database will never accept again. Returning that id sent every PATCH and photo
+ * PUT into a permanent 404 instead of entering the existing key-renewal path.
+ *
+ * Confirm the stored id first. A field read uses 404 to conceal a live report from somebody who is no
+ * longer allowed to view it, so only the server's explicit `410/WEEKLY_REPORT_AUTHOR_DELETED` answer is
+ * both deletion evidence AND authority for a replacement. A UI `mode === "author"` is not enough: an
+ * assigned PM can open someone else's draft in that mode. Every other deleted response keeps its local
+ * work and surfaces the definite answer. The actual author may restart its own filing flow: make the
+ * replacement key durable (which resets the former row's identity and lifecycle state in the reducer)
+ * before its first POST leaves the device. The usual create helper remains
+ * responsible for the separate "new key was itself retired" response, and still retries at most once.
+ */
+export async function resolveWeeklyReportDraftRow<T>(
+  input: { reportId: string | null; clientSubmissionId: string },
+  port: WeeklyReportCreateWithRenewedSubmissionPort<T> & {
+    read(reportId: string): Promise<unknown>;
+  },
+): Promise<WeeklyReportDraftRowResolution<T>> {
+  let replacesExistingReport = false;
+  const onRenewed = async (clientSubmissionId: string): Promise<void> => {
+    replacesExistingReport = true;
+    await port.onRenewed(clientSubmissionId);
+  };
+  const create = (clientSubmissionId: string) =>
+    createWeeklyReportWithRenewedSubmission(clientSubmissionId, {
+      create: port.create,
+      newClientSubmissionId: port.newClientSubmissionId,
+      onRenewed,
+    });
+
+  if (input.reportId) {
+    try {
+      await port.read(input.reportId);
+      return { kind: "existing", reportId: input.reportId };
+    } catch (error) {
+      if (!isWeeklyReportAuthorDeletedError(error)) throw error;
+
+      const renewed = port.newClientSubmissionId();
+      // `onRenewed` must reset the former row's identity and lifecycle state in durable storage before a
+      // replacement row can be made. If its disk write fails, rethrow and leave the draft untouched for
+      // the next explicit retry.
+      await onRenewed(renewed);
+      try {
+        return {
+          kind: "created",
+          created: await create(renewed),
+          replacesExistingReport,
+        };
+      } catch (createError) {
+        // Another device may create this week's empty replacement between the deleted-row read and this
+        // POST. Carry that former-row fact through adoption so a stale approved state or lost marker cannot
+        // make the fresh row look already filed.
+        if (isWeeklyReportWeekTakenError(createError)) return { kind: "replacement-week-taken" };
+        throw createError;
+      }
+    }
+  }
+
+  return {
+    kind: "created",
+    created: await create(input.clientSubmissionId),
+    replacesExistingReport,
+  };
+}
+
 // ── The submit sequence ──────────────────────────────────────────────────────
 
 export interface WeeklyReportSubmitPort {
   /** Create the row (idempotently) or return the one this draft already names. */
-  ensureReport(): Promise<string>;
+  ensureReport(): Promise<{ reportId: string; replacesExistingReport: boolean }>;
   updateContent(reportId: string, patch: WeeklyReportContentPatch): Promise<WeeklyReportSeedableReport>;
   replacePhotos(
     reportId: string,
@@ -144,7 +266,8 @@ export async function runWeeklyReportSubmit(
   },
   port: WeeklyReportSubmitPort,
 ): Promise<{ reportId: string; status: WeeklyReportStatusValue | null }> {
-  const reportId = await port.ensureReport();
+  const ensured = await port.ensureReport();
+  const reportId = ensured.reportId;
 
   const patched = await port.updateContent(reportId, input.patch);
   port.recordSeed(weeklyReportSeedStateFromDetail(patched));
@@ -155,14 +278,18 @@ export async function runWeeklyReportSubmit(
   );
   port.recordSeed(weeklyReportSeedStateFromDetail(withPhotos));
 
-  const to = input.transitionTo;
+  // A deleted report is replaced by a fresh AUTHOR draft. Its previous status may have made the old
+  // button read "Save changes", but a new row must still enter the normal draft -> pending_review step.
+  const to = ensured.replacesExistingReport ? "pending_review" : input.transitionTo;
   if (!to) return { reportId, status: null };
 
   // Read BEFORE the marker is armed, so it answers "did a PREVIOUS attempt of mine go unanswered?" rather
   // than "did I just arm this?". That distinction is the whole guard: reaching the target status is only
   // evidence of MY commit if I have a move outstanding. Without it, a report somebody else advanced
   // answers 409, the re-read confirms the target, and a submit that reverted their work reports success.
-  const mayHaveCommitted = input.draft.pendingTransitionTo === to;
+  // The marker describes a request against the FORMER row. Never let it make a 409 on a replacement row
+  // look like this phone's lost reply; the replacement is armed afresh immediately below instead.
+  const mayHaveCommitted = !ensured.replacesExistingReport && input.draft.pendingTransitionTo === to;
   if (!mayHaveCommitted) await port.markPendingTransition(to);
 
   try {

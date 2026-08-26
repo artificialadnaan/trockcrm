@@ -1,5 +1,7 @@
 import {
+  WEEKLY_REPORT_DELETE_REASON_MAX_CHARS,
   WEEKLY_REPORT_MAX_PHOTOS,
+  WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS,
   WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
   WEEKLY_REPORT_SECTION_MAX_CHARS,
   canTransitionWeeklyReport,
@@ -178,18 +180,30 @@ function mapReportRow(row: Record<string, any>, photos: WeeklyReportPhoto[]): We
  * The questions people actually arrive with — who submitted it, who approved it, who pressed send —
  * were readable only through the per-project audit endpoint, so the History tab could show a week's
  * contents and not one name attached to them.
+ *
+ * AND THE PROJECT'S TWO ASSIGNMENT SLOTS, aliased so they cannot collide with `wr.*`.
+ *
+ * Every permission predicate in this module takes a project row alongside the report row — a report on
+ * its own cannot say who the assigned superintendent is. `listWeeklyReports` had no such row and
+ * therefore could not answer "may this person edit this?" for the History list at all; the alternative
+ * was a second query per row, or the client re-deriving authorisation from a role string, which is how
+ * a button that 403s gets shipped. LEFT JOIN on a primary key, so it costs the detail read nothing.
  */
 const REPORT_SELECT = `
   SELECT wr.*,
          author.display_name    AS authored_by_name,
          submitter.display_name AS submitted_by_name,
          reviewer.display_name  AS reviewed_by_name,
-         sender.display_name    AS sent_by_name
+         sender.display_name    AS sent_by_name,
+         wrp.trock_super_user_id AS project_trock_super_user_id,
+         wrp.trock_pm_user_id    AS project_trock_pm_user_id,
+         wrp.is_active           AS project_is_active
     FROM weekly_reports wr
     LEFT JOIN public.users author    ON author.id    = wr.authored_by
     LEFT JOIN public.users submitter ON submitter.id = wr.submitted_by
     LEFT JOIN public.users reviewer  ON reviewer.id  = wr.reviewed_by
     LEFT JOIN public.users sender    ON sender.id    = wr.sent_by
+    LEFT JOIN weekly_report_projects wrp ON wrp.id = wr.weekly_report_project_id
 `;
 
 export async function getWeeklyReportDetail(
@@ -346,6 +360,23 @@ export function canViewWeeklyReport(
   );
 }
 
+/** The actors who may start a new report for a project. Kept beside the author rule so recovery cannot
+ * mistake a UI mode for a server-authoritative right to create. */
+function canCreateWeeklyReportDraftForActor(
+  projectRow: Record<string, any>,
+  actor: WeeklyReportActor,
+): boolean {
+  // Keep the recovery signal below in lockstep with `createWeeklyReportDraft`: a setup that has been
+  // stopped may leave its deleted rows readable enough to explain what happened, but cannot accept a
+  // replacement draft. The author must not rotate a permanently-spent submission id into a POST that
+  // the creation path will refuse.
+  return (
+    projectRow.is_active !== false &&
+    projectRow.status === "active" &&
+    (isAssignedSuper(projectRow, actor) || isAssignedPm(projectRow, actor) || isElevated(actor))
+  );
+}
+
 /**
  * May move the report to `to`.
  *
@@ -397,6 +428,34 @@ export interface WeeklyReportPermissions {
   canSubmit: boolean;
   canApprove: boolean;
   canReturnToDraft: boolean;
+  /**
+   * May remove the report from the record entirely. See `canDeleteWeeklyReport`.
+   *
+   * It does NOT promise the delete will succeed: a report that supersedes a live predecessor is refused
+   * with a 409 the service raises, because answering it here would need a per-row lookup on a list that
+   * already returns 500 of them. The refusal is rare, explains itself, and costs a dialog rather than a
+   * query per row.
+   */
+  canDelete: boolean;
+}
+
+/**
+ * May DELETE the report: an admin or a director, and nobody else.
+ *
+ * Deliberately NOT `canEditWeeklyReport`. That predicate exists to answer "may this person write this
+ * week's contents", and it says yes to the superintendent who authored the draft — which is right for
+ * the text and wrong for the row. Deleting is not an edit: what disappears is the evidence the week was
+ * filed at all, and the surfaces that read `is_active` — the board, the History list, the carry-over,
+ * the correction wording, the reminder job — all then behave as though it never was.
+ *
+ * The request that prompted this asked for test data to be removable. There is no test-data flag on any
+ * of the eight weekly-report tables and there cannot usefully be one: `createWeeklyReportProject`
+ * refuses a test-data deal outright, so the e2e seed sets `is_test_data = false` on its deals and
+ * reports written by the runbook are, by construction, indistinguishable from production ones. So the
+ * gate is role, not provenance, and this comment is where that substitution is recorded.
+ */
+export function canDeleteWeeklyReport(actor: WeeklyReportActor): boolean {
+  return isElevated(actor);
 }
 
 export interface WeeklyReportForActor {
@@ -416,9 +475,22 @@ export async function getWeeklyReportForActor(
   id: string,
   actor: WeeklyReportActor,
 ): Promise<WeeklyReportForActor> {
-  const { reportRow, projectRow } = await loadReportWithProject(client, id);
+  // Inspect an inactive row only long enough to decide whether THIS actor is entitled to learn that it was
+  // deleted. The ordinary detail loader remains active-only, so no deleted content is ever returned.
+  const { reportRow, projectRow } = await loadReportWithProject(client, id, { includeInactiveReport: true });
   if (!canViewWeeklyReport(projectRow, reportRow, actor)) {
     throw new AppError(404, "Weekly report not found");
+  }
+  if (!reportRow.is_active) {
+    // A PM can open a superintendent's DRAFT in the app's author-mode UI, so that mode cannot prove who
+    // owns the deleted work. Only the server can make this recovery promise: the original author still
+    // has a current right to create a report for this project. Everybody else learns it was deleted but
+    // gets the generic signal, which deliberately never authorizes a client-side replacement.
+    const code =
+      isAuthor(reportRow, actor) && canCreateWeeklyReportDraftForActor(projectRow, actor)
+        ? WEEKLY_REPORT_AUTHOR_DELETED_CODE
+        : WEEKLY_REPORT_DELETED_CODE;
+    throw new AppError(410, "This weekly report was deleted", code);
   }
 
   const report = await getWeeklyReportDetail(client, id);
@@ -429,12 +501,28 @@ export async function getWeeklyReportForActor(
   return {
     report,
     project,
-    permissions: {
-      canEdit: canEditWeeklyReport(projectRow, reportRow, actor),
-      canSubmit: canTransitionAs(projectRow, reportRow, "pending_review", actor),
-      canApprove: canTransitionAs(projectRow, reportRow, "approved", actor),
-      canReturnToDraft: canTransitionAs(projectRow, reportRow, "draft", actor),
-    },
+    permissions: permissionsFor(projectRow, reportRow, actor),
+  };
+}
+
+/** The one place the five capability answers are assembled, for every surface. */
+function permissionsFor(
+  projectRow: Record<string, any>,
+  reportRow: Record<string, any>,
+  actor: WeeklyReportActor,
+): WeeklyReportPermissions {
+  return {
+    // AND THE SETUP HAS TO STILL EXIST. `updateWeeklyReportContent` resolves the project through
+    // `getWeeklyReportProjectRow`, which filters `is_active`, so an edit under a stopped setup answers
+    // 404 "Weekly report project not found". The permissions join in REPORT_SELECT is a LEFT JOIN with
+    // no such filter — it has to be, or a stopped setup's rows would lose their assignment data
+    // entirely — so without this clause the payload advertised `canEdit: true` on a report whose PATCH
+    // could only fail. Delete is deliberately the exception and keeps working; see deleteWeeklyReport.
+    canEdit: projectRow.is_active !== false && canEditWeeklyReport(projectRow, reportRow, actor),
+    canSubmit: canTransitionAs(projectRow, reportRow, "pending_review", actor),
+    canApprove: canTransitionAs(projectRow, reportRow, "approved", actor),
+    canReturnToDraft: canTransitionAs(projectRow, reportRow, "draft", actor),
+    canDelete: canDeleteWeeklyReport(actor),
   };
 }
 
@@ -453,6 +541,40 @@ export interface CreateWeeklyReportInput {
  * the moment the copy is improved.
  */
 export const WEEKLY_REPORT_WEEK_EXISTS_CODE = "WEEKLY_REPORT_WEEK_EXISTS";
+
+/**
+ * Machine-readable tag on "the submission you are retrying was DELETED".
+ *
+ * A THIRD answer, and it needs to be — it is not the week-taken conflict wearing a different message.
+ * The phone reads `WEEKLY_REPORT_WEEK_EXISTS` as "somebody else already started this week" and recovers
+ * by adopting that row (`adoptWeeklyReportWeekRow` in mobile/src/weekly-reports/submit.ts). Here there
+ * is nothing to adopt: the week's report is gone, so the lookup finds no row and the phone lands in its
+ * permanent "unlisted" branch still holding work it can no longer file under any id.
+ *
+ * The recovery for THIS one is the opposite move — mint a fresh `clientSubmissionId` over the same local
+ * draft — because `weekly_reports_client_submission_id_key` is a plain UNIQUE constraint, not a partial
+ * one, so the old key can never produce a row again however many times it is retried.
+ */
+export const WEEKLY_REPORT_SUBMISSION_DELETED_CODE = "WEEKLY_REPORT_SUBMISSION_DELETED";
+
+/**
+ * The field reader returns this only to someone who was authorized to see the report before its deletion.
+ *
+ * A generic 404 must remain opaque for everybody else: /api/field admits every field user in an office,
+ * and confirming that an arbitrary id was deleted would be the same report-existence oracle the regular
+ * view gate intentionally prevents. The phone uses this tagged 410 to distinguish a removed local draft
+ * from an access change, which both otherwise look like a 404 at the transport boundary.
+ */
+export const WEEKLY_REPORT_DELETED_CODE = "WEEKLY_REPORT_DELETED";
+
+/**
+ * A deleted row which this actor actually authored and may currently recreate.
+ *
+ * This is intentionally distinct from the generic deleted signal above. The mobile wizard uses it to
+ * renew a permanently-spent submission id; it must never infer the same right from its `author` display
+ * mode, because an assigned PM can open someone else's draft in that mode.
+ */
+export const WEEKLY_REPORT_AUTHOR_DELETED_CODE = "WEEKLY_REPORT_AUTHOR_DELETED";
 
 /** What last week's report said, for the values a new week starts from. */
 export interface WeeklyReportCarryOver {
@@ -542,19 +664,17 @@ export async function createWeeklyReportDraft(
   if (projectRow.status !== "active") {
     throw new AppError(409, `Weekly reporting is ${projectRow.status} for this project`);
   }
-  if (!isAssignedSuper(projectRow, actor) && !isAssignedPm(projectRow, actor) && !isElevated(actor)) {
+  if (!canCreateWeeklyReportDraftForActor(projectRow, actor)) {
     throw new AppError(403, "You are not assigned to this project");
   }
   assertValidWeekOf(projectRow, input.weekOf);
 
   const existingBySubmission = await client.query(
-    `SELECT id FROM weekly_reports WHERE client_submission_id = $1::uuid LIMIT 1`,
+    `SELECT id, is_active FROM weekly_reports WHERE client_submission_id = $1::uuid LIMIT 1`,
     [input.clientSubmissionId],
   );
   if (existingBySubmission.rows[0]) {
-    const report = await getWeeklyReportDetail(client, existingBySubmission.rows[0].id);
-    if (!report) throw new AppError(404, "Weekly report not found");
-    return { report, created: false };
+    return adoptOrRefuseSubmission(client, existingBySubmission.rows[0]);
   }
 
   const existingForWeek = await client.query(
@@ -566,6 +686,24 @@ export async function createWeeklyReportDraft(
   if (existingForWeek.rows[0]) {
     throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
+
+  // VERSION IS THE WEEK'S HISTORY, not a property of whichever row happens to remain live. The partial
+  // unique index deliberately permits a new row after someone removes one, but letting that replacement
+  // take the schema default of v1 would make a delivered, deleted v1 invisible to the correction wording:
+  // `priorVersionReachedClient` quite rightly looks only at LOWER versions. A removal cannot recall what
+  // the client received, so a refile must remain strictly above every prior copy, active or otherwise.
+  //
+  // The project row is locked above, serialising normal draft creation for this setup. The value belongs
+  // here rather than in the INSERT's default for the same reason a correction uses an explicit version:
+  // the database's partial uniqueness rule protects live collisions, while this is the monotonic history
+  // rule that protects the client's account of the week.
+  const priorVersions = await client.query(
+    `SELECT COALESCE(MAX(version), 0) AS version
+       FROM weekly_reports
+      WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date`,
+    [input.weeklyReportProjectId, input.weekOf],
+  );
+  const nextVersion = Number(priorVersions.rows[0]?.version ?? 0) + 1;
 
   // What last week said. Everything carried forward comes off ONE row so the three values cannot come
   // from three different weeks — see previousWeeklyReportForCarryOver.
@@ -581,10 +719,10 @@ export async function createWeeklyReportDraft(
   // losing side of a race writes nothing at all, and a resumed draft never re-enters this statement.
   const result = await client.query(
     `INSERT INTO weekly_reports (
-       client_submission_id, weekly_report_project_id, deal_id, week_of,
+       client_submission_id, weekly_report_project_id, deal_id, week_of, version,
        projected_duration_weeks, completion_percent, weather_delay_days, work_completed,
        carried_from_report_id, authored_by, authored_at
-     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6::numeric, $7, $8, $9::uuid, $10::uuid, now())
+     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6, $7::numeric, $8, $9, $10::uuid, $11::uuid, now())
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [
@@ -592,6 +730,7 @@ export async function createWeeklyReportDraft(
       input.weeklyReportProjectId,
       projectRow.deal_id,
       input.weekOf,
+      nextVersion,
       projectRow.projected_duration_weeks,
       // NULL carries as NULL, never as 0. "Nobody has said yet" and "zero percent complete" are
       // different claims about a job and the PDF prints them differently.
@@ -610,13 +749,11 @@ export async function createWeeklyReportDraft(
     // Somebody won the race. Which conflict it was decides the answer: the SAME submission id is this
     // caller retrying (200, idempotent), a DIFFERENT one is two people starting the same week (409).
     const bySubmission = await client.query(
-      `SELECT id FROM weekly_reports WHERE client_submission_id = $1::uuid LIMIT 1`,
+      `SELECT id, is_active FROM weekly_reports WHERE client_submission_id = $1::uuid LIMIT 1`,
       [input.clientSubmissionId],
     );
     if (bySubmission.rows[0]) {
-      const report = await getWeeklyReportDetail(client, bySubmission.rows[0].id);
-      if (!report) throw new AppError(404, "Weekly report not found");
-      return { report, created: false };
+      return adoptOrRefuseSubmission(client, bySubmission.rows[0]);
     }
     throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
@@ -624,6 +761,34 @@ export async function createWeeklyReportDraft(
   const report = await getWeeklyReportDetail(client, result.rows[0].id);
   if (!report) throw new AppError(500, "Weekly report could not be read back after creation");
   return { report, created: true };
+}
+
+/**
+ * What a matched `client_submission_id` means, now that a report can be deleted.
+ *
+ * A LIVE match is the phone retrying and is answered idempotently — the whole reason the key exists.
+ * A DELETED match is answered 409, and the code matters: `weekly_reports_client_submission_id_key` is a
+ * plain UNIQUE constraint, not a partial one, so that key can never produce a row again. Reading the id
+ * without `is_active` and then dereferencing it through `getWeeklyReportDetail`, which DOES filter
+ * `is_active`, answered 404 "Weekly report not found" — to a CREATE call, permanently, for the one
+ * mechanism that exists to make flaky-LTE retries boring. The phone recovers from this 409 by minting a fresh
+ * submission id over the same local draft; it cannot recover from a 404 at all, and it must not be told
+ * to ADOPT — see WEEKLY_REPORT_SUBMISSION_DELETED_CODE for why that answer strands the draft.
+ */
+async function adoptOrRefuseSubmission(
+  client: QueryExecutor,
+  row: { id: string; is_active: boolean },
+): Promise<{ report: WeeklyReportDetail; created: boolean }> {
+  if (!row.is_active) {
+    throw new AppError(
+      409,
+      "That report was deleted — start this week again",
+      WEEKLY_REPORT_SUBMISSION_DELETED_CODE,
+    );
+  }
+  const report = await getWeeklyReportDetail(client, row.id);
+  if (!report) throw new AppError(404, "Weekly report not found");
+  return { report, created: false };
 }
 
 export interface WeeklyReportContentPatch {
@@ -749,23 +914,172 @@ function normalizePercent(value: unknown): number | null {
 function normalizeDelayDays(value: unknown): number | null {
   if (value == null || value === "") return null;
   const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 3650) {
+  if (!Number.isInteger(parsed) || parsed < 0) {
     throw new AppError(400, "weatherDelayDays must be a whole number of days");
+  }
+  // THE CEILING, from the shared constant rather than a literal — the form now enforces the same number,
+  // and a limit written twice is a limit that drifts. Its own message, because "must be a whole number"
+  // described a rule a caller sending 4000 had not broken.
+  if (parsed > WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS) {
+    throw new AppError(400, `weatherDelayDays is capped at ${WEEKLY_REPORT_MAX_WEATHER_DELAY_DAYS} days`);
   }
   return parsed;
 }
 
-async function loadReportWithProject(client: QueryExecutor, id: string) {
+async function loadReportWithProject(
+  client: QueryExecutor,
+  id: string,
+  // REMOVING a report must survive the setup being archived, for the same reason revoking a share link
+  // does. `getWeeklyReportProjectRow` filters `is_active`, so a stopped setup would make its reports
+  // permanently undeletable — refused with "Weekly report project not found", which is not even true —
+  // and a stopped setup is exactly where leftover test data comes to rest. Writing CONTENT stays gated:
+  // a project nobody reports on any more is not a project whose weeks should still be edited.
+  options: { allowInactiveProject?: boolean; includeInactiveReport?: boolean } = {},
+) {
   const result = await client.query(
-    `SELECT * FROM weekly_reports WHERE id = $1::uuid AND is_active LIMIT 1`,
+    `SELECT * FROM weekly_reports
+      WHERE id = $1::uuid ${options.includeInactiveReport ? "" : "AND is_active"}
+      LIMIT 1`,
     [id],
   );
   const reportRow = result.rows[0];
   if (!reportRow) throw new AppError(404, "Weekly report not found");
 
-  const projectRow = await getWeeklyReportProjectRow(client, reportRow.weekly_report_project_id);
+  const projectRow = options.allowInactiveProject
+    ? (
+        await client.query(`SELECT * FROM weekly_report_projects WHERE id = $1::uuid LIMIT 1`, [
+          reportRow.weekly_report_project_id,
+        ])
+      ).rows[0]
+    : await getWeeklyReportProjectRow(client, reportRow.weekly_report_project_id);
   if (!projectRow) throw new AppError(404, "Weekly report project not found");
   return { reportRow, projectRow };
+}
+
+export interface WeeklyReportDeleteInput {
+  /** Why. Non-empty, matching the dismissal route and the deal archive — see the check below. */
+  reason: string;
+  /** The `week_of` of a SENT report, typed back by the person deleting it. ISO, `YYYY-MM-DD`. */
+  confirmWeekOf?: string;
+}
+
+/** What was removed. Returned rather than `void` so the caller can log and audit the actual row. */
+export interface WeeklyReportDeletion {
+  id: string;
+  status: WeeklyReportStatus;
+  weekOf: string;
+}
+
+/**
+ * SOFT-DELETE a report — the writer `weekly_reports.is_active` shipped without.
+ *
+ * The column has been read by ~20 queries and every worker job since 0222, and three separate comments in
+ * this module reason about soft-deleted reports as though the feature existed. Nothing could produce one.
+ * That is why the read side needs no changes here: it was already complete, and already consistent.
+ *
+ * ONE READ PATH DID NEED CHANGING and it is worth naming, because the interface note above claims
+ * otherwise: `createWeeklyReportDraft` looked up `client_submission_id` without `is_active`. See
+ * `adoptOrRefuseSubmission`.
+ */
+export async function deleteWeeklyReport(
+  client: QueryExecutor,
+  id: string,
+  actor: WeeklyReportActor,
+  input: WeeklyReportDeleteInput,
+): Promise<WeeklyReportDeletion> {
+  const { reportRow } = await loadReportWithProject(client, id, { allowInactiveProject: true });
+
+  if (!canDeleteWeeklyReport(actor)) {
+    throw new AppError(403, "Only an admin or director can delete a weekly report");
+  }
+
+  // A REPORT THAT REPLACED A LIVE PREDECESSOR CANNOT BE REMOVED, and the refusal is not fussiness.
+  // `superseded_by_id` has exactly one writer (send-service, at send) and nothing ever clears it; the
+  // FK's ON DELETE SET NULL never fires on a soft delete. So deleting v2 leaves v1 stamped as superseded
+  // — excluded from the board — and v2 inactive, also excluded. The week reappears as never filed, the
+  // reminder job emails the superintendent, the PM and leadership about a week the client has already
+  // received twice, and History offers no action on either row. There is no way back out of that state.
+  //
+  // ASKED TWICE, AND THE SECOND TIME IS THE ONE THAT BINDS. This read is a plain SELECT and cannot hold
+  // its answer until the write; the same condition rides on the UPDATE below, so a supersede committing
+  // in between refuses there instead. This one exists to say WHY, in a sentence somebody can act on —
+  // the write can only report that something changed.
+  if (await supersedesLivePredecessor(client, id)) {
+    throw new AppError(409, SUPERSEDES_LIVE_PREDECESSOR_MESSAGE);
+  }
+
+  const weekOf = toIsoDate(reportRow.week_of)!;
+  // TYPE THE WEEK BACK, for a report the client is already holding. `week_of` is a `date` column, so
+  // node-postgres hands back a Date and comparing the input string against the raw value is false for
+  // every input including the right one — the guard would refuse the whole feature on exactly the
+  // reports it exists to protect.
+  if (reportRow.status === "sent" && input.confirmWeekOf !== weekOf) {
+    throw new AppError(400, "Confirm the week of the sent report to delete it");
+  }
+
+  // NON-EMPTY, not some minimum length. The house idiom is `length === 0` — the deal archive, this
+  // module's own dismiss route — and inventing a longer rule here would put the dialog's disabled button
+  // and the server's 400 into disagreement about the same click.
+  const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+  if (reason.length === 0) {
+    throw new AppError(400, "A reason is required to delete a weekly report");
+  }
+  // REFUSED, NOT TRIMMED TO FIT. `audit_log` is the only place this sentence is kept — `weekly_reports`
+  // carries no reason column — so silently cutting it discards forensic record while answering 204, and
+  // the person who wrote the explanation is told it was saved. Shared with the dialog's counter so the
+  // two describe the same rule.
+  if (reason.length > WEEKLY_REPORT_DELETE_REASON_MAX_CHARS) {
+    throw new AppError(
+      400,
+      `A deletion reason is limited to ${WEEKLY_REPORT_DELETE_REASON_MAX_CHARS} characters`,
+    );
+  }
+
+  // CONDITIONED ON THE STATUS THE CHECKS ABOVE RAN AGAINST, exactly as the content and transition writes
+  // are. Without it this is check-then-act: the sent-report confirmation is read from a status fetched in
+  // an earlier statement, so a send committing in that window lets an unconfirmed delete land on a report
+  // the client has since been emailed — the one thing the confirmation exists to stop.
+  //
+  // AND ON THE SUPERSEDE, re-tested here rather than trusted from the SELECT above. A correction send
+  // stamps `superseded_by_id` on its predecessor, and that write can commit between the precheck and
+  // this statement; a delete landing in that window strands the week exactly as an unchecked delete
+  // would. Expressed as NOT EXISTS on the write instead of FOR UPDATE on the predecessor because the row
+  // to lock is not this one and may not exist yet — there is nothing to take a lock on until the send
+  // creates the reference, so only a condition evaluated AT the write can see it.
+  const result = await client.query(
+    `UPDATE weekly_reports SET is_active = false, updated_at = now()
+      WHERE id = $1::uuid AND is_active AND status = $2
+        AND NOT EXISTS (
+          SELECT 1 FROM weekly_reports predecessor
+           WHERE predecessor.superseded_by_id = $1::uuid AND predecessor.is_active
+        )
+      RETURNING id, status, week_of`,
+    [id, reportRow.status],
+  );
+  const deleted = result.rows[0];
+  if (!deleted) {
+    // WHICH condition refused it. Both answer 409 and they want different sentences: one says reload,
+    // the other says delete the other version. Costs a query on the failure path only.
+    if (await supersedesLivePredecessor(client, id)) {
+      throw new AppError(409, SUPERSEDES_LIVE_PREDECESSOR_MESSAGE);
+    }
+    throw new AppError(409, "This report changed while you were working on it — reload and try again");
+  }
+
+  return { id: deleted.id, status: deleted.status, weekOf: toIsoDate(deleted.week_of)! };
+}
+
+const SUPERSEDES_LIVE_PREDECESSOR_MESSAGE =
+  "This report replaced an earlier version of the same week. Deleting it would leave that week " +
+  "reading as never filed — delete the earlier version instead, or leave both in place.";
+
+/** Is there a LIVE report this one replaced? Deleting it would strand that week — see the caller. */
+async function supersedesLivePredecessor(client: QueryExecutor, id: string): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1 FROM weekly_reports WHERE superseded_by_id = $1::uuid AND is_active LIMIT 1`,
+    [id],
+  );
+  return Boolean(result.rows[0]);
 }
 
 export interface WeeklyReportPhotoSelection {
@@ -1227,10 +1541,40 @@ export async function buildWeeklyReportSnapshot(
   };
 }
 
+/**
+ * A History row: the report, and what THIS actor may do with it.
+ *
+ * The permissions ride in their own envelope rather than as fields on `WeeklyReportDetail`, which is also
+ * the field and phone payload with eight call sites and no business carrying a CRM capability answer.
+ * `WeeklyReportPermissions` already existed for exactly this and is already computed by the same
+ * predicates the mutations enforce — one answer, not two implementations that eventually disagree and
+ * ship a button that 403s.
+ */
+export interface WeeklyReportListEntry extends WeeklyReportDetail {
+  permissions: WeeklyReportPermissions;
+  /**
+   * The SETUP behind this report has been stopped — "Stop reporting" soft-deleted it.
+   *
+   * A FACT, not a permission, and that is why it sits here rather than in the envelope beside
+   * `canEdit`: every member of that envelope answers "may THIS ACTOR do X", and this one is the same
+   * for everybody who can see the row.
+   *
+   * It is ONE field rather than one per action because there is one cause, not three. Send, retry and
+   * correction all resolve the project through `loadSendTarget`, which filters `wrp.is_active` and
+   * throws 404 "Weekly report project not found" — so a UI that offers them here is offering three
+   * buttons that fail for the same reason. What each of those actions ADDITIONALLY requires (an
+   * `approved` status, an undelivered send, being the newest version) is genuine product logic that
+   * already lives and is tested in the History panel; folding it in here would move working rules
+   * server-side for no gain.
+   */
+  reportingStopped: boolean;
+}
+
 export async function listWeeklyReports(
   client: QueryExecutor,
   filters: { projectId?: string | null; status?: string | null; from?: string | null; to?: string | null } = {},
-): Promise<WeeklyReportDetail[]> {
+  actor: WeeklyReportActor,
+): Promise<WeeklyReportListEntry[]> {
   const params: unknown[] = [];
   const where: string[] = ["wr.is_active"];
 
@@ -1258,5 +1602,21 @@ export async function listWeeklyReports(
     params,
   );
   // Photos are not needed for the history list and would cost a query per row.
-  return result.rows.map((row) => mapReportRow(row, []));
+  return result.rows.map((row) => ({
+    ...mapReportRow(row, []),
+    // The project's two assignment slots come off the join in REPORT_SELECT, so the whole list is still
+    // ONE query. Rebuilt into the shape the predicates read rather than passed as the raw row, because
+    // `wr.*` also carries columns named the same as the project's and the wrong one silently answering
+    // "is this person the assigned PM?" is the kind of authorisation bug that reads as correct.
+    permissions: permissionsFor(
+      {
+        trock_super_user_id: row.project_trock_super_user_id,
+        trock_pm_user_id: row.project_trock_pm_user_id,
+        is_active: row.project_is_active,
+      },
+      row,
+      actor,
+    ),
+    reportingStopped: row.project_is_active === false,
+  }));
 }

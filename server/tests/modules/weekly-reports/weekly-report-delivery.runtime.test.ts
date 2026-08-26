@@ -13,7 +13,15 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, fieldResponders, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import {
+  auditLog,
+  deals,
+  fieldResponders,
+  files,
+  offices,
+  userOfficeAccess,
+  users,
+} from "@trock-crm/shared/schema";
 import { WEEKLY_REPORT_DELIVERY_TAG, parseWeeklyReportDeliveryEvent } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
@@ -36,6 +44,7 @@ import {
   listWeeklyReportProjectSummaries,
 } from "../../../src/modules/weekly-reports/dashboard-service.js";
 import { ingestWeeklyReportDeliveryEvent } from "../../../src/modules/weekly-reports/delivery-service.js";
+import { getWeeklyReportProjectAudit } from "../../../src/modules/weekly-reports/project-audit-service.js";
 import type { withWeeklyReportOfficeClient } from "../../../src/modules/weekly-reports/office-connection.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -168,7 +177,7 @@ beforeAll(async () => {
   // Both offices get `deals`/`files` BEFORE 0222 runs — that migration skips any office schema lacking
   // them, so a second office created afterwards would silently have no weekly_reports at all and the
   // cross-office case would quietly degrade into a single-office one.
-  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files]));
+  await pg.exec(tenantSchemaSql("office_dallas", [deals, fieldResponders, files, auditLog]));
   await pg.exec(tenantSchemaSql("office_atlanta", [deals, fieldResponders, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   await pg.exec(`
@@ -207,6 +216,10 @@ beforeAll(async () => {
   // than on its subject.
   await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
   await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
+  // 0231 creates `public.weekly_report_views`, which the per-project audit reads. This suite reaches the
+  // audit now because a delivery verdict has to be provable all the way to the week's outstanding flag,
+  // not merely written to a column.
+  await pg.exec(migrationSql("0231_weekly_report_views"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES
@@ -988,5 +1001,79 @@ describe("a bounced week beyond the lookback window", () => {
 
     const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 1 });
     expect(board.olderOutstandingCounts[projectId]).toBe(1);
+  });
+});
+
+describe("a verdict that arrives after the report was deleted", () => {
+  // THE THIRD TIME THIS DEFECT HAS APPEARED ON THIS BRANCH, from a third angle. `lastFailed` filtered
+  // removed rows; `priorVersionReachedClient` filtered removed rows; and this filtered them too. All
+  // three ask about the OUTSIDE WORLD — what the provider did, what the client holds — and our own
+  // deletion flag has no bearing on any of it. Deleting a report does not un-bounce its email.
+  //
+  // The window is small and entirely ordinary: the provider accepts the message, leadership removes the
+  // report, and the bounce webhook lands seconds later.
+  async function sentThenDeleted() {
+    const seeded = await seedApprovedReport();
+    const deliveryKey = await sendReport(seeded.reportId);
+    await pg.query(`UPDATE office_dallas.weekly_reports SET is_active = false WHERE id = $1::uuid`, [
+      seeded.reportId,
+    ]);
+    return { ...seeded, deliveryKey };
+  }
+
+  const lateBounce = (deliveryKey: string) =>
+    providerEvent({
+      type: "email.bounced",
+      createdAt: "2026-08-13T21:05:00.000Z",
+      deliveryKey,
+      bounce: HARD_BOUNCE,
+    });
+
+  it("still records the bounce, instead of dropping it as unmatched", async () => {
+    const { reportId, deliveryKey } = await sentThenDeleted();
+
+    expect((await ingest(lateBounce(deliveryKey))).outcome).toBe("applied");
+
+    const row = await pg.query<{ send_delivery_status: string | null }>(
+      `SELECT send_delivery_status FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+      [reportId],
+    );
+    // The audit trail keeps this row precisely AS evidence. Without the verdict it kept it as evidence
+    // of nothing — a permanent question mark over whether the client got it, on the one page in this
+    // app built to be quoted back to that client.
+    expect(row.rows[0]!.send_delivery_status).toBe("bounced");
+  });
+
+  it("carries that late bounce all the way to the week's outstanding flag", async () => {
+    // THE CHAIN, not just the ingestion. A verdict written where nothing reads it is a fact filed in a
+    // drawer. `markOutstanding` already carries removed rows into `lastFailed` — an earlier finding on
+    // this branch — and this proves the two halves actually meet: a week whose only delivery evidence
+    // is a post-deletion bounce still asks somebody to act on it.
+    const { projectId, deliveryKey } = await sentThenDeleted();
+    await ingest(lateBounce(deliveryKey));
+
+    // The week is refiled, and the replacement is merely ACCEPTED with no verdict of its own — the
+    // ordinary pre-webhook state, which deliberately does not flag on its own account.
+    const refiled = await seedApprovedReport({ projectId });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports
+          SET version = 2, status = 'sent', sent_at = now(), send_delivered_at = now()
+        WHERE id = $1::uuid`,
+      [refiled.reportId],
+    );
+
+    const audit = await getWeeklyReportProjectAudit(db as any, projectId);
+    const replacement = audit.reports.find((report) => report.id === refiled.reportId)!;
+    expect(replacement.undelivered).toBe(false);
+    expect(replacement.outstanding).toBe(true);
+  });
+
+  it("still answers `unmatched` for a key that names no row at all — the control", async () => {
+    // Accepting verdicts for removed rows must not become accepting verdicts for anything. The
+    // `send_delivery_key` predicate is the isolation that survives, and this pins it.
+    await sentThenDeleted();
+    // `unknown_key` is the registry answering first — no office owns that delivery key at all, so the
+    // report-level query is never reached. That IS the isolation under test: the key, not the row.
+    expect((await ingest(lateBounce("00000000-0000-4000-8000-0000000000ff"))).outcome).toBe("unknown_key");
   });
 });
