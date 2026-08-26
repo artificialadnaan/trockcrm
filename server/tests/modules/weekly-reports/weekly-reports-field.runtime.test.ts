@@ -865,6 +865,24 @@ describe("who may open a report by id", () => {
     await expectAppError(getWeeklyReportForActor(db, id, OTHER_SUPER_ACTOR), 404, /not found/i);
   });
 
+  it.each(["paused", "completed"] as const)(
+    "does not tell an author to recreate a deleted report after reporting is %s",
+    async (status) => {
+      const project = await seedProject();
+      const id = await seedDraft(project.id, WEEK_OF);
+      await deleteWeeklyReport(db, id, DIRECTOR_ACTOR, { reason: "Removing a test draft" });
+      // The setup can stop after the deletion but before a phone learns about it. The recovery answer
+      // must describe what `createWeeklyReportDraft` can do NOW, not the permission it had when the row
+      // was first written.
+      await updateWeeklyReportProject(db, project.id, { status }, OFFICE);
+
+      const deleted = await getWeeklyReportForActor(db, id, SUPER_ACTOR).catch((error) => error);
+      expect(deleted).toBeInstanceOf(AppError);
+      expect((deleted as AppError).statusCode).toBe(410);
+      expect((deleted as AppError).code).toBe(WEEKLY_REPORT_DELETED_CODE);
+    },
+  );
+
   it("lets the assigned super, the assigned PM and a director in", async () => {
     const id = await seedSubmitted();
     for (const actor of [SUPER_ACTOR, PM_ACTOR, DIRECTOR_ACTOR]) {

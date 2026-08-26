@@ -366,7 +366,15 @@ function canCreateWeeklyReportDraftForActor(
   projectRow: Record<string, any>,
   actor: WeeklyReportActor,
 ): boolean {
-  return isAssignedSuper(projectRow, actor) || isAssignedPm(projectRow, actor) || isElevated(actor);
+  // Keep the recovery signal below in lockstep with `createWeeklyReportDraft`: a setup that has been
+  // stopped may leave its deleted rows readable enough to explain what happened, but cannot accept a
+  // replacement draft. The author must not rotate a permanently-spent submission id into a POST that
+  // the creation path will refuse.
+  return (
+    projectRow.is_active !== false &&
+    projectRow.status === "active" &&
+    (isAssignedSuper(projectRow, actor) || isAssignedPm(projectRow, actor) || isElevated(actor))
+  );
 }
 
 /**

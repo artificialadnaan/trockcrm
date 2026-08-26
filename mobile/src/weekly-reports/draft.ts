@@ -490,6 +490,55 @@ export function weeklyReportDraftReducer(
   }
 }
 
+/**
+ * Reconcile an autosave snapshot with a submission key that became durable after that snapshot rendered.
+ *
+ * React effects retain the draft from their render. A renewal deliberately waits for its own
+ * read-modify-write before it dispatches, so an edit made while that write is pending can queue an
+ * autosave carrying the RETIRED key behind it. Letting that snapshot write unchanged would erase the
+ * durable replacement key in the narrow window before the renewed render's autosave runs. Apply the
+ * same reducer transition at save time: it preserves that later edit, but cannot resurrect identity or
+ * lifecycle state belonging to the deleted row.
+ */
+export function weeklyReportDraftForAutosave(
+  draft: WeeklyReportDraft,
+  renewedClientSubmissionId: string | null,
+): WeeklyReportDraft {
+  if (!renewedClientSubmissionId || draft.clientSubmissionId === renewedClientSubmissionId) return draft;
+  return weeklyReportDraftReducer(draft, {
+    type: "renewClientSubmissionId",
+    clientSubmissionId: renewedClientSubmissionId,
+  });
+}
+
+/** Effects the wizard needs to serialize its whole-draft autosaves. Kept pure/native-free for race tests. */
+export interface WeeklyReportAutosavePort {
+  finalized(): boolean;
+  /** Read when this save RUNS, not when the effect queues it. */
+  renewedClientSubmissionId(): string | null;
+  save(draft: WeeklyReportDraft): Promise<void>;
+}
+
+/**
+ * Append a snapshot to the wizard's save chain without letting a renewal immediately ahead of it regress.
+ *
+ * The deferred `renewedClientSubmissionId` read is intentional and test-covered: this autosave may be
+ * appended while the renewal is in flight, but its callback does not run until that renewal has made the
+ * replacement key durable.
+ */
+export function enqueueWeeklyReportAutosave(
+  saveChain: Promise<unknown>,
+  draft: WeeklyReportDraft,
+  port: WeeklyReportAutosavePort,
+): Promise<unknown> {
+  return saveChain
+    .then(() => {
+      if (port.finalized()) return;
+      return port.save(weeklyReportDraftForAutosave(draft, port.renewedClientSubmissionId()));
+    })
+    .catch(() => undefined);
+}
+
 // ── Selectors ────────────────────────────────────────────────────────────────
 
 /** What to render for a photo: the durable local copy first, because a presigned URL expires. */

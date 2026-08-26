@@ -4,10 +4,12 @@ import {
   MAX_WEEKLY_REPORT_SECTION_CHARS,
   WEEKLY_REPORT_EMPTY_SIGNATURE,
   createWeeklyReportDraft,
+  enqueueWeeklyReportAutosave,
   parseWeeklyReportDelayDays,
   parseWeeklyReportPercent,
   weeklyReportContentSignature,
   weeklyReportDraftBlocker,
+  weeklyReportDraftForAutosave,
   weeklyReportDraftFromDetail,
   weeklyReportDraftPendingUploads,
   weeklyReportDraftReducer,
@@ -636,5 +638,77 @@ describe("a submission key the server has permanently retired", () => {
     expect(renewed.mode).toBe("author");
     expect(renewed.serverStatus).toBeNull();
     expect(renewed.pendingTransitionTo).toBeNull();
+  });
+
+  it("keeps a late autosave's newer writing while re-stamping its retired submission key", () => {
+    // The snapshot was captured before the renewal completed, then queued behind the renewal while the
+    // super kept typing. It must not overwrite the newly durable id, but it MUST keep those later words.
+    const staleAutosave = newDraft({
+      clientSubmissionId: "spent-key",
+      reportId: "deleted-report",
+      mode: "review",
+      serverStatus: "approved",
+      pendingTransitionTo: "approved",
+      seededFrom: { status: "approved", signature: "deleted-row" },
+      workCompleted: "Framing finished while the retry was pending",
+      photos: [galleryPhoto("new-photo", { caption: "Late upload caption" })],
+    });
+
+    const persisted = weeklyReportDraftForAutosave(staleAutosave, "fresh-key");
+
+    expect(persisted).toMatchObject({
+      clientSubmissionId: "fresh-key",
+      reportId: null,
+      mode: "author",
+      serverStatus: null,
+      seededFrom: null,
+      pendingTransitionTo: null,
+      workCompleted: "Framing finished while the retry was pending",
+    });
+    expect(persisted.photos).toEqual([galleryPhoto("new-photo", { caption: "Late upload caption" })]);
+  });
+
+  it("leaves an autosave that already carries the durable key alone", () => {
+    const current = newDraft({ clientSubmissionId: "fresh-key", workCompleted: "Current draft" });
+    expect(weeklyReportDraftForAutosave(current, "fresh-key")).toBe(current);
+  });
+
+  it("reads a renewed key after the preceding renewal settles, not when the autosave queues", async () => {
+    let releaseRenewal!: () => void;
+    let renewedClientSubmissionId: string | null = null;
+    const renewal = new Promise<void>((resolve) => {
+      releaseRenewal = resolve;
+    }).then(() => {
+      // This happens after the renewal's read-modify-write, immediately before it resolves its chain link.
+      renewedClientSubmissionId = "fresh-key";
+    });
+    const saved: WeeklyReportDraft[] = [];
+    const autosave = enqueueWeeklyReportAutosave(
+      renewal,
+      newDraft({
+        clientSubmissionId: "spent-key",
+        reportId: "deleted-report",
+        workCompleted: "Words typed while renewal was in flight",
+      }),
+      {
+        finalized: () => false,
+        renewedClientSubmissionId: () => renewedClientSubmissionId,
+        save: async (snapshot) => {
+          saved.push(snapshot);
+        },
+      },
+    );
+
+    releaseRenewal();
+    await autosave;
+
+    // A queue-time read sees null and would persist `spent-key`; this proves the queued callback reads
+    // AFTER the durable renewal and still retains the edit captured by this autosave.
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({
+      clientSubmissionId: "fresh-key",
+      reportId: null,
+      workCompleted: "Words typed while renewal was in flight",
+    });
   });
 });

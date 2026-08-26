@@ -52,6 +52,7 @@ import {
   MAX_WEEKLY_REPORT_PHOTOS,
   MAX_WEEKLY_REPORT_SECTION_CHARS,
   WEEKLY_REPORT_STEPS,
+  enqueueWeeklyReportAutosave,
   isImportedWeeklyReportPhoto,
   weeklyReportDraftBlocker,
   weeklyReportDraftPendingUploads,
@@ -204,6 +205,10 @@ function Wizard({
   // and resurrect a report that was already filed. `finalized` stops saves once the draft is gone.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
+  // A passive autosave can retain the pre-renewal draft while the replacement submission id reaches disk.
+  // Read this only from INSIDE the queued save so delayed autosaves retain newer prose but never put the
+  // retired key (or its row-bound lifecycle state) back after the durable renewal.
+  const renewedClientSubmissionId = useRef<string | null>(null);
   // `importing` is React state and does not update before a second rapid tap re-reads it, so a ref is what
   // actually bars the double-tap before the picker opens.
   const importInFlight = useRef(false);
@@ -230,9 +235,13 @@ function Wizard({
 
   useEffect(() => {
     if (finalized.current) return;
-    saveChain.current = saveChain.current
-      .then(() => (finalized.current ? undefined : saveWeeklyReportDraft(ownerKey, draft, Date.now())))
-      .catch(() => undefined);
+    saveChain.current = enqueueWeeklyReportAutosave(saveChain.current, draft, {
+      finalized: () => finalized.current,
+      // A renewal may be immediately ahead of this autosave in `saveChain`, even though this render
+      // still holds its retired key. The helper reads this when the queued callback executes.
+      renewedClientSubmissionId: () => renewedClientSubmissionId.current,
+      save: (snapshot) => saveWeeklyReportDraft(ownerKey, snapshot, Date.now()),
+    });
   }, [draft, ownerKey]);
 
   const anyVoiceBusy = voiceBusyKeys.size > 0;
@@ -300,6 +309,9 @@ function Wizard({
           weeklyReportDraftReducer(stored, { type: "renewClientSubmissionId", clientSubmissionId }),
           Date.now(),
         );
+        // Set before this queued write resolves. Any autosave already appended behind it must normalize
+        // its stale render snapshot before touching disk, while a failed renewal leaves the old key alone.
+        renewedClientSubmissionId.current = clientSubmissionId;
       });
 
       // Let a failed durable save stop THIS retry, but leave the serialization chain usable for a later
