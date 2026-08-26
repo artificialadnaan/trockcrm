@@ -345,6 +345,11 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     const guard = source.indexOf(
       "CREATE CONSTRAINT TRIGGER task_assignment_acknowledgements_on_office_provision"
     );
+    const legacyBridge = source.indexOf(
+      "INSERT INTO public._task_assignment_acknowledgements_cutovers (schema_name, state)\n" +
+        "SELECT schema_name, 'post_fence'\n" +
+        "FROM public._task_assignment_acknowledgements_fenced_offices"
+    );
     const tenantBlock = source.indexOf("-- TENANT_SCHEMA_START");
     const lock = runnerSource.indexOf("SELECT pg_advisory_lock(hashtext($1))");
     const recheck = runnerSource.indexOf("SELECT id FROM public._migrations WHERE name = $1", lock);
@@ -357,6 +362,12 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     expect(source.slice(guard, tenantBlock)).toContain("AFTER INSERT ON public.offices");
     expect(source.slice(guard, tenantBlock)).toContain("DEFERRABLE INITIALLY DEFERRED");
     expect(guard, "the guard must exist before the provisioner-only template").toBeLessThan(tenantBlock);
+    // CREATE/DROP TRIGGER serializes an older in-flight provisioner. Its old deferred trigger can write
+    // only the legacy marker while that DDL waits, so copying markers before this point permanently loses
+    // the post-fence classification and lets the helper seed the office's first assignment on retry.
+    expect(legacyBridge, "the legacy marker bridge must exist").toBeGreaterThanOrEqual(0);
+    expect(legacyBridge, "bridge only after trigger replacement has drained old provisioners").toBeGreaterThan(guard);
+    expect(legacyBridge, "bridge remains inside the migration SQL sent before the helper").toBeLessThan(tenantBlock);
 
     // A transaction-scoped advisory lock would release on every per-office COMMIT; only the session
     // variant makes a concurrent runner wait through SQL + capture + materialization + ledger.
@@ -367,6 +378,28 @@ describe("migration 0235 — task assignment acknowledgements", () => {
     expect(ledger, "ledger is written only after both phases").toBeGreaterThan(phases);
     expect(unlock, "release only after the ledger decision").toBeGreaterThan(ledger);
     expect(runnerSource.slice(lock, unlock)).not.toContain("pg_advisory_xact_lock");
+  });
+
+  it("bridges a legacy fence-only marker into the canonical post-fence header before discovery", async () => {
+    await seedOffices(["office_dallas", "office_tulsa"]);
+    // This is the durable artifact left by the immediately preceding unledgered revision. Its old
+    // provisioner trigger already created Tulsa's acknowledgement table in production; this focused
+    // assertion exercises the bridge/classification boundary rather than recreating that old trigger.
+    await pg.exec(`
+      CREATE TABLE public._task_assignment_acknowledgements_fenced_offices (
+        schema_name text PRIMARY KEY
+      );
+      INSERT INTO public._task_assignment_acknowledgements_fenced_offices (schema_name)
+      VALUES ('office_tulsa');
+    `);
+
+    await pg.exec(migrationSql(MIGRATION));
+
+    expect(await cutoverState("office_tulsa")).toBe("post_fence");
+    const discovered = await pg.query<{ schema_name: string }>(
+      TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_HISTORICAL_SCHEMA_DISCOVERY_SQL
+    );
+    expect(discovered.rows.map((row) => row.schema_name)).not.toContain("office_tulsa");
   });
 
   it("repairs a legacy #1107 provisioner at COMMIT without seeding its post-fence tasks on retry", async () => {

@@ -97,18 +97,11 @@ CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_baseline_pai
 );
 
 -- Compatibility bridge for an interrupted deploy that executed the immediately preceding revision of
--- this same unledgered migration: it had only this post-fence table. Copying it before the trigger is
--- replaced preserves those genuinely new offices as post_fence rather than reclassifying their first
--- assignments as history. New executions use the cutover header below; this table is not consulted by
--- the helper.
+-- this same unledgered migration: it had only this post-fence table. New executions use the cutover
+-- header below; this legacy table is not consulted by the helper.
 CREATE TABLE IF NOT EXISTS public._task_assignment_acknowledgements_fenced_offices (
   schema_name text PRIMARY KEY
 );
-
-INSERT INTO public._task_assignment_acknowledgements_cutovers (schema_name, state)
-SELECT schema_name, 'post_fence'
-FROM public._task_assignment_acknowledgements_fenced_offices
-ON CONFLICT (schema_name) DO NOTHING;
 
 -- Install this trigger before runner.ts scans existing offices. CREATE TRIGGER locks public.offices, so
 -- an old provisioning transaction that inserted first must finish before installation can return; the
@@ -170,6 +163,15 @@ AFTER INSERT ON public.offices
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION public.provision_task_assignment_acknowledgements_after_office();
+
+-- Do this bridge only AFTER DROP/CREATE TRIGGER has serialized an old in-flight provisioner. Such a
+-- transaction still executes the previous deferred trigger at COMMIT and writes the legacy marker; an
+-- earlier bridge would miss that write and let the historical helper seed the office's first tasks. The
+-- new trigger is now installed, so this import sees every old marker before runner.ts calls the helper.
+INSERT INTO public._task_assignment_acknowledgements_cutovers (schema_name, state)
+SELECT schema_name, 'post_fence'
+FROM public._task_assignment_acknowledgements_fenced_offices
+ON CONFLICT (schema_name) DO NOTHING;
 
 -- New tenants: the office provisioner clones the marked block below (office_dallas -> new schema). No
 -- seed there -- a freshly provisioned office has no assignment history to mark as already-seen.
