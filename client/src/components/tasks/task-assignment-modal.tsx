@@ -122,8 +122,10 @@ type FetchState = {
   /** The tenant this state describes. null only in `idle`. */
   office: string | null;
   status: FetchStatus;
-  /** Attempts made for THIS office. Bounds the retry so a persistent failure cannot become a loop. */
+  /** Attempts made for this office and recheck cycle. Bounds retries so a persistent failure cannot loop. */
   attempts: number;
+  /** A user-returned or assignment-signal recheck. Zero is the initial login check. */
+  recheckGeneration: number;
   tasks: PendingAssignmentTask[];
   total: number;
   newTotal: number;
@@ -133,6 +135,7 @@ const IDLE_FETCH_STATE: FetchState = {
   office: null,
   status: "idle",
   attempts: 0,
+  recheckGeneration: 0,
   tasks: [],
   total: 0,
   newTotal: 0,
@@ -247,6 +250,12 @@ export function TaskAssignmentModal() {
   const scopedHref = useOfficeScopedHref();
   const [fetchState, setFetchState] = useState<FetchState>(IDLE_FETCH_STATE);
   const [open, setOpen] = useState(false);
+  /**
+   * A pending assignment can arrive after /auth/me has already truthfully reported none. These are
+   * explicit check cycles rather than a reset of the fetch state: resetting the state would reuse an
+   * existing (office, attempt) request key and StrictMode could suppress the recheck as a duplicate.
+   */
+  const [recheckGenerations, setRecheckGenerations] = useState<Record<string, number>>({});
 
   /**
    * THE REQUEST IDENTITY, not another copy of the fetch lifecycle state.
@@ -254,11 +263,12 @@ export function TaskAssignmentModal() {
    * `id` is monotonic and answers "which request is this the answer to?" — a response whose id is no
    * longer current lost a race and is dropped without touching anything.
    *
-   * `key` is the (office, attempt) pair the last request was issued for, and it exists for exactly one
+   * `key` is the (office, recheck generation, attempt) triple the last request was issued for, and it exists for exactly one
    * reason: StrictMode runs the effect twice before the first run's state write commits, so the second
    * run reads a stale `fetchState` and would issue a duplicate request. Deduping on the attempt the
-   * request was issued FOR is not a record of "done" — a genuine retry bumps `attempts` and a genuine
-   * office change changes the office, so both produce a new key and both proceed. The neighbouring
+   * request was issued FOR is not a record of "done": a genuine retry bumps `attempts`, a requested
+   * recheck bumps its generation, and an office change changes the office, so each produces a new key.
+   * The neighbouring
    * refs answer only commit facts — whether this component is mounted and which office was committed —
    * so an async continuation cannot turn an abandoned response back into lifecycle state.
    */
@@ -270,6 +280,12 @@ export function TaskAssignmentModal() {
   }>({ id: 0, key: null, office: null, controller: null });
   const mountedRef = useRef(false);
   const activeOfficeRef = useRef<string | null>(null);
+  const openRef = useRef(open);
+  const fetchStateRef = useRef(fetchState);
+  // A click and its keyboard-generated click can arrive before React commits the loading state. This
+  // closes that tiny window so one deliberate interaction maps to at most one direct recheck.
+  const interactionRecheckQueuedRef = useRef(false);
+  const suppressNextInteractionRecheckRef = useRef(false);
 
   /**
    * Assignments already put on screen for this person, hydrated from sessionStorage.
@@ -296,6 +312,38 @@ export function TaskAssignmentModal() {
   // otherwise the user's home office — exactly the fallback authMiddleware applies when no header
   // arrives, resolved here so it can be PINNED on the request instead of left ambient.
   const requestOfficeId = officeScopeId ?? user?.officeId ?? null;
+
+  // Event handlers deliberately read refs instead of rendering-time values. A person's next click can
+  // happen between renders; the handler must check the current office and must not start a second
+  // request while the first one is still in flight.
+  useLayoutEffect(() => {
+    openRef.current = open;
+    fetchStateRef.current = fetchState;
+    if (fetchState.status === "loading") interactionRecheckQueuedRef.current = false;
+  }, [fetchState, open]);
+
+  const requestAssignmentRecheck = useCallback(() => {
+    const office = activeOfficeRef.current;
+    if (
+      !office ||
+      openRef.current ||
+      fetchStateRef.current.status === "loading" ||
+      interactionRecheckQueuedRef.current
+    ) {
+      return false;
+    }
+
+    // Let an action dialog the person intentionally opened finish before a background assignment
+    // check can present its own interruption. The next interaction will check again after it closes.
+    if (document.querySelector('[data-slot="dialog-content"]')) return false;
+
+    interactionRecheckQueuedRef.current = true;
+    setRecheckGenerations((current) => ({
+      ...current,
+      [office]: (current[office] ?? 0) + 1,
+    }));
+    return true;
+  }, []);
 
   // Commit the scope BEFORE passive fetch effects or promise continuations can run. A render guard keeps
   // stale data out of the DOM; this guard also keeps it out of state and sessionStorage. Abort releases
@@ -335,6 +383,55 @@ export function TaskAssignmentModal() {
       });
     };
   }, []);
+
+  // Login only tells us what was pending at one instant. A task can be assigned through a different
+  // API instance from the recipient's browser, so an in-memory real-time signal cannot be the source
+  // of truth. Every deliberate interaction therefore performs one deduplicated, authoritative check.
+  // This is event-driven rather than a timer: it never interrupts the action that is already underway,
+  // but it makes a newly assigned task visible on the next click or keyboard action.
+  useEffect(() => {
+    const recheckOnInteraction = () => {
+      // The click that closes this modal is not a new work interaction. Without this one-event
+      // suppression, an assignment made while it was open could immediately fetch and reopen it after
+      // Close, which is indistinguishable from a broken acknowledgement to the recipient.
+      if (suppressNextInteractionRecheckRef.current) {
+        suppressNextInteractionRecheckRef.current = false;
+        return;
+      }
+      requestAssignmentRecheck();
+    };
+    const onClick = () => queueMicrotask(recheckOnInteraction);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      queueMicrotask(recheckOnInteraction);
+    };
+
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [requestAssignmentRecheck]);
+
+  // Returning to a tab is a new work session from the recipient's point of view, so it gets the same
+  // direct, authoritative check as an interaction.
+  useEffect(() => {
+    const recheckOnResume = () => {
+      requestAssignmentRecheck();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") recheckOnResume();
+    };
+
+    window.addEventListener("focus", recheckOnResume);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", recheckOnResume);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [requestAssignmentRecheck]);
 
   // Hydrated during render, and re-hydrated whenever the person or their explicit-login session
   // changes. Mutating a ref here rather than in an effect is deliberate: `needsFetch` and the open
@@ -384,13 +481,24 @@ export function TaskAssignmentModal() {
     requestOfficeId !== null &&
     (requestOfficeId === flagOfficeId ? Boolean(user?.hasPendingTaskAssignments) : true);
 
+  // An explicit recheck is authoritative over the boot flag. It lets somebody discover a task assigned
+  // after login even when `hasPendingTaskAssignments` was correctly false at login time. Its generation
+  // becomes part of request identity, so it cannot be swallowed by the original request's dedupe key.
+  const requestedRecheckGeneration =
+    requestOfficeId === null ? 0 : (recheckGenerations[requestOfficeId] ?? 0);
+  const activeRecheckGeneration =
+    fetchState.office === requestOfficeId ? fetchState.recheckGeneration : 0;
+  const hasQueuedRecheck = requestedRecheckGeneration > activeRecheckGeneration;
+  const recheckAllowsFetch = requestedRecheckGeneration > 0;
+
   // Ask again when the answer we hold is not an answer for the office we are looking at: a different
-  // office, nothing fetched yet, or a failure that has not used up its retry. `loading` and `loaded`
-  // both mean "leave it alone" — one has a request in flight, the other has an answer.
+  // office, nothing fetched yet, a requested live/session recheck, or a failure that has not used its
+  // retry. `loading` and `loaded` both mean "leave it alone" unless a later recheck cycle is queued.
   const needsFetch =
-    shouldFetch &&
+    (shouldFetch || recheckAllowsFetch) &&
     requestOfficeId !== null &&
-    (fetchState.office !== requestOfficeId ||
+    (hasQueuedRecheck ||
+      fetchState.office !== requestOfficeId ||
       fetchState.status === "idle" ||
       (fetchState.status === "error" && fetchState.attempts < MAX_FETCH_ATTEMPTS));
 
@@ -398,14 +506,30 @@ export function TaskAssignmentModal() {
     if (!needsFetch || requestOfficeId === null) return;
 
     const office = requestOfficeId;
-    const attempt = (fetchState.office === office ? fetchState.attempts : 0) + 1;
-    const key = `${office}#${attempt}`;
+    const recheckGeneration = hasQueuedRecheck
+      ? requestedRecheckGeneration
+      : fetchState.office === office
+        ? fetchState.recheckGeneration
+        : 0;
+    const attempt =
+      fetchState.office === office && fetchState.recheckGeneration === recheckGeneration
+        ? fetchState.attempts + 1
+        : 1;
+    const key = `${office}#${recheckGeneration}#${attempt}`;
     if (requestRef.current.key === key) return;
 
     const id = requestRef.current.id + 1;
     const controller = new AbortController();
     requestRef.current = { id, key, office, controller };
-    setFetchState({ office, status: "loading", attempts: attempt, tasks: [], total: 0, newTotal: 0 });
+    setFetchState({
+      office,
+      status: "loading",
+      attempts: attempt,
+      recheckGeneration,
+      tasks: [],
+      total: 0,
+      newTotal: 0,
+    });
     // Anything currently on screen belonged to the previous answer. Closed directly rather than through
     // handleOpenChange, because an office change is not a dismissal and must not acknowledge anything.
     setOpen(false);
@@ -459,6 +583,7 @@ export function TaskAssignmentModal() {
           office,
           status: "loaded",
           attempts: attempt,
+          recheckGeneration,
           tasks: unshown,
           total: Math.max(result.total - hiddenCount, unshown.length),
           newTotal: Math.max(result.newTotal - hiddenNewCount, unshown.filter((task) => task.isNew).length),
@@ -478,9 +603,23 @@ export function TaskAssignmentModal() {
         // Recorded as a FAILURE, never as an empty result. Those must not be the same state: only
         // `loaded` renders, so an error can never reach the modal and reassure somebody that they have
         // nothing waiting when the truth is that nobody managed to ask.
-        setFetchState({ office, status: "error", attempts: attempt, tasks: [], total: 0, newTotal: 0 });
+        setFetchState({
+          office,
+          status: "error",
+          attempts: attempt,
+          recheckGeneration,
+          tasks: [],
+          total: 0,
+          newTotal: 0,
+        });
       });
-  }, [needsFetch, requestOfficeId, fetchState]);
+  }, [
+    fetchState,
+    hasQueuedRecheck,
+    needsFetch,
+    requestOfficeId,
+    requestedRecheckGeneration,
+  ]);
 
   // Persist only AFTER React committed the matching open dialog. The fetch continuation is too early:
   // AuthGate can unmount this component, or an office navigation can commit, between a response arriving
@@ -513,7 +652,16 @@ export function TaskAssignmentModal() {
   }, [fetchState, open, requestOfficeId]);
 
   const handleOpenChange = useCallback(
-    (nextOpen: boolean) => {
+    (nextOpen: boolean, eventDetails?: { reason?: string }) => {
+      // Base UI tells us whether it was a pointer press outside the popup, a close-button press, or
+      // Escape. Only click-based dismissal should suppress this exact click; Escape must leave the
+      // recipient's next actual click available to discover a later assignment.
+      if (
+        !nextOpen &&
+        (eventDetails?.reason === "outside-press" || eventDetails?.reason === "close-press")
+      ) {
+        suppressNextInteractionRecheckRef.current = true;
+      }
       setOpen(nextOpen);
       if (nextOpen || acknowledgedRef.current || fetchState.status !== "loaded") return;
       acknowledgedRef.current = true;
@@ -551,14 +699,21 @@ export function TaskAssignmentModal() {
     [fetchState]
   );
 
+  const closeFromClick = useCallback(() => {
+    // Escape is not a click, so it deliberately does not set this flag. Someone who dismisses with
+    // Escape should get a direct check on their very next actual click.
+    suppressNextInteractionRecheckRef.current = true;
+    handleOpenChange(false);
+  }, [handleOpenChange]);
+
   const handleViewAll = useCallback(() => {
     // CARRIES THE OFFICE SCOPE. A bare navigate("/tasks") drops ?officeId, and api() then resolves
     // x-office-id from a URL that no longer names an office — so the list that opens is the user's
     // HOME office, having just been told about assignments in another one. The tasks the modal named
     // are simply not there, and nothing says why.
     navigate(scopedHref("/tasks"));
-    handleOpenChange(false);
-  }, [handleOpenChange, navigate, scopedHref]);
+    closeFromClick();
+  }, [closeFromClick, navigate, scopedHref]);
 
   // A result belonging to an office the user has since navigated away from is never shown. Derived
   // rather than cleared in an effect, so there is no render in which one tenant's assignments are on
@@ -583,12 +738,14 @@ export function TaskAssignmentModal() {
     newTotal === 0
       ? "Still on your plate"
       : newTotal === 1
-        ? "You have a new task"
-        : `You have ${newTotal} new tasks`;
+        ? "Task assigned"
+        : "Tasks assigned";
   const description =
     newTotal === 0
       ? "Still outstanding, and still assigned to you."
-      : "Assigned to you since you were last here. They are on your tasks page too.";
+      : newTotal === 1
+        ? "You have a new task assigned to you since you were last here. It is on your tasks page too."
+        : `You have ${newTotal} new tasks assigned to you since you were last here. They are on your tasks page too.`;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -614,6 +771,17 @@ export function TaskAssignmentModal() {
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
+        <div className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+          <img
+            src="/task-assigned-confirmation.jpg"
+            alt="T Rock Contracting team member in a branded shirt"
+            width={960}
+            height={1280}
+            decoding="async"
+            className="h-32 w-full object-cover object-[center_34%] sm:h-36"
+          />
+        </div>
+
         {newTasks.length > 0 && (
           <AssignmentGroup
             group="new"
@@ -634,7 +802,7 @@ export function TaskAssignmentModal() {
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => handleOpenChange(false)}>
+          <Button variant="outline" onClick={closeFromClick}>
             Close
           </Button>
           <Button onClick={handleViewAll}>View all tasks</Button>

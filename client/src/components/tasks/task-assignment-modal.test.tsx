@@ -15,7 +15,9 @@ import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.fn();
-vi.mock("@/lib/api", () => ({ api: (...args: unknown[]) => apiMock(...args) }));
+vi.mock("@/lib/api", () => ({
+  api: (...args: unknown[]) => apiMock(...args),
+}));
 
 const navigateMock = vi.fn();
 vi.mock("react-router-dom", async () => {
@@ -268,6 +270,7 @@ afterEach(async () => {
   // jsdom leaves activeElement pointing at whatever the torn-down tree last focused. Reset it, or the
   // next test's "focus moved" assertion is reading the previous test's residue.
   (document.activeElement as HTMLElement | null)?.blur?.();
+  vi.unstubAllGlobals();
 });
 
 describe("TaskAssignmentModal — when it appears", () => {
@@ -277,8 +280,20 @@ describe("TaskAssignmentModal — when it appears", () => {
     await render(true);
 
     expect(dialog()).not.toBeNull();
+    expect(document.querySelector('[data-slot="dialog-title"]')?.textContent).toContain("Task assigned");
     expect(dialog()!.textContent).toContain("Walk the Henderson roof");
     expect(dialog()!.textContent).toContain("Adam Shaw");
+  });
+
+  it("shows the supplied assignment confirmation image", async () => {
+    setPending([task()]);
+
+    await render(true);
+
+    const image = dialog()?.querySelector<HTMLImageElement>(
+      'img[alt="T Rock Contracting team member in a branded shirt"]'
+    );
+    expect(image?.getAttribute("src")).toBe("/task-assigned-confirmation.jpg");
   });
 
   it("does not fetch, and does not open, when the flag is false", async () => {
@@ -463,6 +478,77 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
   });
 });
 
+describe("TaskAssignmentModal — assignments after login", () => {
+  it("checks on the recipient's next click even when the login-time flag was false", async () => {
+    setPending([]);
+    await render(false);
+    expect(pendingFetches()).toHaveLength(0);
+
+    setPending([task({ id: "arrived-after-login", title: "Confirm permit pickup" })]);
+
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(1);
+    expect(dialog()?.textContent).toContain("Confirm permit pickup");
+    expect(acknowledgeCalls()).toHaveLength(0);
+  });
+
+  it("directly checks when the person returns to the browser tab", async () => {
+    setPending([]);
+    await render(false);
+    expect(pendingFetches()).toHaveLength(0);
+
+    setPending([task({ id: "arrived-while-away", title: "Review updated site plan" })]);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle();
+
+    expect(pendingFetches()).toHaveLength(1);
+    expect(dialog()?.textContent).toContain("Review updated site plan");
+  });
+
+  it("does not use the explicit Close click as a follow-up check", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+    setPending([task({ id: "later" })]);
+
+    await click(buttonLabelled("Close"));
+
+    expect(pendingFetches()).toHaveLength(1);
+    expect(acknowledgeCalls()).toHaveLength(1);
+  });
+
+  it("does not use the backdrop dismissal click as a follow-up check", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+    setPending([task({ id: "later" })]);
+
+    await click(document.querySelector<HTMLElement>('[data-slot="dialog-overlay"]') ?? undefined);
+
+    expect(dialog()).toBeNull();
+    expect(pendingFetches()).toHaveLength(1);
+    expect(acknowledgeCalls()).toHaveLength(1);
+  });
+
+  it("does not consume the next click when the modal was dismissed with Escape", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await settle();
+    expect(dialog()).toBeNull();
+
+    setPending([task({ id: "later", title: "Check the final inspection" })]);
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(2);
+    expect(dialog()?.textContent).toContain("Check the final inspection");
+  });
+});
+
 describe("TaskAssignmentModal — it says what is actually true", () => {
   // A repeat is not a new assignment. The server returns urgent/high/overdue work on EVERY login until
   // it leaves pending, so after the first showing "3 new tasks assigned to you since you were last
@@ -494,7 +580,7 @@ describe("TaskAssignmentModal — it says what is actually true", () => {
     await render(true);
 
     const heading = document.querySelector<HTMLElement>('[data-slot="dialog-title"]')!.textContent ?? "";
-    expect(heading).toContain("a new task");
+    expect(heading).toContain("Task assigned");
     // The three rows on screen are one new assignment and two reminders. A headline of "3" would be
     // counting work the person has already been shown.
     expect(heading).not.toContain("3");

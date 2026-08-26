@@ -4,6 +4,7 @@ import crypto from "crypto";
 import {
   deals,
   jobQueue,
+  taskComments,
   taskResolutionState,
   tasks,
 } from "@trock-crm/shared/schema";
@@ -103,10 +104,15 @@ export interface TransitionTaskStatusInput {
   scheduledFor?: string | Date | null;
   waitingOn?: unknown;
   blockedBy?: unknown;
+  /** Required for a human transition to a terminal status. Validated at the service boundary. */
+  resolutionNote?: unknown;
 }
 
 const ACTIVE_BUCKET_STATUSES: TaskStatus[] = ["pending", "in_progress", "waiting_on", "blocked"];
 const COMPLETED_BUCKET_STATUSES: TaskStatus[] = ["completed", "dismissed"];
+
+/** A close explanation is intentionally shorter than a general task comment. */
+export const TASK_RESOLUTION_NOTE_MAX_LENGTH = 2_000;
 
 /**
  * Every status that can surface in an OPEN bucket, and the single denominator behind the per-source
@@ -180,6 +186,29 @@ async function writeDismissalResolutionState(
 }
 
 /**
+ * Add the human's terminal-action explanation to the existing append-only task thread.
+ *
+ * This intentionally does not call postTaskComment. A note written by an assignee would otherwise be
+ * classified as a reply and update last_reply_at, which could re-open a completed task in the
+ * assigner's attention queue. Task routes already hold the tenant transaction open, so this insert and
+ * the status update commit or roll back together.
+ */
+async function writeTaskResolutionNote(
+  tenantDb: TenantDb,
+  taskId: string,
+  authorId: string,
+  status: "completed" | "dismissed",
+  note: string
+) {
+  await tenantDb.insert(taskComments).values({
+    taskId,
+    authorId,
+    kind: "note",
+    body: `${status === "completed" ? "Completed" : "Dismissed"}: ${note}`,
+  });
+}
+
+/**
  * Excludes seeded demo/test rows from every task read path.
  *
  * COALESCE rather than a bare `= false` because the column is only reliably set by one of the two
@@ -240,8 +269,10 @@ export async function transitionTaskStatus(
   // on completeTask alone decorative. Non-terminal moves stay open to anyone who can see the task:
   // "somebody else picked this up" was never the accountability concern.
   const isTerminalTransition = TERMINAL_STATUSES.includes(input.nextStatus);
+  let resolutionNote: string | null = null;
   if (isTerminalTransition) {
     assertTaskCloseAuthority(existing, userRole, userId);
+    resolutionNote = requireTaskResolutionNote({ resolutionNote: input.resolutionNote });
   }
 
   const updates: Record<string, any> = {
@@ -325,6 +356,15 @@ export async function transitionTaskStatus(
   }
 
   const updatedTask = result[0];
+  if (isTerminalTransition && resolutionNote) {
+    await writeTaskResolutionNote(
+      tenantDb,
+      updatedTask.id,
+      userId,
+      input.nextStatus === "completed" ? "completed" : "dismissed",
+      resolutionNote
+    );
+  }
   if (resolvedAt) {
     await writeDismissalResolutionState(tenantDb, updatedTask, resolvedAt);
   }
@@ -822,6 +862,33 @@ export type TaskCloseSystemActor = (typeof TASK_CLOSE_SYSTEM_ACTORS)[number];
 export interface TaskCloseOptions {
   /** Set ONLY by an internal caller. No HTTP handler constructs one. */
   systemActor?: TaskCloseSystemActor;
+  /** Required written outcome for a human close. Internal system actors are deliberately exempt. */
+  resolutionNote?: unknown;
+}
+
+/**
+ * Human task closures need an accountable, durable explanation. Keep this separate from the authority
+ * assertion so every caller can establish 403 access semantics before a malformed payload becomes a 400.
+ */
+function requireTaskResolutionNote(options: TaskCloseOptions): string | null {
+  if (options.systemActor !== undefined) return null;
+
+  if (typeof options.resolutionNote !== "string") {
+    throw new AppError(400, "Tell us what action you took before closing this task");
+  }
+
+  const note = options.resolutionNote.trim();
+  if (note.length === 0) {
+    throw new AppError(400, "Tell us what action you took before closing this task");
+  }
+  if (note.length > TASK_RESOLUTION_NOTE_MAX_LENGTH) {
+    throw new AppError(
+      400,
+      `A task close explanation cannot be longer than ${TASK_RESOLUTION_NOTE_MAX_LENGTH} characters`
+    );
+  }
+
+  return note;
 }
 
 /** Shared predicate behind both "may close" and "may comment" — one definition, two error messages. */
@@ -1177,6 +1244,7 @@ export async function completeTask(
   if (!existing) throw new AppError(404, "Task not found");
 
   assertTaskCloseAuthority(existing, userRole, userId, options);
+  const resolutionNote = requireTaskResolutionNote(options);
 
   // Conditional update: only complete if task is in a completable state
   const result = await tenantDb
@@ -1201,6 +1269,10 @@ export async function completeTask(
     throw new AppError(400, "Task already completed or dismissed");
   }
 
+  if (resolutionNote) {
+    await writeTaskResolutionNote(tenantDb, result[0].id, userId, "completed", resolutionNote);
+  }
+
   return result[0];
 }
 
@@ -1220,6 +1292,7 @@ export async function dismissTask(
   // `dismissed` is terminal AND writes a suppression window that stops the rules engine ever raising
   // the task again, so it needs the same authority as completing — it had none at all before.
   assertTaskCloseAuthority(existing, userRole, userId, options);
+  const resolutionNote = requireTaskResolutionNote(options);
 
   if (existing.status === "completed" || existing.status === "dismissed") {
     throw new AppError(400, `Task is already ${existing.status}`);
@@ -1243,6 +1316,9 @@ export async function dismissTask(
     throw new AppError(409, "Task changed before it could be dismissed");
   }
 
+  if (resolutionNote) {
+    await writeTaskResolutionNote(tenantDb, result[0].id, userId, "dismissed", resolutionNote);
+  }
   await writeDismissalResolutionState(tenantDb, result[0], resolvedAt);
 
   return result[0];

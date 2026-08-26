@@ -2419,12 +2419,25 @@ export const apiSpec = {
                   {
                     type: "object",
                     properties: {
-                      nextStatus: { type: "string", enum: ["pending", "in_progress", "completed", "dismissed"] },
+                      nextStatus: { type: "string", enum: ["pending", "in_progress"] },
                       scheduledFor: { type: "string", format: "date-time", nullable: true },
                       waitingOn: { type: "object", nullable: true, additionalProperties: true },
                       blockedBy: { type: "object", nullable: true, additionalProperties: true },
                     },
                     required: ["nextStatus"],
+                  },
+                  {
+                    type: "object",
+                    properties: {
+                      nextStatus: { type: "string", enum: ["completed", "dismissed"] },
+                      resolutionNote: {
+                        type: "string",
+                        minLength: 1,
+                        maxLength: 2000,
+                        description: "Required explanation of the action taken before closing the task.",
+                      },
+                    },
+                    required: ["nextStatus", "resolutionNote"],
                   },
                 ],
               },
@@ -2452,6 +2465,25 @@ export const apiSpec = {
         tags: ["Tasks"],
         summary: "Mark a task as completed",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  resolutionNote: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 2000,
+                    description: "Required explanation of the action taken before completing the task.",
+                  },
+                },
+                required: ["resolutionNote"],
+              },
+            },
+          },
+        },
         responses: {
           200: {
             description: "Task completed.",
@@ -2461,6 +2493,7 @@ export const apiSpec = {
               },
             },
           },
+          400: { description: "A written completion explanation is required." },
           403: { description: "Access denied." },
           404: { description: "Task not found." },
         },
@@ -2472,6 +2505,25 @@ export const apiSpec = {
         tags: ["Tasks"],
         summary: "Dismiss a task",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  resolutionNote: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 2000,
+                    description: "Required explanation of why the task is being dismissed.",
+                  },
+                },
+                required: ["resolutionNote"],
+              },
+            },
+          },
+        },
         responses: {
           200: {
             description: "Task dismissed.",
@@ -2481,6 +2533,9 @@ export const apiSpec = {
               },
             },
           },
+          400: { description: "A written dismissal explanation is required." },
+          403: { description: "Access denied." },
+          404: { description: "Task not found." },
         },
       },
     },

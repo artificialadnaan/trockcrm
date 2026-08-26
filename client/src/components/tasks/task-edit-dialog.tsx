@@ -27,6 +27,7 @@ import {
 import type { Task } from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { TaskResolutionDialog, type TaskResolutionAction } from "@/components/tasks/task-resolution-dialog";
 
 interface Assignee {
   id: string;
@@ -72,6 +73,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   const [transitioning, setTransitioning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transitionError, setTransitionError] = useState<string | null>(null);
+  const [resolutionAction, setResolutionAction] = useState<TaskResolutionAction | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
 
   const canAssign = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
@@ -105,6 +107,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     setBlockedByText(getLifecycleLabel(task.blockedBy));
     setError(null);
     setTransitionError(null);
+    setResolutionAction(null);
   }, [task]);
 
   // Fetch assignees for every role that can edit assignee selection.
@@ -116,10 +119,15 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   }, [canAssign, open]);
 
   const handleTransition = async (nextStatus: "pending" | "scheduled" | "in_progress" | "waiting_on" | "blocked" | "completed" | "dismissed") => {
+    if (nextStatus === "completed" || nextStatus === "dismissed") {
+      setResolutionAction(nextStatus === "completed" ? "complete" : "dismiss");
+      return;
+    }
+
     setTransitioning(true);
     setTransitionError(null);
     try {
-      if (nextStatus === "completed" || nextStatus === "dismissed" || nextStatus === "pending" || nextStatus === "in_progress") {
+      if (nextStatus === "pending" || nextStatus === "in_progress") {
         await transitionTask(task.id, { nextStatus });
       } else if (nextStatus === "scheduled") {
         if (!scheduledFor) {
@@ -159,6 +167,32 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     }
   };
 
+  const resolveTerminalTransition = async (resolutionNote: string) => {
+    const action = resolutionAction;
+    if (!action) return;
+
+    setTransitioning(true);
+    setTransitionError(null);
+    try {
+      await transitionTask(task.id, {
+        nextStatus: action === "complete" ? "completed" : "dismissed",
+        resolutionNote,
+      });
+      handleEditOpenChange(false);
+      onUpdated();
+    } catch (err: unknown) {
+      console.error("[tasks] terminal transition failed", err);
+      throw err;
+    } finally {
+      setTransitioning(false);
+    }
+  };
+
+  const handleEditOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) setResolutionAction(null);
+    onOpenChange(nextOpen);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
@@ -192,7 +226,8 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <>
+    <Dialog open={open} onOpenChange={handleEditOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Edit Task</DialogTitle>
@@ -387,7 +422,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
           {transitionError && <p className="text-sm text-red-600">{transitionError}</p>}
           {error && <p className="text-sm text-red-600">{error}</p>}
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="ghost" onClick={() => handleEditOpenChange(false)}>
               Cancel
             </Button>
             <Button type="submit" disabled={submitting || !title.trim()}>
@@ -397,5 +432,15 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
         </form>
       </DialogContent>
     </Dialog>
+    <TaskResolutionDialog
+      action={resolutionAction ?? "dismiss"}
+      taskTitle={task.title}
+      open={resolutionAction !== null}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) setResolutionAction(null);
+      }}
+      onResolve={resolveTerminalTransition}
+    />
+    </>
   );
 }

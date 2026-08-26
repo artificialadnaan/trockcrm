@@ -39,6 +39,29 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
+vi.mock("@/components/tasks/task-resolution-dialog", () => ({
+  TaskResolutionDialog: ({
+    open,
+    onResolve,
+    onResolved,
+  }: {
+    open: boolean;
+    onResolve: (resolutionNote: string) => Promise<void>;
+    onResolved?: () => void;
+  }) =>
+    open ? (
+      <button
+        type="button"
+        onClick={async () => {
+          await onResolve("Completed after confirming the delivery.");
+          onResolved?.();
+        }}
+      >
+        Save task outcome
+      </button>
+    ) : null,
+}));
+
 const ASSIGNER = "user-adam";
 const ASSIGNEE = "user-derek";
 const STRANGER = "user-nobody";
@@ -575,7 +598,7 @@ describe("the emailed Mark complete CTA", () => {
 });
 
 describe("close from the drawer", () => {
-  it("completes the task and closes", async () => {
+  it("collects an outcome before completing the task and closing", async () => {
     const onClose = vi.fn();
     const onChanged = vi.fn();
     setComments([]);
@@ -588,7 +611,15 @@ describe("close from the drawer", () => {
       complete.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(mocks.completeTaskMock).toHaveBeenCalledWith("task-1");
+    expect(mocks.completeTaskMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save task outcome"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.completeTaskMock).toHaveBeenCalledWith("task-1", "Completed after confirming the delivery.");
     expect(onChanged).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
   });
