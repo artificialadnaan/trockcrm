@@ -75,34 +75,24 @@ function knownDdSummary<T extends { ddEstimate: number | null }>(rows: readonly 
   return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(known.reduce((sum, value) => sum + value, 0))} known DD${missing ? ` · ${int(missing)} missing DD` : ""}`;
 }
 
-/** The sent-report tiles each have a distinct eligibility rule, so their dialog must reconcile to that
- * exact clicked metric rather than merely restating the rows' DD values. */
-function sentMetricSummary(scope: SentDrillScope, rows: readonly EstimateSentProject[]): string {
-  const latestTotal = rows.reduce((sum, project) => sum + (project.latestBidBoardTotalSales ?? 0), 0);
-  const ddTotal = rows.reduce((sum, project) => sum + (project.ddEstimate ?? 0), 0);
-
+/** The sent-report tiles each have a distinct eligibility rule. Use the server-published aggregates — the
+ * same rounded values rendered in the tile — while the dialog table supplies the exact supporting rows. */
+function sentMetricSummary(
+  scope: SentDrillScope,
+  rows: readonly EstimateSentProject[],
+  sent: MondayShowcaseData["estimatingReport"]["estimatesSent"],
+): string {
   switch (scope) {
-    case "all": {
-      const missingLatestTotal = rows.filter((project) => project.latestBidBoardTotalSales == null).length;
-      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(latestTotal)} latest Bid Board total${missingLatestTotal ? ` · ${int(missingLatestTotal)} missing latest total` : ""}`;
-    }
+    case "all":
+      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(sent.latestBidBoardTotalSales)} latest Bid Board total${sent.missingSentValueCount ? ` · ${int(sent.missingSentValueCount)} missing latest total` : ""}`;
     case "latest_total":
-      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(latestTotal)} latest Bid Board total`;
+      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(sent.latestBidBoardTotalSales)} latest Bid Board total`;
     case "dollar_comparable":
-      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(ddTotal)} DD → ${usd(latestTotal)} latest total · ${signedUsd(latestTotal - ddTotal)} variance`;
-    case "percent_comparable": {
-      const variancePercent = ddTotal > 0 ? (latestTotal / ddTotal - 1) * 100 : null;
-      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(ddTotal)} DD → ${usd(latestTotal)} latest total · ${pct(variancePercent)} variance`;
-    }
-    case "margin_usable": {
-      const weightedMargin = latestTotal > 0
-        ? rows.reduce(
-            (sum, project) => sum + (project.latestBidBoardTotalSales ?? 0) * (project.marginPercent ?? 0),
-            0,
-          ) / latestTotal
-        : null;
-      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(latestTotal)} latest total · ${pct(weightedMargin)} weighted margin`;
-    }
+      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(sent.comparison.dollarComparableDdValue)} DD → ${usd(sent.comparison.dollarComparableLatestBidBoardTotalSales)} latest total · ${signedUsd(sent.comparison.varianceAmount)} variance`;
+    case "percent_comparable":
+      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(sent.comparison.percentageComparableDdValue)} DD → ${usd(sent.comparison.percentageComparableLatestBidBoardTotalSales)} latest total · ${pct(sent.comparison.variancePercent)} variance`;
+    case "margin_usable":
+      return `${int(rows.length)} ${projectNoun(rows.length)} · ${usd(sent.margin.latestBidBoardTotalSales)} latest total · ${pct(sent.margin.blendedPercent)} weighted margin`;
   }
 }
 
@@ -184,7 +174,7 @@ function resolveDrill(request: A1DrillRequest, data: MondayShowcaseData): Resolv
   } as const;
   return {
     title: titleByScope[request.scope],
-    description: `${sentMetricSummary(request.scope, rows)} · first sent in ${data.period.label}. Financial values are latest Bid Board / CRM values, not immutable send-time snapshots.${routeScopeDescription(data)}`,
+    description: `${sentMetricSummary(request.scope, rows, report.estimatesSent)} · first sent in ${data.period.label}. Financial values are latest Bid Board / CRM values, not immutable send-time snapshots.${routeScopeDescription(data)}`,
     sent: rows,
   };
 }

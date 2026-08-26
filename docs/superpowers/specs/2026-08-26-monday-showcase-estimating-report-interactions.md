@@ -37,7 +37,7 @@ The dialog title and description state the cohort meaning, project count, and cu
 - Current Estimating remains a live snapshot; its dialog states the current-as-of time and is unaffected by the period toggle.
 - RFP dialog ownership is the **current** assigned sales rep, matching the rollup’s existing reassignment caveat. It filters by `assignedRepId`, never display name, so duplicate names and the `Unassigned` (`null`) bucket remain exact.
 - Sent dialog rows retain the existing caveat: DD, Bid Board total, variance, and margin are current/latest values, not immutable send-time snapshots.
-- A sent dialog’s summary reconciles to the metric that opened it: latest-total dialogs show the latest-total sum; dollar/percent comparison dialogs show their eligible DD and latest-total bases plus variance; and the margin dialog shows its weighted latest-total base and blended margin.
+- A sent dialog’s summary reconciles to the metric that opened it: latest-total dialogs show the latest-total sum; dollar/percent comparison dialogs show their eligible DD and latest-total bases plus variance; and the margin dialog shows its weighted latest-total base and blended margin. It uses the payload’s published aggregates rather than recomputing them client-side, preserving the exact server rounding shown in the tile.
 - A dialog must never make a missing financial value appear as zero. A real zero DD participates in dollar comparison but not percent comparison; a real zero margin participates in blended margin where latest total is positive.
 
 ## Table sorting

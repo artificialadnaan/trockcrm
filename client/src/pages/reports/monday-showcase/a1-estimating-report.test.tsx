@@ -326,6 +326,34 @@ describe("A1 Estimating Report", () => {
     expect(dialogText()).toContain("$140,000 latest total · 15.4% weighted margin");
   });
 
+  it("uses the published blended-margin aggregate rather than re-rounding project values", () => {
+    const roundedMarginData: MondayShowcaseData = {
+      ...data,
+      estimatingReport: {
+        ...data.estimatingReport,
+        estimatesSent: {
+          ...data.estimatingReport.estimatesSent,
+          projects: data.estimatingReport.estimatesSent.projects.map((project) =>
+            project.id === "sent-1"
+              ? { ...project, marginPercent: 15.4499 }
+              : { ...project, marginPercent: null },
+          ),
+          margin: { projectCount: 1, latestBidBoardTotalSales: 120_000, blendedPercent: 15.45 },
+          missingMarginCount: 2,
+        },
+      },
+    };
+    renderA1(roundedMarginData);
+
+    act(() => {
+      (container.querySelector('button[aria-label="Show supporting records for Blended margin"]') as HTMLButtonElement).click();
+    });
+    // The headline formats the server's 15.45% aggregate to 15.5%. Recomputing from the unrounded row
+    // value (15.4499%) would display 15.4% and make the audit dialog contradict the number it explains.
+    expect(dialogText()).toContain("$120,000 latest total · 15.5% weighted margin");
+    expect(dialogText()).not.toContain("15.4% weighted margin");
+  });
+
   it("sorts Request opened, DD Estimate, and Time in stage both directions with nulls last", () => {
     renderA1();
 
