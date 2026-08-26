@@ -29,9 +29,14 @@ import {
   submitMarketingExpenseRequest,
   withdrawMarketingExpenseRequest,
 } from "../../../src/modules/marketing-expense/service.js";
+import { runFilesAssociationCheckRepair } from "../../../src/migrations/files-association-check-repair.js";
 
 const MIGRATION_0232 = readFileSync(
   fileURLToPath(new URL("../../../../migrations/0232_marketing_expense_requests.sql", import.meta.url)),
+  "utf8",
+);
+const MIGRATION_0241 = readFileSync(
+  fileURLToPath(new URL("../../../../migrations/0241_files_association_check_repair.sql", import.meta.url)),
   "utf8",
 );
 
@@ -90,6 +95,12 @@ beforeAll(async () => {
       role text NOT NULL,
       office_id uuid,
       is_active boolean NOT NULL DEFAULT true
+    );
+    -- 0241 installs a deferred public.offices trigger. Keep the fixture on the production migration path
+    -- instead of stripping that global DDL away merely because this suite exercises a tenant service.
+    CREATE TABLE public.offices (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      slug text NOT NULL UNIQUE
     );
     CREATE TABLE public.user_office_access (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -165,6 +176,11 @@ beforeAll(async () => {
   `);
 
   await pg.exec(MIGRATION_0232);
+  // Execute the same final migration shape the runner reaches: 0232 adds the marketing attachment FK,
+  // then 0241 removes the obsolete all-associations CHECK one office at a time. Leaving the fixture on
+  // 0232 alone would model the transient pre-0241 state rather than the schema the service runs against.
+  await runFilesAssociationCheckRepair(pg as never);
+  await pg.exec(MIGRATION_0241);
 
   // Migration 0232 seeds Takashi by email, which the fixture above satisfies — assert it rather than
   // assume it, because everything below depends on the group resolving to somebody.
