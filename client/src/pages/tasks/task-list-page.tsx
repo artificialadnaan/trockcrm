@@ -37,6 +37,7 @@ import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
 import { TaskConversationDrawer } from "@/components/tasks/task-conversation-drawer";
+import { TaskResolutionDialog } from "@/components/tasks/task-resolution-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -167,6 +168,7 @@ function TaskRow({
   // point, the router is the authority for where the app actually is.
   const { search } = useLocation();
   const [editOpen, setEditOpen] = useState(false);
+  const [completeOpen, setCompleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // While the bucket is refetching (e.g. right after this row's own complete/snooze), these rows are
   // stale until fresh data lands — lock their mutating actions so a just-resolved row can't be
@@ -177,15 +179,20 @@ function TaskRow({
   const projectContext = getTaskProjectContext(task);
   const taskTitle = sanitizeHubspotDealIdentifiers(task.title);
 
-  const complete = async (event: React.MouseEvent) => {
+  const openComplete = (event: React.MouseEvent) => {
     event.stopPropagation();
+    if (locked || isDone || !mayClose) return;
+    setCompleteOpen(true);
+  };
+
+  const complete = async (resolutionNote: string) => {
     setBusy(true);
     try {
-      await completeTask(task.id);
+      await completeTask(task.id, resolutionNote);
       onUpdate();
     } catch (error) {
       console.error("[tasks] complete failed", error);
-      toast.error(error instanceof Error ? error.message : "Failed to complete task");
+      throw error;
     } finally {
       setBusy(false);
     }
@@ -253,7 +260,7 @@ function TaskRow({
         <button
           type="button"
           disabled={locked || isDone || !mayClose}
-          onClick={complete}
+          onClick={openComplete}
           onKeyDown={stopRowKeyDownPropagation}
           aria-label={`Complete ${taskTitle}`}
           // Named, not merely greyed: a disabled control with no explanation reads as a bug.
@@ -364,6 +371,13 @@ function TaskRow({
         </div>
       </div>
       <TaskEditDialog task={task} open={editOpen} onOpenChange={setEditOpen} onUpdated={onUpdate} />
+      <TaskResolutionDialog
+        action="complete"
+        taskTitle={taskTitle}
+        open={completeOpen}
+        onOpenChange={setCompleteOpen}
+        onResolve={complete}
+      />
     </>
   );
 }

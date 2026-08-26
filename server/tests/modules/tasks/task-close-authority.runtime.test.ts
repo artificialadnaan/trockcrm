@@ -20,7 +20,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { tasks, taskResolutionState } from "@trock-crm/shared/schema";
+import { taskComments, tasks, taskResolutionState } from "@trock-crm/shared/schema";
 import {
   assertTaskCloseAuthority,
   completeTask,
@@ -51,6 +51,7 @@ async function seedTask(
   const assignedTo = overrides.assignedTo ?? ASSIGNEE;
   const createdBy = overrides.createdBy === undefined ? ASSIGNER : overrides.createdBy;
   await pg.exec(`
+    DELETE FROM task_comments WHERE task_id = '${id}';
     DELETE FROM tasks WHERE id = '${id}';
     INSERT INTO tasks (id, title, type, priority, status, assigned_to, created_by, source)
     VALUES ('${id}', 'Send the roof photos', 'manual', 'normal', 'pending',
@@ -61,6 +62,18 @@ async function seedTask(
 async function statusOf(id: string) {
   const result = await pg.query<{ status: string }>(`SELECT status FROM tasks WHERE id = $1`, [id]);
   return result.rows[0]?.status;
+}
+
+async function resolutionNotesFor(id: string) {
+  const result = await pg.query<{
+    author_id: string | null;
+    body: string;
+    kind: string;
+  }>(
+    `SELECT author_id, body, kind FROM task_comments WHERE task_id = $1 ORDER BY created_at, id`,
+    [id]
+  );
+  return result.rows;
 }
 
 /**
@@ -117,7 +130,7 @@ function withReassignmentBeforeTerminalWrite(taskId: string) {
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`SET TimeZone='UTC';`);
-  await pg.exec(tenantSchemaSql("public", [tasks, taskResolutionState]));
+  await pg.exec(tenantSchemaSql("public", [tasks, taskResolutionState, taskComments]));
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
     CREATE TABLE deals (id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false,
@@ -287,7 +300,7 @@ describe("close authority is exposed on every task projection", () => {
 
       let actual = true;
       try {
-        await completeTask(tdb, CASE, role, id);
+        await completeTask(tdb, CASE, role, id, { resolutionNote: "Verified the task outcome." });
       } catch {
         actual = false;
       }
@@ -298,17 +311,23 @@ describe("close authority is exposed on every task projection", () => {
 
 describe("POST /:id/complete — completeTask", () => {
   it("lets the assignee complete", async () => {
-    await expect(completeTask(tdb, CASE, "rep", ASSIGNEE)).resolves.toBeDefined();
+    await expect(
+      completeTask(tdb, CASE, "rep", ASSIGNEE, { resolutionNote: "Sent the roof photos." })
+    ).resolves.toBeDefined();
     expect(await statusOf(CASE)).toBe("completed");
   });
 
   it("lets the assigner complete", async () => {
-    await expect(completeTask(tdb, CASE, "rep", ASSIGNER)).resolves.toBeDefined();
+    await expect(
+      completeTask(tdb, CASE, "rep", ASSIGNER, { resolutionNote: "Confirmed the work was done." })
+    ).resolves.toBeDefined();
     expect(await statusOf(CASE)).toBe("completed");
   });
 
   it("lets an admin complete", async () => {
-    await expect(completeTask(tdb, CASE, "admin", ADMIN)).resolves.toBeDefined();
+    await expect(
+      completeTask(tdb, CASE, "admin", ADMIN, { resolutionNote: "Reviewed the completed work." })
+    ).resolves.toBeDefined();
     expect(await statusOf(CASE)).toBe("completed");
   });
 
@@ -325,12 +344,16 @@ describe("POST /:id/complete — completeTask", () => {
 // that stops the rules engine ever raising it again.
 describe("POST /:id/dismiss — dismissTask", () => {
   it("lets the assignee dismiss", async () => {
-    await expect(dismissTask(tdb, CASE, "rep", ASSIGNEE)).resolves.toBeDefined();
+    await expect(
+      dismissTask(tdb, CASE, "rep", ASSIGNEE, { resolutionNote: "The client cancelled the request." })
+    ).resolves.toBeDefined();
     expect(await statusOf(CASE)).toBe("dismissed");
   });
 
   it("lets the assigner dismiss", async () => {
-    await expect(dismissTask(tdb, CASE, "rep", ASSIGNER)).resolves.toBeDefined();
+    await expect(
+      dismissTask(tdb, CASE, "rep", ASSIGNER, { resolutionNote: "The task is no longer needed." })
+    ).resolves.toBeDefined();
     expect(await statusOf(CASE)).toBe("dismissed");
   });
 
@@ -370,9 +393,99 @@ describe("POST /:id/transition — the bypass", () => {
 
   it("lets the assigner transition to completed", async () => {
     await expect(
-      transitionTaskStatus(tdb, CASE, { nextStatus: "completed" }, "rep", ASSIGNER)
+      transitionTaskStatus(
+        tdb,
+        CASE,
+        { nextStatus: "completed", resolutionNote: "Confirmed the outcome with the assignee." },
+        "rep",
+        ASSIGNER
+      )
     ).resolves.toBeDefined();
     expect(await statusOf(CASE)).toBe("completed");
+  });
+});
+
+// A terminal status without its human explanation is not a completed task outcome. Keep this suite at
+// the service layer so a caller cannot bypass the UI or individual HTTP route by choosing another
+// terminal endpoint.
+describe("written task outcomes", () => {
+  it.each([
+    [
+      "complete",
+      () => completeTask(tdb, CASE, "rep", ASSIGNEE, { resolutionNote: " \n\t " }),
+    ],
+    [
+      "dismiss",
+      () => dismissTask(tdb, CASE, "rep", ASSIGNEE, { resolutionNote: " \n\t " }),
+    ],
+    [
+      "terminal transition",
+      () => transitionTaskStatus(
+        tdb,
+        CASE,
+        { nextStatus: "completed", resolutionNote: " \n\t " },
+        "rep",
+        ASSIGNEE
+      ),
+    ],
+  ])("rejects a blank explanation before %s", async (_action, close) => {
+    await expect(close()).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Tell us what action you took before closing this task",
+    });
+    expect(await statusOf(CASE)).toBe("pending");
+    expect(await resolutionNotesFor(CASE)).toEqual([]);
+  });
+
+  it("writes a complete explanation as an author-attributed note, not a reply", async () => {
+    await completeTask(tdb, CASE, "rep", ASSIGNEE, {
+      resolutionNote: "  Sent the requested roof photos to the customer.  ",
+    });
+
+    expect(await resolutionNotesFor(CASE)).toEqual([
+      {
+        author_id: ASSIGNEE,
+        kind: "note",
+        body: "Completed: Sent the requested roof photos to the customer.",
+      },
+    ]);
+    const result = await pg.query<{ last_reply_at: Date | null }>(
+      `SELECT last_reply_at FROM tasks WHERE id = $1`,
+      [CASE]
+    );
+    expect(result.rows[0]?.last_reply_at).toBeNull();
+  });
+
+  it("writes a dismiss explanation as an author-attributed note", async () => {
+    await dismissTask(tdb, CASE, "rep", ASSIGNER, {
+      resolutionNote: "Customer confirmed this work is no longer needed.",
+    });
+
+    expect(await resolutionNotesFor(CASE)).toEqual([
+      {
+        author_id: ASSIGNER,
+        kind: "note",
+        body: "Dismissed: Customer confirmed this work is no longer needed.",
+      },
+    ]);
+  });
+
+  it("writes a transition-to-terminal explanation as an author-attributed note", async () => {
+    await transitionTaskStatus(
+      tdb,
+      CASE,
+      { nextStatus: "completed", resolutionNote: "Verified the permit was received." },
+      "rep",
+      ASSIGNEE
+    );
+
+    expect(await resolutionNotesFor(CASE)).toEqual([
+      {
+        author_id: ASSIGNEE,
+        kind: "note",
+        body: "Completed: Verified the permit was received.",
+      },
+    ]);
   });
 });
 
@@ -381,10 +494,34 @@ describe("POST /:id/transition — the bypass", () => {
 // the exact terminal UPDATE seam. Every terminal path must repeat participant authority in its WHERE.
 describe("terminal close authority is revalidated at write time", () => {
   it.each([
-    ["complete", (db: any) => completeTask(db, CASE, "rep", ASSIGNEE)],
-    ["dismiss", (db: any) => dismissTask(db, CASE, "rep", ASSIGNEE)],
-    ["transition to completed", (db: any) => transitionTaskStatus(db, CASE, { nextStatus: "completed" }, "rep", ASSIGNEE)],
-    ["transition to dismissed", (db: any) => transitionTaskStatus(db, CASE, { nextStatus: "dismissed" }, "rep", ASSIGNEE)],
+    [
+      "complete",
+      (db: any) => completeTask(db, CASE, "rep", ASSIGNEE, { resolutionNote: "Finished the task." }),
+    ],
+    [
+      "dismiss",
+      (db: any) => dismissTask(db, CASE, "rep", ASSIGNEE, { resolutionNote: "The task is obsolete." }),
+    ],
+    [
+      "transition to completed",
+      (db: any) => transitionTaskStatus(
+        db,
+        CASE,
+        { nextStatus: "completed", resolutionNote: "Finished the task." },
+        "rep",
+        ASSIGNEE
+      ),
+    ],
+    [
+      "transition to dismissed",
+      (db: any) => transitionTaskStatus(
+        db,
+        CASE,
+        { nextStatus: "dismissed", resolutionNote: "The task is obsolete." },
+        "rep",
+        ASSIGNEE
+      ),
+    ],
   ])("does not let the former assignee %s after a reassignment", async (_path, close) => {
     const { tenantDb, wasInterleaved } = withReassignmentBeforeTerminalWrite(CASE);
 
@@ -406,6 +543,7 @@ describe("the two internal callers keep working", () => {
       completeTask(tdb, MACHINE_TASK, "rep", STRANGER, { systemActor: "email_association" })
     ).resolves.toBeDefined();
     expect(await statusOf(MACHINE_TASK)).toBe("completed");
+    expect(await resolutionNotesFor(MACHINE_TASK)).toEqual([]);
   });
 
   it("completes and dismisses an AI-disconnect task that has NO assigner at all", async () => {
@@ -414,12 +552,14 @@ describe("the two internal callers keep working", () => {
       completeTask(tdb, MACHINE_TASK, "rep", STRANGER, { systemActor: "ai_disconnect_resolution" })
     ).resolves.toBeDefined();
     expect(await statusOf(MACHINE_TASK)).toBe("completed");
+    expect(await resolutionNotesFor(MACHINE_TASK)).toEqual([]);
 
     await seedTask(MACHINE_TASK, { assignedTo: ASSIGNEE, createdBy: null });
     await expect(
       dismissTask(tdb, MACHINE_TASK, "rep", STRANGER, { systemActor: "ai_disconnect_resolution" })
     ).resolves.toBeDefined();
     expect(await statusOf(MACHINE_TASK)).toBe("dismissed");
+    expect(await resolutionNotesFor(MACHINE_TASK)).toEqual([]);
   });
 
   // The bypass is a parameter, not a role string, so it cannot be reached from an HTTP request: the

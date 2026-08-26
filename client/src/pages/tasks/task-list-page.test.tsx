@@ -71,6 +71,26 @@ vi.mock("@/components/tasks/task-edit-dialog", () => ({
   TaskEditDialog: ({ open }: { open: boolean }) => (open ? <div role="dialog">Edit task dialog</div> : null),
 }));
 
+vi.mock("@/components/tasks/task-resolution-dialog", () => ({
+  TaskResolutionDialog: ({
+    open,
+    onResolve,
+  }: {
+    open: boolean;
+    onResolve: (resolutionNote: string) => Promise<void>;
+  }) =>
+    open ? (
+      <button
+        type="button"
+        onClick={() => {
+          void onResolve("Called the customer and confirmed the next step.").catch(() => {});
+        }}
+      >
+        Save task outcome
+      </button>
+    ) : null,
+}));
+
 vi.mock("@/components/ui/button", () => ({
   Button: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => (
     <button {...props}>{children}</button>
@@ -367,8 +387,7 @@ describe("TaskListPage project context", () => {
     expect(container.textContent).toContain("Edit task dialog");
   });
 
-  it("surfaces complete task failures without leaving the action busy", async () => {
-    mocks.completeTaskMock.mockRejectedValueOnce(new Error("Task API failed"));
+  it("collects an outcome before completing a task", async () => {
     renderPage();
 
     const completeButton = container.querySelector<HTMLButtonElement>('button[aria-label="Complete Call Palm Villas"]');
@@ -378,9 +397,19 @@ describe("TaskListPage project context", () => {
       completeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(completeButton?.disabled).toBe(false);
-    expect(consoleErrorSpy).toHaveBeenCalledWith("[tasks] complete failed", expect.any(Error));
-    expect(mocks.toastErrorMock).toHaveBeenCalledWith("Task API failed");
+    expect(mocks.completeTaskMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Save task outcome");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save task outcome"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.completeTaskMock).toHaveBeenCalledWith(
+      "task-1",
+      "Called the customer and confirmed the next step."
+    );
   });
 
   it("surfaces snooze task failures without leaving the action busy", async () => {

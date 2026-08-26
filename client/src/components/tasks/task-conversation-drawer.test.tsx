@@ -39,6 +39,29 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
+vi.mock("@/components/tasks/task-resolution-dialog", () => ({
+  TaskResolutionDialog: ({
+    open,
+    onResolve,
+    onResolved,
+  }: {
+    open: boolean;
+    onResolve: (resolutionNote: string) => Promise<void | false>;
+    onResolved?: () => void;
+  }) =>
+    open ? (
+      <button
+        type="button"
+        onClick={async () => {
+          const shouldFinishHere = await onResolve("Completed after confirming the delivery.");
+          if (shouldFinishHere !== false) onResolved?.();
+        }}
+      >
+        Save task outcome
+      </button>
+    ) : null,
+}));
+
 const ASSIGNER = "user-adam";
 const ASSIGNEE = "user-derek";
 const STRANGER = "user-nobody";
@@ -274,6 +297,37 @@ describe("the composer", () => {
     expect(refetchCommentsB).not.toHaveBeenCalled();
     expect(refetchTimelineB).not.toHaveBeenCalled();
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("does not let a completed task A refresh or close task B after a drawer switch", async () => {
+    const completeA = deferred<unknown>();
+    const onChanged = vi.fn();
+    const onClose = vi.fn();
+    mocks.completeTaskMock.mockReturnValueOnce(completeA.promise);
+    setComments([]);
+
+    render({ onChanged, onClose });
+    act(() => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Mark complete"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    act(() => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save task outcome"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.completeTaskMock).toHaveBeenCalledWith("task-1", "Completed after confirming the delivery.");
+
+    render({ task: { ...task, id: "task-2", title: "Review the permit" }, onChanged, onClose });
+    await act(async () => {
+      completeA.resolve({});
+      await Promise.resolve();
+    });
+
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("Save task outcome");
   });
 });
 
@@ -575,7 +629,7 @@ describe("the emailed Mark complete CTA", () => {
 });
 
 describe("close from the drawer", () => {
-  it("completes the task and closes", async () => {
+  it("collects an outcome before completing the task and closing", async () => {
     const onClose = vi.fn();
     const onChanged = vi.fn();
     setComments([]);
@@ -588,7 +642,15 @@ describe("close from the drawer", () => {
       complete.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(mocks.completeTaskMock).toHaveBeenCalledWith("task-1");
+    expect(mocks.completeTaskMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save task outcome"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.completeTaskMock).toHaveBeenCalledWith("task-1", "Completed after confirming the delivery.");
     expect(onChanged).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
   });

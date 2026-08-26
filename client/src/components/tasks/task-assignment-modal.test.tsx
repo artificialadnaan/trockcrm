@@ -15,7 +15,9 @@ import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.fn();
-vi.mock("@/lib/api", () => ({ api: (...args: unknown[]) => apiMock(...args) }));
+vi.mock("@/lib/api", () => ({
+  api: (...args: unknown[]) => apiMock(...args),
+}));
 
 const navigateMock = vi.fn();
 vi.mock("react-router-dom", async () => {
@@ -268,6 +270,7 @@ afterEach(async () => {
   // jsdom leaves activeElement pointing at whatever the torn-down tree last focused. Reset it, or the
   // next test's "focus moved" assertion is reading the previous test's residue.
   (document.activeElement as HTMLElement | null)?.blur?.();
+  vi.unstubAllGlobals();
 });
 
 describe("TaskAssignmentModal — when it appears", () => {
@@ -277,8 +280,20 @@ describe("TaskAssignmentModal — when it appears", () => {
     await render(true);
 
     expect(dialog()).not.toBeNull();
+    expect(document.querySelector('[data-slot="dialog-title"]')?.textContent).toContain("Task assigned");
     expect(dialog()!.textContent).toContain("Walk the Henderson roof");
     expect(dialog()!.textContent).toContain("Adam Shaw");
+  });
+
+  it("shows the supplied assignment confirmation image", async () => {
+    setPending([task()]);
+
+    await render(true);
+
+    const image = dialog()?.querySelector<HTMLImageElement>(
+      'img[alt="T Rock Contracting team member in a branded shirt"]'
+    );
+    expect(image?.getAttribute("src")).toBe("/task-assigned-confirmation.jpg");
   });
 
   it("does not fetch, and does not open, when the flag is false", async () => {
@@ -463,6 +478,343 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
   });
 });
 
+describe("TaskAssignmentModal — assignments after login", () => {
+  it("checks on the recipient's next click even when the login-time flag was false", async () => {
+    setPending([]);
+    await render(false);
+    expect(pendingFetches()).toHaveLength(0);
+
+    setPending([task({ id: "arrived-after-login", title: "Confirm permit pickup" })]);
+
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(1);
+    expect(dialog()?.textContent).toContain("Confirm permit pickup");
+    expect(acknowledgeCalls()).toHaveLength(0);
+  });
+
+  it("directly checks when the person returns to the browser tab", async () => {
+    setPending([]);
+    await render(false);
+    expect(pendingFetches()).toHaveLength(0);
+
+    setPending([task({ id: "arrived-while-away", title: "Review updated site plan" })]);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle();
+
+    expect(pendingFetches()).toHaveLength(1);
+    expect(dialog()?.textContent).toContain("Review updated site plan");
+  });
+
+  it("does not recheck on Space before a button's activation click", async () => {
+    setPending([]);
+    await render(false);
+    setPending([task({ id: "arrived-before-space" })]);
+
+    const action = document.createElement("button");
+    document.body.appendChild(action);
+    await act(async () => {
+      action.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    });
+    await settle();
+
+    expect(pendingFetches()).toHaveLength(0);
+    action.remove();
+
+    await click(document.body);
+    expect(pendingFetches()).toHaveLength(1);
+  });
+
+  it("does not treat Enter in an editor or composition as a task check", async () => {
+    setPending([]);
+    await render(false);
+    setPending([task({ id: "arrived-while-typing" })]);
+
+    const textarea = document.createElement("textarea");
+    const richEditor = document.createElement("div");
+    richEditor.contentEditable = "true";
+    const nestedText = document.createElement("span");
+    richEditor.appendChild(nestedText);
+    document.body.append(textarea, richEditor);
+
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      nestedText.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, isComposing: true })
+      );
+    });
+    await settle();
+
+    expect(pendingFetches()).toHaveLength(0);
+    textarea.remove();
+    richEditor.remove();
+
+    await click(document.body);
+    expect(pendingFetches()).toHaveLength(1);
+  });
+
+  it("does not interrupt an editor or native picker click", async () => {
+    setPending([]);
+    await render(false);
+    setPending([task({ id: "arrived-during-picker" })]);
+
+    const textarea = document.createElement("textarea");
+    const picker = document.createElement("select");
+    picker.appendChild(new Option("Normal", "normal"));
+    document.body.append(textarea, picker);
+
+    await click(textarea);
+    await click(picker);
+
+    expect(pendingFetches()).toHaveLength(0);
+    textarea.remove();
+    picker.remove();
+
+    await click(document.body);
+    expect(pendingFetches()).toHaveLength(1);
+  });
+
+  it("holds an in-flight recheck until a newly opened picker is out of the way", async () => {
+    const fetches = deferredFetches();
+    await render(false);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle();
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
+
+    const picker = document.createElement("select");
+    picker.appendChild(new Option("Normal", "normal"));
+    document.body.appendChild(picker);
+    await click(picker);
+
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-during-open-picker" })]);
+    expect(dialog()).toBeNull();
+
+    picker.remove();
+    await click(document.body);
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(2);
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-during-open-picker" })]);
+
+    expect(dialog()?.textContent).toContain("Walk the Henderson roof");
+  });
+
+  it("holds an in-flight recheck until a newly opened popup is out of the way", async () => {
+    const fetches = deferredFetches();
+    await render(false);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle();
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
+
+    const popup = document.createElement("div");
+    popup.dataset.slot = "popover-content";
+    document.body.appendChild(popup);
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-during-open-popup" })]);
+    expect(dialog()).toBeNull();
+
+    popup.remove();
+    await click(document.body);
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(2);
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-during-open-popup" })]);
+
+    expect(dialog()?.textContent).toContain("Walk the Henderson roof");
+  });
+
+  it("queues the next eligible click behind a deferred in-flight recheck", async () => {
+    const fetches = deferredFetches();
+    await render(false);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle();
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
+
+    const picker = document.createElement("select");
+    picker.appendChild(new Option("Normal", "normal"));
+    document.body.appendChild(picker);
+    await click(picker);
+    picker.remove();
+
+    // This is the person's next eligible click, but the focus-triggered request has not answered yet.
+    // It must queue a fresh generation rather than being silently lost to the loading guard.
+    await click(document.body);
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
+
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-before-next-click" })]);
+    expect(dialog()).toBeNull();
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(2);
+
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-before-next-click" })]);
+    expect(dialog()?.textContent).toContain("Walk the Henderson roof");
+  });
+
+  it("does not mark an older answer shown while a newer recheck is queued", async () => {
+    const fetches = deferredFetches();
+    await render(false);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle();
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
+
+    // This ordinary click queues generation two while generation one is still loading.
+    await click(document.body);
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
+
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "fresh-answer", title: "Fresh answer" })]);
+    expect(dialog()).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
+    expect(fetches.issuedFor(HOME_OFFICE)).toBe(2);
+
+    await fetches.resolveFor(HOME_OFFICE, [task({ id: "fresh-answer", title: "Fresh answer" })]);
+    expect(dialog()?.textContent).toContain("Fresh answer");
+  });
+
+  it.each([
+    "dialog-content",
+    "sheet-content",
+    "select-content",
+    "dropdown-menu-content",
+    "dropdown-menu-sub-content",
+    "popover-content",
+  ])("waits for an open %s before checking again", async (slot) => {
+    setPending([]);
+    await render(false);
+    setPending([task({ id: `arrived-beneath-${slot}` })]);
+
+    const popup = document.createElement("div");
+    popup.dataset.slot = slot;
+    document.body.appendChild(popup);
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(0);
+
+    popup.remove();
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(1);
+  });
+
+  it("does not treat a popup trigger or a closing popup choice as a follow-up check", async () => {
+    setPending([]);
+    await render(false);
+    setPending([task({ id: "arrived-during-popup" })]);
+
+    const trigger = document.createElement("button");
+    trigger.dataset.slot = "select-trigger";
+    document.body.appendChild(trigger);
+    await click(trigger);
+
+    expect(pendingFetches()).toHaveLength(0);
+    trigger.remove();
+
+    const popup = document.createElement("div");
+    popup.dataset.slot = "select-content";
+    const choice = document.createElement("button");
+    choice.addEventListener("click", () => popup.remove());
+    popup.appendChild(choice);
+    document.body.appendChild(popup);
+    await click(choice);
+
+    expect(pendingFetches()).toHaveLength(0);
+
+    await click(document.body);
+    expect(pendingFetches()).toHaveLength(1);
+  });
+
+  it("does not use the explicit Close click as a follow-up check", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+    setPending([task({ id: "later" })]);
+
+    await click(buttonLabelled("Close"));
+
+    expect(pendingFetches()).toHaveLength(1);
+    expect(acknowledgeCalls()).toHaveLength(1);
+  });
+
+  it("does not consume the next click after the header close control", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+    setPending([task({ id: "later", title: "Confirm the final site walk" })]);
+
+    const headerClose = document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
+    await click(headerClose ?? undefined);
+
+    expect(pendingFetches()).toHaveLength(1);
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(2);
+    expect(dialog()?.textContent).toContain("Confirm the final site walk");
+  });
+
+  it("does not reopen after Enter activates Close, but accepts the next independent click", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+    setPending([task({ id: "later", title: "Review the final measurements" })]);
+
+    const close = buttonLabelled("Close");
+    await act(async () => {
+      // Browsers dispatch a click after an Enter activation. The global recheck intentionally listens
+      // to that post-activation click, which remains one dismissal gesture rather than future work.
+      close?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      close?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await settle();
+
+    expect(dialog()).toBeNull();
+    expect(pendingFetches()).toHaveLength(1);
+
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(2);
+    expect(dialog()?.textContent).toContain("Review the final measurements");
+  });
+
+  it("does not use the backdrop dismissal click as a follow-up check", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+    setPending([task({ id: "later", title: "Call the city inspector" })]);
+
+    await click(document.querySelector<HTMLElement>('[data-slot="dialog-overlay"]') ?? undefined);
+
+    expect(dialog()).toBeNull();
+    expect(pendingFetches()).toHaveLength(1);
+    expect(acknowledgeCalls()).toHaveLength(1);
+
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(2);
+    expect(dialog()?.textContent).toContain("Call the city inspector");
+  });
+
+  it("does not consume the next click when the modal was dismissed with Escape", async () => {
+    setPending([task({ id: "first" })]);
+    await render(true);
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await settle();
+    expect(dialog()).toBeNull();
+
+    setPending([task({ id: "later", title: "Check the final inspection" })]);
+    await click(document.body);
+
+    expect(pendingFetches()).toHaveLength(2);
+    expect(dialog()?.textContent).toContain("Check the final inspection");
+  });
+});
+
 describe("TaskAssignmentModal — it says what is actually true", () => {
   // A repeat is not a new assignment. The server returns urgent/high/overdue work on EVERY login until
   // it leaves pending, so after the first showing "3 new tasks assigned to you since you were last
@@ -494,7 +846,7 @@ describe("TaskAssignmentModal — it says what is actually true", () => {
     await render(true);
 
     const heading = document.querySelector<HTMLElement>('[data-slot="dialog-title"]')!.textContent ?? "";
-    expect(heading).toContain("a new task");
+    expect(heading).toContain("Task assigned");
     // The three rows on screen are one new assignment and two reminders. A headline of "3" would be
     // counting work the person has already been shown.
     expect(heading).not.toContain("3");

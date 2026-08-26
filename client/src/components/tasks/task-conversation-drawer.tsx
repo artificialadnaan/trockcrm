@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, MessageSquare, Send, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { TaskResolutionDialog } from "@/components/tasks/task-resolution-dialog";
 import { cn } from "@/lib/utils";
 import { getTaskProjectContext } from "@/lib/task-project-context";
 import {
@@ -159,7 +160,10 @@ export function TaskConversationDrawer({
   const [tab, setTab] = useState<"conversation" | "timeline">("conversation");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [closing, setClosing] = useState(false);
+  // The dialog belongs to one concrete task, not merely to this drawer instance. Keeping the id
+  // prevents a completion dialog opened for A from appearing as a dialog for B after a task switch.
+  const [completeTaskId, setCompleteTaskId] = useState<string | null>(null);
+  const completeOpen = completeTaskId === task.id;
   // A drawer instance survives task switches. Async work begun for A must never continue mutating B
   // after the list reuses this component for a different task.
   const taskGenerationRef = useRef(0);
@@ -211,10 +215,11 @@ export function TaskConversationDrawer({
   //     it also swallows a DIFFERENT task whose head happens to match, and two replies rounding to the
   //     same second is not rare.
   const ackedRef = useRef<string | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     taskGenerationRef.current += 1;
     setTab("conversation");
     setDraft("");
+    setCompleteTaskId(null);
     // A send for the previous task must not leave the newly opened task's composer disabled.
     setSending(false);
     ackedRef.current = null;
@@ -302,17 +307,17 @@ export function TaskConversationDrawer({
     }
   };
 
-  const complete = async () => {
-    setClosing(true);
+  const complete = async (resolutionNote: string): Promise<void | false> => {
+    const taskId = task.id;
+    const taskGeneration = taskGenerationRef.current;
     try {
-      await completeTask(task.id);
+      await completeTask(taskId, resolutionNote);
+      // A successful request for A must not refresh or close B after the drawer has been reused.
+      if (taskGeneration !== taskGenerationRef.current) return false;
       onChanged();
-      onClose();
     } catch (error) {
       console.error("[tasks] complete failed", error);
-      toast.error(error instanceof Error ? error.message : "Failed to complete task");
-    } finally {
-      setClosing(false);
+      throw error;
     }
   };
 
@@ -349,8 +354,7 @@ export function TaskConversationDrawer({
               ref={completeButtonRef}
               type="button"
               size="sm"
-              onClick={complete}
-              disabled={closing}
+              onClick={() => setCompleteTaskId(task.id)}
               data-complete-requested={completeRequested ? "true" : "false"}
               className={cn(completeRequested ? "ring-2 ring-brand-red ring-offset-2" : "")}
             >
@@ -460,6 +464,15 @@ export function TaskConversationDrawer({
           )}
         </div>
       )}
+      <TaskResolutionDialog
+        key={task.id}
+        action="complete"
+        taskTitle={task.title}
+        open={completeOpen}
+        onOpenChange={(nextOpen) => setCompleteTaskId(nextOpen ? task.id : null)}
+        onResolve={complete}
+        onResolved={onClose}
+      />
     </section>
   );
 }

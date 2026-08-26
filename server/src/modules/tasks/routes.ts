@@ -550,7 +550,7 @@ router.patch("/:id", async (req, res, next) => {
 // POST /api/tasks/:id/transition — move a task through the lifecycle
 router.post("/:id/transition", async (req, res, next) => {
   try {
-    const { nextStatus, scheduledFor, waitingOn, blockedBy } = req.body;
+    const { nextStatus, scheduledFor, waitingOn, blockedBy, resolutionNote } = req.body ?? {};
 
     const task = await transitionTaskStatus(
       req.tenantDb!,
@@ -560,6 +560,7 @@ router.post("/:id/transition", async (req, res, next) => {
         scheduledFor,
         waitingOn,
         blockedBy,
+        resolutionNote,
       },
       req.user!.role,
       req.user!.id
@@ -575,7 +576,9 @@ router.post("/:id/transition", async (req, res, next) => {
 // POST /api/tasks/:id/complete — mark task as completed
 router.post("/:id/complete", async (req, res, next) => {
   try {
-    const task = await completeTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const task = await completeTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id, {
+      resolutionNote: req.body?.resolutionNote,
+    });
     const completionRule = task.originRule
       ? TASK_RULES.find((rule) => rule.id === task.originRule)
       : null;
@@ -651,7 +654,9 @@ router.post("/:id/complete", async (req, res, next) => {
 // POST /api/tasks/:id/dismiss — dismiss a task
 router.post("/:id/dismiss", async (req, res, next) => {
   try {
-    const task = await dismissTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const task = await dismissTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id, {
+      resolutionNote: req.body?.resolutionNote,
+    });
     await req.commitTransaction!();
     res.json({ task });
   } catch (err) {

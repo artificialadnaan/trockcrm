@@ -16,6 +16,7 @@ import {
 } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
 import { TaskEditDialog } from "./task-edit-dialog";
+import { TaskResolutionDialog, type TaskResolutionAction } from "./task-resolution-dialog";
 
 interface TaskRowProps {
   task: Task;
@@ -53,6 +54,7 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [resolutionAction, setResolutionAction] = useState<TaskResolutionAction | null>(null);
   const isTerminal = isTerminalTaskStatus(task.status);
   const assigneeLabel = task.assignedToName ?? "Unassigned";
   const lifecycleSummary = getTaskLifecycleSummary(task);
@@ -64,27 +66,31 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   const canDismiss = canTransitionTask(task.status, "dismissed");
   const showInlineActions = !isTerminal && task.status !== "scheduled";
 
-  const handleComplete = async (e: React.MouseEvent) => {
+  const openComplete = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setLoading(true);
-    try {
-      await apiCompleteTask(task.id);
-      onUpdate();
-    } catch (err) {
-      console.error("Failed to complete task:", err);
-    } finally {
-      setLoading(false);
-    }
+    setResolutionAction("complete");
   };
 
-  const handleDismiss = async (e: React.MouseEvent) => {
+  const openDismiss = (e: React.MouseEvent) => {
     e.stopPropagation();
+    setResolutionAction("dismiss");
+  };
+
+  const resolveTask = async (resolutionNote: string) => {
+    const action = resolutionAction;
+    if (!action) return;
+
     setLoading(true);
     try {
-      await apiDismissTask(task.id);
+      if (action === "complete") {
+        await apiCompleteTask(task.id, resolutionNote);
+      } else {
+        await apiDismissTask(task.id, resolutionNote);
+      }
       onUpdate();
     } catch (err) {
-      console.error("Failed to dismiss task:", err);
+      console.error(`Failed to ${action} task:`, err);
+      throw err;
     } finally {
       setLoading(false);
     }
@@ -218,7 +224,7 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
               variant="ghost"
               size="icon"
               className="h-7 w-7"
-              onClick={handleComplete}
+              onClick={openComplete}
               disabled={loading}
               title="Complete"
             >
@@ -230,7 +236,7 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
               variant="ghost"
               size="icon"
               className="h-7 w-7"
-              onClick={handleDismiss}
+              onClick={openDismiss}
               disabled={loading}
               title="Dismiss"
             >
@@ -252,6 +258,15 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
       )}
     </div>
     <TaskEditDialog task={task} open={editOpen} onOpenChange={setEditOpen} onUpdated={onUpdate} />
+    <TaskResolutionDialog
+      action={resolutionAction ?? "complete"}
+      taskTitle={task.title}
+      open={resolutionAction !== null}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) setResolutionAction(null);
+      }}
+      onResolve={resolveTask}
+    />
     </>
   );
 }

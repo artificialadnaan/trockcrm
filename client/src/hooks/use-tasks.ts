@@ -139,6 +139,8 @@ export interface TaskTimelineEntry {
 
 export interface TaskTransitionInput {
   nextStatus: TaskStatus;
+  /** Required by the API when a person transitions a task to a terminal state. */
+  resolutionNote?: string;
   scheduledFor?: string | null;
   waitingOn?: TaskLifecycleReference | Record<string, unknown> | null;
   blockedBy?: TaskLifecycleReference | Record<string, unknown> | null;
@@ -544,12 +546,18 @@ export async function transitionTask(taskId: string, input: TaskTransitionInput)
   return api<{ task: Task }>(`/tasks/${taskId}/transition`, { method: "POST", json: input });
 }
 
-export async function completeTask(taskId: string) {
-  return api<{ task: Task }>(`/tasks/${taskId}/complete`, { method: "POST" });
+export async function completeTask(taskId: string, resolutionNote: string) {
+  return api<{ task: Task }>(`/tasks/${taskId}/complete`, {
+    method: "POST",
+    json: { resolutionNote },
+  });
 }
 
-export async function dismissTask(taskId: string) {
-  return api<{ task: Task }>(`/tasks/${taskId}/dismiss`, { method: "POST" });
+export async function dismissTask(taskId: string, resolutionNote: string) {
+  return api<{ task: Task }>(`/tasks/${taskId}/dismiss`, {
+    method: "POST",
+    json: { resolutionNote },
+  });
 }
 
 export async function snoozeTask(taskId: string, dueDate: string) {
