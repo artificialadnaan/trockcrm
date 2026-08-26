@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UNFILTERED_EVIDENCE_ROUTE_FILTER } from "./types";
-import type { EvidenceMetric, EvidenceRecord, MondayShowcaseEvidence } from "./types";
+import type { EvidenceMetric, EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
 
 // Controllable mock of the data hook so we can render the drawer with a fixed evidence payload.
 const hookState: { data: MondayShowcaseEvidence | null } = { data: null };
@@ -72,15 +72,19 @@ afterEach(() => {
   hookState.data = null;
 });
 
-function mount(metric: EvidenceMetric, records: EvidenceRecord[]) {
-  hookState.data = evidence(metric, records);
+function renderDrawer(request: EvidenceRequest | null) {
   act(() => {
     root.render(
       <MemoryRouter>
-        <EvidenceDrawer request={{ metric, title: "Evidence" }} mode="to_date" onClose={() => {}} />
+        <EvidenceDrawer request={request} mode="to_date" onClose={() => {}} />
       </MemoryRouter>
     );
   });
+}
+
+function mount(metric: EvidenceMetric, records: EvidenceRecord[]) {
+  hookState.data = evidence(metric, records);
+  renderDrawer({ metric, title: "Evidence" });
 }
 
 function setCloseDateButtons(): HTMLButtonElement[] {
@@ -303,5 +307,28 @@ describe("evidence drawer 'Set close date' action is owner-gated (CodeRabbit P2)
     authState.user = { id: "director-1", role: "director" };
     mount("undated", [record({ id: "own", repId: "director-1", repName: "Director" })]);
     expect(setCloseDateButtons()).toHaveLength(1);
+  });
+});
+
+describe("evidence drawer nested editor lifecycle (Codex P1)", () => {
+  it("unmounts and clears an open close-date editor when its outer evidence closes", () => {
+    authState.user = { id: "rep-self", role: "rep" };
+    hookState.data = evidence("undated", [record({ id: "office-a-deal", repId: "rep-self" })]);
+    renderDrawer({ metric: "undated", title: "Office A evidence" });
+
+    const editButton = setCloseDateButtons()[0];
+    expect(editButton).toBeDefined();
+    act(() => editButton.click());
+    expect(document.body.textContent).toContain("Move close date");
+
+    // An office switch closes the parent by clearing `request`; the nested dialog must disappear with it,
+    // rather than retaining office A's deal id after the outer evidence drawer has gone away.
+    renderDrawer(null);
+    expect(document.body.textContent).not.toContain("Move close date");
+
+    // Opening a later drawer must start with no editor selected — it cannot revive the old office's row.
+    hookState.data = evidence("undated", [record({ id: "office-b-deal", repId: "rep-self" })]);
+    renderDrawer({ metric: "undated", title: "Office B evidence" });
+    expect(document.body.textContent).not.toContain("Move close date");
   });
 });

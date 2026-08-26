@@ -1431,7 +1431,7 @@ function useOfficeScopeKey() {
  * │ (useLeadSourceROI, useForecastVarianceOverview, useMarketMixReport,                            │
  * │ useCustomerConcentrationReport, useExecutiveTrendsReport, useUnifiedWorkflowOverview,          │
  * │ useDataMiningOverview, useRegionalOwnershipOverview) and the showcase family                   │
- * │ (useMondayShowcase, useShowcaseEvidence, useRepPack, useAtRiskWatchlist, useRegionReport).     │
+ * │ (useShowcaseEvidence, useRepPack, useAtRiskWatchlist, useRegionReport).                        │
  * │                                                                                               │
  * │ ALSO OPEN, one hop further out: the scope now survives report -> entity detail, but company    │
  * │ and property DETAIL pages emit bare onward links of their own (related deals, properties), so  │
@@ -1717,13 +1717,29 @@ export function useMondayShowcase(
   const [data, setData] = useState<MondayShowcaseData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const officeScopeKey = useOfficeScopeKey();
   // Monotonic request id: this endpoint fans out many queries, so a mode toggle can leave an older
   // request in flight. Only the latest request is allowed to write state -- a stale response is dropped,
   // so the page never shows the new toggle with the previous period's data.
   const latestRequest = useRef(0);
+  const isFirstScopeLayout = useRef(true);
   // Depend on the VALUE, not the array identity -- a caller rebuilding the array each render must not
   // retrigger an infinite fetch loop.
   const routesKey = routes?.join(",") ?? "";
+
+  // api() derives its tenant header from ?officeId, while A1 derives its deal links from that same URL.
+  // Clear in a layout effect so a scope switch cannot paint office A's rows with office B's link targets,
+  // and invalidate pending requests before an older office response can land.
+  useLayoutEffect(() => {
+    latestRequest.current += 1;
+    if (isFirstScopeLayout.current) {
+      isFirstScopeLayout.current = false;
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setData(null);
+  }, [officeScopeKey]);
 
   const fetchShowcase = useCallback(async () => {
     const requestId = ++latestRequest.current;
@@ -1757,7 +1773,7 @@ export function useMondayShowcase(
     } finally {
       if (requestId === latestRequest.current) setLoading(false);
     }
-  }, [mode, routesKey, enabled]);
+  }, [mode, routesKey, enabled, officeScopeKey]);
 
   useEffect(() => {
     fetchShowcase();

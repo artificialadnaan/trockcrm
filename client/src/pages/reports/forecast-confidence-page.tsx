@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Loader2, ShieldAlert } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { useMondayShowcase } from "@/hooks/use-reports";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import { PROJECTION_BAND_LABEL, type EvidenceRequest, type MondayShowcaseData } from "./monday-showcase/types";
 import { DrillProvider, DrillNumber, EvidenceDrawer, usd, int, BAND_BAR, Sparkline, DRILL_UNDERLINE } from "./evidence-kit";
 import { ScrollSyncX } from "./scroll-sync-x";
@@ -129,7 +130,20 @@ function Board({ data }: { data: MondayShowcaseData }) {
 export function ForecastConfidencePage() {
   const [mode, setMode] = useState<WeekMode>(DEFAULT_WEEK_MODE);
   const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
+  const officeScopeId = useOfficeScopeId();
+  const isFirstOfficeScopeLayout = useRef(true);
   const { data, loading, error } = useMondayShowcase(mode);
+
+  // Evidence captures record ids from the office that supplied the clicked number, while the drawer stays
+  // mounted outside the report payload. Close it during layout when the tenant changes so office A's ids
+  // can never render, navigate, or edit under office B's live URL scope.
+  useLayoutEffect(() => {
+    if (isFirstOfficeScopeLayout.current) {
+      isFirstOfficeScopeLayout.current = false;
+      return;
+    }
+    setEvidence(null);
+  }, [officeScopeId]);
 
   return (
     <div className="space-y-4 p-4">
