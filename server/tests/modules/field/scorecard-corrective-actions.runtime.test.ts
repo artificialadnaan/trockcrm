@@ -820,6 +820,48 @@ describe("manual corrective-action responder email retrigger", () => {
     expect(afterJobs.rows).toHaveLength(1);
   });
 
+  it("does not let a stale pending job suppress a fresh manual cycle", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const staleNonce = await cardCycleNonce(scorecard.id);
+    expect(staleNonce).toBeTruthy();
+
+    // Leave the original pending job in place, but make it stale by simulating a newer active cycle. The
+    // manual control must compare job payload nonce with the card's CURRENT nonce; merely finding any pending
+    // job would make a recovery action silently no-op forever after a prior cycle was superseded.
+    const currentNonce = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+      SET corrective_action_cycle_nonce = ${currentNonce}
+      WHERE id = ${scorecard.id}
+    `);
+
+    const outcome = await tdb.transaction((tx) =>
+      retriggerCorrectiveActionNotification(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      queued: true,
+      alreadyQueued: false,
+      priorCycleNonce: currentNonce,
+    });
+    expect(outcome.newCycleNonce).toBeTruthy();
+    expect(outcome.newCycleNonce).not.toBe(currentNonce);
+
+    const jobs = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+      ORDER BY id
+    `);
+    expect(jobs.rows).toHaveLength(2);
+    expect((jobs.rows[0] as any).payload.cycleNonce).toBe(staleNonce);
+    expect((jobs.rows[1] as any).payload.cycleNonce).toBe(outcome.newCycleNonce);
+  });
+
   it("refuses cards that are no longer open and cards or deals that are inactive", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
 
