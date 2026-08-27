@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, getTableColumns, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
-import { requireRole, requireRfpReviewer , requireDealMoveBackApprover } from "../../middleware/rbac.js";
+import { requireDirector, requireRole, requireRfpReviewer , requireDealMoveBackApprover } from "../../middleware/rbac.js";
 import {
   addDealChangeOrder,
   deleteDealChangeOrder,
@@ -140,6 +140,9 @@ import {
   listDealScorecards,
   presignDealScorecardPdf,
 } from "./scorecards-service.js";
+import {
+  retriggerCorrectiveActionNotification,
+} from "../field/corrective-actions-service.js";
 import {
   finalizeFieldScorecardArtifacts,
   recheckScorecardArtifactCurrency,
@@ -2779,11 +2782,86 @@ router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
     // Whether to RENDER the approve/reject controls. A boolean, never the allowlist itself: that is
     // authorization config, and shipping it would tell every CRM user who can sign off. The client must not
     // re-derive the gate either — hiding the controls is UX, the route's 403 is the guarantee.
-    res.json({ scorecard: { ...scorecard, canApproveCorrectiveActions: canApproveCorrectiveActions(req) } });
+    res.json({
+      scorecard: {
+        ...scorecard,
+        canApproveCorrectiveActions: canApproveCorrectiveActions(req),
+        // UX only — requireDirector plus the nested deal route's access + active-record checks remain the
+        // authority. Keep this specific to OPEN cards so a stale drawer does not advertise a dead action.
+        canRetriggerCorrectiveAction:
+          (req.user!.role === "admin" || req.user!.role === "director") &&
+          scorecard.status === "corrective_action_open",
+      },
+    });
   } catch (err) {
     next(err);
   }
 });
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/retrigger — explicitly queue a fresh
+// responder "Document Corrective Action" email cycle. This is a repair control, not a delivery claim: 202
+// means the worker has a fresh job, while 200/alreadyQueued means the current cycle is already pending.
+router.post(
+  "/:id/scorecards/:scorecardId/corrective-actions/retrigger",
+  requireDirector,
+  async (req, res, next) => {
+    try {
+      const dealId = req.params.id as string;
+      const scorecardId = req.params.scorecardId as string;
+      assertValidUuid(dealId, "dealId");
+      assertValidUuid(scorecardId, "scorecardId");
+      await assertDealRouteAccess(req, dealId);
+      if (!req.officeSlug) throw new AppError(500, "Office context not available");
+
+      const result = await retriggerCorrectiveActionNotification(req.tenantDb!, {
+        dealId,
+        scorecardId,
+        office: { id: req.user!.activeOfficeId, slug: req.officeSlug },
+      });
+
+      // Record the state-changing enqueue, not a double-click that observed an already pending current
+      // cycle. Keeping it inside the request transaction means a failed audit cannot silently create a
+      // re-send that leadership cannot explain later.
+      if (result.queued) {
+        const auditContext = buildRouteAuditContext(req);
+        await logActivity({
+          tenantDb: req.tenantDb!,
+          actor: auditContext.actor,
+          action: "update",
+          entity: {
+            tableName: "deals",
+            entityType: "deal",
+            recordId: dealId,
+            nameSnapshot: result.dealName,
+            secondaryIdSnapshot: result.projectNumber ?? result.dealNumber ?? null,
+          },
+          fieldChanges: {
+            correctiveActionEmailCycle: {
+              from: result.priorCycleNonce,
+              to: result.newCycleNonce,
+            },
+          },
+          metadata: {
+            operation: "corrective_action_email_retriggered",
+            scorecardId,
+            priorCycleNonce: result.priorCycleNonce,
+            newCycleNonce: result.newCycleNonce,
+          },
+          ipAddress: auditContext.ipAddress,
+          userAgent: auditContext.userAgent,
+        });
+      }
+
+      await req.commitTransaction!();
+      res.status(result.queued ? 202 : 200).json({
+        queued: result.queued,
+        alreadyQueued: result.alreadyQueued,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 // POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/approve — approve specific items, or
 // every item awaiting approval when `itemIds` is omitted (approve-all).

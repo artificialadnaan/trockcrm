@@ -3,6 +3,7 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
+  deals,
   fieldScorecards,
   jobQueue,
   scorecardCorrectiveActions,
@@ -19,6 +20,7 @@ import {
   type FlaggedItem,
   type ScorecardRating,
 } from "@trock-crm/shared/types";
+import { AppError } from "../../middleware/error-handler.js";
 import { recordCorrectiveActionEvent } from "./corrective-action-events.js";
 
 // Matches the alias the field scorecard services use (scorecards-service.ts): the per-office tenant db.
@@ -950,6 +952,121 @@ export async function restartCorrectiveActionNotificationCycleForDeal(
       ),
     );
   await restartCorrectiveActionCyclesForCards(tx, openScorecards, input.office);
+}
+
+/**
+ * Manually queue the responder "Document Corrective Action" notification again for one still-open card.
+ *
+ * The caller supplies the deal id as well as the scorecard id so the lock/read is scoped to the nested route
+ * and cannot operate on a scorecard paired with an unrelated deal. `FOR UPDATE` serializes two fast clicks:
+ * the second reader observes the first call's fresh cycle nonce and its pending job, then returns the
+ * explicit no-op result instead of minting a second cycle and invalidating the first link immediately.
+ *
+ * A stale pending job is deliberately NOT treated as a duplicate. The existing restart helper rotates the
+ * active nonce and deletes prior-cycle tokens, while the worker requires its payload nonce to still match the
+ * card before it stamps delivery. That makes a stale job harmless and lets the fresh current-cycle email win.
+ */
+export async function retriggerCorrectiveActionNotification(
+  tx: TenantDb,
+  input: { scorecardId: string; dealId: string; office: { id: string; slug: string } },
+): Promise<{
+  queued: boolean;
+  alreadyQueued: boolean;
+  priorCycleNonce: string | null;
+  newCycleNonce: string | null;
+  dealName: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+}> {
+  // The route has already established collaborator access. This query independently enforces that neither
+  // an inactive card nor an archived deal can cause a new email to go out.
+  const [card] = await tx
+    .select({
+      id: fieldScorecards.id,
+      dealId: fieldScorecards.dealId,
+      status: fieldScorecards.status,
+      cycleNonce: fieldScorecards.correctiveActionCycleNonce,
+      dealName: deals.name,
+      dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
+    })
+    .from(fieldScorecards)
+    .innerJoin(deals, eq(deals.id, fieldScorecards.dealId))
+    .where(
+      and(
+        eq(fieldScorecards.id, input.scorecardId),
+        eq(fieldScorecards.dealId, input.dealId),
+        eq(fieldScorecards.isActive, true),
+        eq(deals.isActive, true),
+      ),
+    )
+    .limit(1)
+    .for("update");
+
+  if (!card) throw new AppError(404, "Scorecard not found");
+  if (card.status !== CORRECTIVE_ACTION_CARD_OPEN) {
+    throw new AppError(
+      409,
+      "This corrective action is no longer open and cannot be re-triggered.",
+      "CORRECTIVE_ACTION_RETRIGGER_WRONG_STATE",
+    );
+  }
+
+  // Only a job for the card's CURRENT nonce is a duplicate. Pending work from an earlier nonce is stale and
+  // must not suppress a repair; the worker will ignore it after the new cycle is committed.
+  const currentNoncePredicate = card.cycleNonce
+    ? sql`${jobQueue.payload}->>'cycleNonce' = ${card.cycleNonce}`
+    : sql`(${jobQueue.payload}->>'cycleNonce' IS NULL OR ${jobQueue.payload}->>'cycleNonce' = '')`;
+  const [liveCurrentCycleJob] = await tx
+    .select({ id: jobQueue.id })
+    .from(jobQueue)
+    .where(
+      and(
+        eq(jobQueue.jobType, SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB),
+        eq(jobQueue.officeId, input.office.id),
+        inArray(jobQueue.status, ["pending", "processing"]),
+        sql`${jobQueue.payload}->>'scorecardId' = ${input.scorecardId}`,
+        sql`${jobQueue.payload}->>'dealId' = ${input.dealId}`,
+        currentNoncePredicate,
+      ),
+    )
+    .limit(1);
+
+  if (liveCurrentCycleJob) {
+    return {
+      queued: false,
+      alreadyQueued: true,
+      priorCycleNonce: card.cycleNonce ?? null,
+      newCycleNonce: card.cycleNonce ?? null,
+      dealName: card.dealName,
+      dealNumber: card.dealNumber ?? null,
+      projectNumber: card.projectNumber ?? null,
+    };
+  }
+
+  const priorCycleNonce = card.cycleNonce ?? null;
+  await restartCorrectiveActionCyclesForCards(tx, [{ id: card.id, dealId: card.dealId }], input.office);
+
+  // The helper mints the nonce internally because batch callers can restart several cards. Re-read it while
+  // retaining the parent row lock so the audit record names the exact cycle that was queued.
+  const [restarted] = await tx
+    .select({ cycleNonce: fieldScorecards.correctiveActionCycleNonce })
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, card.id))
+    .limit(1);
+  if (!restarted?.cycleNonce) {
+    throw new AppError(500, "Could not create a corrective-action notification cycle.");
+  }
+
+  return {
+    queued: true,
+    alreadyQueued: false,
+    priorCycleNonce,
+    newCycleNonce: restarted.cycleNonce,
+    dealName: card.dealName,
+    dealNumber: card.dealNumber ?? null,
+    projectNumber: card.projectNumber ?? null,
+  };
 }
 
 /**
