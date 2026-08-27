@@ -846,21 +846,21 @@ export function TaskAssignmentModal() {
         // just before the dialog mounts, so whatever the person was doing gets focus back.
         initialFocus={popupRef}
         finalFocus={previouslyFocusedRef}
-        className="sm:max-w-lg"
+        className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-lg"
       >
         <DialogHeader>
           <DialogTitle>{heading}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
-        <div className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+        <div className="flex items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-50 p-2">
           <img
             src="/task-assigned-confirmation.jpg"
             alt="T Rock Contracting team member in a branded shirt"
             width={960}
             height={1280}
             decoding="async"
-            className="h-32 w-full object-cover object-[center_34%] sm:h-36"
+            className="h-auto max-h-[40svh] w-auto max-w-full object-contain"
           />
         </div>
 
