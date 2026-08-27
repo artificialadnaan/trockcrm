@@ -3,7 +3,6 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
-  deals,
   fieldScorecards,
   jobQueue,
   scorecardCorrectiveActions,
@@ -22,9 +21,20 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { recordCorrectiveActionEvent } from "./corrective-action-events.js";
+import { activeProjectWhere } from "./projects-service.js";
 
 // Matches the alias the field scorecard services use (scorecards-service.ts): the per-office tenant db.
 type TenantDb = NodePgDatabase<typeof schema>;
+
+type RetriggerLockedCard = {
+  id: string;
+  dealId: string;
+  status: string;
+  cycleNonce: string | null;
+  dealName: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+};
 
 // job_type string for the below-band corrective-action notification — MUST match the worker's
 // registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, ...). Duplicated here (server can't import the
@@ -978,30 +988,35 @@ export async function retriggerCorrectiveActionNotification(
   dealNumber: string | null;
   projectNumber: string | null;
 }> {
-  // The route has already established collaborator access. This query independently enforces that neither
-  // an inactive card nor an archived deal can cause a new email to go out.
-  const [card] = await tx
-    .select({
-      id: fieldScorecards.id,
-      dealId: fieldScorecards.dealId,
-      status: fieldScorecards.status,
-      cycleNonce: fieldScorecards.correctiveActionCycleNonce,
-      dealName: deals.name,
-      dealNumber: deals.dealNumber,
-      projectNumber: deals.projectNumber,
-    })
-    .from(fieldScorecards)
-    .innerJoin(deals, eq(deals.id, fieldScorecards.dealId))
-    .where(
-      and(
-        eq(fieldScorecards.id, input.scorecardId),
-        eq(fieldScorecards.dealId, input.dealId),
-        eq(fieldScorecards.isActive, true),
-        eq(deals.isActive, true),
-      ),
-    )
-    .limit(1)
-    .for("update");
+  // The route has already established collaborator access. Lock the card only if it remains on the same
+  // active-pipeline-or-Won, never-Lost/other-terminal project predicate the field responder and worker use.
+  // `activeProjectWhere` is that shared browsability rule and intentionally uses the `d`/`psc` aliases below;
+  // a raw query keeps its stage logic identical instead of re-deriving it here.
+  //
+  // The test-data clause mirrors the QC report's population gate. A test card is not exposed for operational
+  // follow-up, so allowing this repair endpoint to email its responders would create a notification for work
+  // no operational surface will show.
+  const locked = await tx.execute(sql`
+    SELECT
+      sc.id,
+      sc.deal_id AS "dealId",
+      sc.status,
+      sc.corrective_action_cycle_nonce AS "cycleNonce",
+      d.name AS "dealName",
+      d.deal_number AS "dealNumber",
+      d.project_number AS "projectNumber"
+    FROM field_scorecards sc
+    JOIN deals d ON d.id = sc.deal_id
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE sc.id = ${input.scorecardId}::uuid
+      AND sc.deal_id = ${input.dealId}::uuid
+      AND sc.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${activeProjectWhere()}
+    LIMIT 1
+    FOR UPDATE OF sc, d
+  `);
+  const card = (locked as unknown as { rows: RetriggerLockedCard[] }).rows[0];
 
   if (!card) throw new AppError(404, "Scorecard not found");
   if (card.status !== CORRECTIVE_ACTION_CARD_OPEN) {
@@ -1045,7 +1060,15 @@ export async function retriggerCorrectiveActionNotification(
   }
 
   const priorCycleNonce = card.cycleNonce ?? null;
-  await restartCorrectiveActionCyclesForCards(tx, [{ id: card.id, dealId: card.dealId }], input.office);
+  await restartCorrectiveActionCyclesForCards(
+    tx,
+    [{ id: card.id, dealId: card.dealId }],
+    input.office,
+    // A manual resend changes notification delivery only. It must not invalidate the current PDF or the
+    // generation an approver reviewed: `updated_at` is the scorecard's content generation, not an email-cycle
+    // timestamp. Other restart callers retain the default generation bump below.
+    { advanceScorecardGeneration: false },
+  );
 
   // The helper mints the nonce internally because batch callers can restart several cards. Re-read it while
   // retaining the parent row lock so the audit record names the exact cycle that was queued.
@@ -1112,12 +1135,16 @@ export async function restartCorrectiveActionCyclesForCards(
   tx: TenantDb,
   openScorecards: Array<{ id: string; dealId: string }>,
   office: { id: string; slug: string },
+  options: { advanceScorecardGeneration?: boolean } = {},
 ): Promise<void> {
   if (openScorecards.length === 0) return;
   const input = { office };
   const dealIdByScorecardId = new Map(openScorecards.map((s) => [s.id, s.dealId]));
 
   const scorecardIds = openScorecards.map((s) => s.id);
+  // Delivery-affecting restart callers historically advanced the scorecard generation and retain that default.
+  // A manual email-only resend opts out because it does not alter any content the PDF or approver consumes.
+  const advanceScorecardGeneration = options.advanceScorecardGeneration !== false;
 
   // Mint one fresh per-cycle nonce per open scorecard and use it in BOTH the persisted
   // corrective_action_cycle_nonce (the ACTIVE cycle) and that scorecard's enqueued job payload, so they stay
@@ -1139,13 +1166,15 @@ export async function restartCorrectiveActionCyclesForCards(
         // already delivered, so the rework sits in their queue with nobody told it is ready.
         correctiveActionApprovalRequestedAt: null,
         correctiveActionCycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
-        // MONOTONIC, not a JS timestamp captured before the loop. updated_at is now the PDF's content
-        // generation, and the currency check is an equality against it — so it must only ever increase. A
-        // client-captured `new Date()` can move it BACKWARD: if this transaction selected the open cards and
-        // then blocked behind a concurrent corrective-action response, that response advances the generation,
-        // and writing the earlier timestamp here can restore the exact value stamped on the PRE-response
-        // artifact. The stale PDF then classifies as current forever, which is the original bug, latched.
-        updatedAt: nextGeneration(),
+        ...(advanceScorecardGeneration ? {
+          // MONOTONIC, not a JS timestamp captured before the loop. updated_at is now the PDF's content
+          // generation, and the currency check is an equality against it — so it must only ever increase. A
+          // client-captured `new Date()` can move it BACKWARD: if this transaction selected the open cards and
+          // then blocked behind a concurrent corrective-action response, that response advances the generation,
+          // and writing the earlier timestamp here can restore the exact value stamped on the PRE-response
+          // artifact. The stale PDF then classifies as current forever, which is the original bug, latched.
+          updatedAt: nextGeneration(),
+        } : {}),
         // The OVERSIGHT stamps are deliberately NOT cleared here. This helper only ever touches scorecards
         // already at status 'corrective_action_open' (see the id query above): the corrective action never
         // left open, so from oversight's point of view nothing new happened — a responder was reassigned.
