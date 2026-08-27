@@ -22,7 +22,7 @@ import {
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
-const DEAL = "11111111-1111-1111-1111-111111111111";
+const DEAL = "aaaaaaaa-1111-4111-8111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
 const STAGE_TERMINAL = "cccccccc-0000-0000-0000-000000000002";
@@ -844,6 +844,36 @@ describe("manual corrective-action responder email retrigger", () => {
         AND payload->>'scorecardId' = ${scorecard.id}
     `);
     expect(afterJobs.rows).toHaveLength(1);
+  });
+
+  it("treats case-variant UUID route input as the same current queued cycle", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const before = await cardCycleNonce(scorecard.id);
+
+    // UUID casts used to locate the card accept upper-case hex, while the job payload is stored in the
+    // database's canonical lower-case spelling. This must remain an idempotent read, not a token-revoking
+    // second notification cycle.
+    const outcome = await tdb.transaction((tx) =>
+      retriggerCorrectiveActionNotification(tx as any, {
+        scorecardId: scorecard.id.toUpperCase(),
+        dealId: DEAL.toUpperCase(),
+        office: OFFICE,
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      queued: false,
+      alreadyQueued: true,
+      priorCycleNonce: before,
+      newCycleNonce: before,
+    });
+    expect(await cardCycleNonce(scorecard.id)).toBe(before);
+    const jobs = await tdb.execute(sql`
+      SELECT id FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    expect(jobs.rows).toHaveLength(1);
   });
 
   it("does not let a stale pending job suppress a fresh manual cycle", async () => {

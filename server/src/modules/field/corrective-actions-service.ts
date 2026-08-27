@@ -1040,8 +1040,12 @@ export async function retriggerCorrectiveActionNotification(
         eq(jobQueue.jobType, SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB),
         eq(jobQueue.officeId, input.office.id),
         inArray(jobQueue.status, ["pending", "processing"]),
-        sql`${jobQueue.payload}->>'scorecardId' = ${input.scorecardId}`,
-        sql`${jobQueue.payload}->>'dealId' = ${input.dealId}`,
+        // PostgreSQL accepts case-insensitive UUID text in the route lookup, whereas these JSON payload
+        // comparisons are ordinary case-sensitive strings. Compare with the canonical UUIDs returned by the
+        // locked rows, not the caller's raw URL spelling, so an uppercase UUID retry still sees its pending
+        // current-cycle job rather than needlessly superseding it.
+        sql`${jobQueue.payload}->>'scorecardId' = ${card.id}`,
+        sql`${jobQueue.payload}->>'dealId' = ${card.dealId}`,
         currentNoncePredicate,
       ),
     )
