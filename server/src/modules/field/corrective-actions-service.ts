@@ -22,6 +22,7 @@ import {
 import { AppError } from "../../middleware/error-handler.js";
 import { recordCorrectiveActionEvent } from "./corrective-action-events.js";
 import { activeProjectWhere } from "./projects-service.js";
+import { LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 // Matches the alias the field scorecard services use (scorecards-service.ts): the per-office tenant db.
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -35,6 +36,8 @@ type RetriggerLockedCard = {
   dealNumber: string | null;
   projectNumber: string | null;
 };
+
+const textArray = (values: readonly string[]) => sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
 
 // job_type string for the below-band corrective-action notification — MUST match the worker's
 // registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, ...). Duplicated here (server can't import the
@@ -995,7 +998,9 @@ export async function retriggerCorrectiveActionNotification(
   //
   // The test-data clause mirrors the QC report's population gate. A test card is not exposed for operational
   // follow-up, so allowing this repair endpoint to email its responders would create a notification for work
-  // no operational surface will show.
+  // no operational surface will show. The QC report also treats a Lost Bid Board mirror as terminal even when
+  // an active pipeline-stage row is present (which `COALESCE` in activeProjectWhere intentionally prefers), so
+  // preserve that report-specific exclusion before a resend can rotate tokens.
   const locked = await tx.execute(sql`
     SELECT
       sc.id,
@@ -1013,6 +1018,7 @@ export async function retriggerCorrectiveActionNotification(
       AND sc.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND ${activeProjectWhere()}
+      AND COALESCE(d.bid_board_stage_slug, '') <> ALL(${textArray(LOST_STAGE_SLUGS)})
     LIMIT 1
     FOR UPDATE OF sc, d
   `);

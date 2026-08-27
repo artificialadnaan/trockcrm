@@ -965,8 +965,20 @@ describe("manual corrective-action responder email retrigger", () => {
     await tdb.execute(sql`UPDATE deals SET stage_id = ${STAGE_LOST} WHERE id = ${DEAL}`);
     await assertBlockedWithoutMutation();
 
+    // `activeProjectWhere()` deliberately gives a configured pipeline stage precedence over the Bid Board
+    // mirror. QC Reports is stricter: an active pipeline row with a Lost mirror is already absent from the
+    // operational report, so the repair control must reject it before it invalidates a viable token.
     await tdb.execute(sql`
-      UPDATE deals SET stage_id = ${STAGE_ACTIVE}, is_test_data = true WHERE id = ${DEAL}
+      UPDATE deals
+      SET stage_id = ${STAGE_ACTIVE}, bid_board_stage_slug = 'closed_lost'
+      WHERE id = ${DEAL}
+    `);
+    await assertBlockedWithoutMutation();
+
+    await tdb.execute(sql`
+      UPDATE deals
+      SET stage_id = ${STAGE_ACTIVE}, bid_board_stage_slug = NULL, is_test_data = true
+      WHERE id = ${DEAL}
     `);
     await assertBlockedWithoutMutation();
   });
