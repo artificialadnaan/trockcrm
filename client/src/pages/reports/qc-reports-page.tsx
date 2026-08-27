@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Download, Loader2, Search, ClipboardCheck, ArrowUpRight } from "lucide-react";
+import { AlertTriangle, Download, Loader2, Search, ClipboardCheck, ArrowUpRight, Mail } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/layout/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -14,6 +14,8 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -26,8 +28,10 @@ import {
   type ScorecardRating,
 } from "@trock-crm/shared/types";
 import { formatDealDisplayName } from "@/lib/deal-utils";
+import { isApiError } from "@/lib/api";
 import { useQcScorecards, type QcScorecardRow } from "@/hooks/use-qc-scorecards";
 import { fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
+import { retriggerCorrectiveAction } from "@/hooks/use-corrective-actions";
 import { LeadershipDetailView, ScorecardDetailView } from "@/pages/deals/deal-scorecards-tab";
 
 const RATING_BADGE: Record<string, string> = {
@@ -42,6 +46,7 @@ const SCORE_COLOR: Record<string, string> = {
   needs_improvement: "text-amber-600",
   corrective_action: "text-brand-red",
 };
+
 function ratingLabel(row: Pick<QcScorecardRow, "kind" | "formVersion" | "rating">) {
   const rating = row.rating as ScorecardRating;
   if (row.kind === "leadership") return scorecardLeadershipRatingLabel(rating) ?? row.rating;
@@ -291,7 +296,7 @@ export default function QcReportsPage() {
       </Dialog>
 
       {/* detail drawer (reuses the deal-tab detail view + per-deal endpoints) */}
-      <QcDetailSheet row={detailRow} onClose={() => setDetailRow(null)} />
+      <QcDetailSheet row={detailRow} onClose={() => setDetailRow(null)} onReportRefetch={refetch} />
     </div>
   );
 }
@@ -462,7 +467,123 @@ async function triggerDownload(r: QcScorecardRow) {
   }
 }
 
-function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: () => void }) {
+function RetriggerCorrectiveActionButton({
+  dealId,
+  scorecardId,
+  onQueued,
+  onStateChange,
+}: {
+  dealId: string;
+  scorecardId: string;
+  onQueued: () => void;
+  onStateChange: () => void;
+}) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [queued, setQueued] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const onDialogOpenChange = (open: boolean) => {
+    // An in-flight request already has a durable effect on the server. Keep its progress state visible until
+    // the call settles instead of letting Escape/outside-click make it look like nothing happened.
+    if (submitting) return;
+    setConfirmOpen(open);
+    if (!open) setError(null);
+  };
+
+  const queueEmail = async () => {
+    if (submitting || queued) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await retriggerCorrectiveAction(dealId, scorecardId);
+      if (!result.queued && !result.alreadyQueued) {
+        setError("The corrective-action email was not queued. Please try again.");
+        return;
+      }
+      setQueued(true);
+      setConfirmOpen(false);
+      toast.success(
+        result.alreadyQueued
+          ? "A corrective-action email is already queued."
+          : "Corrective-action email queued. A fresh request is scheduled for the current superintendent and project manager.",
+      );
+      // The card remains open, but reload the report feed so a server-side status or permission change made
+      // while the confirmation was open is never left looking current in the QC Reports list.
+      onQueued();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Couldn’t queue the corrective-action email.";
+      // A 409 means the card left the only state in which a re-trigger is valid; a 404 intentionally hides a
+      // deactivated card/deal. In either case, re-read both views rather than leaving a stale action visible.
+      // The detail reload unmounts this dialog, so surface the state change in a toast instead of setting an
+      // inline error that would disappear before the user can read it.
+      if (isApiError(err) && (err.status === 409 || err.status === 404)) {
+        toast.error(
+          err.status === 404
+            ? "This scorecard is no longer available. The QC report has been refreshed."
+            : message,
+        );
+        onStateChange();
+        return;
+      }
+      setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        className="w-full border-brand-red/30 text-brand-red hover:border-brand-red hover:bg-red-50 hover:text-brand-red"
+        disabled={queued}
+        onClick={() => setConfirmOpen(true)}
+      >
+        <Mail className="mr-2 h-4 w-4" />
+        {queued ? "Email queued" : "Resend corrective-action email"}
+      </Button>
+
+      <Dialog open={confirmOpen} onOpenChange={onDialogOpenChange}>
+        <DialogContent showCloseButton={!submitting} className="sm:!max-w-md">
+          <DialogHeader>
+            <DialogTitle>Resend corrective-action request?</DialogTitle>
+            <DialogDescription>
+              This queues fresh Document Corrective Action emails to the current superintendent and project
+              manager. Any secure link from the previous email may stop working, so use the fresh request. It
+              does not change the corrective action or its approval status.
+            </DialogDescription>
+          </DialogHeader>
+          {error ? (
+            <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-brand-red">
+              {error}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={submitting} onClick={() => onDialogOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="button" className="bg-brand-red text-white hover:bg-brand-red/90" disabled={submitting} onClick={() => void queueEmail()}>
+              {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Mail className="mr-2 h-4 w-4" />}
+              {submitting ? "Queueing…" : "Queue email"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function QcDetailSheet({
+  row,
+  onClose,
+  onReportRefetch,
+}: {
+  row: QcScorecardRow | null;
+  onClose: () => void;
+  onReportRefetch: () => Promise<void>;
+}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [detail, setDetail] = useState<FieldScorecardDetail | null>(null);
@@ -539,13 +660,29 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
               </div>
             </div>
 
-            <div className="flex shrink-0 gap-2 border-t border-slate-100 bg-white px-6 py-4">
-              <Button className="flex-1 bg-brand-red text-white hover:bg-brand-red/90" onClick={() => void triggerDownload(row)}>
-                <Download className="mr-2 h-4 w-4" /> Download PDF
-              </Button>
-              <Button variant="outline" onClick={() => navigate(dealHref)}>
-                Open deal
-              </Button>
+            <div className="shrink-0 space-y-2 border-t border-slate-100 bg-white px-6 py-4">
+              {detail?.status === "corrective_action_open" && detail.canRetriggerCorrectiveAction === true ? (
+                <RetriggerCorrectiveActionButton
+                  key={`${row.dealId}:${row.scorecardId}`}
+                  dealId={row.dealId}
+                  scorecardId={row.scorecardId}
+                  onQueued={() => {
+                    void onReportRefetch();
+                  }}
+                  onStateChange={() => {
+                    void onReportRefetch();
+                    setReloadKey((current) => current + 1);
+                  }}
+                />
+              ) : null}
+              <div className="flex gap-2">
+                <Button className="flex-1 bg-brand-red text-white hover:bg-brand-red/90" onClick={() => void triggerDownload(row)}>
+                  <Download className="mr-2 h-4 w-4" /> Download PDF
+                </Button>
+                <Button variant="outline" onClick={() => navigate(dealHref)}>
+                  Open deal
+                </Button>
+              </div>
             </div>
           </>
         )}
