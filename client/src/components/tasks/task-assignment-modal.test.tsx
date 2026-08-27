@@ -285,7 +285,7 @@ describe("TaskAssignmentModal — when it appears", () => {
     expect(dialog()!.textContent).toContain("Adam Shaw");
   });
 
-  it("shows the supplied assignment confirmation image", async () => {
+  it("shows the supplied assignment confirmation image in full", async () => {
     setPending([task()]);
 
     await render(true);
@@ -294,6 +294,14 @@ describe("TaskAssignmentModal — when it appears", () => {
       'img[alt="T Rock Contracting team member in a branded shirt"]'
     );
     expect(image?.getAttribute("src")).toBe("/task-assigned-confirmation.jpg");
+    expect(image?.getAttribute("width")).toBe("960");
+    expect(image?.getAttribute("height")).toBe("1280");
+    expect(image?.className).toContain("object-contain");
+    expect(image?.className).not.toContain("object-cover");
+    expect(image?.className).toContain("max-h-[40svh]");
+    expect(image?.parentElement?.className).toContain("justify-center");
+    expect(dialog()?.className).toContain("max-h-[calc(100svh-2rem)]");
+    expect(dialog()?.className).toContain("overflow-y-auto");
   });
 
   it("does not fetch, and does not open, when the flag is false", async () => {
