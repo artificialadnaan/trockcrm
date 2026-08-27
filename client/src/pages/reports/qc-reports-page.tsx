@@ -471,12 +471,12 @@ function RetriggerCorrectiveActionButton({
   dealId,
   scorecardId,
   onQueued,
-  onConflict,
+  onStateChange,
 }: {
   dealId: string;
   scorecardId: string;
   onQueued: () => void;
-  onConflict: () => void;
+  onStateChange: () => void;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -513,13 +513,17 @@ function RetriggerCorrectiveActionButton({
       onQueued();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Couldn’t queue the corrective-action email.";
-      // A 409 means the card left the only state in which a re-trigger is valid. Re-read both the drawer and
-      // report feed rather than leaving the stale action visible beneath an error the user cannot resolve.
-      // The detail reload unmounts this dialog, so surface that state-change error in a toast instead of
-      // setting an inline error that would disappear before the user can read it.
-      if (isApiError(err) && err.status === 409) {
-        toast.error(message);
-        onConflict();
+      // A 409 means the card left the only state in which a re-trigger is valid; a 404 intentionally hides a
+      // deactivated card/deal. In either case, re-read both views rather than leaving a stale action visible.
+      // The detail reload unmounts this dialog, so surface the state change in a toast instead of setting an
+      // inline error that would disappear before the user can read it.
+      if (isApiError(err) && (err.status === 409 || err.status === 404)) {
+        toast.error(
+          err.status === 404
+            ? "This scorecard is no longer available. The QC report has been refreshed."
+            : message,
+        );
+        onStateChange();
         return;
       }
       setError(message);
@@ -665,7 +669,7 @@ function QcDetailSheet({
                   onQueued={() => {
                     void onReportRefetch();
                   }}
-                  onConflict={() => {
+                  onStateChange={() => {
                     void onReportRefetch();
                     setReloadKey((current) => current + 1);
                   }}

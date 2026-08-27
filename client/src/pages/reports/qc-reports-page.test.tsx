@@ -352,9 +352,24 @@ describe("QcReportsPage", () => {
     )).toBe(false);
   });
 
-  it("refreshes the drawer and report if the corrective action changed before the resend was queued", async () => {
+  it.each([
+    {
+      status: 409,
+      serverMessage: "This corrective action is no longer open.",
+      expectedToast: "This corrective action is no longer open.",
+    },
+    {
+      status: 404,
+      serverMessage: "Scorecard not found",
+      expectedToast: "This scorecard is no longer available. The QC report has been refreshed.",
+    },
+  ])("refreshes the drawer and report when the resend returns stale state HTTP $status", async ({
+    status,
+    serverMessage,
+    expectedToast,
+  }) => {
     mocks.retriggerCorrectiveAction.mockRejectedValue(
-      new ApiError(409, { message: "This corrective action is no longer open." }),
+      new ApiError(status, { message: serverMessage }),
     );
 
     await act(async () => {
@@ -386,7 +401,7 @@ describe("QcReportsPage", () => {
       await Promise.resolve();
     });
 
-    expect(mocks.toastError).toHaveBeenCalledWith("This corrective action is no longer open.");
+    expect(mocks.toastError).toHaveBeenCalledWith(expectedToast);
     expect(mocks.refetch).toHaveBeenCalledOnce();
     expect(mocks.fetchDealScorecardDetail).toHaveBeenCalledTimes(2);
   });
