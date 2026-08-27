@@ -2811,12 +2811,13 @@ router.post(
       assertValidUuid(dealId, "dealId");
       assertValidUuid(scorecardId, "scorecardId");
       await assertDealRouteAccess(req, dealId);
-      if (!req.officeSlug) throw new AppError(500, "Office context not available");
+      const officeId = req.user!.activeOfficeId;
+      if (!req.officeSlug || !officeId) throw new AppError(500, "Office context not available");
 
       const result = await retriggerCorrectiveActionNotification(req.tenantDb!, {
         dealId,
         scorecardId,
-        office: { id: req.user!.activeOfficeId, slug: req.officeSlug },
+        office: { id: officeId, slug: req.officeSlug },
       });
 
       // Record the state-changing enqueue, not a double-click that observed an already pending current
