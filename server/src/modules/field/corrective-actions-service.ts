@@ -21,7 +21,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { recordCorrectiveActionEvent } from "./corrective-action-events.js";
-import { activeProjectWhere } from "./projects-service.js";
+import { activeProjectWhere } from "./project-browsability.js";
 import { LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 // Matches the alias the field scorecard services use (scorecards-service.ts): the per-office tenant db.
