@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   fetchDealScorecardDetail: vi.fn(),
   leadershipDetailView: vi.fn(),
   scorecardDetailView: vi.fn(),
+  retriggerCorrectiveAction: vi.fn(),
+  refetch: vi.fn(),
+  toastSuccess: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-qc-scorecards", () => ({
@@ -18,6 +21,9 @@ vi.mock("@/hooks/use-qc-scorecards", () => ({
 vi.mock("@/hooks/use-deal-scorecards", () => ({
   fetchDealScorecardDetail: mocks.fetchDealScorecardDetail,
   downloadDealScorecardPdf: vi.fn(),
+}));
+vi.mock("@/hooks/use-corrective-actions", () => ({
+  retriggerCorrectiveAction: (...args: unknown[]) => mocks.retriggerCorrectiveAction(...args),
 }));
 vi.mock("@/pages/deals/deal-scorecards-tab", () => ({
   LeadershipDetailView: (props: unknown) => {
@@ -29,7 +35,7 @@ vi.mock("@/pages/deals/deal-scorecards-tab", () => ({
     return null;
   },
 }));
-vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: mocks.toastSuccess } }));
 
 import QcReportsPage from "./qc-reports-page";
 
@@ -45,8 +51,16 @@ beforeEach(() => {
   mocks.fetchDealScorecardDetail.mockReset();
   mocks.leadershipDetailView.mockReset();
   mocks.scorecardDetailView.mockReset();
+  mocks.retriggerCorrectiveAction.mockReset();
+  mocks.refetch.mockReset();
+  mocks.toastSuccess.mockReset();
+  mocks.retriggerCorrectiveAction.mockResolvedValue({ queued: true });
   mocks.fetchDealScorecardDetail.mockImplementation((_dealId: string, scorecardId: string) =>
-    Promise.resolve({ scorecardId }),
+    Promise.resolve({
+      scorecardId,
+      status: scorecardId === "project-1" ? "corrective_action_open" : "submitted",
+      canRetriggerCorrectiveAction: scorecardId === "project-1",
+    }),
   );
   mocks.useQcScorecards.mockReturnValue({
     scorecards: [
@@ -97,7 +111,7 @@ beforeEach(() => {
     truncated: false,
     loading: false,
     error: null,
-    refetch: vi.fn(),
+    refetch: mocks.refetch,
   });
 });
 
@@ -257,6 +271,82 @@ describe("QcReportsPage", () => {
     );
     expect(pmFilter).toBeTruthy();
     expect(Array.from(pmFilter!.options).map((o) => o.textContent)).toEqual(["Anyone", "Nick Cheatam"]);
+  });
+
+  it("lets an authorized viewer queue a fresh corrective-action email from an open scorecard", async () => {
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const row = container.querySelector('[aria-label^="Open project scorecard for Project Job,"]');
+    expect(row).toBeTruthy();
+    await act(async () => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const resend = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent === "Resend corrective-action email",
+    );
+    expect(resend).toBeTruthy();
+    await act(async () => {
+      resend!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const confirmation = document.body.textContent ?? "";
+    expect(confirmation).toContain("Resend corrective-action request?");
+    expect(confirmation).toContain("fresh Document Corrective Action emails");
+    expect(confirmation).toContain("secure link from the previous email may stop working");
+
+    const queue = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent === "Queue email",
+    );
+    expect(queue).toBeTruthy();
+    await act(async () => {
+      queue!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.retriggerCorrectiveAction).toHaveBeenCalledWith("deal-2", "project-1");
+    expect(mocks.refetch).toHaveBeenCalled();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      "Corrective-action email queued. A fresh request is scheduled for the current superintendent and project manager.",
+    );
+    expect(Array.from(document.body.querySelectorAll("button")).some(
+      (button) => button.textContent === "Email queued",
+    )).toBe(true);
+  });
+
+  it("does not render the resend action when the detail does not grant the capability", async () => {
+    mocks.fetchDealScorecardDetail.mockResolvedValue({
+      scorecardId: "project-1",
+      status: "corrective_action_open",
+      canRetriggerCorrectiveAction: false,
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+    const row = container.querySelector('[aria-label^="Open project scorecard for Project Job,"]');
+    await act(async () => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(Array.from(document.body.querySelectorAll("button")).some(
+      (button) => button.textContent === "Resend corrective-action email",
+    )).toBe(false);
   });
 
   it.each([
