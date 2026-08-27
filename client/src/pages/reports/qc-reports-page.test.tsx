@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   scorecardDetailView: vi.fn(),
   retriggerCorrectiveAction: vi.fn(),
   refetch: vi.fn(),
+  toastError: vi.fn(),
   toastSuccess: vi.fn(),
 }));
 
@@ -35,9 +36,10 @@ vi.mock("@/pages/deals/deal-scorecards-tab", () => ({
     return null;
   },
 }));
-vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: mocks.toastSuccess } }));
+vi.mock("sonner", () => ({ toast: { error: mocks.toastError, success: mocks.toastSuccess } }));
 
 import QcReportsPage from "./qc-reports-page";
+import { ApiError } from "@/lib/api";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -53,6 +55,7 @@ beforeEach(() => {
   mocks.scorecardDetailView.mockReset();
   mocks.retriggerCorrectiveAction.mockReset();
   mocks.refetch.mockReset();
+  mocks.toastError.mockReset();
   mocks.toastSuccess.mockReset();
   mocks.retriggerCorrectiveAction.mockResolvedValue({ queued: true });
   mocks.fetchDealScorecardDetail.mockImplementation((_dealId: string, scorecardId: string) =>
@@ -347,6 +350,45 @@ describe("QcReportsPage", () => {
     expect(Array.from(document.body.querySelectorAll("button")).some(
       (button) => button.textContent === "Resend corrective-action email",
     )).toBe(false);
+  });
+
+  it("refreshes the drawer and report if the corrective action changed before the resend was queued", async () => {
+    mocks.retriggerCorrectiveAction.mockRejectedValue(
+      new ApiError(409, { message: "This corrective action is no longer open." }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+    const row = container.querySelector('[aria-label^="Open project scorecard for Project Job,"]');
+    await act(async () => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const resend = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent === "Resend corrective-action email",
+    );
+    await act(async () => {
+      resend!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const queue = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent === "Queue email",
+    );
+    await act(async () => {
+      queue!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.toastError).toHaveBeenCalledWith("This corrective action is no longer open.");
+    expect(mocks.refetch).toHaveBeenCalledOnce();
+    expect(mocks.fetchDealScorecardDetail).toHaveBeenCalledTimes(2);
   });
 
   it.each([

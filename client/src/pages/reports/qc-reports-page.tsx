@@ -47,12 +47,6 @@ const SCORE_COLOR: Record<string, string> = {
   corrective_action: "text-brand-red",
 };
 
-// The deal-detail endpoint adds this capability only for active admin/director viewers. Keep the local
-// extension while API and client deployments roll independently; FieldScorecardDetail remains valid for the
-// field-app readers that intentionally never receive CRM-only capabilities.
-type QcScorecardDetail = FieldScorecardDetail & {
-  canRetriggerCorrectiveAction?: boolean;
-};
 function ratingLabel(row: Pick<QcScorecardRow, "kind" | "formVersion" | "rating">) {
   const rating = row.rating as ScorecardRating;
   if (row.kind === "leadership") return scorecardLeadershipRatingLabel(rating) ?? row.rating;
@@ -476,11 +470,13 @@ async function triggerDownload(r: QcScorecardRow) {
 function RetriggerCorrectiveActionButton({
   dealId,
   scorecardId,
-  onRefresh,
+  onQueued,
+  onConflict,
 }: {
   dealId: string;
   scorecardId: string;
-  onRefresh: () => void;
+  onQueued: () => void;
+  onConflict: () => void;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -514,12 +510,19 @@ function RetriggerCorrectiveActionButton({
       );
       // The card remains open, but reload the report feed so a server-side status or permission change made
       // while the confirmation was open is never left looking current in the QC Reports list.
-      onRefresh();
+      onQueued();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn’t queue the corrective-action email.");
-      // A 409 means the card left the only state in which a re-trigger is valid. Refresh rather than leaving
-      // the stale action visible beneath an error the user cannot resolve from this drawer.
-      if (isApiError(err) && err.status === 409) onRefresh();
+      const message = err instanceof Error ? err.message : "Couldn’t queue the corrective-action email.";
+      // A 409 means the card left the only state in which a re-trigger is valid. Re-read both the drawer and
+      // report feed rather than leaving the stale action visible beneath an error the user cannot resolve.
+      // The detail reload unmounts this dialog, so surface that state-change error in a toast instead of
+      // setting an inline error that would disappear before the user can read it.
+      if (isApiError(err) && err.status === 409) {
+        toast.error(message);
+        onConflict();
+        return;
+      }
+      setError(message);
     } finally {
       setSubmitting(false);
     }
@@ -579,7 +582,7 @@ function QcDetailSheet({
 }) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [detail, setDetail] = useState<QcScorecardDetail | null>(null);
+  const [detail, setDetail] = useState<FieldScorecardDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -659,8 +662,12 @@ function QcDetailSheet({
                   key={`${row.dealId}:${row.scorecardId}`}
                   dealId={row.dealId}
                   scorecardId={row.scorecardId}
-                  onRefresh={() => {
+                  onQueued={() => {
                     void onReportRefetch();
+                  }}
+                  onConflict={() => {
+                    void onReportRefetch();
+                    setReloadKey((current) => current + 1);
                   }}
                 />
               ) : null}
