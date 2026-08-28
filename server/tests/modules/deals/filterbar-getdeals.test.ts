@@ -149,6 +149,45 @@ describe("getDeals — FilterBar wiring", () => {
     expect(sql).toContain("coalesce");
   });
 
+  it("keeps archived RFP-state records under Opportunity because Pending RFP is active-only", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { stageIds: ["op-1"], excludePendingRfpFromOpportunity: true, status: "inactive", scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const sql = mainWhere(capturedWheres);
+    // One is the Status=Inactive filter. The second is the explicit inactive escape hatch in the
+    // Opportunity complement: deleteDeal only flips is_active, leaving RFP fields intact.
+    expect(sql.split('"is_active"').length - 1).toBe(2);
+    expect(sql).toContain("rfp_approval_status");
+    expect(sql).toContain(" or ");
+  });
+
+  it("keeps the Pending RFP-only bucket active-only even when Inactive is selected", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { pendingRfpOnly: true, status: "inactive", scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const query = render(capturedWheres[capturedWheres.length - 1]);
+    // Status owns one is_active=false predicate, while the actionable Pending RFP bucket adds
+    // is_active=true. Their deliberate contradiction means archived RFP-state rows cannot reappear
+    // under the synthetic queue; they belong to the ordinary Opportunity choice instead.
+    expect(query.sql.toLowerCase().split('"is_active"').length - 1).toBe(2);
+    expect(query.params).toContain(false);
+    expect(query.params).toContain(true);
+  });
+
   it("keeps direct Opportunity stage-id callers inclusive when they do not render a separate bucket", async () => {
     const { db, capturedWheres } = createTenantDbCapturingWhere();
     const { getDeals } = await import("../../../src/modules/deals/service.js");

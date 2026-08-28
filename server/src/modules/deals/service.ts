@@ -2438,8 +2438,10 @@ export async function getDeals(
   // Filter by real stages and/or the synthetic Pending RFP bucket. Pending RFP is not a
   // `pipeline_stage_config` row: it is an Opportunity-family subset defined by the RFP lifecycle.
   // The base board is the only surface that renders this subset separately. Its opt-in makes ordinary
-  // Opportunity selections explicitly exclude the subset, and adding the synthetic option back makes
-  // the two branches a disjoint UNION. All other stage-id callers retain their legacy inclusive rule.
+  // Opportunity selections explicitly exclude the *active* subset, and adding the synthetic option
+  // back makes the two live-work branches a disjoint UNION. Archived rows are never actionable
+  // Pending RFP work, so they remain ordinary Opportunity rows even when their historical RFP fields
+  // still say pending/declined. All other stage-id callers retain their legacy inclusive rule.
   const selectedStageIds = filters.stageIds ?? [];
   const separatesPendingRfpFromOpportunity = filters.excludePendingRfpFromOpportunity === true;
   if (filters.pendingRfpOnly || (separatesPendingRfpFromOpportunity && selectedStageIds.length > 0)) {
@@ -2469,7 +2471,9 @@ export async function getDeals(
       selectedStageConditions.push(
         and(
           inArray(deals.stageId, selectedOpportunityStageIds),
-          aliasedNotPendingRfpBucketCondition("deals")
+          // Pending RFP itself is active-only. Keeping inactive records in Opportunity prevents an
+          // archive from disappearing from both choices merely because it retains its old RFP state.
+          or(eq(deals.isActive, false), aliasedNotPendingRfpBucketCondition("deals"))
         )
       );
     }
