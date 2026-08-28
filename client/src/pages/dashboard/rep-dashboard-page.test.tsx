@@ -355,8 +355,12 @@ describe("RepDashboardPage", () => {
 
     expect(html).toContain('href="/pipeline/my-cleanup"');
     expect(html).toContain('href="/leads?stale=true&amp;scope=mine"');
-    expect(html).toContain('href="/tasks"');
-    expect(html).toContain('href="/tasks?filter=overdue"');
+    // ?source=all on BOTH task cells. The Tasks page opens on the Manual tab, but neither of these
+    // numbers is manual-only: the server's overdue count has no source predicate and the follow-up
+    // rate is computed over every task. A bare /tasks link would send a rep from "Overdue 42" to a
+    // list showing 1 — the tile and the page it opens have to describe the same set of rows.
+    expect(html).toContain('href="/tasks?source=all"');
+    expect(html).toContain('href="/tasks?source=all&amp;filter=overdue"');
     expect(html).toContain('href="/reports/performance"');
   });
 
