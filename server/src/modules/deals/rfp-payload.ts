@@ -24,6 +24,15 @@ export interface RfpPayloadSourceDeal {
    *  assigned_rep → user, with fallbacks (see rfp-enqueue resolveDealOwner). */
   ownerName?: string | null;
   ownerEmail?: string | null;
+  /**
+   * `deals.company_id` / `deals.property_id`. Shipped so downstream systems resolve the customer and the
+   * job site BY ID rather than by the names below. Name matching is unsafe in the other direction:
+   * SyncHub's `street` falls back to `project_location`, which holds the office designator, so an
+   * address-less deal would create a property literally named "DFW" and every job site of that customer
+   * would collapse onto one row.
+   */
+  companyId?: string | null;
+  propertyId?: string | null;
   companyName?: string | null;
   contactName?: string | null;
   clientEmail?: string | null;
@@ -57,6 +66,10 @@ export interface NormalizedRfpRequestBody {
     estimator: string | null;
     ownerName: string | null;
     ownerEmail: string | null;
+    /** CRM uuids for the customer and the job site — see RfpPayloadSourceDeal. Deliberately absent from
+     *  SACRIFICIAL_DEAL_FIELDS: they are identity, not display, so the size cap must never drop them. */
+    companyId: string | null;
+    propertyId: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -478,6 +491,39 @@ export function capRfpRequestBody(
   return next;
 }
 
+/**
+ * Re-resolves the identity uuids on a body read back out of job_queue, from the deal as it stands now.
+ *
+ * The gap capRfpRequestBody deliberately preserves is the right call for display fields and the WRONG
+ * one for identity: a job enqueued before these ids shipped has no `companyId`/`propertyId` key at all,
+ * and the shallow spread carries that absence straight into the re-enqueued body. Downstream a missing
+ * uuid is not "resolve it another way", it is a terminal skip — so the retry would silently never hand
+ * off, or fall back to the name/address matching these ids exist to retire.
+ *
+ * The deal's own columns are the authority, and a safe one: both are immutable once established (see
+ * assertDealUpdateLineagePolicy — neither can be cleared or repointed), so re-reading them can only
+ * FILL a gap, never disagree with the original enqueue.
+ * Must run BEFORE capRfpRequestBody so the limiter counts these bytes; they are not sacrificial, so the
+ * cap will never drop them again.
+ */
+export function withRfpRequestBodyIdentity(
+  body: NormalizedRfpRequestBody,
+  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId">
+): NormalizedRfpRequestBody {
+  // Same tolerance for a partial stored record as capRfpRequestBody, and the same cleanString the
+  // builder uses — so a retried body states an absent id exactly the way a first-attempt body does
+  // (an explicit null, never an omitted key).
+  const storedDeal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
+  return {
+    ...body,
+    deal: {
+      ...storedDeal,
+      companyId: cleanString(deal.companyId),
+      propertyId: cleanString(deal.propertyId),
+    },
+  };
+}
+
 export function buildNormalizedRfpRequestBody(input: {
   deal: RfpPayloadSourceDeal;
   sourceEventId: string;
@@ -513,6 +559,8 @@ export function buildNormalizedRfpRequestBody(input: {
       estimator: cleanString(deal.estimator) ?? cleanString(deal.bidBoardEstimator),
       ownerName: cleanString(deal.ownerName),
       ownerEmail: cleanString(deal.ownerEmail),
+      companyId: cleanString(deal.companyId),
+      propertyId: cleanString(deal.propertyId),
       companyName: cleanString(deal.companyName),
       contactName: cleanString(deal.contactName),
       clientEmail: cleanString(deal.clientEmail),
