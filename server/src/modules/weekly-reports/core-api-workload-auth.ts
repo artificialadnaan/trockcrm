@@ -130,8 +130,14 @@ export function coreWeeklyReportWorkloadKeyReadiness(env: {
     return { ok: false, reason: "invalid_workload_current_public_key" };
   }
 
-  const previousKeyId = env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID;
-  const previousPublicValue = env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY;
+  // dotenv preserves example-file blanks as empty strings. Optional rotation slots treat those blanks as
+  // absent, while whitespace and every other malformed value remain present and fail validation below.
+  const previousKeyId = env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID === ""
+    ? undefined
+    : env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID;
+  const previousPublicValue = env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY === ""
+    ? undefined
+    : env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY;
   const previousIdPresent = previousKeyId !== undefined;
   const previousKeyPresent = previousPublicValue !== undefined;
   if (previousIdPresent !== previousKeyPresent) {

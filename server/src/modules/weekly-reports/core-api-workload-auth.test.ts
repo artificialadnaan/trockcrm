@@ -140,6 +140,11 @@ describe("Core weekly-report Ed25519 workload verification", () => {
     expect(coreWeeklyReportWorkloadKeyReadiness(base)).toMatchObject({ ok: true });
     expect(coreWeeklyReportWorkloadKeyReadiness({
       ...base,
+      TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID: "",
+      TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY: "",
+    })).toMatchObject({ ok: true, keyring: { previous: null } });
+    expect(coreWeeklyReportWorkloadKeyReadiness({
+      ...base,
       TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PUBLIC_KEY: `${CURRENT_PUBLIC}=`,
     })).toEqual({ ok: false, reason: "invalid_workload_current_public_key" });
     expect(coreWeeklyReportWorkloadKeyReadiness({
