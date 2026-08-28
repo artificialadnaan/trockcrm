@@ -300,6 +300,10 @@ async function loadRfpPayloadDeal(
     createdAt: row.created_at ?? null,
     // Round-precise event id for enqueueRfpBidBoardCreate's sourceEventId (authoritative, from the DB row).
     rfpApprovalRequestEventId: (row.rfp_approval_request_event_id as string | null) ?? null,
+    // The deal's own FK columns, already in `SELECT d.*`. They travel so downstream resolution keys on a
+    // uuid instead of on the joined names below — see RfpPayloadSourceDeal for why the name route is unsafe.
+    companyId: (row.company_id as string | null) ?? null,
+    propertyId: (row.property_id as string | null) ?? null,
     companyName: (row.companyName as string | null) ?? null,
     contactName: (row.contactName as string | null) ?? null,
     clientEmail: (row.clientEmail as string | null) ?? null,

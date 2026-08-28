@@ -24,6 +24,15 @@ export interface RfpPayloadSourceDeal {
    *  assigned_rep → user, with fallbacks (see rfp-enqueue resolveDealOwner). */
   ownerName?: string | null;
   ownerEmail?: string | null;
+  /**
+   * `deals.company_id` / `deals.property_id`. Shipped so downstream systems resolve the customer and the
+   * job site BY ID rather than by the names below. Name matching is unsafe in the other direction:
+   * SyncHub's `street` falls back to `project_location`, which holds the office designator, so an
+   * address-less deal would create a property literally named "DFW" and every job site of that customer
+   * would collapse onto one row.
+   */
+  companyId?: string | null;
+  propertyId?: string | null;
   companyName?: string | null;
   contactName?: string | null;
   clientEmail?: string | null;
@@ -57,6 +66,10 @@ export interface NormalizedRfpRequestBody {
     estimator: string | null;
     ownerName: string | null;
     ownerEmail: string | null;
+    /** CRM uuids for the customer and the job site — see RfpPayloadSourceDeal. Deliberately absent from
+     *  SACRIFICIAL_DEAL_FIELDS: they are identity, not display, so the size cap must never drop them. */
+    companyId: string | null;
+    propertyId: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -513,6 +526,8 @@ export function buildNormalizedRfpRequestBody(input: {
       estimator: cleanString(deal.estimator) ?? cleanString(deal.bidBoardEstimator),
       ownerName: cleanString(deal.ownerName),
       ownerEmail: cleanString(deal.ownerEmail),
+      companyId: cleanString(deal.companyId),
+      propertyId: cleanString(deal.propertyId),
       companyName: cleanString(deal.companyName),
       contactName: cleanString(deal.contactName),
       clientEmail: cleanString(deal.clientEmail),
