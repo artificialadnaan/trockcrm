@@ -90,9 +90,15 @@ function findRouteHandler(method: "post", routePath: string) {
   return layer.route.stack[0].handle as (req: any, res: any, next: (err?: unknown) => void) => unknown;
 }
 
-/** Records the interleaving of commit and send so the ordering can be asserted, not assumed. */
-function createRequestContext(body: Record<string, unknown>) {
-  const order: string[] = [];
+/**
+ * Records commit/prepare/send into ONE array, so their relative ORDER is what gets asserted.
+ *
+ * An earlier version of this file pushed "commit" into one array and "prepare"/"send" into another,
+ * then asserted each separately — which pins nothing: swapping the commit and the send in routes.ts
+ * left both arrays byte-identical and all ten tests green, while the mail went out inside an
+ * uncommitted transaction. Same array or no assertion.
+ */
+function createRequestContext(body: Record<string, unknown>, order: string[] = []) {
   const req: Record<string, any> = {
     params: { id: TASK_ID },
     query: {},
@@ -110,9 +116,9 @@ function createRequestContext(body: Record<string, unknown>) {
   return { req, order };
 }
 
-async function invoke(routePath: string, body: Record<string, unknown>) {
+async function invoke(routePath: string, body: Record<string, unknown>, order: string[] = []) {
   const handler = findRouteHandler("post", routePath);
-  const { req, order } = createRequestContext(body);
+  const { req } = createRequestContext(body, order);
   const res: Record<string, any> = {
     statusCode: 200,
     body: undefined,
@@ -216,13 +222,16 @@ describe("the outcome email is sent from every close path", () => {
     expect(notificationMocks.sendPreparedTaskResolutionEmail).not.toHaveBeenCalled();
   });
 
-  it("sends nothing when the close carried no outcome note", async () => {
-    // The system-actor path. Exempt from the note requirement, so there is nothing to report.
-    await invoke("/:id/complete", {});
-
-    expect(notificationMocks.prepareTaskResolutionEmail).not.toHaveBeenCalled();
-    expect(notificationMocks.sendPreparedTaskResolutionEmail).not.toHaveBeenCalled();
-  });
+  /**
+   * There is deliberately NO "sends nothing when the body carried no note" case here.
+   *
+   * It cannot happen through a route: requireTaskResolutionNote 400s a missing, non-string or
+   * whitespace-only note before the service returns, and no HTTP handler can pass the `systemActor`
+   * that exempts it. Testing it at this layer means stubbing completeTask into RESOLVING on a body
+   * the real one rejects — an impossible state, asserting behaviour nothing can reach. The empty-note
+   * contract belongs to prepareTaskResolutionEmail and is tested against the real function in
+   * task-resolution-email.test.ts, where a direct caller genuinely can reach it.
+   */
 
   it("sends nothing when there is nobody to write to", async () => {
     notificationMocks.prepareTaskResolutionEmail.mockResolvedValue(null);
@@ -239,22 +248,26 @@ describe("the outcome email is sent from every close path", () => {
    * the send must not, or a mail outage becomes a failed close. Asserted as an ordering rather than
    * as two independent "was called" checks, which pass in either arrangement.
    */
-  it("prepares inside the transaction and sends after the commit", async () => {
-    const contextOrder: string[] = [];
+  it.each([
+    ["/:id/complete", { resolutionNote: "Done." }],
+    ["/:id/dismiss", { resolutionNote: "Duplicate." }],
+    ["/:id/transition", { nextStatus: "completed", resolutionNote: "Done." }],
+  ])("prepares inside the transaction and sends after the commit — %s", async (routePath, body) => {
+    const order: string[] = [];
     notificationMocks.prepareTaskResolutionEmail.mockImplementation(async () => {
-      contextOrder.push("prepare");
+      order.push("prepare");
       return PREPARED;
     });
     notificationMocks.sendPreparedTaskResolutionEmail.mockImplementation(async () => {
-      contextOrder.push("send");
+      order.push("send");
       return true;
     });
 
-    const { order } = await invoke("/:id/complete", { resolutionNote: "Done." });
-    // `order` records the commit; the mocks above record their own steps into contextOrder. Merge by
-    // asserting each relative pair, which is what the ordering claim actually is.
-    expect(contextOrder).toEqual(["prepare", "send"]);
-    expect(order).toEqual(["commit"]);
+    await invoke(routePath, body as Record<string, unknown>, order);
+
+    // ONE sequence, so moving the send in front of the commit — mailing from inside a transaction
+    // that has not been written yet — fails here.
+    expect(order).toEqual(["prepare", "commit", "send"]);
   });
 
   it("does not fail the close when the mail send throws", async () => {

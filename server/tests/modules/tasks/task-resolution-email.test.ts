@@ -91,10 +91,18 @@ describe("buildTaskResolutionEmail", () => {
     expect(buildTaskResolutionEmail(base).text.startsWith("Hi Adam,")).toBe(true);
   });
 
-  // display_name is nullable on public.users, and "  completed: X" reads as a bug.
-  it("falls back to a readable actor when the closer has no display name", () => {
+  /**
+   * The closer's users row could not be read at all — display_name is NOT NULL on public.users, so a
+   * blank name is not the case this covers.
+   *
+   * "Someone", not "The assignee": assertTaskCloseAuthority also admits the assigner and every
+   * elevated role, so an unnamed closer may well be an admin closing another person's task. Naming
+   * them the assignee would put a fact in the mail that nothing established.
+   */
+  it("falls back to a non-committal actor when the closer cannot be named", () => {
     const email = buildTaskResolutionEmail({ ...base, closerName: null });
-    expect(email.subject).toBe("The assignee completed: Stage Move");
+    expect(email.subject).toBe("Someone completed: Stage Move");
+    expect(email.subject).not.toContain("assignee");
   });
 
   it("names the linked project when one was resolved", () => {
@@ -156,7 +164,14 @@ const activeAssignerRow = { ...assigner, isActive: true };
 const closerRow = { id: CLOSER_ID, email: "adnaan@example.com", displayName: "Adnaan Iqbal", firstName: "Adnaan", isActive: true };
 
 const prepareInput = {
-  task: { id: TASK_ID, title: "Stage Move", dealId: null, createdBy: ASSIGNER_ID, lastAssignedBy: null },
+  task: {
+    id: TASK_ID,
+    title: "Stage Move",
+    dealId: null,
+    createdBy: ASSIGNER_ID,
+    lastAssignedBy: null,
+    source: "manual",
+  },
   closedBy: CLOSER_ID,
   resolution: "completed" as const,
   resolutionNote: "Moved it back to estimating.",
@@ -215,12 +230,57 @@ describe("prepareTaskResolutionEmail", () => {
   // --- and the four reasons nobody is mailed. Each on its own, because a single "returns null" case
   // passes with three of the four branches broken. ---
 
+  /**
+   * ⚠️ AN AUTOMATED TASK HAS NO HUMAN ASSIGNER, EVEN WHEN created_by IS SET.
+   *
+   * It is easy to assume `created_by IS NULL` protects this. It does not: only the 25-rule engine
+   * leaves it unset. `createAssignmentTaskIfNeeded` stamps the DIRECTOR who reassigned the deal, and
+   * `routeRevisionToEstimating` stamps whoever's edit triggered the routing — both on tasks those
+   * people never typed. Falling back to created_by would mail a director "the task you assigned was
+   * completed" about a task the system raised.
+   *
+   * This is the exact misattribution the `source` column was introduced to end, one layer up.
+   */
+  it("sends nothing on an automated task, even though created_by names a real person", async () => {
+    const db = createDb([[activeAssignerRow, closerRow]]);
+    const email = await prepareTaskResolutionEmail(db as any, {
+      ...prepareInput,
+      task: { ...prepareInput.task, source: "automated", createdBy: ASSIGNER_ID, lastAssignedBy: null },
+    });
+
+    expect(email).toBeNull();
+    expect(db.select).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ...but a REASSIGNMENT counts whatever raised the task.
+   *
+   * `last_assigned_by` is only ever written when a person deliberately hands work to somebody else.
+   * That person is owed the answer even if a cron created the row, and gating the whole thing on
+   * `source === 'manual'` alone would silently drop them.
+   */
+  it("still mails a human who reassigned an automated task", async () => {
+    const handedOver = {
+      ...activeAssignerRow,
+      id: "55555555-5555-4555-8555-555555555555",
+      email: "reassigner@example.com",
+    };
+    const db = createDb([[handedOver, closerRow]]);
+
+    const email = await prepareTaskResolutionEmail(db as any, {
+      ...prepareInput,
+      task: { ...prepareInput.task, source: "automated", lastAssignedBy: handedOver.id },
+    });
+
+    expect(email?.to).toBe("reassigner@example.com");
+  });
+
   it("sends nothing when the task has no assigner at all", async () => {
     // created_by IS NULL on every rules-engine and AI-disconnect task. There is nobody to write to.
     const db = createDb([[]]);
     const email = await prepareTaskResolutionEmail(db as any, {
       ...prepareInput,
-      task: { ...prepareInput.task, createdBy: null, lastAssignedBy: null },
+      task: { ...prepareInput.task, source: "automated", createdBy: null, lastAssignedBy: null },
     });
 
     expect(email).toBeNull();

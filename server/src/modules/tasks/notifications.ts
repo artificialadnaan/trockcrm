@@ -4,7 +4,7 @@ import { deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { formatDealDisplayNumber } from "@trock-crm/shared/types";
 import { sendSystemEmail } from "../../lib/resend-client.js";
-import { resolveTaskAssignerId } from "./closed-loop-service.js";
+import { resolveHumanTaskAssignerId } from "./task-assigner.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -495,8 +495,11 @@ export function buildTaskResolutionEmail(input: {
 }) {
   const link = taskUrl(input.task.id, input.officeId);
   const assignerFirstName = firstNameFor(input.assigner);
-  // display_name is nullable on public.users, and "  completed: X" reads as a bug.
-  const closer = input.closerName?.trim() || "The assignee";
+  // Fires only when the closer's users row could not be read at all — display_name is NOT NULL
+  // (shared/src/schema/public/users.ts). "Someone" rather than "The assignee", because
+  // assertTaskCloseAuthority also admits the assigner and any elevated role: naming the closer as the
+  // assignee would state a fact the mail has no basis for.
+  const closer = input.closerName?.trim() || "Someone";
   const verb = RESOLUTION_VERB[input.resolution];
   const when = formatRepliedAt(input.resolvedAt);
   const project = formatLinkedProjectLabel(input.project ?? { kind: "none" });
@@ -544,12 +547,18 @@ export function buildTaskResolutionEmail(input: {
 /**
  * WHO GETS THE OUTCOME MAIL, and the four reasons nobody does.
  *
- * The recipient is `last_assigned_by ?? created_by` — resolveTaskAssignerId, the one definition the
- * awaiting-me bucket and 0240's expression index also use. After a reassignment the creator and the
- * assigner are different people, and the person owed the answer is the one who handed the work over.
+ * The recipient is resolveHumanTaskAssignerId — a reassignment if there was one, otherwise the creator
+ * of a MANUAL task. After a reassignment the creator and the assigner are different people, and the
+ * person owed the answer is the one who handed the work over.
+ *
+ * ⚠️ NOT resolveTaskAssignerId. That one falls back to `created_by` unconditionally, and `created_by`
+ * is a real human on two machine writers (deal reassignment, estimate-revision routing) — so it would
+ * mail a director "the task you assigned was completed" about a task the system raised and they never
+ * typed. See task-assigner.ts.
  *
  * Returns null — silently, this is not an error — when:
- *   1. there is no assigner at all (created_by IS NULL on every rules-engine and AI-disconnect task);
+ *   1. nobody handed it over: an automated task with no reassignment, or a rules-engine task, which
+ *      carries no created_by at all;
  *   2. the assigner is deactivated (this repo deactivates rather than deletes, and mailing a departed
  *      employee is exactly what getTaskLoopDescriptor exists to prevent);
  *   3. the assigner closed it themselves — nobody needs to be told what they just did;
@@ -565,6 +574,8 @@ export async function prepareTaskResolutionEmail(
       dealId?: string | null;
       createdBy: string | null;
       lastAssignedBy: string | null;
+      /** 'manual' | 'automated'. Load-bearing — see resolveHumanTaskAssignerId. */
+      source?: string | null;
     };
     closedBy: string;
     resolution: TaskResolution;
@@ -575,7 +586,7 @@ export async function prepareTaskResolutionEmail(
 ): Promise<PreparedTaskResolutionEmail | null> {
   if (!input.resolutionNote.trim()) return null;
 
-  const assignerId = resolveTaskAssignerId(input.task);
+  const assignerId = resolveHumanTaskAssignerId(input.task);
   if (!assignerId) return null;
   if (assignerId === input.closedBy) return null;
 
@@ -597,7 +608,8 @@ export async function prepareTaskResolutionEmail(
           isActive: users.isActive,
         })
         .from(users)
-        .where(inArray(users.id, Array.from(new Set([assignerId, input.closedBy]))));
+        // Always two DISTINCT ids: the self-close case returned above, so there is nothing to dedupe.
+        .where(inArray(users.id, [assignerId, input.closedBy]));
 
       const assigner = rows.find((row) => row.id === assignerId) ?? null;
       const closer = rows.find((row) => row.id === input.closedBy) ?? null;

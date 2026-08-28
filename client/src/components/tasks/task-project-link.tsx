@@ -40,8 +40,8 @@ function readOfficeIdFromLocation(): string | null {
  * and wants the project alongside it, not instead of it. `rel="noopener noreferrer"` because a bare
  * `_blank` hands the opened page a live `window.opener` handle back into the CRM session.
  *
- * Renders plain text when there is no deal, so a task with no project degrades to exactly what it
- * showed before.
+ * RENDERS NOTHING when the task has no deal. getTaskProjectContext already returns null in that case,
+ * so there is no "plain text" branch to write — an earlier draft had one and it was unreachable.
  */
 export function TaskProjectLink({
   task,
@@ -55,15 +55,12 @@ export function TaskProjectLink({
   className?: string;
   showIcon?: boolean;
 }) {
+  // Null exactly when `dealId` is null, which is why there is no separate no-deal branch below.
   const label = getTaskProjectContext(task as ProjectTask);
-  if (!label) return null;
-
-  if (!task.dealId) {
-    return <span className={cn("truncate", className)}>{label}</span>;
-  }
+  if (!label || !task.dealId) return null;
 
   const href = appendOfficeIdSearch(
-    `/deals/${task.dealId}`,
+    `/deals/${encodeURIComponent(task.dealId)}`,
     officeId === undefined ? readOfficeIdFromLocation() : officeId
   );
 

@@ -460,7 +460,7 @@ describe("TaskListPage project context", () => {
     expect(container.textContent).not.toContain("Edit task dialog");
   });
 
-  it("renders plain text, not a link, for a task with no project", () => {
+  it("renders nothing at all for a task with no project", () => {
     mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
       tasks:
         filters.section === "overdue"
@@ -473,7 +473,46 @@ describe("TaskListPage project context", () => {
 
     renderPage();
 
+    // NOTHING, not fallback text. getTaskProjectContext returns null without a dealId, so there is no
+    // label to render — an earlier draft claimed a plain-text branch that could never be reached, and
+    // an absence-only assertion would have passed against it either way.
     expect(container.querySelector('[data-testid="task-project-link"]')).toBeNull();
+    expect(container.textContent).not.toContain("Project linked");
+  });
+
+  /**
+   * A drag that selects text across the row must not open the editor.
+   *
+   * The row is click-to-edit and its plain cells (priority, due date, assignee) are selectable text.
+   * A selection drag beginning and ending inside them fires `click` on their shared ancestor, where
+   * no interactive-element check can see it — copying a project name would open a dialog.
+   */
+  it("does not open the edit dialog when the click ends a text selection", () => {
+    renderPage();
+
+    const original = window.getSelection;
+    window.getSelection = (() => ({ isCollapsed: false })) as unknown as typeof window.getSelection;
+    try {
+      const row = container.querySelector<HTMLElement>('[data-testid="task-row"]');
+      expect(row).not.toBeNull();
+      act(() => {
+        row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.textContent).not.toContain("Edit task dialog");
+    } finally {
+      window.getSelection = original;
+    }
+  });
+
+  it("still opens the edit dialog on an ordinary click with no selection", () => {
+    renderPage();
+
+    const row = container.querySelector<HTMLElement>('[data-testid="task-row"]');
+    act(() => {
+      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("Edit task dialog");
   });
 
   it("does not expose HS-prefixed identifiers embedded in generated task titles", () => {

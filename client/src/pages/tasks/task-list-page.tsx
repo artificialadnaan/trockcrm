@@ -210,9 +210,9 @@ function TaskRow({
   // link and the linked-record action for that reason — see TaskProjectLink.
   const officeId = new URLSearchParams(search).get("officeId")?.trim() || null;
   const linkedRecordHref = task.dealId
-    ? appendOfficeIdSearch(`/deals/${task.dealId}`, officeId)
+    ? appendOfficeIdSearch(`/deals/${encodeURIComponent(task.dealId)}`, officeId)
     : task.contactId
-      ? appendOfficeIdSearch(`/contacts/${task.contactId}`, officeId)
+      ? appendOfficeIdSearch(`/contacts/${encodeURIComponent(task.contactId)}`, officeId)
       : task.emailId
         ? appendOfficeIdSearch("/email", officeId)
         : null;
@@ -264,12 +264,20 @@ function TaskRow({
    * inside a <button> is invalid HTML and every browser resolves it differently. Moving the handler
    * onto the container is what makes a real link possible while keeping the full-width click target.
    *
-   * The container is deliberately NOT focusable and carries no role: the title button below is the
-   * keyboard affordance, so there is exactly one tab stop per row and nothing is announced twice.
+   * The container is deliberately NOT focusable and carries no role, so it adds no tab stop and is
+   * announced as nothing. The row's focusable elements are its real controls — complete, title,
+   * project link, conversation, snooze, open-linked-record — each of which does something distinct.
    */
   const handleRowClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
-    if (target?.closest("a,button,input,select,textarea,[role='dialog']")) return;
+    // Links and buttons only. The edit and resolution dialogs are SIBLINGS of this row in the tree,
+    // not descendants, so no `[role="dialog"]` event can ever reach here — a selector entry for them
+    // would be a guard that cannot fire. Form controls are listed because a row is a plausible place
+    // to grow one, and the cost of the two extra tokens is nil.
+    if (target?.closest("a,button,input,select,textarea")) return;
+    // A drag that SELECTS text across the row's plain cells ends in a click on their shared ancestor,
+    // which no interactive-element check can catch. Copying a project name should not open an editor.
+    if (!window.getSelection()?.isCollapsed) return;
     openEdit();
   };
 
@@ -347,10 +355,11 @@ function TaskRow({
               onClick={openEdit}
               onKeyDown={(event) => {
                 if (event.key !== "Enter" && event.key !== " ") return;
+                // preventDefault only. Space on a button SCROLLS the page without it, and the suite
+                // drives these rows with synthetic KeyboardEvents that never synthesize a click.
+                // No stopPropagation: the row container listens for `click`, not `keydown`, so there
+                // is nothing above to stop.
                 event.preventDefault();
-                // The row container's click handler already ignores anything that came from a button,
-                // so this cannot double-fire; stopping propagation keeps that true for keydown too.
-                event.stopPropagation();
                 openEdit();
               }}
               className={cn(
@@ -595,15 +604,16 @@ function AssigneeFilter({
   const { assignees, loading } = useTaskAssignees();
   const others = assignees.filter((assignee) => assignee.id !== currentUserId);
 
-  // Base UI resolves the trigger's label from `items`, NOT from the SelectItem children — omit it and
-  // the trigger renders the raw value, which for an assignee is a bare uuid. Built from the same
-  // arrays the items below are rendered from so the two cannot drift.
-  const items = [
+  // NO `items` prop on the Select below, deliberately. Base UI consults it only when SelectValue has
+  // no explicit children (SelectValue.js resolves function -> children -> placeholder -> items), and
+  // this trigger passes children. Adding one would look like the fix the two dialogs needed and do
+  // nothing at all here.
+  const options = [
     { value: currentUserId, label: MY_TASKS_LABEL },
     { value: ALL_ASSIGNEES_VALUE, label: EVERYONE_LABEL },
     ...others.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
   ];
-  const selectedLabel = items.find((item) => item.value === selection)?.label ?? "Selected assignee";
+  const selectedLabel = options.find((option) => option.value === selection)?.label ?? "Selected assignee";
 
   return (
     <div data-testid="assignee-filter" className="flex items-center gap-2">
@@ -611,7 +621,6 @@ function AssigneeFilter({
         Assignee
       </label>
       <Select
-        items={items}
         value={selection}
         onValueChange={(value) => onChange(value || currentUserId)}
         disabled={loading}

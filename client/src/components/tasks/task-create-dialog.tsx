@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -76,6 +76,12 @@ export function TaskCreateDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
+  // Memoized rather than built inline: Base UI's SelectRoot lists `items` in a context useMemo's
+  // dependency array, so a fresh array identity on every render invalidates it for nothing.
+  const assigneeSelectItems = useMemo(
+    () => assignees.map((u) => ({ value: u.id, label: u.displayName })),
+    [assignees]
+  );
   const [deals, setDeals] = useState<DealOption[]>([]);
   const [selectedDeal, setSelectedDeal] = useState<DealOption | null>(null);
   const [dealPickerOpen, setDealPickerOpen] = useState(false);
@@ -268,7 +274,7 @@ export function TaskCreateDialog({
               {/* Same rule: no `items`, and the trigger renders the assignee's raw uuid the moment
                   one is chosen. */}
               <Select
-                items={assignees.map((u) => ({ value: u.id, label: u.displayName }))}
+                items={assigneeSelectItems}
                 value={assignedTo}
                 onValueChange={(v) => setAssignedTo(v ?? "")}
               >

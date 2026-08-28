@@ -183,7 +183,7 @@ async function sendTaskReplyEmailBestEffort(email: PreparedTaskReplyEmail | null
  *
  * The note is read straight off the request body. The service has already validated it by the time we
  * get here (requireTaskResolutionNote — mandatory, trimmed, length-capped, 400 otherwise), so this is
- * a read of a value already known good, not a second validation. An empty one means a system-actor
+ * a read of a value already known good, not a second validation. An empty one would mean an internal
  * close, which is exempt from the note requirement and has nothing to report.
  */
 function terminalResolutionFor(status: unknown): TaskResolution | null {
@@ -199,15 +199,23 @@ async function prepareTaskResolutionEmailBestEffort(
     dealId?: string | null;
     createdBy: string | null;
     lastAssignedBy: string | null;
+    source?: string | null;
     completedAt?: Date | string | null;
   }
 ): Promise<PreparedTaskResolutionEmail | null> {
   const resolution = terminalResolutionFor(task.status);
   if (!resolution) return null;
 
+  // Read, not re-validated. requireTaskResolutionNote has already rejected a missing, non-string or
+  // whitespace-only note with a 400 by the time the service returns, and no HTTP handler can pass a
+  // the internal actor flag that is the only exemption — a route cannot, and a test in
+  // task-close-authority.runtime.test.ts greps this file to keep it that way — so an empty note is
+  // unreachable here. An `if (!note) return`
+  // would therefore be a guard that cannot fire — and the only test able to "prove" it would have to
+  // stub completeTask into resolving on a body the real one rejects. prepareTaskResolutionEmail keeps
+  // the check as its own library contract, where a direct caller CAN reach it and a test can see it.
   const rawNote = req.body?.resolutionNote;
   const resolutionNote = typeof rawNote === "string" ? rawNote.trim() : "";
-  if (!resolutionNote) return null;
 
   try {
     return await prepareTaskResolutionEmail(req.tenantDb!, {
@@ -217,12 +225,16 @@ async function prepareTaskResolutionEmailBestEffort(
         dealId: task.dealId ?? null,
         createdBy: task.createdBy,
         lastAssignedBy: task.lastAssignedBy,
+        // Decides whether anybody is mailed at all — see resolveHumanTaskAssignerId.
+        source: task.source ?? null,
       },
       closedBy: req.user!.id,
       resolution,
       resolutionNote,
       // The row's own close timestamp, not a fresh clock read — the mail should say when the task was
-      // closed, not when the mail happened to be assembled.
+      // closed, not when the mail happened to be assembled. Every terminal path stamps completedAt,
+      // so the fallback is for an UNPARSEABLE value rather than an absent one: a bad timestamp should
+      // cost the reader a slightly-off "when", not the whole message.
       resolvedAt: toIsoTimestamp(task.completedAt) ?? new Date().toISOString(),
       // The office the task lives in. Without it the deep link resolves against the READER's own
       // office and 404s for a cross-office recipient — see notifications.ts taskUrl.
@@ -732,8 +744,9 @@ router.post("/:id/complete", async (req, res, next) => {
 
     await req.commitTransaction!();
 
-    await sendTaskResolutionEmailBestEffort(resolutionEmail);
-
+    // BEFORE the mail send, not after. The send is an outbound HTTPS round-trip to Resend; leaving it
+    // in front of this would delay every other connected client's live task-completed update by the
+    // length of that call, for no gain — the two are independent.
     // Best-effort local emit for SSE push (already persisted via outbox above)
     try {
       eventBus.emitLocal({
@@ -746,6 +759,8 @@ router.post("/:id/complete", async (req, res, next) => {
     } catch (eventErr) {
       console.error("[Tasks] Failed to emit task.completed event:", eventErr);
     }
+
+    await sendTaskResolutionEmailBestEffort(resolutionEmail);
 
     res.json({ task });
   } catch (err) {
