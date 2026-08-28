@@ -491,6 +491,39 @@ export function capRfpRequestBody(
   return next;
 }
 
+/**
+ * Re-resolves the identity uuids on a body read back out of job_queue, from the deal as it stands now.
+ *
+ * The gap capRfpRequestBody deliberately preserves is the right call for display fields and the WRONG
+ * one for identity: a job enqueued before these ids shipped has no `companyId`/`propertyId` key at all,
+ * and the shallow spread carries that absence straight into the re-enqueued body. Downstream a missing
+ * uuid is not "resolve it another way", it is a terminal skip — so the retry would silently never hand
+ * off, or fall back to the name/address matching these ids exist to retire.
+ *
+ * The deal's own columns are the authority, and a safe one: both are immutable once established (see
+ * assertDealUpdateLineagePolicy — neither can be cleared or repointed), so re-reading them can only
+ * FILL a gap, never disagree with the original enqueue.
+ * Must run BEFORE capRfpRequestBody so the limiter counts these bytes; they are not sacrificial, so the
+ * cap will never drop them again.
+ */
+export function withRfpRequestBodyIdentity(
+  body: NormalizedRfpRequestBody,
+  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId">
+): NormalizedRfpRequestBody {
+  // Same tolerance for a partial stored record as capRfpRequestBody, and the same cleanString the
+  // builder uses — so a retried body states an absent id exactly the way a first-attempt body does
+  // (an explicit null, never an omitted key).
+  const storedDeal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
+  return {
+    ...body,
+    deal: {
+      ...storedDeal,
+      companyId: cleanString(deal.companyId),
+      propertyId: cleanString(deal.propertyId),
+    },
+  };
+}
+
 export function buildNormalizedRfpRequestBody(input: {
   deal: RfpPayloadSourceDeal;
   sourceEventId: string;
