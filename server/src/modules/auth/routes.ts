@@ -9,7 +9,6 @@ import {
   getUserByEmail,
   getUserById,
   getUserOnboardingGateStatus,
-  userHasPendingTaskAssignments,
   signJwt,
 } from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
@@ -199,42 +198,14 @@ function graphOAuthExchangeErrorRedirect(error: unknown) {
 
 async function withOnboardingGate<T extends { id: string; email: string; officeId: string; activeOfficeId?: string; role: string }>(user: T) {
   const officeId = user.activeOfficeId ?? user.officeId;
-  // Run alongside the gate rather than after it. This builder is on the critical path of every page
-  // boot (/auth/me calls it), so the added F6 lookup costs latency only if it is serialised behind the
-  // gate's own queries — and allSettled keeps it strictly optional: a failed lookup means "no modal",
-  // never a failed sign-in. Somebody who cannot log in because a task query timed out is a far worse
-  // outcome than somebody who misses one popup.
-  const [gateResult, pendingTasksResult] = await Promise.allSettled([
-    getUserOnboardingGateStatus({
-      userId: user.id,
-      officeId,
-      role: user.role,
-    }),
-    // Wrapped in an async thunk rather than called directly into the array. A direct call that throws
-    // SYNCHRONOUSLY — the function is missing, an argument is malformed — throws while the array is
-    // still being built, before allSettled ever sees it, and takes the whole login down with a 500.
-    // That is the precise failure this arrangement exists to make impossible, so the sync path has to
-    // be inside the boundary too.
-    (async () => userHasPendingTaskAssignments({ userId: user.id, officeId }))(),
-  ]);
-
-  if (gateResult.status === "rejected") throw gateResult.reason;
-  const gate = gateResult.value;
+  const gate = await getUserOnboardingGateStatus({
+    userId: user.id,
+    officeId,
+    role: user.role,
+  });
 
   return {
     ...user,
-    /**
-     * F6 — does this person have an assignment they have not been shown yet? The client opens the
-     * new-assignment modal on it.
-     *
-     * It rides HERE, in the shared builder, rather than on /auth/me alone: localLogin sets `user` in
-     * place from the login response and never refetches /auth/me, and a newly provisioned person is
-     * held on <ForcePasswordChangeScreen/> until /local/change-password answers — so for the exact
-     * population this feature was written for, that response is the only user object their app ever
-     * receives. One insertion point covers all five paths.
-     */
-    hasPendingTaskAssignments:
-      pendingTasksResult.status === "fulfilled" ? pendingTasksResult.value : false,
     onboardingCompletedAt: gate.onboardingCompletedAt,
     onboardingPendingCount: gate.onboardingPendingCount,
     requiresOnboarding: gate.requiresOnboarding,

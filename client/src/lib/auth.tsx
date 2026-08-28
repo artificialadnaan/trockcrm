@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import type { ReactNode } from "react";
 import { api, clearCsrfTokenOverride } from "./api";
-import { clearTaskAssignmentModalShownTasks } from "./task-assignment-modal-shown";
+import { clearTaskAssignmentModalSessionState } from "./task-assignment-modal-shown";
 
 type Role = "admin" | "director" | "sales_manager" | "rep" | "construction";
 
@@ -44,16 +44,6 @@ interface User {
    * same allowlist, so treating a missing flag as "no" only hides an action that would have 403'd.
    */
   canMoveDealBackToOpportunity?: boolean;
-  /**
-   * True iff this person has a task assignment the new-assignment modal has not shown them yet (or an
-   * urgent/high/overdue one that re-shows until it leaves `pending`). Drives <TaskAssignmentModal/>.
-   *
-   * It rides EVERY auth response — dev login, local login, mobile login, /auth/me and, critically,
-   * /local/change-password — because `localLogin` sets `user` in place and never refetches /auth/me,
-   * and a newly provisioned person is held on the force-password-change screen until that last one
-   * answers. A flag present only on /auth/me is invisible on the login it is about.
-   */
-  hasPendingTaskAssignments?: boolean;
 }
 
 interface AuthContextValue {
@@ -91,7 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // the modal can consume its in-memory reset token. Leaving the previous shown-set in sessionStorage
     // would make that full-page navigation recreate it and suppress the first modal of the new login.
     // fetchUser()/refreshUser() never call this: restoring a cookie on F5 is not another login.
-    clearTaskAssignmentModalShownTasks(userId);
+    clearTaskAssignmentModalSessionState(userId);
     setAssignmentModalSession((current) => ({ token: current.token + 1, resetPending: true }));
   }, []);
 

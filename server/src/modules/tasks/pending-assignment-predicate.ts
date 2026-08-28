@@ -4,19 +4,13 @@ import { tasks } from "@trock-crm/shared/schema";
 /**
  * "Which assignments should the login modal put in front of this person right now?"
  *
- * ONE definition, TWO callers, and the duplication this avoids is not cosmetic. The modal's list comes
- * from the tenant-scoped tasks service; the `hasPendingTaskAssignments` boolean on every auth response
- * comes from `auth/service.ts`, which is mounted BEFORE the tenant router and therefore has no
- * `tenantDb` at all (it reaches the office schema by name, the way getUserOnboardingGateStatus does).
- * Two hand-written copies of this predicate would drift the moment either side changed, and the drift is
- * silent in both directions: a flag that is broader than the list opens an EMPTY modal, and a flag that
- * is narrower than the list means the modal never fires for exactly the tasks the repeat rule exists to
- * re-surface. So both sides import this.
+ * This is the tenant-scoped source of truth for the reminder list. Keeping its eligibility rules in one
+ * place prevents the rows the modal labels as new from drifting away from the rows the service returns.
  *
  * THE TABLE IS REFERENCED UNALIASED ON PURPOSE. `taskPriorityRankSql()` in service.ts renders Drizzle
  * column refs as `"tasks"."priority"`, so the caller's FROM clause must leave the relation named
  * `tasks`. That still works schema-qualified -- `FROM office_atlanta.tasks` exposes its columns as
- * `tasks.*` -- which is what lets the auth side share this fragment verbatim.
+ * `tasks.*`.
  */
 export type PendingAssignmentPredicateOptions = {
   /** The person the modal is for. Always the authenticated caller; never taken from a payload. */
@@ -39,8 +33,8 @@ const SCHEMA_NAME = /^office_[a-z][a-z0-9_]*$/;
 /**
  * Priorities that re-show on every login until the task leaves `pending`.
  *
- * Held as a constant so the modal, the flag and the tests all read the same list, and so mutating it is
- * a single edit that a test can be pointed at.
+ * Held as a constant so the modal, the service and the tests all read the same list, and so mutating it
+ * is a single edit that a test can be pointed at.
  */
 export const REPEATING_TASK_PRIORITIES = ["urgent", "high"] as const;
 
@@ -79,10 +73,9 @@ function assertSchemaName(schema: string | undefined) {
 /**
  * "This person has never been shown this task."
  *
- * ONE definition, used in three places that must agree: the eligibility predicate below, the `is_new`
- * column the modal groups by, and the ORDER BY that keeps unseen work ahead of repeats. If the flag the
- * UI labels a row with could ever disagree with the predicate that selected it, the modal would file a
- * row under "New" that it was only returning as a reminder.
+ * ONE definition, used in the eligibility predicate below, the `is_new` column the modal groups by,
+ * and the ORDER BY that keeps unseen work ahead of repeats. If the UI label could ever disagree with
+ * the predicate that selected a row, the modal would file a reminder under "New".
  *
  * AN ACK ANSWERS ONE ASSIGNMENT, NOT A TASK FOREVER. The row is keyed (task, user) and so cannot say
  * WHICH assignment it answered; `acknowledged_at >= assigned_at` supplies the missing half. Without it,
