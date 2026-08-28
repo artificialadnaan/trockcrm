@@ -115,6 +115,9 @@ function baseInput(overrides: Partial<IngestGlassesWalkthroughInput> = {}): Inge
     userId: USER,
     officeSlug: "dallas",
     officeId: null,
+    // Null by default: the client stating no job type is the shape every walk filed to date has, so
+    // that is what the unmodified fixture must exercise.
+    jobType: null,
     artifacts: [
       {
         idempotencyKey: "artifact-1",
@@ -660,6 +663,33 @@ const domainEvents = () =>
 // project folder, and the `job_queue` row says a forward is scheduled — neither answers "which glasses
 // walks does this deal have, and which TROCK Scope walkthrough did each become".
 describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () => {
+  it("stores the job type the client stated, and puts it on the forward job's payload", async () => {
+    // Two writes, one fact. The read-model column is what a reader of the CRM sees; the payload copy is
+    // what actually reaches TROCK Scope. They are written in different statements, so a change that
+    // updates one and not the other looks correct on the deal page and grades against the wrong catalog.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBe("roofing_envelope");
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
+  });
+
+  it("leaves the job type NULL when nobody stated one", async () => {
+    // The shape of every walk filed to date. NULL has to reach the forward job so it can omit the field
+    // and let TROCK Scope apply its own default, which is what makes this change a no-op on ingest.
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBeNull();
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
   it("writes ONE row carrying the deal, the walk, the capture time and the capturing user", async () => {
     await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
 

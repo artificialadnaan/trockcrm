@@ -172,6 +172,39 @@ const MAX_SITE_LABEL_CHARS = 300;
 const MAX_FILENAME_CHARS = 500; // files.original_filename / files.display_name are varchar(500)
 const MAX_WALK_ID_CHARS = 100;
 
+/**
+ * The work-type catalogs TROCK Scope can grade a walk against.
+ *
+ * A LOCAL COPY of `JOB_TYPES` (trock-scope, shared/src/schema/enums.ts), because that repo is not a
+ * dependency of this one. Validated here so a bad value is a 400 to the caller who can still fix it,
+ * rather than a 422 discovered three hops later inside a retrying background job — where the walk is
+ * already filed, the bytes are already in R2, and the only symptom is a deal panel stuck on
+ * "processing" with the reason buried in a dead letter.
+ *
+ * Adding a value here without TROCK Scope having it is the harmless direction (that end refuses it);
+ * the reverse just means a new type cannot be sent yet. `job_type` deliberately carries no CHECK, so
+ * this list and TROCK Scope's own validation are the only two gates — see migration 0243.
+ */
+const GLASSES_WALKTHROUGH_JOB_TYPES = [
+  "interior_finish_out",
+  "roofing_envelope",
+  "commercial_ti",
+  "service_repair",
+] as const;
+const MAX_JOB_TYPE_CHARS = 40;
+
+function assertOptionalJobType(value: unknown, field: string): string | null {
+  const jobType = assertOptionalString(value, field, MAX_JOB_TYPE_CHARS);
+  if (jobType === null) return null;
+  if (!(GLASSES_WALKTHROUGH_JOB_TYPES as readonly string[]).includes(jobType)) {
+    throw new AppError(
+      400,
+      `${field} must be one of: ${GLASSES_WALKTHROUGH_JOB_TYPES.join(", ")}.`
+    );
+  }
+  return jobType;
+}
+
 const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -550,6 +583,14 @@ export interface IngestGlassesWalkthroughInput {
   userId: string;
   officeSlug: string;
   officeId: string | null;
+  /**
+   * Which catalog TROCK Scope should grade this walk against, or null when the client did not say.
+   *
+   * Null is carried all the way through rather than defaulted here: the forward job omits the field
+   * entirely, and TROCK Scope applies its own default. Choosing one at this end would put a guess in
+   * a column a reader would take for a statement.
+   */
+  jobType: string | null;
   artifacts: GlassesWalkthroughArtifactInput[];
 }
 
@@ -648,6 +689,7 @@ export function validateGlassesWalkthroughCompleteInput(raw: Record<string, unkn
     userId: assertNonEmptyString(raw.userId, "userId", 100),
     officeSlug: assertNonEmptyString(raw.officeSlug, "officeSlug", 100),
     officeId: assertOptionalString(raw.officeId, "officeId", 100),
+    jobType: assertOptionalJobType(raw.jobType, "jobType"),
     artifacts,
   };
 }
@@ -1546,6 +1588,7 @@ async function recordGlassesWalkthrough(
       // a bare `Date.parse` check was not enough.
       capturedAt: new Date(input.capturedAt),
       capturedByUserId: input.userId,
+      jobType: input.jobType,
     })
     .onConflictDoNothing({ target: [glassesWalkthroughs.dealId, glassesWalkthroughs.walkId] });
 }
@@ -1870,6 +1913,9 @@ export async function ingestGlassesWalkthrough(
     capturedAt: input.capturedAt,
     capturedByUserId: input.userId,
     officeSlug: input.officeSlug,
+    // Absent when the client did not state one. The forward job omits it from its create call in that
+    // case, so TROCK Scope applies the same default it applies for every walk filed to date.
+    jobType: input.jobType,
     // The DEAD row's artifacts are inherited too, not just this call's list — the same union the live
     // branch above applies, for the same reason, and leaving it off here was an asymmetry with a real
     // casualty. A recovered manifest is assembled from a directory scan and can legitimately OMIT an

@@ -234,6 +234,44 @@ describe("handleGlassesWalkthroughForward", () => {
     expect(JSON.parse(completeCall!.init.body)).toEqual({ parts: [{ partNumber: 1, etag: '"etag-1"' }] });
   });
 
+  it("sends the walk's job type, so TROCK Scope grades it against the right catalog", async () => {
+    const db = makeDb();
+    const { fetchImpl, calls } = makeScopeFetch();
+
+    await handleGlassesWalkthroughForward(makePayload({ jobType: "roofing_envelope" }), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      baseUrl: "https://scope.example.com",
+      token: "shared-token",
+      downloadRange: makeDownloadRange(),
+    });
+
+    expect(JSON.parse(calls[0]!.init.body).jobType).toBe("roofing_envelope");
+  });
+
+  it("OMITS the job type when nobody stated one, rather than sending a default", async () => {
+    /**
+     * The field's absence is the signal. Sending an explicit `interior_finish_out` would be
+     * indistinguishable at the far end from a walker who chose it, and TROCK Scope records what it was
+     * told. Omitting lets that side apply its own default and keeps "nobody said" a fact.
+     *
+     * It also covers the queue rows enqueued before this field existed, which are still deliverable and
+     * carry no job type at all.
+     */
+    const db = makeDb();
+    const { fetchImpl, calls } = makeScopeFetch();
+
+    await handleGlassesWalkthroughForward(makePayload(), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      baseUrl: "https://scope.example.com",
+      token: "shared-token",
+      downloadRange: makeDownloadRange(),
+    });
+
+    expect(JSON.parse(calls[0]!.init.body)).not.toHaveProperty("jobType");
+  });
+
   it("reuses a checkpointed scopeWalkthroughId instead of creating a second remote walkthrough", async () => {
     const db = makeDb();
     const { fetchImpl, calls } = makeScopeFetch();

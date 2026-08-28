@@ -144,6 +144,14 @@ interface JobPayload {
   capturedAt: string;
   capturedByUserId: string;
   officeSlug: string;
+  /**
+   * Which work-type catalog TROCK Scope should grade this walk against, when the client stated one.
+   *
+   * Optional on the wire as well as in the type: payloads enqueued before 0243 do not carry it, and
+   * those rows are still in the queue. Absent ⇒ the create call omits the field ⇒ TROCK Scope applies
+   * its own default, which is what every walk to date has had.
+   */
+  jobType?: string | null;
   artifacts: JobArtifact[];
   /** The checkpoint: set once TROCK Scope's walkthrough has actually been created, so a retry of this
    *  same job row reuses it instead of creating a second one. */
@@ -384,6 +392,16 @@ async function createScopeWalkthrough(
       dealUuid: payload.dealId,
       officeSlug: payload.officeSlug,
       capturedBy: payload.capturedByUserId,
+      /**
+       * OMITTED rather than defaulted when nobody stated one.
+       *
+       * Sending an explicit `interior_finish_out` here would be indistinguishable, at the far end, from
+       * a walker who chose it — and TROCK Scope records what it was told. Leaving the field out lets
+       * that side apply its own default and keeps "nobody said" as a fact rather than a guess. It also
+       * means a queue row enqueued before 0243, which carries no job type at all, forwards exactly as it
+       * would have before this existed.
+       */
+      ...(payload.jobType ? { jobType: payload.jobType } : {}),
       // The dedupe key TROCK Scope actually deduplicates on — not a hint. A repeat create under this ref
       // returns the walkthrough it already has, `dealUuid` and all, so this field decides which remote
       // walkthrough this delivery's clips land in. `dealUuid` above does NOT: it is stored, never matched.

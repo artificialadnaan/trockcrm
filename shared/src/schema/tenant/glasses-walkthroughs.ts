@@ -42,6 +42,18 @@ export const glassesWalkthroughs = pgTable(
      * somebody paid for nor be blocked by it.
      */
     capturedByUserId: uuid("captured_by_user_id"),
+    /**
+     * Which TROCK Scope work-type catalog this walk should be graded against.
+     *
+     * NULL is a real answer and the safe one: it means nobody stated a type, and the forward job then
+     * OMITS the field from its create call rather than inventing a value, so TROCK Scope applies exactly
+     * the default it applies today. Every historical row is NULL, and every walk from a client that does
+     * not yet send one stays NULL — which is why shipping this changes nothing about ingest.
+     *
+     * The authoritative vocabulary is `JOB_TYPES` in the trock-scope repo, validated at the ingest route
+     * and again by TROCK Scope. Migration 0243 owns the DDL and explains why there is no CHECK here.
+     */
+    jobType: varchar("job_type", { length: 40 }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
