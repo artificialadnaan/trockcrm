@@ -15,11 +15,14 @@ import {
 } from "../../src/migrations/weekly-report-delivery-recorded-at.js";
 
 const MIGRATION = "0242_weekly_report_delivery_recorded_at";
-const COLUMN = "send_delivery_status_recorded_at";
-const CHECK = "weekly_reports_send_delivery_recorded_pair_check";
+const ACCEPTANCE_COLUMN = "send_acceptance_recorded_at";
+const VERDICT_COLUMN = "send_delivery_status_recorded_at";
+const ACCEPTANCE_CHECK = "weekly_reports_send_acceptance_recorded_pair_check";
+const VERDICT_CHECK = "weekly_reports_send_delivery_recorded_pair_check";
 const TRIGGERS = [
+  "weekly_reports_delivery_boundary_acceptance_update_stmt",
   "weekly_reports_delivery_boundary_insert_stmt",
-  "weekly_reports_delivery_boundary_update_stmt",
+  "weekly_reports_delivery_boundary_verdict_update_stmt",
   "weekly_reports_delivery_recorded_row",
 ] as const;
 
@@ -54,6 +57,11 @@ async function applyMigration(): Promise<void> {
 
 async function seedOffice(schema: string): Promise<void> {
   await pg.exec(`
+    CREATE TABLE IF NOT EXISTS public.offices (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      name text NOT NULL,
+      slug text NOT NULL UNIQUE
+    );
     CREATE SCHEMA IF NOT EXISTS ${schema};
     CREATE TABLE ${schema}.weekly_reports (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -65,11 +73,11 @@ async function seedOffice(schema: string): Promise<void> {
   `);
 }
 
-async function columnType(schema: string): Promise<string | null> {
+async function columnType(schema: string, column: string): Promise<string | null> {
   const result = await pg.query<{ data_type: string }>(
     `SELECT data_type FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = 'weekly_reports' AND column_name = $2`,
-    [schema, COLUMN],
+    [schema, column],
   );
   return result.rows[0]?.data_type ?? null;
 }
@@ -103,35 +111,52 @@ afterEach(async () => {
 });
 
 describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => {
-  it("adds and backfills the paired receipt clock in every existing office", async () => {
+  it("adds and backfills both paired receipt clocks in every existing office", async () => {
     await seedOffice("office_dallas");
     await seedOffice("office_atlanta");
     for (const schema of ["office_dallas", "office_atlanta"]) {
       await pg.exec(
         `INSERT INTO ${schema}.weekly_reports
-           (send_delivery_status, send_delivery_status_at, send_delivery_detail)
-         VALUES ('bounced', '2026-08-01T00:00:00Z', '{"source":"old image"}')`,
+           (send_delivered_at, send_delivery_status, send_delivery_status_at, send_delivery_detail)
+         VALUES ('2026-07-31T23:00:00Z', 'bounced', '2026-08-01T00:00:00Z',
+                 '{"source":"old image"}')`,
       );
     }
 
     await applyMigration();
 
     for (const schema of ["office_dallas", "office_atlanta"]) {
-      expect(await columnType(schema)).toBe("timestamp with time zone");
+      expect(await columnType(schema, ACCEPTANCE_COLUMN)).toBe("timestamp with time zone");
+      expect(await columnType(schema, VERDICT_COLUMN)).toBe("timestamp with time zone");
       expect(await triggerNames(schema)).toEqual([...TRIGGERS].sort());
-      const row = await pg.query<{ recorded_at: Date | string | null }>(
-        `SELECT send_delivery_status_recorded_at AS recorded_at FROM ${schema}.weekly_reports`,
+      const row = await pg.query<{
+        acceptance_recorded_at: Date | string | null;
+        verdict_recorded_at: Date | string | null;
+      }>(
+        `SELECT send_acceptance_recorded_at AS acceptance_recorded_at,
+                send_delivery_status_recorded_at AS verdict_recorded_at
+           FROM ${schema}.weekly_reports`,
       );
-      expect(row.rows[0]?.recorded_at).not.toBeNull();
+      expect(row.rows[0]?.acceptance_recorded_at).not.toBeNull();
+      expect(row.rows[0]?.verdict_recorded_at).not.toBeNull();
       const constraint = await pg.query<{ validated: boolean }>(
         `SELECT c.convalidated AS validated
            FROM pg_constraint c
            JOIN pg_class t ON t.oid = c.conrelid
            JOIN pg_namespace n ON n.oid = t.relnamespace
           WHERE n.nspname = $1 AND t.relname = 'weekly_reports' AND c.conname = $2`,
-        [schema, CHECK],
+        [schema, ACCEPTANCE_CHECK],
       );
       expect(constraint.rows).toEqual([{ validated: true }]);
+      const verdictConstraint = await pg.query<{ validated: boolean }>(
+        `SELECT c.convalidated AS validated
+           FROM pg_constraint c
+           JOIN pg_class t ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = $1 AND t.relname = 'weekly_reports' AND c.conname = $2`,
+        [schema, VERDICT_CHECK],
+      );
+      expect(verdictConstraint.rows).toEqual([{ validated: true }]);
     }
   });
 
@@ -187,7 +212,8 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
     await seedOffice("office_houston");
     await pg.exec(tenantBlock("office_houston"));
 
-    expect(await columnType("office_houston")).toBe("timestamp with time zone");
+    expect(await columnType("office_houston", ACCEPTANCE_COLUMN)).toBe("timestamp with time zone");
+    expect(await columnType("office_houston", VERDICT_COLUMN)).toBe("timestamp with time zone");
     expect(await triggerNames("office_houston")).toEqual([...TRIGGERS].sort());
     await pg.exec(
       `INSERT INTO office_houston.weekly_reports (send_delivery_status)
@@ -221,7 +247,7 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
     ).rejects.toThrow(/weekly_reports_send_delivery_recorded_pair_check/);
   });
 
-  it("owns the provider-acceptance clock after the statement boundary", async () => {
+  it("owns the live acceptance clocks and stamps historical imports after their publication boundary", async () => {
     await seedOffice("office_dallas");
     await applyMigration();
     const definitions = await pg.query<{ tgname: string; definition: string }>(
@@ -232,7 +258,7 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
         WHERE n.nspname = 'office_dallas'
           AND t.relname = 'weekly_reports'
           AND tg.tgname IN (
-            'weekly_reports_delivery_boundary_update_stmt',
+            'weekly_reports_delivery_boundary_acceptance_update_stmt',
             'weekly_reports_delivery_recorded_row'
           )`,
     );
@@ -240,7 +266,7 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
       expect(trigger.definition).toContain("send_delivered_at");
     }
     expect(definitions.rows.map((row) => row.tgname).sort()).toEqual([
-      "weekly_reports_delivery_boundary_update_stmt",
+      "weekly_reports_delivery_boundary_acceptance_update_stmt",
       "weekly_reports_delivery_recorded_row",
     ]);
     const inserted = await pg.query<{ id: string }>(
@@ -256,13 +282,17 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
         WHERE id = $1::uuid`,
       [inserted.rows[0]!.id, workerTransactionStartedAt],
     );
-    const accepted = await pg.query<{ accepted_at: Date | string }>(
-      `SELECT send_delivered_at AS accepted_at
+    const accepted = await pg.query<{ accepted_at: Date | string; recorded_at: Date | string }>(
+      `SELECT send_delivered_at AS accepted_at,
+              send_acceptance_recorded_at AS recorded_at
          FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
       [inserted.rows[0]!.id],
     );
     expect(new Date(accepted.rows[0]!.accepted_at).toISOString()).not.toBe(
       workerTransactionStartedAt,
+    );
+    expect(new Date(accepted.rows[0]!.recorded_at).toISOString()).toBe(
+      new Date(accepted.rows[0]!.accepted_at).toISOString(),
     );
 
     // Once published, an unrelated/incorrect timestamp edit cannot move the row across an issued walk.
@@ -280,18 +310,107 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
     expect(new Date(preserved.rows[0]!.accepted_at).toISOString()).toBe(
       new Date(accepted.rows[0]!.accepted_at).toISOString(),
     );
+
+    const beforeImport = await pg.query<{ boundary: string }>(
+      `SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC',
+                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS boundary`,
+    );
+    await pg.exec("SELECT pg_sleep(0.005)");
+    const imported = await pg.query<{
+      accepted_at: Date | string;
+      recorded_at: Date | string;
+    }>(
+      `INSERT INTO office_dallas.weekly_reports (send_delivered_at)
+       VALUES ('2001-02-03T04:05:06Z'::timestamptz)
+       RETURNING send_delivered_at AS accepted_at,
+                 send_acceptance_recorded_at AS recorded_at`,
+    );
+    expect(new Date(imported.rows[0]!.accepted_at).toISOString()).toBe(
+      "2001-02-03T04:05:06.000Z",
+    );
+    expect(new Date(imported.rows[0]!.recorded_at).getTime()).toBeGreaterThan(
+      Date.parse(beforeImport.rows[0]!.boundary),
+    );
   });
 
-  it("wires 0242 through the per-office runner before recording its ledger", () => {
+  it("uses a retryable verdict lock so old row-first webhooks cannot deadlock boundary-first writers", async () => {
+    await seedOffice("office_dallas");
+    await applyMigration();
+    const definitions = await pg.query<{ tgname: string; definition: string }>(
+      `SELECT tg.tgname, pg_get_triggerdef(tg.oid) AS definition
+         FROM pg_trigger tg
+         JOIN pg_class t ON t.oid = tg.tgrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'office_dallas'
+          AND t.relname = 'weekly_reports'
+          AND tg.tgname LIKE 'weekly_reports_delivery_boundary_%_update_stmt'
+        ORDER BY tg.tgname`,
+    );
+    expect(definitions.rows).toEqual([
+      expect.objectContaining({
+        tgname: "weekly_reports_delivery_boundary_acceptance_update_stmt",
+        definition: expect.stringContaining("weekly_report_delivery_boundary_lock_v1"),
+      }),
+      expect.objectContaining({
+        tgname: "weekly_reports_delivery_boundary_verdict_update_stmt",
+        definition: expect.stringContaining("weekly_report_delivery_boundary_try_lock_v1"),
+      }),
+    ]);
+    expect(migrationSql(MIGRATION)).toContain("USING ERRCODE = '40001'");
+  });
+
+  it("repairs an office committed by an old provisioner after the existing-office scan began", async () => {
+    await seedOffice("office_dallas");
+    await applyMigration();
+
+    await pg.exec(`
+      BEGIN;
+      INSERT INTO public.offices (name, slug) VALUES ('Houston', 'houston');
+      CREATE SCHEMA office_houston;
+      CREATE TABLE office_houston.weekly_reports (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        send_delivered_at timestamptz,
+        send_delivery_status text,
+        send_delivery_status_at timestamptz,
+        send_delivery_detail jsonb
+      );
+      COMMIT;
+    `);
+
+    expect(await columnType("office_houston", ACCEPTANCE_COLUMN)).toBe("timestamp with time zone");
+    expect(await columnType("office_houston", VERDICT_COLUMN)).toBe("timestamp with time zone");
+    expect(await triggerNames("office_houston")).toEqual([...TRIGGERS].sort());
+  });
+
+  it("serializes 0242's per-office commits through its ledger write", () => {
     const branch = runnerSource.indexOf(
       "file === WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION",
     );
+    const wrapper = runnerSource.indexOf(
+      "async function runWeeklyReportDeliveryRecordedAtMigrationUnderLock",
+    );
+    const lock = runnerSource.indexOf(
+      "WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION_LOCK",
+      wrapper,
+    );
+    const recheck = runnerSource.indexOf(
+      '"SELECT id FROM public._migrations WHERE name = $1"',
+      lock,
+    );
     const run = runnerSource.indexOf(
       "await runWeeklyReportDeliveryRecordedAtMigration(client, sql)",
-      branch,
+      recheck,
     );
     const ledger = runnerSource.indexOf(
       '"INSERT INTO public._migrations (name) VALUES ($1)"',
+      run,
+    );
+    const unlock = runnerSource.indexOf(
+      "pg_advisory_unlock",
+      ledger,
+    );
+    const wrapperCall = runnerSource.indexOf(
+      "runWeeklyReportDeliveryRecordedAtMigrationUnderLock(client, file)",
       branch,
     );
     const sql = migrationSql(MIGRATION);
@@ -301,8 +420,13 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
       "0242_weekly_report_delivery_recorded_at.sql",
     );
     expect(branch).toBeGreaterThan(-1);
-    expect(run).toBeGreaterThan(branch);
+    expect(wrapper).toBeGreaterThan(-1);
+    expect(lock).toBeGreaterThan(wrapper);
+    expect(recheck).toBeGreaterThan(lock);
+    expect(run).toBeGreaterThan(recheck);
     expect(ledger).toBeGreaterThan(run);
+    expect(unlock).toBeGreaterThan(ledger);
+    expect(wrapperCall).toBeGreaterThan(branch);
     expect(existingTenantSection).not.toContain("DO $tenant$");
     expect(existingTenantSection).not.toContain("UPDATE office_");
   });
@@ -331,8 +455,8 @@ describe("migration 0242 — CRM receipt boundary for delivery verdicts", () => 
         (statement) =>
           statement === "BEGIN" ||
           statement === "COMMIT" ||
-          statement.includes("ALTER TABLE office_atlanta.weekly_reports") ||
-          statement.includes("ALTER TABLE office_dallas.weekly_reports"),
+          statement.includes("install_weekly_report_delivery_boundary_v1('office_atlanta')") ||
+          statement.includes("install_weekly_report_delivery_boundary_v1('office_dallas')"),
       )
       .map((statement) => {
         if (statement === "BEGIN" || statement === "COMMIT") return statement;

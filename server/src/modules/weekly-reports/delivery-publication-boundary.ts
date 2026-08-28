@@ -20,18 +20,21 @@ export async function lockCoreWeeklyReportDeliveryBoundary(
   );
 }
 
-/** Capture an ISO boundary after all webhook writers that arrived first have committed. */
+/** Capture a full-precision UTC boundary after all publication writers that arrived first committed. */
 export async function captureCoreWeeklyReportDeliveryBoundary(
   client: QueryExecutor,
 ): Promise<string> {
   await lockCoreWeeklyReportDeliveryBoundary(client);
   const result = await client.query(
-    "SELECT clock_timestamp() AS captured_at",
+    `SELECT to_char(
+              clock_timestamp() AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+            ) AS captured_at`,
   );
   const value = result.rows[0]?.captured_at;
-  const parsed = value instanceof Date ? value : new Date(String(value));
-  if (!Number.isFinite(parsed.getTime())) {
+  if (typeof value !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)) {
     throw new Error("Weekly-report delivery boundary clock is unavailable");
   }
-  return parsed.toISOString();
+  return value;
 }

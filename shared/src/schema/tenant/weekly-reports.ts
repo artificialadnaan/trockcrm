@@ -220,6 +220,12 @@ export const weeklyReports = pgTable(
      *  a mail server, and a report that claims delivery the instant a button was clicked hides the
      *  failure this feature exists to surface. */
     sendDeliveredAt: timestamp("send_delivered_at", { withTimezone: true }),
+    /** Migration 0242. When CRM published the acceptance into client history. This differs from the
+     *  provider acceptance clock above for historical imports, whose original timestamp is preserved
+     *  while their receipt into CRM must remain outside any pagination walk already in progress. */
+    sendAcceptanceRecordedAt: timestamp("send_acceptance_recorded_at", {
+      withTimezone: true,
+    }),
     /** Migration 0226. `sendAttempts` alone cannot tell "failed twice an hour ago and gave up" from
      *  "failed twice in the last minute and is still retrying". */
     sendLastAttemptAt: timestamp("send_last_attempt_at", { withTimezone: true }),
@@ -274,6 +280,10 @@ export const weeklyReports = pgTable(
     check(
       "weekly_reports_send_delivery_status_check",
       sql`${table.sendDeliveryStatus} is null or ${table.sendDeliveryStatus} in ('delayed', 'delivered', 'complained', 'failed', 'bounced')`,
+    ),
+    check(
+      "weekly_reports_send_acceptance_recorded_pair_check",
+      sql`(${table.sendDeliveredAt} is null) = (${table.sendAcceptanceRecordedAt} is null)`,
     ),
     check(
       "weekly_reports_send_delivery_recorded_pair_check",

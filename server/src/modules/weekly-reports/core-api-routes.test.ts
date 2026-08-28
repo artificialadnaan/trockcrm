@@ -708,7 +708,7 @@ describe("Core weekly-report HTTP operation isolation and DTOs", () => {
   });
 
   it("issues an immediately usable cursor when the database clock is ahead of the API clock", async () => {
-    const databaseAsOf = new Date(NOW_MS + 10_000).toISOString();
+    const databaseAsOf = "2026-08-27T20:00:10.123456Z";
     const firstHarness = createHarness({
       captureDeliveryBoundary: vi.fn(async () => databaseAsOf),
       listReports: vi.fn(async (): Promise<CoreWeeklyReportListResult> => ({

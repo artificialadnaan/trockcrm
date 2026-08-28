@@ -159,6 +159,9 @@ export async function applyWeeklyReportDeliveryEvent(
   // Linearize provider-webhook receipt with the first page of every Core client-history walk. The
   // provider occurrence timestamp cannot do this job: a webhook may arrive hours after that instant.
   // This lock is transaction-scoped and the list reader samples its asOf only after taking the same key.
+  // Migration 0242 also keeps mixed-version writers safe: its verdict statement trigger uses try-lock
+  // and raises retryable 40001 when an older row-first webhook meets this boundary-first order, instead
+  // of waiting here and completing a boundary -> row / row -> boundary deadlock.
   await lockCoreWeeklyReportDeliveryBoundary(client);
   const locked = await client.query(
     `SELECT id, send_delivery_status, send_delivery_status_at

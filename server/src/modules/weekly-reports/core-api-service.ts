@@ -202,8 +202,8 @@ function mapListRow(row: Record<string, unknown>): CoreWeeklyReportListItem {
 
 /**
  * Keyset page of provider-accepted frozen sends with no known failure. Migration 0242 owns the live
- * NULL -> accepted `send_delivered_at` transition and samples it after the same advisory boundary used
- * by page one, so `send_delivered_at <= asOf` freezes new acceptance commits across the walk. A failure
+ * acceptance publication and samples `send_acceptance_recorded_at` after the same advisory boundary used
+ * by page one, so its receipt clock freezes both live sends and historical imports across the walk. A failure
  * verdict CRM recorded after the boundary is evaluated as it stood at that boundary, regardless of the
  * provider event's older occurrence time, so delayed provider facts cannot reshuffle later pages.
  * `(week_of, version, id)` makes ordering total even if a legacy deal has more than one setup row.
@@ -247,7 +247,7 @@ export async function listCoreWeeklyReports(
             AND newer.status = 'sent'
             AND newer.sent_at IS NOT NULL
             AND newer.send_delivered_at IS NOT NULL
-            AND newer.send_delivered_at <= $2::timestamptz
+            AND newer.send_acceptance_recorded_at <= $2::timestamptz
             AND (
               newer.send_delivery_status IS NULL
               OR NOT (newer.send_delivery_status = ANY($3::text[]))
@@ -262,7 +262,7 @@ export async function listCoreWeeklyReports(
         AND wr.status = 'sent'
         AND wr.sent_at IS NOT NULL
         AND wr.send_delivered_at IS NOT NULL
-        AND wr.send_delivered_at <= $2::timestamptz
+        AND wr.send_acceptance_recorded_at <= $2::timestamptz
         AND (
           wr.send_delivery_status IS NULL
           OR NOT (wr.send_delivery_status = ANY($3::text[]))

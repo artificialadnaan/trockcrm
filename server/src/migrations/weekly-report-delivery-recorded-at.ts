@@ -27,7 +27,10 @@ export function extractWeeklyReportDeliveryBoundaryGlobals(migrationSql: string)
   const globals = migrationSql.slice(0, start).trim();
   if (
     !globals.includes("public.weekly_report_delivery_boundary_lock_v1") ||
-    !globals.includes("public.weekly_report_delivery_recorded_guard_v1")
+    !globals.includes("public.weekly_report_delivery_boundary_try_lock_v1") ||
+    !globals.includes("public.weekly_report_delivery_recorded_guard_v1") ||
+    !globals.includes("public.install_weekly_report_delivery_boundary_v1") ||
+    !globals.includes("weekly_report_delivery_boundary_on_office_provision")
   ) {
     throw new Error(
       `${WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION} is missing its boundary functions`,
@@ -47,7 +50,7 @@ export function renderWeeklyReportDeliveryTenantStep(
   const safeSchemaName = validateOfficeSchemaName(schemaName);
   const { start, end } = markerBounds(migrationSql);
   const template = migrationSql.slice(start + TENANT_START.length, end).trim();
-  if (!template.includes("office_dallas.weekly_reports")) {
+  if (!template.includes("office_dallas")) {
     throw new Error(
       `${WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION} tenant template has no Dallas anchor`,
     );

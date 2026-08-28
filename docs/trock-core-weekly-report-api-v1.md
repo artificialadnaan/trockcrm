@@ -112,11 +112,14 @@ Queued, stalled, draft, pending-review, merely-approved, bounced, failed, and sn
 published. Results order by week, version, and report id descending. The signed keyset cursor binds the
 office, deal, canonical number, page limit, first-page `asOf` boundary, issue/expiry time, and last
 position. Cursors live for at most 15 minutes and are valid on the half-open interval
-`[issuedAt, expiresAt)`. A provider acceptance after `asOf` cannot enter a later page. Changing the page
-limit or any identity binding requires a fresh first page. CRM captures `asOf` inside the tenant
-transaction after taking the same per-office boundary lock used by delivery-webhook writes. A delayed
-failure received after page one is evaluated as unknown for that signed walk even if the provider event
-itself occurred earlier; a fresh walk excludes it immediately.
+`[issuedAt, expiresAt)`. New cursors preserve PostgreSQL's six-digit microsecond precision for `asOf`;
+CRM also accepts the earlier three-digit millisecond form until those short-lived cursors expire. A send
+whose acceptance is published into CRM after `asOf` cannot enter a later page, even when an imported
+provider timestamp predates the walk. Changing the page limit or any identity binding requires a fresh
+first page. CRM captures `asOf` inside the tenant transaction after taking the same per-office boundary
+lock used by acceptance and delivery-verdict writes. A delayed failure received after page one is
+evaluated as unknown for that signed walk even if the provider event itself occurred earlier; a fresh
+walk excludes it immediately.
 
 Each item exposes:
 

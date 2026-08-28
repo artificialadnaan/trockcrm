@@ -64,6 +64,11 @@ const TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION_LOCK =
 // another runner is still in either pass, and a session lock (not an xact lock) must survive each
 // office commit until the ledger write completes.
 const TASKS_ASSIGNED_AT_MIGRATION_LOCK = "trockcrm:migration:0239_tasks-assigned-at";
+// 0242 commits globals and one office at a time. A session lock must span those commits and its ledger
+// insert, otherwise two booting API containers can interleave the cutovers and the loser fails on the
+// unique ledger row after doing all of the work.
+const WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION_LOCK =
+  "trockcrm:migration:0242_weekly-report-delivery-recorded-at";
 
 /**
  * 0235's global acknowledgement baseline needs the 0239 assignment-version compatibility trigger
@@ -184,6 +189,39 @@ async function runTasksAssignedAtMigrationUnderLock(
   }
 }
 
+/** Serialize 0242's global fence, per-office commits and ledger publication as one migration attempt. */
+async function runWeeklyReportDeliveryRecordedAtMigrationUnderLock(
+  client: pg.Client,
+  file: string
+): Promise<boolean> {
+  await client.query("SELECT pg_advisory_lock(hashtext($1))", [
+    WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION_LOCK,
+  ]);
+
+  try {
+    const { rows } = await client.query(
+      "SELECT id FROM public._migrations WHERE name = $1",
+      [file]
+    );
+    if (rows.length > 0) {
+      console.log(`Skipping ${file} (already executed by another migration runner)`);
+      return false;
+    }
+
+    const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+    await runWeeklyReportDeliveryRecordedAtMigration(client, sql);
+    await client.query(
+      "INSERT INTO public._migrations (name) VALUES ($1)",
+      [file]
+    );
+    return true;
+  } finally {
+    await client.query("SELECT pg_advisory_unlock(hashtext($1))", [
+      WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION_LOCK,
+    ]);
+  }
+}
+
 async function runMigrations(): Promise<void> {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
@@ -230,6 +268,12 @@ async function runMigrations(): Promise<void> {
 
       if (file === TASKS_ASSIGNED_AT_BACKFILL_MIGRATION) {
         const completed = await runTasksAssignedAtMigrationUnderLock(client, file, stagedInThisRun);
+        if (completed) console.log(`Completed ${file}`);
+        continue;
+      }
+
+      if (file === WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION) {
+        const completed = await runWeeklyReportDeliveryRecordedAtMigrationUnderLock(client, file);
         if (completed) console.log(`Completed ${file}`);
         continue;
       }
@@ -307,13 +351,6 @@ async function runMigrations(): Promise<void> {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
         await runFilesAssociationCheckRepair(client);
-      } else if (file === WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION) {
-        // 0242 backfills receipt clocks, replaces statement/row triggers and validates a CHECK. Every one
-        // of those operations takes tenant-table locks. The helper installs the global functions once and
-        // commits the complete tenant template ONE OFFICE AT A TIME, so Dallas is released before Atlanta
-        // is touched instead of all offices blocking writes until one cross-tenant transaction ends.
-        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
-        await runWeeklyReportDeliveryRecordedAtMigration(client, sql);
       } else {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);

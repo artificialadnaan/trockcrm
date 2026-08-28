@@ -279,7 +279,7 @@ describe("T Rock Core weekly-report pagination cursors", () => {
   it("keeps the database visibility boundary independent from the API-issued lifetime", () => {
     const databaseAhead = {
       ...CURSOR,
-      asOf: "2026-08-27T20:00:07.000Z",
+      asOf: "2026-08-27T20:00:07.123456Z",
     };
     expect(
       decodeCoreWeeklyReportCursor(
@@ -288,6 +288,30 @@ describe("T Rock Core weekly-report pagination cursors", () => {
         CURSOR_ISSUED_AT_MS,
       ),
     ).toEqual(databaseAhead);
+  });
+
+  it("preserves all six PostgreSQL boundary digits while rejecting non-canonical precision", () => {
+    const fullPrecision = { ...CURSOR, asOf: "2026-08-27T20:00:00.123456Z" };
+    expect(
+      decodeCoreWeeklyReportCursor(
+        encodeCoreWeeklyReportCursor(fullPrecision, SECRET),
+        [SECRET],
+        CURSOR_ISSUED_AT_MS,
+      ),
+    ).toEqual(fullPrecision);
+    for (const asOf of [
+      "2026-08-27T20:00:00.1234Z",
+      "2026-08-27T20:00:00.1234567Z",
+      "2026-02-31T20:00:00.123456Z",
+    ]) {
+      expect(
+        decodeCoreWeeklyReportCursor(
+          encodeCoreWeeklyReportCursor({ ...CURSOR, asOf }, SECRET),
+          [SECRET],
+          CURSOR_ISSUED_AT_MS,
+        ),
+      ).toBeNull();
+    }
   });
 
   it("uses a half-open issued-at/expires-at validity window", () => {

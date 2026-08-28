@@ -15,6 +15,19 @@ const UUID_PATTERN =
 const OFFICE_SLUG_PATTERN = /^[a-z][a-z0-9_]{0,99}$/;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const ISO_BOUNDARY_TIMESTAMP_PATTERN =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{3})(?:\d{3})?Z$/;
+
+/** Accept legacy millisecond cursors and new PostgreSQL-microsecond boundaries without discarding time. */
+export function isCanonicalCoreWeeklyReportBoundaryTimestamp(value: string): boolean {
+  const match = ISO_BOUNDARY_TIMESTAMP_PATTERN.exec(value);
+  if (!match) return false;
+  const parsedMs = Date.parse(value);
+  return (
+    Number.isFinite(parsedMs) &&
+    new Date(parsedMs).toISOString() === `${match[1]}.${match[2]}Z`
+  );
+}
 
 export type CoreWeeklyReportAuthAction = "resolve-deal" | "list-reports" | "report-detail";
 
@@ -266,7 +279,7 @@ function isCursorPayload(value: unknown): value is CoreWeeklyReportCursorPayload
     Number.isSafeInteger(row.limit) &&
     Number(row.limit) >= 1 &&
     Number(row.limit) <= CORE_WEEKLY_REPORT_MAX_PAGE_SIZE &&
-    typeof row.asOf === "string" && ISO_TIMESTAMP_PATTERN.test(row.asOf) &&
+    typeof row.asOf === "string" && isCanonicalCoreWeeklyReportBoundaryTimestamp(row.asOf) &&
     typeof row.issuedAt === "string" && ISO_TIMESTAMP_PATTERN.test(row.issuedAt) &&
     typeof row.expiresAt === "string" && ISO_TIMESTAMP_PATTERN.test(row.expiresAt) &&
     typeof row.weekOf === "string" && ISO_DATE_PATTERN.test(row.weekOf) &&
@@ -311,7 +324,7 @@ export function decodeCoreWeeklyReportCursor(
       !Number.isFinite(issuedAtMs) ||
       !Number.isFinite(expiresAtMs) ||
       !Number.isFinite(weekOfMs) ||
-      new Date(asOfMs).toISOString() !== parsed.asOf ||
+      !isCanonicalCoreWeeklyReportBoundaryTimestamp(parsed.asOf) ||
       new Date(issuedAtMs).toISOString() !== parsed.issuedAt ||
       new Date(expiresAtMs).toISOString() !== parsed.expiresAt ||
       new Date(weekOfMs).toISOString().slice(0, 10) !== parsed.weekOf ||

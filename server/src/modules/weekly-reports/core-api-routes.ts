@@ -14,6 +14,7 @@ import {
   coreWeeklyReportCursorMatchesContext,
   decodeCoreWeeklyReportCursor,
   encodeCoreWeeklyReportCursor,
+  isCanonicalCoreWeeklyReportBoundaryTimestamp,
   verifyCoreWeeklyReportRequest,
   type CoreWeeklyReportAuthAction,
   type CoreWeeklyReportAuthHeaders,
@@ -655,10 +656,8 @@ function initialCursorPayload(
   asOf: string,
   issuedAtMs: number,
 ): ReturnType<typeof currentCursorPayload> {
-  const asOfMs = Date.parse(asOf);
   if (
-    !Number.isFinite(asOfMs) ||
-    new Date(asOfMs).toISOString() !== asOf ||
+    !isCanonicalCoreWeeklyReportBoundaryTimestamp(asOf) ||
     !Number.isFinite(issuedAtMs)
   ) {
     throw new AppError(503, "Weekly-report delivery boundary is unavailable");

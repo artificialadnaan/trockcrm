@@ -441,12 +441,10 @@ describe("Core weekly-report sent-history list", () => {
   });
 
   it("keyset-pages without duplicates and keeps sends after the as-of boundary out", async () => {
-    // Put the synthetic signed boundary just after every setup fixture's receipt clock. The exact
-    // post-boundary receipt below is injected under a disabled row trigger because PGlite exposes only
-    // millisecond precision to JS; migration 0242's own suite separately proves the trigger owns/stamps
-    // that value for old and new writers.
-    const capturedAt = await captureCoreWeeklyReportDeliveryBoundary(db);
-    const asOf = new Date(Date.parse(capturedAt) + 1_000).toISOString();
+    // The database boundary remains at all six PostgreSQL digits in the signed cursor. Sleep past
+    // PGlite's millisecond clock before publishing new rows so the late-write assertions cannot collapse
+    // two distinct database instants onto one JavaScript millisecond.
+    const asOf = await captureCoreWeeklyReportDeliveryBoundary(db);
     const first = await listCoreWeeklyReports(db, { dealId: DEAL, limit: 2, asOf });
     expect(first.hasMore).toBe(true);
     expect(first.last).not.toBeNull();
@@ -458,7 +456,7 @@ describe("Core weekly-report sent-history list", () => {
         canonicalProjectNumber: "dfw-1-12345-aa",
         limit: 2,
         asOf,
-        issuedAt: asOf,
+        issuedAt: new Date(Date.parse(asOf)).toISOString(),
         expiresAt: new Date(Date.parse(asOf) + 15 * 60 * 1_000).toISOString(),
         weekOf: first.last!.weekOf,
         reportVersion: first.last!.reportVersion,
@@ -467,18 +465,18 @@ describe("Core weekly-report sent-history list", () => {
       CURSOR_SECRET,
     );
 
+    await pg.exec("SELECT pg_sleep(0.005)");
     await insertReport({
       id: LATE_REPORT,
       weekOf: "2026-09-24",
       status: "sent",
       sentAt: "2026-08-27T23:00:00Z",
-      deliveredAt: new Date(Date.parse(asOf) + 60_000).toISOString(),
+      // A historical import committed after page one. Its provider clock predates the walk; migration
+      // 0242's separate acceptance receipt clock is what must keep it out.
+      deliveredAt: "2001-02-03T04:05:06.000Z",
     });
-    // PGlite exposes clock_timestamp() to JS at millisecond precision. Sleep beyond the synthetic +1s
-    // boundary so this behavioural assertion cannot collapse two distinct database instants onto one
-    // JavaScript millisecond. The worker deliberately supplies an ancient transaction-start value: the
-    // migration trigger must replace it after acquiring the statement boundary lock.
-    await pg.exec("SELECT pg_sleep(1.005)");
+    // The worker deliberately supplies an ancient transaction-start value: the migration trigger must
+    // replace it after acquiring the statement boundary lock.
     await pg.query(
       `UPDATE office_dallas.weekly_reports
           SET send_delivered_at = '2000-01-01T00:00:00Z'::timestamptz
