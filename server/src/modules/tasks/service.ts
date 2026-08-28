@@ -545,6 +545,10 @@ export async function getTasks(
 
   // Subquery to resolve assignee display name from public.users
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+  // WHO handed this work over, resolved exactly as resolveTaskAssignerId does — last_assigned_by if
+  // the task has changed hands, otherwise the creator. A second, different resolution here is how the
+  // label on the task and the recipient of its mail drift apart.
+  const assignedByName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = COALESCE(${tasks.lastAssignedBy}, ${tasks.createdBy}))`.as("assignedByName");
 
   // Per-bucket sort: when the caller picks a sort, order the FULL filtered set in the DB.
   // Otherwise keep the legacy section-aware default ordering (back-compat for other callers).
@@ -570,6 +574,8 @@ export async function getTasks(
       assignedToName,
       createdBy: tasks.createdBy,
       lastAssignedBy: tasks.lastAssignedBy,
+      assignedByName,
+      assignedAt: tasks.assignedAt,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -658,6 +664,10 @@ export async function getProjectTasks(
     startedAt: typeof tasks.createdAt;
   };
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+  // WHO handed this work over, resolved exactly as resolveTaskAssignerId does — last_assigned_by if
+  // the task has changed hands, otherwise the creator. A second, different resolution here is how the
+  // label on the task and the recipient of its mail drift apart.
+  const assignedByName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = COALESCE(${tasks.lastAssignedBy}, ${tasks.createdBy}))`.as("assignedByName");
 
   const projectRows = await tenantDb
     .select({
@@ -672,6 +682,8 @@ export async function getProjectTasks(
       assignedToName,
       createdBy: tasks.createdBy,
       lastAssignedBy: tasks.lastAssignedBy,
+      assignedByName,
+      assignedAt: tasks.assignedAt,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -1040,6 +1052,10 @@ export async function getTaskById(
     startedAt: typeof tasks.createdAt;
   };
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+  // WHO handed this work over, resolved exactly as resolveTaskAssignerId does — last_assigned_by if
+  // the task has changed hands, otherwise the creator. A second, different resolution here is how the
+  // label on the task and the recipient of its mail drift apart.
+  const assignedByName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = COALESCE(${tasks.lastAssignedBy}, ${tasks.createdBy}))`.as("assignedByName");
 
   const result = await tenantDb
     .select({
@@ -1054,6 +1070,8 @@ export async function getTaskById(
       assignedToName,
       createdBy: tasks.createdBy,
       lastAssignedBy: tasks.lastAssignedBy,
+      assignedByName,
+      assignedAt: tasks.assignedAt,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,

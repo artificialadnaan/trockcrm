@@ -261,6 +261,138 @@ describe("TaskListPage project context", () => {
     });
   }
 
+  /**
+   * THE DEFAULTS. The page used to open on every task in the office — 15,409 of them, 15,360 of them
+   * machine-generated — with the assignee control reading "All assignees". It now opens on the
+   * manual tasks assigned to whoever is looking, and does so WITHOUT rewriting the URL: the default
+   * is applied by interpretation at render, so `/tasks` stays a valid, unchanged link.
+   */
+  describe("what the page opens on", () => {
+    it("scopes every bucket to the signed-in user and the manual tab", () => {
+      renderPage();
+
+      for (const section of ["overdue", "today", "this_week", "later", "completed"]) {
+        expect(mocks.useTasksMock).toHaveBeenCalledWith(
+          expect.objectContaining({ section, source: "manual", assignedTo: "director-1" })
+        );
+      }
+      expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith("director-1", "manual");
+    });
+
+    it("says so in the controls, rather than leaving them reading All", () => {
+      renderPage();
+
+      const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
+      expect(picker?.value).toBe("director-1");
+      expect(container.textContent).toContain("Assigned to me");
+    });
+
+    /**
+     * `?assignee=all` is the ONLY way to say "everyone" now.
+     *
+     * Deleting the parameter — which is what the control used to do — would hand the very next
+     * render back to the default and pin the list on the current user. Asserted on the wire rather
+     * than on the control, because `assignedTo: undefined` is the thing that actually widens the query.
+     */
+    it("honours an explicit ?assignee=all", () => {
+      renderPage("/tasks?assignee=all");
+
+      expect(mocks.useTasksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ section: "overdue", assignedTo: undefined })
+      );
+      expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith(undefined, "manual");
+    });
+
+    it("honours an explicit ?assignee=<someone else>", () => {
+      renderPage("/tasks?assignee=rep-2");
+
+      expect(mocks.useTasksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ section: "overdue", assignedTo: "rep-2" })
+      );
+    });
+
+    /**
+     * A REP IS SCOPED BY THE SERVER, NOT BY THIS.
+     *
+     * getTasks narrows `rep` to `assigned_to = me` and IGNORES the filter, as does getTaskCounts.
+     * Sending the parameter anyway would be inert but misleading, and rendering a control that
+     * cannot change anything would be a lie. Both are absent.
+     */
+    it("sends no assignee parameter for a rep, who the server already scopes", () => {
+      mocks.useAuthMock.mockReturnValue({
+        user: {
+          id: "rep-1",
+          email: "rep@example.test",
+          displayName: "Rep User",
+          role: "rep",
+          officeId: "office-1",
+          activeOfficeId: "office-1",
+        },
+        loading: false,
+      });
+
+      renderPage();
+
+      expect(container.querySelector('[data-testid="assignee-filter"]')).toBeNull();
+      expect(mocks.useTasksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ section: "overdue", assignedTo: undefined })
+      );
+      expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith(undefined, "manual");
+    });
+
+    /**
+     * A rep cannot be pinned to somebody else by a hand-edited URL either.
+     *
+     * The server would ignore it, but a client that forwards it is one server change away from
+     * mattering — and it would render a list scoped to a stranger with no control to escape it.
+     */
+    it("ignores ?assignee= on the URL for a rep", () => {
+      mocks.useAuthMock.mockReturnValue({
+        user: {
+          id: "rep-1",
+          email: "rep@example.test",
+          displayName: "Rep User",
+          role: "rep",
+          officeId: "office-1",
+          activeOfficeId: "office-1",
+        },
+        loading: false,
+      });
+
+      renderPage("/tasks?assignee=rep-2");
+
+      expect(mocks.useTasksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ section: "overdue", assignedTo: undefined })
+      );
+    });
+
+    /**
+     * `construction` and `estimator` were handed every task in the office with NO control at all —
+     * getTasks only narrows reps, and the picker was gated on admin/director. The default now scopes
+     * them to their own work and gives them the way out.
+     */
+    it("gives a construction user the same personal default and the control to widen it", () => {
+      mocks.useAuthMock.mockReturnValue({
+        user: {
+          id: "field-1",
+          email: "field@example.test",
+          displayName: "Field User",
+          role: "construction",
+          officeId: "office-1",
+          activeOfficeId: "office-1",
+        },
+        loading: false,
+      });
+
+      renderPage();
+
+      expect(container.querySelector('[data-testid="assignee-filter"]')).not.toBeNull();
+      expect(mocks.useTasksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ section: "overdue", assignedTo: "field-1" })
+      );
+    });
+  });
+
   it("formats and renders project context for deal-linked tasks", () => {
     const source = normalize(taskListPageSource);
 
@@ -281,11 +413,67 @@ describe("TaskListPage project context", () => {
     expect(resolver).toContain("formatDealDisplayNumber(task)");
     expect(resolver).toContain("return \"Project linked\";");
     // ...and the page still consumes it rather than having grown a second, divergent copy.
-    expect(source).toContain("const projectContext = getTaskProjectContext(task);");
     expect(source).not.toContain("function getTaskProjectContext");
-    expect(source).toContain("{projectContext ? <span className=\"truncate\">{projectContext}</span> : null}");
     expect(source).toContain("type GroupKey = \"overdue\" | \"today\" | \"this_week\" | \"later\" | \"completed\";");
     expect(source).toContain("getTaskStatusLabel(task.status)");
+  });
+
+  /**
+   * The project is a LINK now, and it opens a new tab.
+   *
+   * Asserted on the rendered DOM rather than on the source text the rest of this block reads: the
+   * previous version of this test pinned an exact JSX string, which made it fail on edits that
+   * changed no behaviour and pass on any edit that kept the string. What matters is that the label
+   * resolves to the shared resolver's answer and that clicking it leaves the page.
+   */
+  it("renders the project as a new-tab link to the deal", () => {
+    renderPage();
+
+    const link = container.querySelector<HTMLAnchorElement>('[data-testid="task-project-link"]');
+    expect(link).not.toBeNull();
+    expect(link?.tagName).toBe("A");
+    expect(link?.textContent).toContain("TR-2026-0001 - Palm Villas");
+    expect(link?.getAttribute("href")).toBe("/deals/deal-1");
+    expect(link?.getAttribute("target")).toBe("_blank");
+    // Without noopener the opened page keeps a live window.opener handle back into the CRM session.
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  /**
+   * Clicking the project must NOT also open the editor behind the new tab.
+   *
+   * The row is click-to-edit, and the link sits inside it. This is the interaction that forced the
+   * row to stop being a <button> in the first place — the guard that makes it safe is the row
+   * handler ignoring events that originated inside a link or a button, and inverting that guard has
+   * to fail here.
+   */
+  it("does not open the edit dialog when the project link is clicked", () => {
+    renderPage();
+
+    const link = container.querySelector<HTMLAnchorElement>('[data-testid="task-project-link"]');
+    expect(link).not.toBeNull();
+
+    act(() => {
+      link?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).not.toContain("Edit task dialog");
+  });
+
+  it("renders plain text, not a link, for a task with no project", () => {
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks:
+        filters.section === "overdue"
+          ? [{ ...makeTask(), dealId: null, dealName: null, dealNumber: null, projectNumber: null }]
+          : [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+
+    expect(container.querySelector('[data-testid="task-project-link"]')).toBeNull();
   });
 
   it("does not expose HS-prefixed identifiers embedded in generated task titles", () => {
@@ -498,7 +686,10 @@ describe("TaskListPage project context", () => {
 
     const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
     expect(picker).not.toBeNull();
-    expect(picker?.textContent).toContain("All assignees");
+    // "Assigned to me" and "Everyone", not "All assignees": the list now OPENS on your own work, so
+    // the control has to name both the default and the way out of it.
+    expect(picker?.textContent).toContain("Assigned to me");
+    expect(picker?.textContent).toContain("Everyone");
     expect(picker?.textContent).toContain("Brett Jones");
   });
 
@@ -548,9 +739,9 @@ describe("TaskListPage project context", () => {
       }
     });
 
-    // Second argument is the automated/manual tab, undefined here because no tab is selected. The
-    // counts endpoint takes it so the summary cards scope to the same rows the buckets do.
-    expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith("rep-2", undefined);
+    // Second argument is the automated/manual tab — "manual" here because that is what the page now
+    // OPENS on. The counts endpoint takes it so the summary cards scope to the same rows the buckets do.
+    expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith("rep-2", "manual");
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", assignedTo: "rep-2" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today", assignedTo: "rep-2" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "this_week", assignedTo: "rep-2" }));
