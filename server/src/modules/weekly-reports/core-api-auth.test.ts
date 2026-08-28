@@ -13,6 +13,7 @@ import {
   type CoreWeeklyReportAuthAction,
   type CoreWeeklyReportCursorPayload,
 } from "./core-api-auth.js";
+import { CORE_WEEKLY_REPORT_MAX_PAGE_SIZE } from "./core-api-contracts.js";
 
 const SECRET = "core-current-secret-with-32-byte-minimum-0001";
 const PREVIOUS_SECRET = "core-previous-secret-with-32-byte-minimum-001";
@@ -241,7 +242,10 @@ describe("T Rock Core weekly-report pagination cursors", () => {
       { ...CURSOR, weekOf: "2026-02-31" },
       SECRET,
     );
-    const badLimit = encodeCoreWeeklyReportCursor({ ...CURSOR, limit: 101 }, SECRET);
+    const badLimit = encodeCoreWeeklyReportCursor(
+      { ...CURSOR, limit: CORE_WEEKLY_REPORT_MAX_PAGE_SIZE + 1 },
+      SECRET,
+    );
     const unsafeVersion = encodeCoreWeeklyReportCursor(
       { ...CURSOR, reportVersion: Number.MAX_SAFE_INTEGER + 1 },
       SECRET,

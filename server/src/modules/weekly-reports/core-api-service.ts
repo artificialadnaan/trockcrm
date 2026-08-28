@@ -19,6 +19,7 @@ const DEAL_IDENTITY_CONFLICT_CODE = "core_weekly_report_deal_identity_conflict";
 const DEAL_BINDING_CHANGED_CODE = "core_weekly_report_deal_binding_changed";
 const REPORT_NOT_FOUND_CODE = "core_weekly_report_not_found";
 const REPORT_WITHDRAWN_CODE = "core_weekly_report_withdrawn";
+const REPORT_READ_CONFLICT_CODE = "core_weekly_report_read_conflict";
 const REPORT_SNAPSHOT_UNAVAILABLE_CODE = "core_weekly_report_snapshot_unavailable";
 
 const DELIVERY_FAILURE_STATUSES = [...WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES];
@@ -164,7 +165,14 @@ export interface CoreWeeklyReportListResult {
 }
 
 function isoDate(value: unknown): string {
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) {
+    // node-postgres represents a PostgreSQL `date` as LOCAL midnight. UTC conversion can subtract a day
+    // in positive-offset deployments, so preserve the driver's calendar components instead.
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
   return String(value).slice(0, 10);
 }
 
@@ -222,7 +230,7 @@ export async function listCoreWeeklyReports(
   const result = await client.query(
     `SELECT wr.id,
             wr.weekly_report_project_id,
-            wr.week_of,
+            wr.week_of::text AS week_of,
             wr.version,
             wr.send_delivered_at,
             wr.is_active,
@@ -341,7 +349,7 @@ export async function getCoreWeeklyReportDetail(
     `SELECT wr.id,
             wr.deal_id,
             wr.weekly_report_project_id,
-            wr.week_of,
+            wr.week_of::text AS week_of,
             wr.version,
             wr.send_delivered_at,
             wr.is_active
@@ -369,7 +377,11 @@ export async function getCoreWeeklyReportDetail(
     // The service-auth route's transaction/shared lock prevents this race. Keep the guard for any direct
     // caller that fails to supply that envelope: a changed row is never permission to use retained raw
     // columns. The generic conflict makes the caller re-list and learn the terminal state there.
-    throw new AppError(409, "Weekly report changed while it was being read", REPORT_WITHDRAWN_CODE);
+    throw new AppError(
+      409,
+      "Weekly report changed while it was being read",
+      REPORT_READ_CONFLICT_CODE,
+    );
   }
   const view = source.view;
   if (view.status !== "sent" || !view.sentAt || !view.fromSnapshot) {

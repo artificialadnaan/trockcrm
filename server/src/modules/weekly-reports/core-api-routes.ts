@@ -337,21 +337,18 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new CoreWeeklyReportRequestCancelledError();
 }
 
-function requestAbortController(req: Request, res: Response): {
+function requestAbortController(_req: Request, res: Response): {
   controller: AbortController;
   cleanup: () => void;
 } {
   const controller = new AbortController();
-  const onRequestAborted = () => controller.abort();
   const onResponseClosed = () => {
     if (!res.writableEnded) controller.abort();
   };
-  req.once("aborted", onRequestAborted);
   res.once("close", onResponseClosed);
   return {
     controller,
     cleanup: () => {
-      req.off("aborted", onRequestAborted);
       res.off("close", onResponseClosed);
     },
   };

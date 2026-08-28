@@ -378,6 +378,32 @@ describe("Core weekly-report deal resolution", () => {
 });
 
 describe("Core weekly-report sent-history list", () => {
+  it("preserves a node-postgres local-midnight date as the same calendar day", async () => {
+    const localMidnight = new Date(2026, 7, 27);
+    const localDateClient = {
+      query: async () => ({
+        rows: [{
+          id: REPORT_LATEST,
+          weekly_report_project_id: PROJECT,
+          week_of: localMidnight,
+          version: 1,
+          send_delivered_at: new Date("2026-08-27T18:00:00.000Z"),
+          is_active: true,
+          superseded_by_id: null,
+          is_superseded: false,
+        }],
+        rowCount: 1,
+      }),
+    };
+    const page = await listCoreWeeklyReports(localDateClient, {
+      dealId: DEAL,
+      limit: 25,
+      asOf: "2026-08-28T00:00:00.000Z",
+    });
+    expect(page.items[0]?.weekOf).toBe("2026-08-27");
+    expect(page.last?.weekOf).toBe("2026-08-27");
+  });
+
   it("publishes provider-accepted snapshots with null/delivered verdicts, but excludes known failures", async () => {
     const asOf = await captureCoreWeeklyReportDeliveryBoundary(db);
     const page = await listCoreWeeklyReports(db, {
@@ -415,7 +441,12 @@ describe("Core weekly-report sent-history list", () => {
   });
 
   it("keyset-pages without duplicates and keeps sends after the as-of boundary out", async () => {
-    const asOf = await captureCoreWeeklyReportDeliveryBoundary(db);
+    // Put the synthetic signed boundary just after every setup fixture's receipt clock. The exact
+    // post-boundary receipt below is injected under a disabled row trigger because PGlite exposes only
+    // millisecond precision to JS; migration 0242's own suite separately proves the trigger owns/stamps
+    // that value for old and new writers.
+    const capturedAt = await captureCoreWeeklyReportDeliveryBoundary(db);
+    const asOf = new Date(Date.parse(capturedAt) + 1_000).toISOString();
     const first = await listCoreWeeklyReports(db, { dealId: DEAL, limit: 2, asOf });
     expect(first.hasMore).toBe(true);
     expect(first.last).not.toBeNull();
@@ -443,12 +474,30 @@ describe("Core weekly-report sent-history list", () => {
       sentAt: "2026-08-27T23:00:00Z",
       deliveredAt: new Date(Date.parse(asOf) + 60_000).toISOString(),
     });
-    await pg.query(
-      `UPDATE office_dallas.weekly_reports
-          SET send_delivery_status = 'bounced',
-              send_delivery_status_at = '2026-08-01T00:01:00Z'::timestamptz
-        WHERE id = $1::uuid`,
+    await pg.exec(
+      "ALTER TABLE office_dallas.weekly_reports DISABLE TRIGGER weekly_reports_delivery_recorded_row",
+    );
+    try {
+      await pg.query(
+        `UPDATE office_dallas.weekly_reports
+            SET send_delivery_status = 'bounced',
+                send_delivery_status_at = '2026-08-01T00:01:00Z'::timestamptz,
+                send_delivery_status_recorded_at = $2::timestamptz
+          WHERE id = $1::uuid`,
+        [REPORT_OLD, new Date(Date.parse(asOf) + 30_000).toISOString()],
+      );
+    } finally {
+      await pg.exec(
+        "ALTER TABLE office_dallas.weekly_reports ENABLE TRIGGER weekly_reports_delivery_recorded_row",
+      );
+    }
+    const delayedReceipt = await pg.query<{ recorded_at: Date | string }>(
+      `SELECT send_delivery_status_recorded_at AS recorded_at
+         FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
       [REPORT_OLD],
+    );
+    expect(new Date(delayedReceipt.rows[0]!.recorded_at).getTime()).toBeGreaterThan(
+      Date.parse(asOf),
     );
     const cursor = decodeCoreWeeklyReportCursor(encoded, [CURSOR_SECRET], Date.parse(asOf));
     expect(cursor).not.toBeNull();
