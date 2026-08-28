@@ -57,6 +57,8 @@ import { weeklyReportRoutes } from "./modules/weekly-reports/routes.js";
 import marketingExpenseRoutes from "./modules/marketing-expense/routes.js";
 import { weeklyReportPublicRoutes } from "./modules/weekly-reports/public-routes.js";
 import { weeklyReportDeliveryWebhookRoutes } from "./modules/weekly-reports/delivery-webhook-routes.js";
+import { CORE_WEEKLY_REPORT_API_BASE_PATH } from "./modules/weekly-reports/core-api-contracts.js";
+import { createCoreWeeklyReportApiRouter } from "./modules/weekly-reports/core-api-routes.js";
 import {
   adminPhotoTokenRoutes,
   publicPhotoViewerRoutes,
@@ -157,6 +159,11 @@ export function createApp() {
   // with the other signed integrations because the signature covers the RAW bytes: once express.json()
   // has parsed and discarded them there is nothing left to verify against.
   app.use("/api/webhooks/resend", weeklyReportDeliveryWebhookRoutes);
+
+  // Read-only Core -> CRM weekly-report integration. The router owns a bounded raw parser because both
+  // the exact-body HMAC and the independent Ed25519 Core-workload assertion cover the original bytes.
+  // It remains content-free 404 while dark and fail-closed 503 for incomplete key configuration.
+  app.use(CORE_WEEKLY_REPORT_API_BASE_PATH, createCoreWeeklyReportApiRouter());
 
   app.use(cookieParser());
 

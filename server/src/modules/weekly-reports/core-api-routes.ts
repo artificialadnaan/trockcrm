@@ -21,6 +21,12 @@ import {
   type CoreWeeklyReportCursorPayload,
 } from "./core-api-auth.js";
 import {
+  CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER,
+  CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER,
+  verifyCoreWeeklyReportWorkloadAssertion,
+  type CoreWeeklyReportWorkloadHeaders,
+} from "./core-api-workload-auth.js";
+import {
   CORE_WEEKLY_REPORT_DEAL_RESPONSE_VERSION,
   CORE_WEEKLY_REPORT_DETAIL_RESPONSE_VERSION,
   CORE_WEEKLY_REPORT_ERROR_RESPONSE_VERSION,
@@ -76,6 +82,8 @@ export interface CoreWeeklyReportApiAuditEvent {
   statusCode: number;
   resultCode: string;
   keySlot: "current" | "previous" | null;
+  workloadKeyId: string | null;
+  workloadKeySlot: "current" | "previous" | null;
   itemCount: number | null;
   paginationCursorPresent: boolean | null;
   nextCursorPresent: boolean | null;
@@ -85,11 +93,6 @@ export interface CoreWeeklyReportApiAuditEvent {
 export type CoreWeeklyReportApiObserver = (
   event: CoreWeeklyReportApiAuditEvent,
 ) => void | Promise<void>;
-
-/** Must prove trusted workload identity or mTLS from the server/socket context, never a caller header. */
-export type CoreWeeklyReportPeerAuthorizer = (
-  req: Request,
-) => boolean | Promise<boolean>;
 
 export type CoreWeeklyReportOfficeResolver = (
   officeSlug: string,
@@ -112,7 +115,6 @@ export interface CoreWeeklyReportApiRouterOptions {
   env?: CoreWeeklyReportApiEnvironment;
   now?: () => number;
   observe?: CoreWeeklyReportApiObserver;
-  authorizeCorePeer?: CoreWeeklyReportPeerAuthorizer;
   resolveActiveOffice?: CoreWeeklyReportOfficeResolver;
   withOfficeTransaction?: CoreWeeklyReportOfficeTransaction;
   resolveDeal?: typeof resolveCoreWeeklyReportDeal;
@@ -125,7 +127,6 @@ export interface CoreWeeklyReportApiRouterOptions {
 interface ResolvedDependencies {
   now: () => number;
   observe: CoreWeeklyReportApiObserver;
-  authorizeCorePeer: CoreWeeklyReportPeerAuthorizer;
   resolveActiveOffice: CoreWeeklyReportOfficeResolver;
   withOfficeTransaction: CoreWeeklyReportOfficeTransaction;
   resolveDeal: typeof resolveCoreWeeklyReportDeal;
@@ -143,6 +144,8 @@ interface RequestAuditState {
   dealId: string | null;
   reportId: string | null;
   keySlot: "current" | "previous" | null;
+  workloadKeyId: string | null;
+  workloadKeySlot: "current" | "previous" | null;
   itemCount: number | null;
   paginationCursorPresent: boolean | null;
   nextCursorPresent: boolean | null;
@@ -150,6 +153,7 @@ interface RequestAuditState {
 
 interface RouteLocals {
   coreWeeklyReportAuthHeaders?: CoreWeeklyReportAuthHeaders;
+  coreWeeklyReportWorkloadHeaders?: CoreWeeklyReportWorkloadHeaders;
   coreWeeklyReportAuditState?: RequestAuditState;
 }
 
@@ -194,6 +198,13 @@ function exactAuthHeaders(req: Request): CoreWeeklyReportAuthHeaders | null {
   return { requestId, timestamp, signature };
 }
 
+function exactWorkloadHeaders(req: Request): CoreWeeklyReportWorkloadHeaders | null {
+  const keyId = singletonRawHeader(req, CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER);
+  const signature = singletonRawHeader(req, CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER);
+  if (keyId === null || signature === null) return null;
+  return { keyId, signature };
+}
+
 function hasExactJsonContentType(req: Request): boolean {
   const contentType = singletonRawHeader(req, "content-type");
   return contentType !== null && req.is("application/json") === "application/json";
@@ -210,8 +221,8 @@ function hasSupportedContentEncoding(req: Request): boolean {
 }
 
 function carriesBrowserOrigin(req: Request): boolean {
-  // These are browser-origin context headers, not trusted proxy identity. Their presence is enough to
-  // refuse this machine-only surface; their absence is never treated as proof (the peer authorizer is).
+  // These are browser-origin context headers. Their presence is enough to refuse this machine-only
+  // surface; their absence is never identity proof (the Ed25519 assertion is).
   const browserHeaders = new Set([
     "origin",
     "referer",
@@ -264,6 +275,8 @@ function auditEvent(
     statusCode,
     resultCode,
     keySlot: state.keySlot,
+    workloadKeyId: state.workloadKeyId,
+    workloadKeySlot: state.workloadKeySlot,
     itemCount: state.itemCount,
     paginationCursorPresent: state.paginationCursorPresent,
     nextCursorPresent: state.nextCursorPresent,
@@ -396,9 +409,6 @@ function resolveDependencies(options: CoreWeeklyReportApiRouterOptions): Resolve
   return {
     now: options.now ?? Date.now,
     observe: options.observe ?? defaultObserver,
-    // There is no trusted workload-identity/mTLS verifier elsewhere in this repository today. Omitting
-    // this dependency therefore fails readiness rather than silently downgrading the boundary to HMAC.
-    authorizeCorePeer: options.authorizeCorePeer ?? (() => false),
     resolveActiveOffice: options.resolveActiveOffice ?? defaultResolveActiveOffice,
     withOfficeTransaction:
       options.withOfficeTransaction ?? createCoreWeeklyReportOfficeTransaction(),
@@ -421,6 +431,8 @@ function initialAuditState(action: CoreWeeklyReportAuthAction, now: () => number
     dealId: null,
     reportId: null,
     keySlot: null,
+    workloadKeyId: null,
+    workloadKeySlot: null,
     itemCount: null,
     paginationCursorPresent: null,
     nextCursorPresent: null,
@@ -458,16 +470,7 @@ function routePreflight(
       return;
     }
 
-
-    let peerAuthorized = false;
-    if (!carriesBrowserOrigin(req)) {
-      try {
-        peerAuthorized = await dependencies.authorizeCorePeer(req) === true;
-      } catch {
-        peerAuthorized = false;
-      }
-    }
-    if (!peerAuthorized) {
+    if (carriesBrowserOrigin(req)) {
       await safelyObserve(
         dependencies.observe,
         auditEvent(
@@ -483,7 +486,8 @@ function routePreflight(
     }
 
     const headers = exactAuthHeaders(req);
-    if (!headers) {
+    const workloadHeaders = exactWorkloadHeaders(req);
+    if (!headers || !workloadHeaders) {
       await safelyObserve(
         dependencies.observe,
         auditEvent(
@@ -498,6 +502,7 @@ function routePreflight(
       return;
     }
     locals(res).coreWeeklyReportAuthHeaders = headers;
+    locals(res).coreWeeklyReportWorkloadHeaders = workloadHeaders;
 
     if (!hasExactJsonContentType(req) || !hasSupportedContentEncoding(req)) {
       const error: SafeHttpError = {
@@ -560,6 +565,7 @@ async function verifyAndDecodeRequest(
     return null;
   }
 
+  const authenticationNowMs = dependencies.now();
   const authentication = verifyCoreWeeklyReportRequest({
     action,
     rawBody,
@@ -568,7 +574,7 @@ async function verifyAndDecodeRequest(
     previousSecret: runtime.previousSecret ?? undefined,
     // Authentication linearizes after the complete bounded body arrives. Using request-start time here
     // would let a sender begin within the skew window, drip the body, and preserve an otherwise stale MAC.
-    nowMs: dependencies.now(),
+    nowMs: authenticationNowMs,
   });
   if (!authentication.ok) {
     await safelyObserve(
@@ -584,8 +590,33 @@ async function verifyAndDecodeRequest(
     bareStatus(res, 401);
     return null;
   }
+  const workloadAuthentication = verifyCoreWeeklyReportWorkloadAssertion({
+    action,
+    requestId: authentication.requestId,
+    timestampSeconds: authentication.timestampSeconds,
+    rawBody,
+    headers: locals(res).coreWeeklyReportWorkloadHeaders!,
+    keyring: runtime.workloadKeys,
+    nowMs: authenticationNowMs,
+  });
+  if (!workloadAuthentication.ok) {
+    await safelyObserve(
+      dependencies.observe,
+      auditEvent(
+        state,
+        dependencies.now,
+        "crm_weekly_report_api.request_refused",
+        401,
+        "authentication_failed",
+      ),
+    );
+    bareStatus(res, 401);
+    return null;
+  }
   state.requestId = authentication.requestId;
   state.keySlot = authentication.keySlot;
+  state.workloadKeyId = workloadAuthentication.keyId;
+  state.workloadKeySlot = workloadAuthentication.keySlot;
 
   let source: string;
   try {
@@ -1007,9 +1038,7 @@ function rawBodyErrorHandler(
 export function createCoreWeeklyReportApiRouter(
   options: CoreWeeklyReportApiRouterOptions = {},
 ): Router {
-  const runtime = resolveCoreWeeklyReportApiRuntimeConfig(options.env ?? process.env, {
-    peerAuthorizerConfigured: options.authorizeCorePeer !== undefined,
-  });
+  const runtime = resolveCoreWeeklyReportApiRuntimeConfig(options.env ?? process.env);
   const dependencies = resolveDependencies(options);
   const router = Router();
 
@@ -1055,6 +1084,8 @@ export function createCoreWeeklyReportApiRouter(
       statusCode: 404,
       resultCode: "unsupported_operation",
       keySlot: null,
+      workloadKeyId: null,
+      workloadKeySlot: null,
       itemCount: null,
       paginationCursorPresent: null,
       nextCursorPresent: null,
