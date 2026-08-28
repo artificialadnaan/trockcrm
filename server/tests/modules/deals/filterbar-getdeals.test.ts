@@ -130,6 +130,37 @@ describe("getDeals — FilterBar wiring", () => {
     expect(sql).toContain('"stage_id"');
   });
 
+  it("keeps an Opportunity-only selection disjoint from the separate Pending RFP bucket", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { stageIds: ["op-1"], excludePendingRfpFromOpportunity: true, scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const sql = mainWhere(capturedWheres);
+    // Pending RFP rows retain an Opportunity stage id, so the ordinary branch needs the shared
+    // negated bucket predicate. Without it, checking Opportunity alone leaks the separate column.
+    expect(sql).toContain("rfp_approval_status");
+    expect(sql).toContain("is_bid_board_owned");
+    expect(sql).toContain("coalesce");
+  });
+
+  it("keeps direct Opportunity stage-id callers inclusive when they do not render a separate bucket", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { stageIds: ["op-1"], scope: "all" }, "director", "director-1");
+
+    const sql = mainWhere(capturedWheres);
+    expect(sql).toContain('"stage_id"');
+    expect(sql).not.toContain("rfp_approval_status");
+    expect(sql).not.toContain("is_bid_board_owned");
+  });
+
   it("an unrecognized status passed through from the route becomes a no-match (sql false), never widened", async () => {
     // Codex #546: the route must pass raw values to the registry so a bad param
     // hits the predicate's no-match, instead of being normalized to undefined

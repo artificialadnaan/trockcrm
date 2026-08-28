@@ -1619,6 +1619,22 @@ describe("useDeals", () => {
       "pendingRfpOnly="
     );
 
+    const callsBeforeSeparateOpportunity = apiMock.mock.calls.length;
+    hookDealFilters = {
+      scope: "all",
+      stageIds: ["stage-estimating"],
+      excludePendingRfpFromOpportunity: true,
+    };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBeforeSeparateOpportunity);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain(
+      "excludePendingRfpFromOpportunity=true"
+    );
+
     await act(async () => {
       root.unmount();
       await flushEffects();

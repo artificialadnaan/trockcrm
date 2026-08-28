@@ -129,8 +129,12 @@ interface DealsListSectionProps {
      *  - terminalStageIds: the visible terminal subset — sent as inactiveStageIds with isActive
      *    "pipeline" (unless an explicit Status is chosen) so terminal deals show like the board's
      *    Won/Lost columns, overriding the contract's active-only default at THIS mount (Q1).
+     *  - includePendingRfpBucket: include the board's synthetic Pending RFP column when this mount
+     *    falls back to every visible column, and make that mount's ordinary Opportunity selection
+     *    disjoint from it. It remains opt-in so other stage-id callers retain legacy behavior.
      */
     defaultStageIds?: string[];
+    includePendingRfpBucket?: boolean;
     terminalStageIds?: string[];
     /**
      * The visible stages grouped into workflow-family sibling-id sets. The stage OPTIONS carry one
@@ -946,6 +950,7 @@ export function DealsListSection({
   const visibleUrlFilters = pickFilterBarValueForDimensions(urlFilters, filterBar?.dimensions ?? []);
   const barFilters = applyBoardVisibilityDefaults(filterBarValueToDealFilters(visibleUrlFilters), {
     defaultStageIds: filterBar?.defaultStageIds,
+    includePendingRfpBucket: filterBar?.includePendingRfpBucket,
     terminalStageIds: filterBar?.terminalStageIds,
     // Expand an explicit canonical stage pick to its full workflow-family so the list matches the board
     // column the option represents (Codex #589 P1). Opt-in; canonical-only mounts pass through unchanged.

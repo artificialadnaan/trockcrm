@@ -542,6 +542,8 @@ export interface DealFilters {
   stageIds?: string[];
   /** The synthetic Pending RFP list bucket, whose rows remain in Opportunity stages. */
   pendingRfpOnly?: boolean;
+  /** Opt-in for the base board list, which renders Pending RFP separately from Opportunity. */
+  excludePendingRfpFromOpportunity?: boolean;
   inactiveStageIds?: string[];
   assignedRepId?: string;
   /** Deals this person is ESTIMATING (deals.estimator_user_id). Independent of assignedRepId — the two
@@ -2435,9 +2437,12 @@ export async function getDeals(
 
   // Filter by real stages and/or the synthetic Pending RFP bucket. Pending RFP is not a
   // `pipeline_stage_config` row: it is an Opportunity-family subset defined by the RFP lifecycle.
-  // A multi-select means a UNION of stage choices, so combine any real stage ids with that subset
-  // under OR, while every other list filter/scope remains ANDed around the result.
-  if (filters.pendingRfpOnly) {
+  // The base board is the only surface that renders this subset separately. Its opt-in makes ordinary
+  // Opportunity selections explicitly exclude the subset, and adding the synthetic option back makes
+  // the two branches a disjoint UNION. All other stage-id callers retain their legacy inclusive rule.
+  const selectedStageIds = filters.stageIds ?? [];
+  const separatesPendingRfpFromOpportunity = filters.excludePendingRfpFromOpportunity === true;
+  if (filters.pendingRfpOnly || (separatesPendingRfpFromOpportunity && selectedStageIds.length > 0)) {
     const pendingRfpOpportunityStageIds = await getPendingRfpOpportunityStageIds(tenantDb);
     const pendingRfpCondition = pendingRfpOpportunityStageIds.length > 0
       ? and(
@@ -2448,13 +2453,39 @@ export async function getDeals(
           eq(deals.isActive, true)
         )
       : sql`false`;
-    conditions.push(
-      filters.stageIds && filters.stageIds.length > 0
-        ? or(inArray(deals.stageId, filters.stageIds), pendingRfpCondition)
-        : pendingRfpCondition
-    );
-  } else if (filters.stageIds && filters.stageIds.length > 0) {
-    conditions.push(inArray(deals.stageId, filters.stageIds));
+
+    const selectedOpportunityStageIds = separatesPendingRfpFromOpportunity
+      ? selectedStageIds.filter((stageId) => pendingRfpOpportunityStageIds.includes(stageId))
+      : [];
+    const selectedOtherStageIds = separatesPendingRfpFromOpportunity
+      ? selectedStageIds.filter((stageId) => !pendingRfpOpportunityStageIds.includes(stageId))
+      : selectedStageIds;
+    const selectedStageConditions: any[] = [];
+
+    if (selectedOtherStageIds.length > 0) {
+      selectedStageConditions.push(inArray(deals.stageId, selectedOtherStageIds));
+    }
+    if (selectedOpportunityStageIds.length > 0) {
+      selectedStageConditions.push(
+        and(
+          inArray(deals.stageId, selectedOpportunityStageIds),
+          aliasedNotPendingRfpBucketCondition("deals")
+        )
+      );
+    }
+    if (filters.pendingRfpOnly) selectedStageConditions.push(pendingRfpCondition);
+
+    // `selectedStageIds` can be empty only for a Pending RFP-only selection; otherwise the array
+    // has at least one real-stage condition. Keep the guard defensive for direct API callers.
+    if (selectedStageConditions.length === 1) {
+      conditions.push(selectedStageConditions[0]);
+    } else if (selectedStageConditions.length > 1) {
+      conditions.push(or(...selectedStageConditions));
+    }
+  } else if (selectedStageIds.length > 0) {
+    // Standalone Opportunity/stage/rep pages do not render Pending RFP as a separate filter option,
+    // so their direct stage-id selection remains inclusive exactly as it was before this list feature.
+    conditions.push(inArray(deals.stageId, selectedStageIds));
   }
 
   // Filter by source

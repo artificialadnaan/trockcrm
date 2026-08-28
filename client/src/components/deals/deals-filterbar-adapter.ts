@@ -212,6 +212,11 @@ export interface BoardVisibility {
    *  `stageIds` to these when the user has selected none, so the list shows the SAME stages as the
    *  board it sits under — including terminal columns, excluding DD when the board hides it. */
   defaultStageIds?: string[];
+  /** This board exposes Pending RFP as a separate synthetic column in addition to its real
+   *  Opportunity-family stage ids. When the list falls back to every visible column (no explicit
+   *  stage pick, or a stale hidden pick), include that synthetic bucket too. Omit on mounts that do
+   *  not expose the Pending RFP board column. */
+  includePendingRfpBucket?: boolean;
   /** The visible TERMINAL stage ids (subset of defaultStageIds). Sent as `inactiveStageIds` with
    *  `isActive:"pipeline"` so terminal (is_active=false) deals flow through the server's active-only
    *  default — matching the board, which shows Won/Lost columns. Omit to keep the contract's
@@ -229,9 +234,11 @@ export interface BoardVisibility {
 
 /**
  * Layer "this list mirrors the board above it" onto the mapped FilterBar filters (Slice 7 design
- * sign-off). Two overrides, both opt-in via the board context:
+ * sign-off). Three overrides, all opt-in via the board context:
  *  - Q2 (Show-DD mirror): when the user has chosen no stages, default `stageIds` to the board's
  *    visible columns, so DD deals disappear from the list exactly when the board hides the DD column.
+ *  - Pending RFP mirror: a board that separately shows the synthetic Pending RFP subset opts in so
+ *    its no-pick default contains both the ordinary Opportunity rows and that separate bucket.
  *  - Q1 (active+terminal): when the user has chosen no explicit Status, request mixed visibility
  *    (`isActive:"pipeline"` + the visible terminal ids as `inactiveStageIds`) so terminal deals show
  *    like the board's terminal columns. An explicit Status owns is_active/on_hold server-side
@@ -245,8 +252,8 @@ export function applyBoardVisibilityDefaults(
   const next: Partial<DealFilters> = { ...filters };
   const explicit = Array.isArray(next.stageIds) ? next.stageIds : [];
   // Pending RFP is a synthetic stage choice, not an id in `defaultStageIds`. It has already been
-  // translated from the FilterBar sentinel into `pendingRfpOnly`, so an otherwise-empty selection
-  // means exactly that bucket — never "all visible board columns".
+  // translated from the FilterBar sentinel into `pendingRfpOnly`, so an otherwise-empty explicit
+  // selection means exactly that bucket — never "all visible board columns".
   const hasPendingRfpOnly = next.pendingRfpOnly === true;
   // Expand each explicit canonical pick to its full sibling workflow-family, so a single canonical id
   // (the one each stage OPTION carries) queries every family stage and never under-shows sibling-family
@@ -280,6 +287,10 @@ export function applyBoardVisibilityDefaults(
       delete next.stageIds;
     } else {
       next.stageIds = visible;
+      // The ordinary Opportunity stage condition deliberately excludes Pending RFP rows. On the
+      // base deals board, however, an unfiltered list must include every visible board bucket;
+      // opt in only there so generic and drill-down lists keep their existing defaults.
+      if (board.includePendingRfpBucket) next.pendingRfpOnly = true;
     }
   } else if (board.stageIdFamilies && explicit.length > 0) {
     // Unscoped mount (no board columns — the rep drill-down): apply the family-expanded explicit pick
@@ -287,6 +298,12 @@ export function applyBoardVisibilityDefaults(
     // the no-pick default (explicit is [] there, so this is skipped and the list stays unscoped = every
     // stage, matching the legacy rep list).
     next.stageIds = expanded;
+  }
+  // Only the base deals board renders Pending RFP as a distinct stage choice. Tell its list API to
+  // make a selected Opportunity family disjoint from that bucket; generic/stage/rep-list callers
+  // deliberately keep the legacy inclusive stage-id behavior.
+  if (board.includePendingRfpBucket && next.stageIds && next.stageIds.length > 0) {
+    next.excludePendingRfpFromOpportunity = true;
   }
   const hasExplicitStatus = next.status !== undefined;
   if (!hasExplicitStatus && board.terminalStageIds && board.terminalStageIds.length > 0) {

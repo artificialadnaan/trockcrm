@@ -2467,6 +2467,10 @@ function DealListPageContent({
                 // date-windowed, so Stalled is offered and the date axis is labeled outcome-aware.
                 stageEntryDateEnabled: true,
                 defaultStageIds: dealsBaseListStageScope.defaultStageIds,
+                // Pending RFP is displayed as its own board column even though its rows retain an
+                // Opportunity stage id. Include it whenever this list falls back to all visible
+                // board columns; an explicit Opportunity pick intentionally excludes it.
+                includePendingRfpBucket: true,
                 terminalStageIds: dealsBaseListStageScope.terminalStageIds,
                 // Expand an explicit canonical stage pick to its full workflow-family (Codex #589 P1).
                 stageIdFamilies: dealsBaseListStageScope.stageIdFamilies,

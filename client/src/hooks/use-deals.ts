@@ -399,6 +399,9 @@ export interface DealFilters {
   stageIds?: string[];
   /** The synthetic Pending RFP bucket (an Opportunity subset), not a pipeline-stage UUID. */
   pendingRfpOnly?: boolean;
+  /** On a surface that renders Pending RFP as a separate stage option, keep an ordinary Opportunity
+   *  choice disjoint from that bucket. Other stage-id callers retain their legacy inclusive behavior. */
+  excludePendingRfpFromOpportunity?: boolean;
   inactiveStageIds?: string[];
   assignedRepId?: string;
   /** Deals this person is ESTIMATING. The sibling of assignedRepId — the server ANDs them, and the header
@@ -660,6 +663,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   if (filters.search) params.set("search", filters.search);
   if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
   if (filters.pendingRfpOnly) params.set("pendingRfpOnly", "true");
+  if (filters.excludePendingRfpFromOpportunity) params.set("excludePendingRfpFromOpportunity", "true");
   if (filters.inactiveStageIds?.length) params.set("inactiveStageIds", filters.inactiveStageIds.join(","));
   if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
   if (filters.estimatorId) params.set("estimatorId", filters.estimatorId);
@@ -738,6 +742,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.search,
     filters.stageIds?.join(","),
     filters.pendingRfpOnly,
+    filters.excludePendingRfpFromOpportunity,
     filters.inactiveStageIds?.join(","),
     filters.assignedRepId,
     // This list is EXPLICIT SCALARS, not the filters object, so a field missing here is not merely a lint
