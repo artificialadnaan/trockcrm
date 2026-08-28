@@ -75,6 +75,7 @@ import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import {
   aliasedNotPendingRfpBucketCondition,
   aliasedPendingRfpBucketCondition,
+  getPendingRfpOpportunityStageIds,
 } from "./pending-rfp-service.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
@@ -539,6 +540,8 @@ function excludeTestDataCondition(alias: string) {
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
+  /** The synthetic Pending RFP list bucket, whose rows remain in Opportunity stages. */
+  pendingRfpOnly?: boolean;
   inactiveStageIds?: string[];
   assignedRepId?: string;
   /** Deals this person is ESTIMATING (deals.estimator_user_id). Independent of assignedRepId — the two
@@ -2430,8 +2433,27 @@ export async function getDeals(
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
   }
 
-  // Filter by stage(s)
-  if (filters.stageIds && filters.stageIds.length > 0) {
+  // Filter by real stages and/or the synthetic Pending RFP bucket. Pending RFP is not a
+  // `pipeline_stage_config` row: it is an Opportunity-family subset defined by the RFP lifecycle.
+  // A multi-select means a UNION of stage choices, so combine any real stage ids with that subset
+  // under OR, while every other list filter/scope remains ANDed around the result.
+  if (filters.pendingRfpOnly) {
+    const pendingRfpOpportunityStageIds = await getPendingRfpOpportunityStageIds(tenantDb);
+    const pendingRfpCondition = pendingRfpOpportunityStageIds.length > 0
+      ? and(
+          inArray(deals.stageId, pendingRfpOpportunityStageIds),
+          aliasedPendingRfpBucketCondition("deals"),
+          // Match the board/dedicated queue: a soft-deleted inactive record is never actionable
+          // Pending RFP work, even if a hand-edited Status filter asks for archived rows.
+          eq(deals.isActive, true)
+        )
+      : sql`false`;
+    conditions.push(
+      filters.stageIds && filters.stageIds.length > 0
+        ? or(inArray(deals.stageId, filters.stageIds), pendingRfpCondition)
+        : pendingRfpCondition
+    );
+  } else if (filters.stageIds && filters.stageIds.length > 0) {
     conditions.push(inArray(deals.stageId, filters.stageIds));
   }
 

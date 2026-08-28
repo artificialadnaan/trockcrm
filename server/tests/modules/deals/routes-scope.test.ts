@@ -163,6 +163,17 @@ describe("deal routes scope defaults", () => {
     );
   });
 
+  it("forwards the Pending RFP list-bucket flag to getDeals", async () => {
+    const { req } = await invokeRoute("/", { pendingRfpOnly: "true", stageIds: "stage-estimating" });
+    expect(dealServiceMocks.getDeals).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({ pendingRfpOnly: true, stageIds: ["stage-estimating"] }),
+      "director",
+      "director-1",
+      "director"
+    );
+  });
+
   it("defaults GET /api/deals/pipeline to mine scope when scope is missing", async () => {
     const { req } = await invokeRoute("/pipeline", { includeDd: "true" });
     expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(

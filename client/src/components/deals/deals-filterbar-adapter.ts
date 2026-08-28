@@ -28,6 +28,14 @@ export const DEAL_LIST_SORT_OPTIONS: FilterBarSortOption[] = [
  */
 export const DRILLDOWN_FILTERBAR_PARAM_PREFIX = "fb_";
 
+/**
+ * FilterBar option value for the board's synthetic Pending RFP column. It is deliberately not a
+ * pipeline-stage id: Pending RFP is a subset of Opportunity, determined by the RFP lifecycle rather
+ * than a row in pipeline_stage_config. The adapter translates it to `pendingRfpOnly` before a list
+ * request is made, so it can never be sent to `deals.stage_id` as though it were a UUID.
+ */
+export const PENDING_RFP_STAGE_FILTER_VALUE = "__pending_rfp__";
+
 /** Canonical render order for the deals FilterBar dimensions (the pipeline list's row). Per-surface
  *  sets are this order, filtered — never re-sorted — so every deals bar reads left-to-right the same. */
 const DRILLDOWN_DIMENSION_ORDER: FilterDimension[] = [
@@ -166,7 +174,9 @@ export function buildDrilldownListFilterBar(input: {
 export function filterBarValueToDealFilters(value: FilterBarValue): Partial<DealFilters> {
   const filters: Partial<DealFilters> = {};
   if (value.search) filters.search = value.search;
-  if (value.stageIds && value.stageIds.length > 0) filters.stageIds = value.stageIds;
+  const stageIds = value.stageIds?.filter((id) => id !== PENDING_RFP_STAGE_FILTER_VALUE) ?? [];
+  if (stageIds.length > 0) filters.stageIds = stageIds;
+  if (value.stageIds?.includes(PENDING_RFP_STAGE_FILTER_VALUE)) filters.pendingRfpOnly = true;
   if (value.assignedRepId) filters.assignedRepId = value.assignedRepId;
   if (value.regionId) filters.regionId = value.regionId;
   if (value.projectTypeId) filters.projectTypeId = value.projectTypeId;
@@ -234,6 +244,10 @@ export function applyBoardVisibilityDefaults(
 ): Partial<DealFilters> {
   const next: Partial<DealFilters> = { ...filters };
   const explicit = Array.isArray(next.stageIds) ? next.stageIds : [];
+  // Pending RFP is a synthetic stage choice, not an id in `defaultStageIds`. It has already been
+  // translated from the FilterBar sentinel into `pendingRfpOnly`, so an otherwise-empty selection
+  // means exactly that bucket — never "all visible board columns".
+  const hasPendingRfpOnly = next.pendingRfpOnly === true;
   // Expand each explicit canonical pick to its full sibling workflow-family, so a single canonical id
   // (the one each stage OPTION carries) queries every family stage and never under-shows sibling-family
   // deals — matching the legacy slug filter (getSelectedDealStageIds returned EVERY id for the picked
@@ -260,7 +274,13 @@ export function applyBoardVisibilityDefaults(
     // linger in the list query (Q2). With no pick — or once every pick is hidden — mirror the board's
     // full visible column set rather than querying nothing or a hidden stage.
     const intersected = expanded.filter((id) => visible.includes(id));
-    next.stageIds = intersected.length > 0 ? intersected : visible;
+    if (intersected.length > 0) {
+      next.stageIds = intersected;
+    } else if (hasPendingRfpOnly) {
+      delete next.stageIds;
+    } else {
+      next.stageIds = visible;
+    }
   } else if (board.stageIdFamilies && explicit.length > 0) {
     // Unscoped mount (no board columns — the rep drill-down): apply the family-expanded explicit pick
     // directly so a grouped-slug pick includes all sibling ids like the legacy list, WITHOUT restricting

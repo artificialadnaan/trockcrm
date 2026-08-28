@@ -10,6 +10,7 @@ import { act, useEffect } from "react";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import type { Deal } from "@/hooks/use-deals";
 import type { AtRiskResult } from "@trock-crm/shared/types";
+import { PENDING_RFP_STAGE_FILTER_VALUE } from "@/components/deals/deals-filterbar-adapter";
 import {
   DealListPage,
   buildDealsPageKpiDrilldownPath,
@@ -1535,6 +1536,22 @@ describe("DealListPage", () => {
     expect(props.filterBar.dimensions).not.toContain("scope");
     // The legacy inline filter row is gone (FilterBar mode supersedes it).
     expect(props.enableDateFilter).toBeUndefined();
+  });
+
+  it("includes the synthetic Pending RFP bucket in the base Deals-list Stage menu", () => {
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { options?: { stages?: Array<{ value: string; label: string }> } };
+    };
+
+    expect(props.filterBar.options?.stages).toContainEqual({
+      value: PENDING_RFP_STAGE_FILTER_VALUE,
+      label: "Pending RFP",
+    });
+    expect(props.filterBar.options?.stages).not.toContainEqual({
+      value: "canonical-pending_rfp",
+      label: "Pending RFP",
+    });
   });
 
   it("drops the Rep dimension entirely when the header pins a concrete rep (no no-op single-rep control, no misleading Unassigned) (Codex #589 P2)", () => {
@@ -4395,4 +4412,3 @@ describe("DealListPage", () => {
     });
   });
 });
-

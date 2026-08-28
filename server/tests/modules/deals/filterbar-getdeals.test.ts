@@ -110,6 +110,26 @@ describe("getDeals — FilterBar wiring", () => {
     expect(sql).toContain('"is_active"'); // default active filter still applied
   });
 
+  it("maps the Pending RFP list bucket to Opportunity-family RFP rows, rather than a fake stage id", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { pendingRfpOnly: true, stageIds: ["estimating-1"], scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const sql = mainWhere(capturedWheres);
+    // A selection containing an ordinary stage and Pending RFP is a UNION, and the synthetic side
+    // uses the same RFP lifecycle predicate as the Pending RFP board column/queue.
+    expect(sql).toContain(" or ");
+    expect(sql).toContain("rfp_approval_status");
+    expect(sql).toContain("is_bid_board_owned");
+    expect(sql).toContain('"stage_id"');
+  });
+
   it("an unrecognized status passed through from the route becomes a no-match (sql false), never widened", async () => {
     // Codex #546: the route must pass raw values to the registry so a bad param
     // hits the predicate's no-match, instead of being normalized to undefined

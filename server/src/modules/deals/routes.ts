@@ -956,6 +956,7 @@ router.get("/", async (req, res, next) => {
       stageIds: req.query.stageIds
         ? (req.query.stageIds as string).split(",")
         : undefined,
+      pendingRfpOnly: req.query.pendingRfpOnly === "true",
       inactiveStageIds: req.query.inactiveStageIds
         ? (req.query.inactiveStageIds as string).split(",")
         : undefined,

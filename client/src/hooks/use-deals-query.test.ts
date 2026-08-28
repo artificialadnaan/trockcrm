@@ -50,6 +50,12 @@ describe("buildDealsQueryParams (DealFilters -> GET /api/deals query string)", (
     expect(p.get("estimatorId")).toBe("user-1");
   });
 
+  it("serializes the synthetic Pending RFP bucket as its named API filter, never as a fake stage id", () => {
+    const p = get({ pendingRfpOnly: true });
+    expect(p.get("pendingRfpOnly")).toBe("true");
+    expect(p.has("stageIds")).toBe(false);
+  });
+
   it("omits estimatorId when unset, so no caller sends an empty filter", () => {
     expect(get({ assignedRepId: "rep-1" }).has("estimatorId")).toBe(false);
   });

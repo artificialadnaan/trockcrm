@@ -1586,6 +1586,46 @@ describe("useDeals", () => {
     });
   });
 
+  it("refetches when Pending RFP is toggled alongside an unchanged real stage", async () => {
+    // The stage multi-select stores the real stage id separately from the synthetic Pending RFP
+    // flag. Toggling only that checkbox must still make a new request; otherwise the list keeps
+    // showing the previous stage-only population until some unrelated filter changes.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ deals: [], pagination: { page: 1, limit: 50, total: 0, totalPages: 0 } });
+    hookDealFilters = { scope: "all", stageIds: ["stage-estimating"] };
+    const root = await renderDealsHook();
+    const callsBeforePending = apiMock.mock.calls.length;
+
+    hookDealFilters = { scope: "all", stageIds: ["stage-estimating"], pendingRfpOnly: true };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBeforePending);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain(
+      "pendingRfpOnly=true"
+    );
+
+    const callsBeforeClear = apiMock.mock.calls.length;
+    hookDealFilters = { scope: "all", stageIds: ["stage-estimating"] };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBeforeClear);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).not.toContain(
+      "pendingRfpOnly="
+    );
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
   // Proving-ground guarantee for the unified search rollout: debounce reduces but does not
   // eliminate out-of-order responses on fast typing, so the deals search must be last-write-
   // wins. A slow response for an EARLIER keystroke must not overwrite the results of a LATER
