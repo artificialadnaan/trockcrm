@@ -19,6 +19,7 @@ import {
   isBoardVisibleStage,
   DEAL_LIST_SORT_OPTIONS,
   DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+  PENDING_RFP_STAGE_FILTER_VALUE,
 } from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
@@ -2450,21 +2451,26 @@ function DealListPageContent({
                   regions: regions.map((region) => ({ value: region.id, label: region.name })),
                   projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
                   stages: boardColumns
-                    // Exclude the synthetic Pending RFP column: its id ("canonical-pending_rfp") is not a
-                    // real deals.stage_id, so offering it as a stage filter would send stageIds the server
-                    // matches against nothing and return an empty list. Its deals stay reachable via the
-                    // Opportunity option (they share that real stage_id) and the dedicated /deals/pending-rfp page.
-                    .filter(
-                      (column) =>
-                        column.stage.slug !== "pending_rfp" && isBoardVisibleStage(column.stage.slug, true)
-                    )
-                    .map((column) => ({ value: column.stage.id, label: column.stage.name })),
+                    .filter((column) => isBoardVisibleStage(column.stage.slug, true))
+                    .map((column) =>
+                      // Pending RFP is a synthetic board column, so its board id cannot be sent as a
+                      // deals.stage_id. The adapter recognizes this sentinel and asks the list API for
+                      // the canonical RFP bucket instead. Keeping it in the same ordered option set
+                      // makes the bottom list match the board users are scanning above it.
+                      column.stage.slug === "pending_rfp"
+                        ? { value: PENDING_RFP_STAGE_FILTER_VALUE, label: column.stage.name }
+                        : { value: column.stage.id, label: column.stage.name }
+                    ),
                   sortOptions: DEAL_LIST_SORT_OPTIONS,
                 },
                 // ENABLE_STAGE_ENTRY_DATE_FILTER is on in prod (matches /pipeline): open rows are
                 // date-windowed, so Stalled is offered and the date axis is labeled outcome-aware.
                 stageEntryDateEnabled: true,
                 defaultStageIds: dealsBaseListStageScope.defaultStageIds,
+                // Pending RFP is displayed as its own board column even though its rows retain an
+                // Opportunity stage id. Include it whenever this list falls back to all visible
+                // board columns; an explicit Opportunity pick intentionally excludes it.
+                includePendingRfpBucket: true,
                 terminalStageIds: dealsBaseListStageScope.terminalStageIds,
                 // Expand an explicit canonical stage pick to its full workflow-family (Codex #589 P1).
                 stageIdFamilies: dealsBaseListStageScope.stageIdFamilies,

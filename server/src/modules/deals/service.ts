@@ -75,6 +75,7 @@ import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import {
   aliasedNotPendingRfpBucketCondition,
   aliasedPendingRfpBucketCondition,
+  getPendingRfpOpportunityStageIds,
 } from "./pending-rfp-service.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
@@ -539,6 +540,10 @@ function excludeTestDataCondition(alias: string) {
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
+  /** The synthetic Pending RFP list bucket, whose rows remain in Opportunity stages. */
+  pendingRfpOnly?: boolean;
+  /** Opt-in for the base board list, which renders Pending RFP separately from Opportunity. */
+  excludePendingRfpFromOpportunity?: boolean;
   inactiveStageIds?: string[];
   assignedRepId?: string;
   /** Deals this person is ESTIMATING (deals.estimator_user_id). Independent of assignedRepId — the two
@@ -2430,9 +2435,61 @@ export async function getDeals(
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
   }
 
-  // Filter by stage(s)
-  if (filters.stageIds && filters.stageIds.length > 0) {
-    conditions.push(inArray(deals.stageId, filters.stageIds));
+  // Filter by real stages and/or the synthetic Pending RFP bucket. Pending RFP is not a
+  // `pipeline_stage_config` row: it is an Opportunity-family subset defined by the RFP lifecycle.
+  // The base board is the only surface that renders this subset separately. Its opt-in makes ordinary
+  // Opportunity selections explicitly exclude the *active* subset, and adding the synthetic option
+  // back makes the two live-work branches a disjoint UNION. Archived rows are never actionable
+  // Pending RFP work, so they remain ordinary Opportunity rows even when their historical RFP fields
+  // still say pending/declined. All other stage-id callers retain their legacy inclusive rule.
+  const selectedStageIds = filters.stageIds ?? [];
+  const separatesPendingRfpFromOpportunity = filters.excludePendingRfpFromOpportunity === true;
+  if (filters.pendingRfpOnly || (separatesPendingRfpFromOpportunity && selectedStageIds.length > 0)) {
+    const pendingRfpOpportunityStageIds = await getPendingRfpOpportunityStageIds(tenantDb);
+    const pendingRfpCondition = pendingRfpOpportunityStageIds.length > 0
+      ? and(
+          inArray(deals.stageId, pendingRfpOpportunityStageIds),
+          aliasedPendingRfpBucketCondition("deals"),
+          // Match the board/dedicated queue: a soft-deleted inactive record is never actionable
+          // Pending RFP work, even if a hand-edited Status filter asks for archived rows.
+          eq(deals.isActive, true)
+        )
+      : sql`false`;
+
+    const selectedOpportunityStageIds = separatesPendingRfpFromOpportunity
+      ? selectedStageIds.filter((stageId) => pendingRfpOpportunityStageIds.includes(stageId))
+      : [];
+    const selectedOtherStageIds = separatesPendingRfpFromOpportunity
+      ? selectedStageIds.filter((stageId) => !pendingRfpOpportunityStageIds.includes(stageId))
+      : selectedStageIds;
+    const selectedStageConditions: any[] = [];
+
+    if (selectedOtherStageIds.length > 0) {
+      selectedStageConditions.push(inArray(deals.stageId, selectedOtherStageIds));
+    }
+    if (selectedOpportunityStageIds.length > 0) {
+      selectedStageConditions.push(
+        and(
+          inArray(deals.stageId, selectedOpportunityStageIds),
+          // Pending RFP itself is active-only. Keeping inactive records in Opportunity prevents an
+          // archive from disappearing from both choices merely because it retains its old RFP state.
+          or(eq(deals.isActive, false), aliasedNotPendingRfpBucketCondition("deals"))
+        )
+      );
+    }
+    if (filters.pendingRfpOnly) selectedStageConditions.push(pendingRfpCondition);
+
+    // `selectedStageIds` can be empty only for a Pending RFP-only selection; otherwise the array
+    // has at least one real-stage condition. Keep the guard defensive for direct API callers.
+    if (selectedStageConditions.length === 1) {
+      conditions.push(selectedStageConditions[0]);
+    } else if (selectedStageConditions.length > 1) {
+      conditions.push(or(...selectedStageConditions));
+    }
+  } else if (selectedStageIds.length > 0) {
+    // Standalone Opportunity/stage/rep pages do not render Pending RFP as a separate filter option,
+    // so their direct stage-id selection remains inclusive exactly as it was before this list feature.
+    conditions.push(inArray(deals.stageId, selectedStageIds));
   }
 
   // Filter by source

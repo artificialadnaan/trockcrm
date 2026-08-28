@@ -79,7 +79,11 @@ export function aliasedPendingRfpBucketCondition(alias: string) {
 
 // All stage ids that canonicalize to Opportunity (incl. legacy aliases like `dd`), matching what the
 // trigger route accepts and how the board buckets cards.
-async function opportunityStageIds(tenantDb: any): Promise<string[]> {
+/**
+ * All stage ids that can legitimately hold a Pending RFP, including normal/service and legacy
+ * Opportunity aliases. Shared by the dedicated cross-rep queue and the ordinary deals-list filter.
+ */
+export async function getPendingRfpOpportunityStageIds(tenantDb: any): Promise<string[]> {
   const stages = await tenantDb
     .select({ id: pipelineStageConfig.id, slug: pipelineStageConfig.slug })
     .from(pipelineStageConfig);
@@ -99,7 +103,7 @@ export async function getPendingRfpDeals(
   tenantDb: any,
   filters: { estimatorId?: string; search?: string } = {},
 ): Promise<PendingRfpDeal[]> {
-  const oppStageIds = await opportunityStageIds(tenantDb);
+  const oppStageIds = await getPendingRfpOpportunityStageIds(tenantDb);
   if (oppStageIds.length === 0) return [];
 
   const triggeredBy = alias(users, "triggered_by");
@@ -210,7 +214,7 @@ export async function cancelPendingRfp(
   // rather than letting a former owner clear the RFP. Admins/directors pass undefined (cancel any owner).
   requireOwnerId?: string,
 ): Promise<{ id: string } | null> {
-  const oppStageIds = await opportunityStageIds(tenantDb);
+  const oppStageIds = await getPendingRfpOpportunityStageIds(tenantDb);
   if (oppStageIds.length === 0) return null;
   const ownerGuard = requireOwnerId ? [eq(deals.assignedRepId, requireOwnerId)] : [];
   const [updated] = await tenantDb

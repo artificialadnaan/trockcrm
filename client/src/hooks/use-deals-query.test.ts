@@ -50,6 +50,17 @@ describe("buildDealsQueryParams (DealFilters -> GET /api/deals query string)", (
     expect(p.get("estimatorId")).toBe("user-1");
   });
 
+  it("serializes the synthetic Pending RFP bucket as its named API filter, never as a fake stage id", () => {
+    const p = get({ pendingRfpOnly: true });
+    expect(p.get("pendingRfpOnly")).toBe("true");
+    expect(p.has("stageIds")).toBe(false);
+  });
+
+  it("serializes the board-only disjoint Opportunity rule explicitly", () => {
+    const p = get({ stageIds: ["opportunity-1"], excludePendingRfpFromOpportunity: true });
+    expect(p.get("excludePendingRfpFromOpportunity")).toBe("true");
+  });
+
   it("omits estimatorId when unset, so no caller sends an empty filter", () => {
     expect(get({ assignedRepId: "rep-1" }).has("estimatorId")).toBe(false);
   });

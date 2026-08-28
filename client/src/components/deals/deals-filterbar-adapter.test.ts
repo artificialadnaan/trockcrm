@@ -8,6 +8,7 @@ import {
   getBoardVisibleStageScope,
   getDealDisplayDate,
   getDrilldownFilterBarDimensions,
+  PENDING_RFP_STAGE_FILTER_VALUE,
   pickFilterBarValueForDimensions,
 } from "./deals-filterbar-adapter";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
@@ -81,6 +82,15 @@ describe("filterBarValueToDealFilters (FilterBar URL value -> useDeals DealFilte
     expect("stageIds" in result).toBe(false);
   });
 
+  it("translates the synthetic Pending RFP option instead of sending it as a stage id", () => {
+    expect(filterBarValueToDealFilters({ stageIds: [PENDING_RFP_STAGE_FILTER_VALUE] })).toEqual({
+      pendingRfpOnly: true,
+    });
+    expect(
+      filterBarValueToDealFilters({ stageIds: ["stage-estimating", PENDING_RFP_STAGE_FILTER_VALUE] })
+    ).toEqual({ stageIds: ["stage-estimating"], pendingRfpOnly: true });
+  });
+
   it("preserves zero-valued numeric ranges (0 is a real bound, distinct from 'unset')", () => {
     expect(filterBarValueToDealFilters({ valueMin: 0, valueMax: 0, minAgeDays: 0, maxAgeDays: 0 })).toEqual({
       valueMin: 0,
@@ -121,12 +131,44 @@ describe("applyBoardVisibilityDefaults (the under-kanban list mirrors the board 
     expect(result.stageIds).toEqual(["s-opp", "s-est", "s-won", "s-lost"]);
   });
 
+  it("includes the separate Pending RFP bucket in an all-visible fallback only when this board exposes it", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({}), {
+      ...board,
+      includePendingRfpBucket: true,
+    });
+
+    expect(result.stageIds).toEqual(["s-opp", "s-est", "s-won", "s-lost"]);
+    expect(result.pendingRfpOnly).toBe(true);
+    expect(result.excludePendingRfpFromOpportunity).toBe(true);
+  });
+
+  it("keeps a Pending RFP-only selection as its own bucket instead of replacing it with every board stage", () => {
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({ stageIds: [PENDING_RFP_STAGE_FILTER_VALUE] }),
+      board
+    );
+
+    expect(result.pendingRfpOnly).toBe(true);
+    expect(result.stageIds).toBeUndefined();
+  });
+
   it("respects an explicit stage selection (the user's pick overrides the board default)", () => {
     const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ stageIds: ["s-est"] }), board);
     expect(result.stageIds).toEqual(["s-est"]);
     // visibility still mirrors the board (no Status chosen)
     expect(result.isActive).toBe("pipeline");
     expect(result.inactiveStageIds).toEqual(["s-won", "s-lost"]);
+  });
+
+  it("scopes the Opportunity/Pending RFP split to a board that displays both choices", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ stageIds: ["s-opp"] }), {
+      ...board,
+      includePendingRfpBucket: true,
+    });
+    expect(result.excludePendingRfpFromOpportunity).toBe(true);
+
+    const generic = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ stageIds: ["s-opp"] }), board);
+    expect(generic.excludePendingRfpFromOpportunity).toBeUndefined();
   });
 
   it("intersects an explicit selection with the board's visible stages — a hidden stage (DD after Show-DD off) cannot linger in the list query (Q2 / Codex)", () => {
