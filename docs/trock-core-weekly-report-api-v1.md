@@ -49,6 +49,33 @@ configuration before looking up an office.
 Set `TROCK_CORE_WEEKLY_REPORT_API_SECRET` on CRM and the matching secret on Core. During rotation only, set
 `TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET` to the retiring key.
 
+HMAC is necessary but not sufficient. The HTTP host must also supply `createCoreWeeklyReportApiRouter` an
+`authorizeCorePeer(req)` implementation backed by trusted workload identity or mTLS state. The factory does not
+derive trust from `X-Forwarded-*` headers and defaults unready when that verifier is absent. Requests carrying browser
+origin/referrer/fetch-metadata context are refused before HMAC processing; absence of those headers is not identity
+proof and the peer verifier still runs.
+
+## Feature readiness and mount seam
+
+`ENABLE_CRM_CORE_WEEKLY_REPORT_READ_API` is dark unless its value is the exact string `true`. A false/unset flag
+answers the factory's known paths with a content-free `404`; an enabled feature with unsafe HMAC rotation config or no
+peer authorizer answers content-free `503`. Peer/auth/header failures are uniform content-free `401`. Every response,
+including errors, is `Cache-Control: private, no-store`.
+
+This change exports the boundary as `createCoreWeeklyReportApiRouter(...)`; it is intentionally not registered in
+`server/src/app.ts` until the deployment supplies the reviewed peer authorizer. The eventual raw-body mount belongs
+with the other signed integrations, before `express.json()`:
+
+```ts
+app.use(
+  CORE_WEEKLY_REPORT_API_BASE_PATH,
+  createCoreWeeklyReportApiRouter({ authorizeCorePeer: trustedCorePeerAuthorizer }),
+);
+```
+
+Do not mount it with the default options: that state is deliberately unready, and adding a caller-controlled proxy
+header as the missing authorizer would not satisfy the workload-identity boundary.
+
 ## Deal resolution and binding
 
 Resolution uses CRM's Bid Board project-number canonicalizer across the established deal project-number
