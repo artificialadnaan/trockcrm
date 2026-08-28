@@ -8,7 +8,7 @@ import { REPORT_VIEWER_ROLES } from "@/lib/roles";
 import { AppShell } from "@/components/layout/app-shell";
 import { BoardAliasRedirect } from "@/components/shared/board-alias-redirect";
 // Statically imported on purpose. A lazy() modal cannot render until its own chunk arrives, which
-// defeats the point of firing it at the moment of login.
+// defeats the point of surfacing an assignment on the recipient's next interaction.
 import { TaskAssignmentModal } from "@/components/tasks/task-assignment-modal";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { PendingRfpPage } from "@/pages/deals/pending-rfp-page";
@@ -189,7 +189,7 @@ function AuthGate({ children }: { children: ReactNode }) {
   //
   // A SIBLING of `children`, not inside it: `children` is the <Suspense> boundary that wraps <Routes>,
   // and the post-login landing route is lazy(). A modal declared inside that boundary cannot render
-  // until the dashboard chunk resolves, which is precisely the moment it needs to be on screen.
+  // until the dashboard chunk resolves, which can lag behind the recipient's next interaction.
   // <Toaster/> is the precedent for a route-independent global, not for the boundary it sits in.
   //
   // Declaration position is otherwise irrelevant to DOM and focus order: DialogContent portals to

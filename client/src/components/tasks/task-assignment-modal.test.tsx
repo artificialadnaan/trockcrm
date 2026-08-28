@@ -117,7 +117,7 @@ function pendingFetches() {
 let currentOfficeId: string | null = null;
 
 async function render(
-  flag: boolean | undefined,
+  checkOnNextInteraction: boolean | undefined,
   {
     officeId,
     activeOfficeId,
@@ -135,14 +135,11 @@ async function render(
   currentOfficeId = officeId ?? null;
   authMock.mockReturnValue({
     user:
-      flag === undefined
+      checkOnNextInteraction === undefined
         ? null
         : {
             id: userId,
-            hasPendingTaskAssignments: flag,
             officeId: HOME_OFFICE,
-            // The office the server computed the flag under. authMiddleware promotes x-office-id into
-            // activeOfficeId, so a boot on ?officeId=X gets a flag that describes X.
             activeOfficeId: activeOfficeId ?? officeId ?? HOME_OFFICE,
           },
     assignmentModalSession,
@@ -159,6 +156,9 @@ async function render(
     );
   });
   await settle();
+  // Most visual/acknowledgement tests exercise the modal after the recipient's first ordinary CRM
+  // interaction. Keep that explicit in the harness while letting boot/no-interaction tests pass false.
+  if (checkOnNextInteraction) await click(document.body);
 }
 
 /**
@@ -188,12 +188,15 @@ async function reload({
   await render(true, { officeId, userId, assignmentModalSession, assignmentModalSessionResetPending });
 }
 
-async function changeOfficeTo(officeId: string) {
+async function changeOfficeTo(officeId: string, { checkOnNextInteraction = true }: { checkOnNextInteraction?: boolean } = {}) {
   currentOfficeId = officeId;
   await act(async () => {
     setSearchParams?.(new URLSearchParams({ officeId }));
   });
   await settle();
+  // The production modal intentionally waits for the next ordinary interaction after a scope switch.
+  // Existing scope tests are about the pinned request/race behavior, so they simulate that next click.
+  if (checkOnNextInteraction) await click(document.body);
 }
 
 /**
@@ -304,7 +307,7 @@ describe("TaskAssignmentModal — when it appears", () => {
     expect(dialog()?.className).toContain("overflow-y-auto");
   });
 
-  it("does not fetch, and does not open, when the flag is false", async () => {
+  it("does not fetch or open during authenticated boot before the first eligible interaction", async () => {
     setPending([task()]);
 
     await render(false);
@@ -322,10 +325,9 @@ describe("TaskAssignmentModal — when it appears", () => {
     expect(dialog()).toBeNull();
   });
 
-  // The flag and the list are answered by two different queries against a moving table. A task
-  // completed between them leaves the flag true and the list empty, and an empty modal is worse than
-  // no modal.
-  it("stays closed when the flag is true but the list comes back empty", async () => {
+  // A task can complete between the recipient's click and the server's answer. An empty modal is
+  // worse than no modal.
+  it("stays closed when the session check comes back empty", async () => {
     setPending([], 0);
 
     await render(true);
@@ -350,15 +352,12 @@ describe("TaskAssignmentModal — when it appears", () => {
     expect(dialog()!.textContent).not.toContain("more");
   });
 
-  // UNDER StrictMode, which is how the app actually runs (main.tsx wraps <App/> in it) and the only
-  // thing that can exercise the latch. A plain re-render proves nothing: `hasPending` does not change,
-  // so the effect's dependency list already stops it, and the test stays green with the latch deleted.
-  // StrictMode deliberately mounts, unmounts and remounts every effect — without the ref, that is two
-  // fetches per boot and, worse, a dialog that can re-open after the user has dismissed it.
-  it("fetches once per boot even under StrictMode's double-invoke", async () => {
+  // UNDER StrictMode, which is how the app actually runs (main.tsx wraps <App/> in it). The deferred
+  // check must still attach one listener and issue exactly one request for one ordinary click.
+  it("checks once after one interaction even under StrictMode's double-invoke", async () => {
     setPending([task()]);
     authMock.mockReturnValue({
-      user: { id: "u1", hasPendingTaskAssignments: true, officeId: HOME_OFFICE, activeOfficeId: HOME_OFFICE },
+      user: { id: "u1", officeId: HOME_OFFICE, activeOfficeId: HOME_OFFICE },
     });
 
     await act(async () => {
@@ -372,6 +371,7 @@ describe("TaskAssignmentModal — when it appears", () => {
       );
     });
     await settle();
+    await click(document.body);
 
     expect(dialog()).not.toBeNull();
     expect(apiMock.mock.calls.filter(([p]) => p === "/tasks/pending-acknowledgement")).toHaveLength(1);
@@ -486,13 +486,13 @@ describe("TaskAssignmentModal — every dismissal acknowledges, exactly once", (
   });
 });
 
-describe("TaskAssignmentModal — assignments after login", () => {
-  it("checks on the recipient's next click even when the login-time flag was false", async () => {
-    setPending([]);
-    await render(false);
-    expect(pendingFetches()).toHaveLength(0);
-
+describe("TaskAssignmentModal — bounded assignment checks", () => {
+  it("checks on the recipient's next ordinary click, not during auth boot", async () => {
     setPending([task({ id: "arrived-after-login", title: "Confirm permit pickup" })]);
+    await render(false);
+
+    expect(pendingFetches()).toHaveLength(0);
+    expect(dialog()).toBeNull();
 
     await click(document.body);
 
@@ -501,124 +501,71 @@ describe("TaskAssignmentModal — assignments after login", () => {
     expect(acknowledgeCalls()).toHaveLength(0);
   });
 
-  it("directly checks when the person returns to the browser tab", async () => {
-    setPending([]);
+  it("makes clicks, focus and visibility changes no-ops after a successful session check", async () => {
+    setPending([], 0);
     await render(false);
-    expect(pendingFetches()).toHaveLength(0);
 
-    setPending([task({ id: "arrived-while-away", title: "Review updated site plan" })]);
+    await click(document.body);
+    expect(pendingFetches()).toHaveLength(1);
+
     await act(async () => {
       window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
     });
-    await settle();
+    await click(document.body);
+    await click(document.body);
+    await click(document.body);
 
     expect(pendingFetches()).toHaveLength(1);
-    expect(dialog()?.textContent).toContain("Review updated site plan");
+    expect(dialog()).toBeNull();
   });
 
-  it("does not recheck on Space before a button's activation click", async () => {
-    setPending([]);
+  it("does no selector work on later clicks after this office has its answer", async () => {
+    setPending([], 0);
     await render(false);
-    setPending([task({ id: "arrived-before-space" })]);
-
-    const action = document.createElement("button");
-    document.body.appendChild(action);
-    await act(async () => {
-      action.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
-    });
-    await settle();
-
-    expect(pendingFetches()).toHaveLength(0);
-    action.remove();
-
     await click(document.body);
     expect(pendingFetches()).toHaveLength(1);
-  });
 
-  it("does not treat Enter in an editor or composition as a task check", async () => {
-    setPending([]);
-    await render(false);
-    setPending([task({ id: "arrived-while-typing" })]);
-
-    const textarea = document.createElement("textarea");
-    const richEditor = document.createElement("div");
-    richEditor.contentEditable = "true";
-    const nestedText = document.createElement("span");
-    richEditor.appendChild(nestedText);
-    document.body.append(textarea, richEditor);
-
-    await act(async () => {
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      nestedText.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      document.body.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, isComposing: true })
-      );
-    });
-    await settle();
-
-    expect(pendingFetches()).toHaveLength(0);
-    textarea.remove();
-    richEditor.remove();
-
+    // The listener remains installed so another office can be checked after a scope change. Once this
+    // office is answered, though, it must return before its popup selector/microtask work; otherwise a
+    // no-network fix still taxes every click in a busy CRM screen.
+    const querySelector = vi.spyOn(document, "querySelector");
     await click(document.body);
+    expect(querySelector).not.toHaveBeenCalled();
+    querySelector.mockRestore();
+
     expect(pendingFetches()).toHaveLength(1);
   });
 
-  it("does not interrupt an editor or native picker click", async () => {
-    setPending([]);
-    await render(false);
+  it("does not spend the session check on typing, native controls, or popup interactions", async () => {
     setPending([task({ id: "arrived-during-picker" })]);
+    await render(false);
 
     const textarea = document.createElement("textarea");
     const picker = document.createElement("select");
     picker.appendChild(new Option("Normal", "normal"));
-    document.body.append(textarea, picker);
+    const trigger = document.createElement("button");
+    trigger.dataset.slot = "select-trigger";
+    document.body.append(textarea, picker, trigger);
 
     await click(textarea);
     await click(picker);
-
+    await click(trigger);
     expect(pendingFetches()).toHaveLength(0);
+
     textarea.remove();
     picker.remove();
-
+    trigger.remove();
     await click(document.body);
+
     expect(pendingFetches()).toHaveLength(1);
+    expect(dialog()).not.toBeNull();
   });
 
-  it("holds an in-flight recheck until a newly opened picker is out of the way", async () => {
+  it("leaves an unseen answer retryable when a popup opens before its response", async () => {
     const fetches = deferredFetches();
     await render(false);
-
-    await act(async () => {
-      window.dispatchEvent(new Event("focus"));
-    });
-    await settle();
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
-
-    const picker = document.createElement("select");
-    picker.appendChild(new Option("Normal", "normal"));
-    document.body.appendChild(picker);
-    await click(picker);
-
-    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-during-open-picker" })]);
-    expect(dialog()).toBeNull();
-
-    picker.remove();
     await click(document.body);
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(2);
-    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-during-open-picker" })]);
-
-    expect(dialog()?.textContent).toContain("Walk the Henderson roof");
-  });
-
-  it("holds an in-flight recheck until a newly opened popup is out of the way", async () => {
-    const fetches = deferredFetches();
-    await render(false);
-
-    await act(async () => {
-      window.dispatchEvent(new Event("focus"));
-    });
-    await settle();
     expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
 
     const popup = document.createElement("div");
@@ -635,111 +582,7 @@ describe("TaskAssignmentModal — assignments after login", () => {
     expect(dialog()?.textContent).toContain("Walk the Henderson roof");
   });
 
-  it("queues the next eligible click behind a deferred in-flight recheck", async () => {
-    const fetches = deferredFetches();
-    await render(false);
-
-    await act(async () => {
-      window.dispatchEvent(new Event("focus"));
-    });
-    await settle();
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
-
-    const picker = document.createElement("select");
-    picker.appendChild(new Option("Normal", "normal"));
-    document.body.appendChild(picker);
-    await click(picker);
-    picker.remove();
-
-    // This is the person's next eligible click, but the focus-triggered request has not answered yet.
-    // It must queue a fresh generation rather than being silently lost to the loading guard.
-    await click(document.body);
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
-
-    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-before-next-click" })]);
-    expect(dialog()).toBeNull();
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(2);
-
-    await fetches.resolveFor(HOME_OFFICE, [task({ id: "arrived-before-next-click" })]);
-    expect(dialog()?.textContent).toContain("Walk the Henderson roof");
-  });
-
-  it("does not mark an older answer shown while a newer recheck is queued", async () => {
-    const fetches = deferredFetches();
-    await render(false);
-
-    await act(async () => {
-      window.dispatchEvent(new Event("focus"));
-    });
-    await settle();
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
-
-    // This ordinary click queues generation two while generation one is still loading.
-    await click(document.body);
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(1);
-
-    await fetches.resolveFor(HOME_OFFICE, [task({ id: "fresh-answer", title: "Fresh answer" })]);
-    expect(dialog()).toBeNull();
-    expect(window.sessionStorage.length).toBe(0);
-    expect(fetches.issuedFor(HOME_OFFICE)).toBe(2);
-
-    await fetches.resolveFor(HOME_OFFICE, [task({ id: "fresh-answer", title: "Fresh answer" })]);
-    expect(dialog()?.textContent).toContain("Fresh answer");
-  });
-
-  it.each([
-    "dialog-content",
-    "sheet-content",
-    "select-content",
-    "dropdown-menu-content",
-    "dropdown-menu-sub-content",
-    "popover-content",
-  ])("waits for an open %s before checking again", async (slot) => {
-    setPending([]);
-    await render(false);
-    setPending([task({ id: `arrived-beneath-${slot}` })]);
-
-    const popup = document.createElement("div");
-    popup.dataset.slot = slot;
-    document.body.appendChild(popup);
-    await click(document.body);
-
-    expect(pendingFetches()).toHaveLength(0);
-
-    popup.remove();
-    await click(document.body);
-
-    expect(pendingFetches()).toHaveLength(1);
-  });
-
-  it("does not treat a popup trigger or a closing popup choice as a follow-up check", async () => {
-    setPending([]);
-    await render(false);
-    setPending([task({ id: "arrived-during-popup" })]);
-
-    const trigger = document.createElement("button");
-    trigger.dataset.slot = "select-trigger";
-    document.body.appendChild(trigger);
-    await click(trigger);
-
-    expect(pendingFetches()).toHaveLength(0);
-    trigger.remove();
-
-    const popup = document.createElement("div");
-    popup.dataset.slot = "select-content";
-    const choice = document.createElement("button");
-    choice.addEventListener("click", () => popup.remove());
-    popup.appendChild(choice);
-    document.body.appendChild(popup);
-    await click(choice);
-
-    expect(pendingFetches()).toHaveLength(0);
-
-    await click(document.body);
-    expect(pendingFetches()).toHaveLength(1);
-  });
-
-  it("does not use the explicit Close click as a follow-up check", async () => {
+  it("does not let a close click start another assignment request", async () => {
     setPending([task({ id: "first" })]);
     await render(true);
     setPending([task({ id: "later" })]);
@@ -748,78 +591,6 @@ describe("TaskAssignmentModal — assignments after login", () => {
 
     expect(pendingFetches()).toHaveLength(1);
     expect(acknowledgeCalls()).toHaveLength(1);
-  });
-
-  it("does not consume the next click after the header close control", async () => {
-    setPending([task({ id: "first" })]);
-    await render(true);
-    setPending([task({ id: "later", title: "Confirm the final site walk" })]);
-
-    const headerClose = document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
-    await click(headerClose ?? undefined);
-
-    expect(pendingFetches()).toHaveLength(1);
-    await click(document.body);
-
-    expect(pendingFetches()).toHaveLength(2);
-    expect(dialog()?.textContent).toContain("Confirm the final site walk");
-  });
-
-  it("does not reopen after Enter activates Close, but accepts the next independent click", async () => {
-    setPending([task({ id: "first" })]);
-    await render(true);
-    setPending([task({ id: "later", title: "Review the final measurements" })]);
-
-    const close = buttonLabelled("Close");
-    await act(async () => {
-      // Browsers dispatch a click after an Enter activation. The global recheck intentionally listens
-      // to that post-activation click, which remains one dismissal gesture rather than future work.
-      close?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      close?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await settle();
-
-    expect(dialog()).toBeNull();
-    expect(pendingFetches()).toHaveLength(1);
-
-    await click(document.body);
-
-    expect(pendingFetches()).toHaveLength(2);
-    expect(dialog()?.textContent).toContain("Review the final measurements");
-  });
-
-  it("does not use the backdrop dismissal click as a follow-up check", async () => {
-    setPending([task({ id: "first" })]);
-    await render(true);
-    setPending([task({ id: "later", title: "Call the city inspector" })]);
-
-    await click(document.querySelector<HTMLElement>('[data-slot="dialog-overlay"]') ?? undefined);
-
-    expect(dialog()).toBeNull();
-    expect(pendingFetches()).toHaveLength(1);
-    expect(acknowledgeCalls()).toHaveLength(1);
-
-    await click(document.body);
-
-    expect(pendingFetches()).toHaveLength(2);
-    expect(dialog()?.textContent).toContain("Call the city inspector");
-  });
-
-  it("does not consume the next click when the modal was dismissed with Escape", async () => {
-    setPending([task({ id: "first" })]);
-    await render(true);
-
-    await act(async () => {
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    });
-    await settle();
-    expect(dialog()).toBeNull();
-
-    setPending([task({ id: "later", title: "Check the final inspection" })]);
-    await click(document.body);
-
-    expect(pendingFetches()).toHaveLength(2);
-    expect(dialog()?.textContent).toContain("Check the final inspection");
   });
 });
 
@@ -973,6 +744,51 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
     expect(dialog()!.textContent).not.toContain("Dallas roof walk");
   });
 
+  it("never lets a same-office response cross into a different authenticated user", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a", userId: "u1" });
+    const abandonedSignal = fetches.signalFor("office-a");
+
+    // The next account can legitimately work in the same office. Office-only request identity would
+    // make an abort-insensitive transport display u1's result to u2.
+    await render(false, { officeId: "office-a", userId: "u2" });
+    expect(abandonedSignal?.aborted, "the previous user's request kept running").toBe(true);
+    await fetches.resolveFor("office-a", [task({ id: "u1-task", title: "Only for user one" })]);
+
+    expect(dialog()).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
+
+    await click(document.body);
+    expect(fetches.issuedFor("office-a")).toBe(2);
+    await fetches.resolveFor("office-a", [task({ id: "u2-task", title: "Only for user two" })]);
+
+    expect(dialog()?.textContent).toContain("Only for user two");
+    expect(dialog()?.textContent).not.toContain("Only for user one");
+  });
+
+  it("never lets a same-office response cross into a new explicit login session", async () => {
+    const fetches = deferredFetches();
+    await render(true, { officeId: "office-a", userId: "u1" });
+    const abandonedSignal = fetches.signalFor("office-a");
+
+    await render(false, {
+      officeId: "office-a",
+      userId: "u1",
+      assignmentModalSession: 1,
+      assignmentModalSessionResetPending: true,
+    });
+    expect(abandonedSignal?.aborted, "the prior login session's request kept running").toBe(true);
+    await fetches.resolveFor("office-a", [task({ id: "old-session", title: "Old login result" })]);
+
+    expect(dialog()).toBeNull();
+    await click(document.body);
+    expect(fetches.issuedFor("office-a")).toBe(2);
+    await fetches.resolveFor("office-a", [task({ id: "new-session", title: "Fresh login result" })]);
+
+    expect(dialog()?.textContent).toContain("Fresh login result");
+    expect(dialog()?.textContent).not.toContain("Old login result");
+  });
+
   it("aborts and ignores a response that settles after the modal unmounts", async () => {
     const fetches = deferredFetches();
     await render(true, { officeId: "office-a" });
@@ -1007,10 +823,10 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
     expect(fetches.issuedFor("office-a")).toBe(2);
   });
 
-  // The boot office's auth flag can truthfully say "nothing pending", so visiting it issues no
-  // replacement request. If abandoning A leaves A/loading in the state machine, nothing overwrites
-  // that latch and a later return to A mistakes an aborted request for one still in flight forever.
-  it("refetches an aborted office after visiting a flag-scoped office that needs no fetch", async () => {
+  // If abandoning A leaves A/loading in the state machine, a later return to A mistakes an aborted
+  // request for one still in flight forever. Every newly selected office gets its first interaction
+  // check, so both transitions below must remain independently askable.
+  it("refetches an aborted office after visiting another office", async () => {
     const fetches = deferredFetches();
     await render(false, { officeId: "office-b" });
     expect(fetches.issuedFor("office-b")).toBe(0);
@@ -1021,7 +837,7 @@ describe("TaskAssignmentModal — overlapping fetches", () => {
 
     await changeOfficeTo("office-b");
     expect(abandonedSignal?.aborted, "the abandoned office request kept running").toBe(true);
-    expect(fetches.issuedFor("office-b")).toBe(0);
+    expect(fetches.issuedFor("office-b")).toBe(1);
 
     await changeOfficeTo("office-a");
     expect(fetches.issuedFor("office-a")).toBe(2);
@@ -1076,10 +892,8 @@ function setPendingByOffice(
 }
 
 describe("TaskAssignmentModal — a page refresh is not a new login", () => {
-  // A refresh remounts the component and every ref with it, while the auth cookie is long-lived: boot
-  // calls /auth/me, the flag comes back true because urgent/high/overdue repeats stay eligible by
-  // design, and the same dialog opens again. Not once per login — once per RELOAD, which is the
-  // permanent-nag failure this feature has already been rescued from once, arriving by another door.
+  // A refresh remounts the component and every ref with it, while the browser session is still alive.
+  // The same task must not be rechecked and reopened simply because someone pressed F5.
   //
   // So "already shown" has to outlive the component. sessionStorage is the right lifetime and it is
   // worth being precise about why, because the spec ruled browser storage OUT for acknowledgement:
@@ -1114,14 +928,15 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
     expect(consumeAssignmentModalSessionResetMock).toHaveBeenCalledWith(1);
   });
 
-  it("shows and acknowledges only the new card when a repeat shares its later batch", async () => {
+  it("starts a fresh reminder display when a new login returns a repeat alongside new work", async () => {
     setPendingByOffice({
       "office-a": { tasks: [repeat({ id: "a1", title: "Already shown urgent work" })] },
     });
     await render(true, { officeId: "office-a" });
     await click(buttonLabelled("Close"));
 
-    // Adam assigns something while the tab is open; the person reloads.
+    // Adam assigns something while the tab is open. A new explicit login starts the next reminder
+    // session; a plain reload deliberately does not poll the same office again.
     setPendingByOffice({
       "office-a": {
         tasks: [
@@ -1130,22 +945,21 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
         ],
       },
     });
-    await reload();
+    await reload({ assignmentModalSession: 1, assignmentModalSessionResetPending: true });
 
     expect(dialog()!.textContent).toContain("Brand new work");
-    expect(dialog()!.textContent).not.toContain("Already shown urgent work");
+    expect(dialog()!.textContent).toContain("Already shown urgent work");
     await click(buttonLabelled("Close"));
     expect(acknowledgeCalls()).toHaveLength(2);
-    expect(acknowledgedTaskIds(acknowledgeCalls()[1]!)).toEqual(["a2"]);
+    expect(acknowledgedTaskIds(acknowledgeCalls()[1]!)).toEqual(["a2", "a1"]);
   });
 
-  it("does not count a previously shown new card after its acknowledgement retry failed", async () => {
+  it("does not hide work after an acknowledgement outage when a new login starts a fresh session", async () => {
     setPendingByOffice({ "office-a": { tasks: [task({ id: "a1", title: "First new assignment" })] } });
     await render(true, { officeId: "office-a" });
 
-    // Showing is intentionally session-local and survives an acknowledgement outage. When the server
-    // still returns that first NEW card with a later card, only the latter may affect this dialog's
-    // title and remaining-count copy.
+    // The acknowledgement outage means the server can still return the first card. A real new login
+    // deliberately begins a fresh reminder session, so both current assignments remain visible.
     apiMock.mockImplementation(async (path: string) => {
       if (path === "/tasks/acknowledge") throw new Error("acknowledgement network blip");
       if (path === "/tasks/pending-acknowledgement") {
@@ -1161,12 +975,11 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
       throw new Error(`unexpected api call: ${path}`);
     });
     await click(buttonLabelled("Close"));
-    await reload();
+    await reload({ assignmentModalSession: 1, assignmentModalSessionResetPending: true });
 
     expect(dialog()!.textContent).toContain("Second new assignment");
-    expect(dialog()!.textContent).not.toContain("First new assignment");
-    expect(dialog()!.textContent).toContain("You have a new task");
-    expect(dialog()!.textContent).not.toContain("You have 2 new tasks");
+    expect(dialog()!.textContent).toContain("First new assignment");
+    expect(dialog()!.textContent).toContain("You have 2 new tasks");
     expect(dialog()!.textContent).not.toContain("more waiting");
   });
 
@@ -1199,7 +1012,7 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
         ],
       },
     });
-    await reload();
+    await reload({ assignmentModalSession: 1, assignmentModalSessionResetPending: true });
 
     expect(dialog(), "the newer handoff inherited suppression from its old assignment").not.toBeNull();
     expect(dialog()!.textContent).toContain("reassigned back to you");
@@ -1210,8 +1023,8 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
   // The server sends five rows and a total. A sixth eligible task never crossed the wire, so nobody
   // saw it, and it is exactly the kind of row the unseen-first ordering exists to surface. Recording
   // "shown" from the TOTAL rather than from the rendered page would write that sixth task into
-  // storage as already seen — and unlike the in-memory version, this one survives the reload, so the
-  // task would be suppressed for the rest of the session without a person ever laying eyes on it.
+  // storage as already seen — and unlike the in-memory version, this one survives a new reminder
+  // session, so the task would be suppressed without a person ever laying eyes on it.
   // Same failure the acknowledgement guard prevents, one layer further out and considerably quieter.
   it("does not record a task that was crowded out of the page it never appeared on", async () => {
     setPendingByOffice({
@@ -1232,7 +1045,7 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
 
     // The five acknowledged ones drop out; the sixth finally has room.
     setPendingByOffice({ "office-a": { tasks: [task({ id: "a6", title: "Was crowded out" })] } });
-    await reload();
+    await reload({ assignmentModalSession: 1, assignmentModalSessionResetPending: true });
 
     expect(dialog(), "the sixth task was recorded as shown without ever being sent").not.toBeNull();
     expect(dialog()!.textContent).toContain("Was crowded out");
@@ -1268,16 +1081,13 @@ describe("TaskAssignmentModal — a page refresh is not a new login", () => {
   });
 });
 
-describe("TaskAssignmentModal — once per office, per login", () => {
+describe("TaskAssignmentModal — once per office, per browser session", () => {
   // Urgent, high and overdue assignments stay eligible after acknowledgement — that is the repeat rule
   // and it is correct. But eligibility is a SERVER answer about a task, and "I have already
-  // interrupted this person" is a CLIENT fact about this session, so for a cross-office user A -> B ->
-  // A re-fetches A, finds the same repeats still eligible, and opens the same dialog a second time in
-  // one login. The two facts live in different places for the same reason every other round on this
-  // file did: fetchState answers what is being shown NOW, and it is replaced on every office change,
-  // which is precisely when "already shown" has to survive.
+  // interrupted this person" and "we already asked this office" are CLIENT facts about this browser
+  // session. A -> B -> A must not make a second A database request, even for an urgent repeat.
 
-  it("does not interrupt twice for the same office in one login", async () => {
+  it("does not interrupt twice for the same office in one browser session", async () => {
     setPendingByOffice({
       "office-a": { tasks: [repeat({ id: "a1", title: "Dallas roof walk" })] },
       "office-b": { tasks: [] },
@@ -1292,17 +1102,10 @@ describe("TaskAssignmentModal — once per office, per login", () => {
     expect(dialog(), "the same repeats, a second time, in one login").toBeNull();
     // Nothing was acknowledged a second time either, because nothing was shown a second time.
     expect(acknowledgeCalls()).toHaveLength(1);
-    // Deliberately NO assertion here about whether office A was re-fetched. It is, and that belongs to
-    // the refetch-on-office-change property, which has its own test below. Asserting it here as well
-    // coupled this test to that guard: breaking the office arm made THIS test red, which reads as
-    // "the once-per-login guard is broken" when the truth is that the request was never issued.
+    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(1);
   });
 
-  // The other half, kept separate for that reason. What is suppressed is the second INTERRUPTION, not
-  // the second question — the answer may have changed, and a new assignment arriving while the person
-  // was in office B has to be able to surface, which is why the guard sits on opening the dialog
-  // rather than on issuing the request.
-  it("still ASKS the office again on return, even though it will not interrupt", async () => {
+  it("does not query a previously checked office again on return", async () => {
     setPendingByOffice({
       "office-a": { tasks: [repeat({ id: "a1" })] },
       "office-b": { tasks: [] },
@@ -1313,7 +1116,7 @@ describe("TaskAssignmentModal — once per office, per login", () => {
     await changeOfficeTo("office-b");
     await changeOfficeTo("office-a");
 
-    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(2);
+    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(1);
   });
 
   it("still interrupts for an office it has NOT shown yet", async () => {
@@ -1329,9 +1132,7 @@ describe("TaskAssignmentModal — once per office, per login", () => {
     expect(dialog()!.textContent).toContain("Atlanta punch list");
   });
 
-  // "Shown" must mean the dialog went on screen, not that a response arrived. Each of the next three
-  // put nothing in front of anybody, so each office must remain askable.
-  it("does not count an office whose list came back EMPTY as shown", async () => {
+  it("waits until a new reminder session before rechecking an office whose first answer was empty", async () => {
     setPendingByOffice({ "office-a": { tasks: [] }, "office-b": { tasks: [] } });
     await render(true, { officeId: "office-a" });
     expect(dialog()).toBeNull();
@@ -1343,10 +1144,14 @@ describe("TaskAssignmentModal — once per office, per login", () => {
     });
     await changeOfficeTo("office-a");
 
+    expect(dialog()).toBeNull();
+    expect(pendingFetches().filter((c) => officeHeaderOf(c) === "office-a")).toHaveLength(1);
+
+    await reload({ assignmentModalSession: 1, assignmentModalSessionResetPending: true });
     expect(dialog()!.textContent).toContain("Arrived later");
   });
 
-  it("does not count an office whose fetch FAILED as shown", async () => {
+  it("does not count an office whose fetch FAILED as checked", async () => {
     setPendingByOffice({ "office-a": "fail", "office-b": { tasks: [] } });
     await render(true, { officeId: "office-a" });
     expect(dialog()).toBeNull();
