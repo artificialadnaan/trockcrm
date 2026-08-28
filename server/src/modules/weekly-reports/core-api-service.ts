@@ -71,7 +71,7 @@ export async function resolveCoreWeeklyReportDeal(
             d.project_number,
             d.deal_number,
             d.bid_board_project_number,
-            COALESCE(d.is_change_order, false) AS is_change_order,
+            d.is_change_order,
             d.parent_deal_id
        FROM deals d
       WHERE d.is_active = true
@@ -128,7 +128,7 @@ export async function requireCoreWeeklyReportDealBinding(
             d.project_number,
             d.deal_number,
             d.bid_board_project_number,
-            COALESCE(d.is_change_order, false) AS is_change_order,
+            d.is_change_order,
             d.parent_deal_id
        FROM deals d
       WHERE d.id = $1::uuid
