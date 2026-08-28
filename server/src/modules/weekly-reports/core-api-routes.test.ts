@@ -96,6 +96,7 @@ interface Harness {
   transaction: ReturnType<typeof vi.fn>;
   resolveDeal: ReturnType<typeof vi.fn>;
   requireDealBinding: ReturnType<typeof vi.fn>;
+  captureDeliveryBoundary: ReturnType<typeof vi.fn>;
   listReports: ReturnType<typeof vi.fn>;
   detailReport: ReturnType<typeof vi.fn>;
 }
@@ -118,6 +119,7 @@ function createHarness(overrides: CoreWeeklyReportApiRouterOptions = {}): Harnes
     id: DEAL_ID,
     canonicalProjectNumber: CANONICAL_PROJECT_NUMBER,
   }));
+  const captureDeliveryBoundary = vi.fn(async () => new Date(NOW_MS).toISOString());
   const listReports = vi.fn(async (): Promise<CoreWeeklyReportListResult> => ({
     items: [LIST_ITEM],
     hasMore: false,
@@ -143,6 +145,8 @@ function createHarness(overrides: CoreWeeklyReportApiRouterOptions = {}): Harnes
     resolveDeal: resolveDeal as unknown as NonNullable<CoreWeeklyReportApiRouterOptions["resolveDeal"]>,
     requireDealBinding:
       requireDealBinding as unknown as NonNullable<CoreWeeklyReportApiRouterOptions["requireDealBinding"]>,
+    captureDeliveryBoundary:
+      captureDeliveryBoundary as unknown as NonNullable<CoreWeeklyReportApiRouterOptions["captureDeliveryBoundary"]>,
     listReports:
       listReports as unknown as NonNullable<CoreWeeklyReportApiRouterOptions["listReports"]>,
     detailReport:
@@ -162,6 +166,7 @@ function createHarness(overrides: CoreWeeklyReportApiRouterOptions = {}): Harnes
     transaction,
     resolveDeal,
     requireDealBinding,
+    captureDeliveryBoundary,
     listReports,
     detailReport,
   };
@@ -636,6 +641,9 @@ describe("Core weekly-report HTTP operation isolation and DTOs", () => {
       after: null,
     });
     expect(harness.requireDealBinding.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.captureDeliveryBoundary.mock.invocationCallOrder[0]!,
+    );
+    expect(harness.captureDeliveryBoundary.mock.invocationCallOrder[0]).toBeLessThan(
       harness.listReports.mock.invocationCallOrder[0]!,
     );
   });
@@ -696,6 +704,7 @@ describe("Core weekly-report HTTP operation isolation and DTOs", () => {
         reportId: LIST_ITEM.id,
       },
     });
+    expect(secondHarness.captureDeliveryBoundary).not.toHaveBeenCalled();
   });
 
   it("accepts a previous-key cursor during rotation but rejects tamper/context/limit/expiry before lookup", async () => {

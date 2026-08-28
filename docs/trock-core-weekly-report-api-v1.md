@@ -113,7 +113,10 @@ published. Results order by week, version, and report id descending. The signed 
 office, deal, canonical number, page limit, first-page `asOf` boundary, issue/expiry time, and last
 position. Cursors live for at most 15 minutes and are valid on the half-open interval
 `[issuedAt, expiresAt)`. A provider acceptance after `asOf` cannot enter a later page. Changing the page
-limit or any identity binding requires a fresh first page.
+limit or any identity binding requires a fresh first page. CRM captures `asOf` inside the tenant
+transaction after taking the same per-office boundary lock used by delivery-webhook writes. A delayed
+failure received after page one is evaluated as unknown for that signed walk even if the provider event
+itself occurred earlier; a fresh walk excludes it immediately.
 
 Each item exposes:
 
@@ -136,7 +139,8 @@ from a fresh list/detail read, while a null verdict remains eligible under the e
 `publicationStatus` is fixed to `sent` in v1. `latest` has no later eligible accepted version for that week;
 `superseded` names the next eligible accepted version; `withdrawn` means CRM retained historical metadata
 but disabled content access. A correction that was never accepted or has a known failure does not
-supersede the preceding eligible version.
+supersede the preceding eligible version. Supersession is scoped to the immutable weekly-report setup id,
+so deleting and recreating a setup for the same deal cannot make one historical series replace another.
 
 ## Detail allowlist
 

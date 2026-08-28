@@ -4,6 +4,7 @@ import {
 } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import { pool } from "../../db.js";
 import { withWeeklyReportOfficeClient } from "./office-connection.js";
+import { lockCoreWeeklyReportDeliveryBoundary } from "./delivery-publication-boundary.js";
 import type { QueryExecutor } from "./projects-service.js";
 
 // Ingesting what the mail provider said about a send, after the send was over.
@@ -155,6 +156,10 @@ export async function applyWeeklyReportDeliveryEvent(
   client: QueryExecutor,
   input: { weeklyReportId: string; deliveryKey: string; event: WeeklyReportDeliveryEvent },
 ): Promise<WeeklyReportDeliveryOutcome> {
+  // Linearize provider-webhook receipt with the first page of every Core client-history walk. The
+  // provider occurrence timestamp cannot do this job: a webhook may arrive hours after that instant.
+  // This lock is transaction-scoped and the list reader samples its asOf only after taking the same key.
+  await lockCoreWeeklyReportDeliveryBoundary(client);
   const locked = await client.query(
     `SELECT id, send_delivery_status, send_delivery_status_at
        FROM weekly_reports

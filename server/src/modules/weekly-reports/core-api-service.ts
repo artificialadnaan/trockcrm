@@ -33,9 +33,15 @@ type DealIdentityRow = {
 };
 
 function authoritativeCanonicalProjectNumber(row: DealIdentityRow): string | null {
-  return canonicalizeProjectNumber(
-    row.project_number ?? row.deal_number ?? row.bid_board_project_number,
-  );
+  for (const candidate of [
+    row.project_number,
+    row.deal_number,
+    row.bid_board_project_number,
+  ]) {
+    const canonical = canonicalizeProjectNumber(candidate);
+    if (canonical) return canonical;
+  }
+  return null;
 }
 
 function dealBinding(row: DealIdentityRow): CoreWeeklyReportDealBinding {
@@ -188,9 +194,9 @@ function mapListRow(row: Record<string, unknown>): CoreWeeklyReportListItem {
 
 /**
  * Keyset page of provider-accepted frozen sends with no known failure. `send_delivered_at <= asOf`
- * freezes new acceptances across a paginated walk. A failure verdict dated after the boundary is
- * evaluated as it stood at that boundary, so a webhook arriving between page requests cannot reshuffle
- * the walk.
+ * freezes new acceptances across a paginated walk. A failure verdict CRM recorded after the boundary is
+ * evaluated as it stood at that boundary, regardless of the provider event's older occurrence time, so
+ * a delayed webhook arriving between page requests cannot reshuffle the walk.
  * `(week_of, version, id)` makes ordering total even if a legacy deal has more than one setup row.
  */
 export async function listCoreWeeklyReports(
@@ -215,6 +221,7 @@ export async function listCoreWeeklyReports(
 
   const result = await client.query(
     `SELECT wr.id,
+            wr.weekly_report_project_id,
             wr.week_of,
             wr.version,
             wr.send_delivered_at,
@@ -226,6 +233,7 @@ export async function listCoreWeeklyReports(
          SELECT newer.id
            FROM weekly_reports newer
           WHERE newer.deal_id = wr.deal_id
+            AND newer.weekly_report_project_id = wr.weekly_report_project_id
             AND newer.week_of = wr.week_of
             AND newer.status = 'sent'
             AND newer.sent_at IS NOT NULL
@@ -234,7 +242,7 @@ export async function listCoreWeeklyReports(
             AND (
               newer.send_delivery_status IS NULL
               OR NOT (newer.send_delivery_status = ANY($3::text[]))
-              OR newer.send_delivery_status_at > $2::timestamptz
+              OR newer.send_delivery_status_recorded_at > $2::timestamptz
             )
             AND newer.snapshot IS NOT NULL
             AND (newer.version, newer.id) > (wr.version, wr.id)
@@ -249,7 +257,7 @@ export async function listCoreWeeklyReports(
         AND (
           wr.send_delivery_status IS NULL
           OR NOT (wr.send_delivery_status = ANY($3::text[]))
-          OR wr.send_delivery_status_at > $2::timestamptz
+          OR wr.send_delivery_status_recorded_at > $2::timestamptz
         )
         AND wr.snapshot IS NOT NULL${afterSql}
       ORDER BY wr.week_of DESC, wr.version DESC, wr.id DESC
@@ -285,18 +293,20 @@ async function reportSupersession(
     `SELECT candidate.id
        FROM weekly_reports candidate
       WHERE candidate.deal_id = $1::uuid
-        AND candidate.week_of = $2::date
+        AND candidate.weekly_report_project_id = $2::uuid
+        AND candidate.week_of = $3::date
         AND candidate.status = 'sent'
         AND candidate.sent_at IS NOT NULL
         AND candidate.send_delivered_at IS NOT NULL
         AND (candidate.send_delivery_status IS NULL
-             OR NOT (candidate.send_delivery_status = ANY($5::text[])))
+             OR NOT (candidate.send_delivery_status = ANY($6::text[])))
         AND candidate.snapshot IS NOT NULL
-        AND (candidate.version, candidate.id) > ($3::integer, $4::uuid)
+        AND (candidate.version, candidate.id) > ($4::integer, $5::uuid)
       ORDER BY candidate.version ASC, candidate.id ASC
       LIMIT 1`,
     [
       row.deal_id,
+      row.weekly_report_project_id,
       isoDate(row.week_of),
       Number(row.version),
       row.id,
@@ -330,6 +340,7 @@ export async function getCoreWeeklyReportDetail(
   const eligible = await client.query(
     `SELECT wr.id,
             wr.deal_id,
+            wr.weekly_report_project_id,
             wr.week_of,
             wr.version,
             wr.send_delivered_at,

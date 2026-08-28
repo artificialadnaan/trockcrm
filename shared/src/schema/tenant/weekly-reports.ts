@@ -230,6 +230,13 @@ export const weeklyReports = pgTable(
      *  the time we received it. Webhooks arrive out of order, so this — not arrival — decides which
      *  verdict wins; a late `delivered` must not overwrite a later `bounced`. */
     sendDeliveryStatusAt: timestamp("send_delivery_status_at", { withTimezone: true }),
+    /** Migration 0242. When CRM recorded the verdict that currently controls publication. Unlike the
+     *  provider occurrence clock above, this is the local receipt boundary used to keep a paginated
+     *  client-history walk stable when a delayed bounce arrives between pages. For failures it remains
+     *  the first time CRM knew the send had failed, even if a later failure refines the stored detail. */
+    sendDeliveryStatusRecordedAt: timestamp("send_delivery_status_recorded_at", {
+      withTimezone: true,
+    }),
     /** Migration 0227. The bounce class (hard/soft), the provider's own type/subtype, its message and the
      *  message id, verbatim. A hard bounce and a full mailbox need opposite actions from the PM. */
     sendDeliveryDetail: jsonb("send_delivery_detail"),
@@ -265,6 +272,10 @@ export const weeklyReports = pgTable(
     check(
       "weekly_reports_send_delivery_status_check",
       sql`${table.sendDeliveryStatus} is null or ${table.sendDeliveryStatus} in ('delayed', 'delivered', 'complained', 'failed', 'bounced')`,
+    ),
+    check(
+      "weekly_reports_send_delivery_recorded_pair_check",
+      sql`(${table.sendDeliveryStatus} is null) = (${table.sendDeliveryStatusRecordedAt} is null)`,
     ),
     check(
       "weekly_reports_completion_percent_check",

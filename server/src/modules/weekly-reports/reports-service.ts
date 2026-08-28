@@ -1430,6 +1430,7 @@ export async function transitionWeeklyReport(
         `send_last_attempt_at = NULL`,
         `send_delivery_status = NULL`,
         `send_delivery_status_at = NULL`,
+        `send_delivery_status_recorded_at = NULL`,
         `send_delivery_detail = NULL`,
       );
     }

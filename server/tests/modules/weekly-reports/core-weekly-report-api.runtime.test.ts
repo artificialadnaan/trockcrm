@@ -8,6 +8,7 @@ import {
   requireCoreWeeklyReportDealBinding,
   resolveCoreWeeklyReportDeal,
 } from "../../../src/modules/weekly-reports/core-api-service.js";
+import { captureCoreWeeklyReportDeliveryBoundary } from "../../../src/modules/weekly-reports/delivery-publication-boundary.js";
 import {
   decodeCoreWeeklyReportCursor,
   encodeCoreWeeklyReportCursor,
@@ -43,6 +44,8 @@ const REPORT_UNACCEPTED = U("211");
 const REPORT_BOUNCED = U("212");
 const REPORT_FAILED = U("213");
 const REPORT_LEGACY_PROPERTY = U("214");
+const RECREATED_PROJECT = U("102");
+const RECREATED_REPORT = U("215");
 const PHOTO = U("300");
 const CURSOR_SECRET = "runtime-cursor-secret-with-32-byte-minimum-0001";
 
@@ -173,6 +176,7 @@ beforeAll(async () => {
   await pg.exec(migrationSql("0228_weekly_report_project_roster_link"));
   await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
   await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
+  await pg.exec(migrationSql("0242_weekly_report_delivery_recorded_at"));
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
     INSERT INTO public.users (id, display_name, email, role, office_id)
@@ -325,6 +329,14 @@ describe("Core weekly-report deal resolution", () => {
     expect(result).toEqual({ id: DEAL, canonicalProjectNumber: "dfw-1-12345-aa" });
   });
 
+  it("falls through a blank primary project number to the first canonical legacy identity", async () => {
+    await pg.query("UPDATE office_dallas.deals SET project_number = '  ' WHERE id = $1::uuid", [DEAL]);
+    await expect(resolveCoreWeeklyReportDeal(db, "DFW-1-12345-AA")).resolves.toEqual({
+      id: DEAL,
+      canonicalProjectNumber: "dfw-1-12345-aa",
+    });
+  });
+
   it("fails closed for a change-order-only match and for cross-column parent ambiguity", async () => {
     await expectAppError(
       resolveCoreWeeklyReportDeal(db, "ATL-1-99999-ZZ"),
@@ -367,10 +379,11 @@ describe("Core weekly-report deal resolution", () => {
 
 describe("Core weekly-report sent-history list", () => {
   it("publishes provider-accepted snapshots with null/delivered verdicts, but excludes known failures", async () => {
+    const asOf = await captureCoreWeeklyReportDeliveryBoundary(db);
     const page = await listCoreWeeklyReports(db, {
       dealId: DEAL,
       limit: 100,
-      asOf: "2026-08-28T00:00:00.000Z",
+      asOf,
     });
     expect(page.items.map((row) => row.id)).toEqual([
       REPORT_LATEST,
@@ -402,7 +415,7 @@ describe("Core weekly-report sent-history list", () => {
   });
 
   it("keyset-pages without duplicates and keeps sends after the as-of boundary out", async () => {
-    const asOf = "2026-08-28T00:00:00.000Z";
+    const asOf = await captureCoreWeeklyReportDeliveryBoundary(db);
     const first = await listCoreWeeklyReports(db, { dealId: DEAL, limit: 2, asOf });
     expect(first.hasMore).toBe(true);
     expect(first.last).not.toBeNull();
@@ -415,7 +428,7 @@ describe("Core weekly-report sent-history list", () => {
         limit: 2,
         asOf,
         issuedAt: asOf,
-        expiresAt: "2026-08-28T00:15:00.000Z",
+        expiresAt: new Date(Date.parse(asOf) + 15 * 60 * 1_000).toISOString(),
         weekOf: first.last!.weekOf,
         reportVersion: first.last!.reportVersion,
         reportId: first.last!.reportId,
@@ -428,12 +441,12 @@ describe("Core weekly-report sent-history list", () => {
       weekOf: "2026-09-24",
       status: "sent",
       sentAt: "2026-08-27T23:00:00Z",
-      deliveredAt: "2026-08-29T00:00:00Z",
+      deliveredAt: new Date(Date.parse(asOf) + 60_000).toISOString(),
     });
     await pg.query(
       `UPDATE office_dallas.weekly_reports
           SET send_delivery_status = 'bounced',
-              send_delivery_status_at = '2026-08-29T00:01:00Z'::timestamptz
+              send_delivery_status_at = '2026-08-01T00:01:00Z'::timestamptz
         WHERE id = $1::uuid`,
       [REPORT_OLD],
     );
@@ -456,14 +469,14 @@ describe("Core weekly-report sent-history list", () => {
       REPORT_WITHDRAWN,
     ]);
     expect(second.items.map((row) => row.id)).not.toContain(LATE_REPORT);
-    // The bounce was dated after the first page's snapshot boundary. It is excluded from fresh walks and
-    // from detail immediately, but it cannot reshuffle the metadata positions within this signed walk.
+    // The provider occurrence predates page one, but CRM received this delayed webhook after page one's
+    // boundary. Detail excludes it immediately; the signed metadata walk reconstructs what CRM knew.
     expect(second.items.map((row) => row.id)).toContain(REPORT_OLD);
 
     const fresh = await listCoreWeeklyReports(db, {
       dealId: DEAL,
       limit: 100,
-      asOf: "2026-08-30T00:00:00.000Z",
+      asOf: new Date(Date.parse(asOf) + 120_000).toISOString(),
     });
     expect(fresh.items.map((row) => row.id)).not.toContain(REPORT_OLD);
     expect(fresh.items.map((row) => row.id)).toContain(LATE_REPORT);
@@ -482,16 +495,53 @@ describe("Core weekly-report sent-history list", () => {
         WHERE id = $1::uuid`,
       [REPORT_CORRECTION],
     );
+    const asOf = await captureCoreWeeklyReportDeliveryBoundary(db);
     const page = await listCoreWeeklyReports(db, {
       dealId: DEAL,
       limit: 100,
-      asOf: "2026-08-28T00:00:00.000Z",
+      asOf,
     });
     expect(page.items.map((row) => row.id)).not.toContain(REPORT_CORRECTION);
     expect(page.items.find((row) => row.id === REPORT_OLD)).toMatchObject({
       lifecycleState: "latest",
       supersededByReportId: null,
     });
+  });
+
+  it("never supersedes across two historical setup rows for the same deal and week", async () => {
+    await pg.query(
+      "UPDATE office_dallas.weekly_report_projects SET is_active = false WHERE id = $1::uuid",
+      [PROJECT],
+    );
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, client_name, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Recreated setup', 'Same client', 4, '2026-08-01')`,
+      [RECREATED_PROJECT, DEAL],
+    );
+    await insertReport({
+      id: RECREATED_REPORT,
+      projectId: RECREATED_PROJECT,
+      weekOf: "2026-08-27",
+      version: 2,
+      status: "sent",
+      sentAt: "2026-08-27T19:00:00Z",
+    });
+
+    const asOf = await captureCoreWeeklyReportDeliveryBoundary(db);
+    const page = await listCoreWeeklyReports(db, { dealId: DEAL, limit: 100, asOf });
+    expect(page.items.find((row) => row.id === REPORT_LATEST)).toMatchObject({
+      lifecycleState: "latest",
+      supersededByReportId: null,
+    });
+    expect(page.items.find((row) => row.id === RECREATED_REPORT)).toMatchObject({
+      lifecycleState: "latest",
+      supersededByReportId: null,
+    });
+    await expect(getCoreWeeklyReportDetail(db, { dealId: DEAL, reportId: REPORT_LATEST }))
+      .resolves.toMatchObject({
+        item: { lifecycleState: "latest", supersededByReportId: null },
+      });
   });
 });
 

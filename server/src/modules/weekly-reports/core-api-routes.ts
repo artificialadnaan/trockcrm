@@ -51,6 +51,7 @@ import {
   type CoreWeeklyReportDetailResult,
   type CoreWeeklyReportListResult,
 } from "./core-api-service.js";
+import { captureCoreWeeklyReportDeliveryBoundary } from "./delivery-publication-boundary.js";
 import { withWeeklyReportOfficeClient } from "./office-connection.js";
 import type { QueryExecutor } from "./projects-service.js";
 
@@ -115,6 +116,7 @@ export interface CoreWeeklyReportApiRouterOptions {
   withOfficeTransaction?: CoreWeeklyReportOfficeTransaction;
   resolveDeal?: typeof resolveCoreWeeklyReportDeal;
   requireDealBinding?: typeof requireCoreWeeklyReportDealBinding;
+  captureDeliveryBoundary?: typeof captureCoreWeeklyReportDeliveryBoundary;
   listReports?: typeof listCoreWeeklyReports;
   detailReport?: typeof getCoreWeeklyReportDetail;
 }
@@ -127,6 +129,7 @@ interface ResolvedDependencies {
   withOfficeTransaction: CoreWeeklyReportOfficeTransaction;
   resolveDeal: typeof resolveCoreWeeklyReportDeal;
   requireDealBinding: typeof requireCoreWeeklyReportDealBinding;
+  captureDeliveryBoundary: typeof captureCoreWeeklyReportDeliveryBoundary;
   listReports: typeof listCoreWeeklyReports;
   detailReport: typeof getCoreWeeklyReportDetail;
 }
@@ -403,6 +406,8 @@ function resolveDependencies(options: CoreWeeklyReportApiRouterOptions): Resolve
       options.withOfficeTransaction ?? createCoreWeeklyReportOfficeTransaction(),
     resolveDeal: options.resolveDeal ?? resolveCoreWeeklyReportDeal,
     requireDealBinding: options.requireDealBinding ?? requireCoreWeeklyReportDealBinding,
+    captureDeliveryBoundary:
+      options.captureDeliveryBoundary ?? captureCoreWeeklyReportDeliveryBoundary,
     listReports: options.listReports ?? listCoreWeeklyReports,
     detailReport: options.detailReport ?? getCoreWeeklyReportDetail,
   };
@@ -618,17 +623,7 @@ function currentCursorPayload(
   expiresAt: string;
   after: Pick<CoreWeeklyReportCursorPayload, "weekOf" | "reportVersion" | "reportId"> | null;
 } {
-  if (request.cursor === null) {
-    const issuedAt = new Date(nowMs).toISOString();
-    return {
-      asOf: issuedAt,
-      issuedAt,
-      expiresAt: new Date(
-        nowMs + CORE_WEEKLY_REPORT_CURSOR_TTL_SECONDS * 1_000,
-      ).toISOString(),
-      after: null,
-    };
-  }
+  if (request.cursor === null) throw new CoreWeeklyReportContractError("cursor is missing");
   const cursor = decodeCoreWeeklyReportCursor(
     request.cursor,
     runtime.previousSecret
@@ -656,6 +651,21 @@ function currentCursorPayload(
       reportVersion: cursor.reportVersion,
       reportId: cursor.reportId,
     },
+  };
+}
+
+function initialCursorPayload(asOf: string): ReturnType<typeof currentCursorPayload> {
+  const issuedAtMs = Date.parse(asOf);
+  if (!Number.isFinite(issuedAtMs) || new Date(issuedAtMs).toISOString() !== asOf) {
+    throw new AppError(503, "Weekly-report delivery boundary is unavailable");
+  }
+  return {
+    asOf,
+    issuedAt: asOf,
+    expiresAt: new Date(
+      issuedAtMs + CORE_WEEKLY_REPORT_CURSOR_TTL_SECONDS * 1_000,
+    ).toISOString(),
+    after: null,
   };
 }
 
@@ -769,7 +779,9 @@ async function handleListReports(
   decoded.state.dealId = request.dealId;
   decoded.state.paginationCursorPresent = request.cursor !== null;
   // Validate cursor authentication/context before spending an office lookup or tenant connection.
-  const cursor = currentCursorPayload(request, runtime, dependencies.now());
+  const suppliedCursor = request.cursor === null
+    ? null
+    : currentCursorPayload(request, runtime, dependencies.now());
   const { controller, cleanup } = requestAbortController(req, res);
   try {
     await requireSignedOffice(request.officeSlug, decoded.state, dependencies, controller.signal);
@@ -785,24 +797,30 @@ async function handleListReports(
         assertReturnedDealBinding(request, deal);
         decoded.state.dealId = deal.id;
         throwIfAborted(controller.signal);
+        // Page one linearizes with delivery-webhook receipt inside this exact tenant transaction. Later
+        // pages carry the signed boundary and deliberately do not take a new one.
+        const cursor = suppliedCursor ?? initialCursorPayload(
+          await dependencies.captureDeliveryBoundary(client),
+        );
+        throwIfAborted(controller.signal);
         const page = await dependencies.listReports(client, {
           dealId: deal.id,
           limit: request.limit,
           asOf: cursor.asOf,
           after: cursor.after,
         });
-        return { deal, page };
+        return { deal, page, cursor };
       },
     );
     throwIfAborted(controller.signal);
-    const encodedNextCursor = nextCursor(request, result.page, cursor, runtime);
+    const encodedNextCursor = nextCursor(request, result.page, result.cursor, runtime);
     decoded.state.itemCount = result.page.items.length;
     decoded.state.nextCursorPresent = encodedNextCursor !== null;
     const body: CoreWeeklyReportListResponse = {
       version: CORE_WEEKLY_REPORT_LIST_RESPONSE_VERSION,
       requestId: decoded.requestId,
       deal: result.deal,
-      asOf: cursor.asOf,
+      asOf: result.cursor.asOf,
       items: result.page.items,
       nextCursor: encodedNextCursor,
     };
