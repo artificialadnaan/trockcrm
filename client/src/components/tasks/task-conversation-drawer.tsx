@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { TaskResolutionDialog } from "@/components/tasks/task-resolution-dialog";
 import { cn } from "@/lib/utils";
-import { getTaskProjectContext } from "@/lib/task-project-context";
+import { TaskProjectLink } from "@/components/tasks/task-project-link";
 import {
   ackTaskReplies,
   completeTask,
@@ -202,7 +202,6 @@ export function TaskConversationDrawer({
   // Both halves: a status the API will accept AND the server's verdict that THIS viewer may close it.
   // Either one alone leaves a button that looks live and 403s.
   const canComplete = COMPLETABLE_STATUSES.has(task.status) && task.canClose !== false;
-  const projectContext = getTaskProjectContext(task);
   const notice = loopNotice(loop);
 
   // The drawer is ONE instance reused for every task the list opens, so anything task-scoped has to be
@@ -338,8 +337,11 @@ export function TaskConversationDrawer({
             <span>Assigned to {task.assignedToName ?? "Unassigned"}</span>
             {/* The project, from the SAME resolver the list row uses. This is what an assignee
                 arriving from the assignment email needs first, and it is the requirement the old
-                "Linked task" banner carried — the drawer replaces that banner, so it inherits it. */}
-            {projectContext ? <span className="truncate">{projectContext}</span> : null}
+                "Linked task" banner carried — the drawer replaces that banner, so it inherits it.
+                A LINK now, and to the same place the row's link goes, opening in a new tab so the
+                thread you are reading survives the click. */}
+            <TaskProjectLink task={task} />
+            {task.assignedByName?.trim() ? <span>Assigned by {task.assignedByName.trim()}</span> : null}
             {/* Assigner-only: the assignee's own replies are not "new" to the person who wrote them. */}
             {isAssigner && unreadReplyCount > 0 ? (
               <span className="font-black text-brand-red">

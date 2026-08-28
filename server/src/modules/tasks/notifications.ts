@@ -1,9 +1,10 @@
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { formatDealDisplayNumber } from "@trock-crm/shared/types";
 import { sendSystemEmail } from "../../lib/resend-client.js";
+import { resolveHumanTaskAssignerId } from "./task-assigner.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -441,6 +442,217 @@ export async function prepareTaskReplyEmail(
 }
 
 export async function sendPreparedTaskReplyEmail(email: PreparedTaskReplyEmail) {
+  return sendSystemEmail(email.to, email.subject, email.html, email.options);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task closed: the outcome email back to the assigner
+// ---------------------------------------------------------------------------------------------
+
+export type TaskResolution = "completed" | "dismissed";
+
+type TaskResolutionEmailRecipient = {
+  id: string;
+  email: string;
+  displayName: string;
+  firstName: string | null;
+};
+
+export type PreparedTaskResolutionEmail = {
+  to: string;
+  subject: string;
+  html: string;
+  options: { text: string };
+};
+
+const RESOLUTION_VERB: Record<TaskResolution, string> = {
+  completed: "completed",
+  dismissed: "dismissed",
+};
+
+/**
+ * "<Name> completed: <task title>" — with the outcome text IN the email.
+ *
+ * Same reasoning as buildTaskReplyEmail above, and the same channel choice: worker-written in-app
+ * rows never push over SSE and the bell only fetches while its popover is open, so the mail is what
+ * actually arrives. A "your task was closed" notice that withholds the answer just makes the assigner
+ * open the CRM to read one sentence — which is the round trip this whole loop exists to remove.
+ *
+ * Dismissal is carried by the same builder, with its own verb. It is the MORE consequential close:
+ * it writes a suppression window that stops the rules engine ever raising the task again. An assigner
+ * told about completions but not dismissals watches tasks vanish and learns to distrust the channel.
+ */
+export function buildTaskResolutionEmail(input: {
+  task: { id: string; title: string };
+  assigner: TaskResolutionEmailRecipient;
+  closerName: string | null;
+  resolution: TaskResolution;
+  resolutionNote: string;
+  resolvedAt: string;
+  project?: ProjectResolution;
+  /** Same cross-office reason as every other task link — see taskUrl. */
+  officeId?: string | null;
+}) {
+  const link = taskUrl(input.task.id, input.officeId);
+  const assignerFirstName = firstNameFor(input.assigner);
+  // Fires only when the closer's users row could not be read at all — display_name is NOT NULL
+  // (shared/src/schema/public/users.ts). "Someone" rather than "The assignee", because
+  // assertTaskCloseAuthority also admits the assigner and any elevated role: naming the closer as the
+  // assignee would state a fact the mail has no basis for.
+  const closer = input.closerName?.trim() || "Someone";
+  const verb = RESOLUTION_VERB[input.resolution];
+  const when = formatRepliedAt(input.resolvedAt);
+  const project = formatLinkedProjectLabel(input.project ?? { kind: "none" });
+  const subject = sanitizeSubject(`${closer} ${verb}: ${input.task.title}`);
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:640px;margin:0 auto;padding:24px;">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:24px;color:#111827;line-height:1.5;">
+      <p>Hi ${escapeHtml(assignerFirstName)},</p>
+      <p>${escapeHtml(closer)} ${escapeHtml(verb)} the task you assigned: ${escapeHtml(input.task.title)}</p>
+      <p>Project: ${escapeHtml(project)}</p>
+      <blockquote style="margin:16px 0;padding:12px 16px;border-left:4px solid #e5e7eb;background:#f9fafb;color:#111827;">
+        ${escapeHtmlWithBreaks(input.resolutionNote)}
+      </blockquote>
+      <p style="color:#6b7280;font-size:13px;">${escapeHtml(closer)} &middot; ${escapeHtml(when)}</p>
+      <p><a href="${escapeHtml(link)}">Open the task</a></p>
+      <p style="color:#6b7280;font-size:12px;">${escapeHtml(link)}</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  const text = [
+    `Hi ${assignerFirstName},`,
+    "",
+    `${closer} ${verb} the task you assigned: ${input.task.title}`,
+    `Project: ${project}`,
+    "",
+    input.resolutionNote,
+    "",
+    `${closer} - ${when}`,
+    "",
+    `Open the task: ${link}`,
+  ].join("\n");
+
+  return { subject, html, text, link };
+}
+
+/**
+ * WHO GETS THE OUTCOME MAIL, and the four reasons nobody does.
+ *
+ * The recipient is resolveHumanTaskAssignerId — a reassignment if there was one, otherwise the creator
+ * of a MANUAL task. After a reassignment the creator and the assigner are different people, and the
+ * person owed the answer is the one who handed the work over.
+ *
+ * ⚠️ NOT resolveTaskAssignerId. That one falls back to `created_by` unconditionally, and `created_by`
+ * is a real human on two machine writers (deal reassignment, estimate-revision routing) — so it would
+ * mail a director "the task you assigned was completed" about a task the system raised and they never
+ * typed. See task-assigner.ts.
+ *
+ * Returns null — silently, this is not an error — when:
+ *   1. nobody handed it over: an automated task with no reassignment, or a rules-engine task, which
+ *      carries no created_by at all;
+ *   2. the assigner is deactivated (this repo deactivates rather than deletes, and mailing a departed
+ *      employee is exactly what getTaskLoopDescriptor exists to prevent);
+ *   3. the assigner closed it themselves — nobody needs to be told what they just did;
+ *   4. there is no outcome note, which is the system-actor close path (email association, AI
+ *      disconnect resolution). Those are exempt from the note requirement, so there is nothing to say.
+ */
+export async function prepareTaskResolutionEmail(
+  tenantDb: TenantDb,
+  input: {
+    task: {
+      id: string;
+      title: string;
+      dealId?: string | null;
+      createdBy: string | null;
+      lastAssignedBy: string | null;
+      /** 'manual' | 'automated'. Load-bearing — see resolveHumanTaskAssignerId. */
+      source?: string | null;
+    };
+    closedBy: string;
+    resolution: TaskResolution;
+    resolutionNote: string;
+    resolvedAt: string;
+    officeId?: string | null;
+  }
+): Promise<PreparedTaskResolutionEmail | null> {
+  if (!input.resolutionNote.trim()) return null;
+
+  const assignerId = resolveHumanTaskAssignerId(input.task);
+  if (!assignerId) return null;
+  if (assignerId === input.closedBy) return null;
+
+  // Savepointed for the same reason every other task-email read is: this runs inside the caller's
+  // OPEN transaction, and in Postgres one failed statement poisons the whole thing — the later COMMIT
+  // would degrade to a silent ROLLBACK while the route reported the task as closed.
+  const people = await readInSavepoint<{
+    assigner: (TaskResolutionEmailRecipient & { isActive: boolean }) | null;
+    closerName: string | null;
+  }>(
+    tenantDb,
+    async () => {
+      const rows = await tenantDb
+        .select({
+          id: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          firstName: users.firstName,
+          isActive: users.isActive,
+        })
+        .from(users)
+        // Always two DISTINCT ids: the self-close case returned above, so there is nothing to dedupe.
+        .where(inArray(users.id, [assignerId, input.closedBy]));
+
+      const assigner = rows.find((row) => row.id === assignerId) ?? null;
+      const closer = rows.find((row) => row.id === input.closedBy) ?? null;
+      return {
+        assigner: assigner as (TaskResolutionEmailRecipient & { isActive: boolean }) | null,
+        closerName: closer?.displayName ?? null,
+      };
+    },
+    { assigner: null, closerName: null }
+  );
+
+  const assigner = people.assigner;
+  if (!assigner?.email) {
+    console.warn("[Tasks] No assigner email found — skipping task resolution email");
+    return null;
+  }
+  if (!assigner.isActive) {
+    // Not a warning: a deactivated assigner is an ordinary, expected end of the loop.
+    return null;
+  }
+
+  const project = await resolveLinkedProject(tenantDb, input.task.dealId);
+
+  const email = buildTaskResolutionEmail({
+    task: { id: input.task.id, title: input.task.title },
+    assigner,
+    closerName: people.closerName,
+    resolution: input.resolution,
+    resolutionNote: input.resolutionNote,
+    resolvedAt: input.resolvedAt,
+    project,
+    officeId: input.officeId,
+  });
+
+  return {
+    to: assigner.email,
+    subject: email.subject,
+    html: email.html,
+    options: { text: email.text },
+  };
+}
+
+export async function sendPreparedTaskResolutionEmail(email: PreparedTaskResolutionEmail) {
   return sendSystemEmail(email.to, email.subject, email.html, email.options);
 }
 

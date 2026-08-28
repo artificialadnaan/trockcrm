@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   Clock,
+  ExternalLink,
   FileText,
   Flag,
   Mail,
@@ -37,16 +38,42 @@ import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
 import { TaskConversationDrawer } from "@/components/tasks/task-conversation-drawer";
+import { TaskProjectLink } from "@/components/tasks/task-project-link";
 import { TaskResolutionDialog } from "@/components/tasks/task-resolution-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { appendOfficeIdSearch } from "@/lib/office-selection";
 import { getTaskProjectContext } from "@/lib/task-project-context";
 import { toast } from "sonner";
 
 type GroupKey = "overdue" | "today" | "this_week" | "later" | "completed";
-const ALL_ASSIGNEES_VALUE = "__all__";
+
+/**
+ * "Show everyone", said out loud.
+ *
+ * Both filters now DEFAULT to something, so absence of the parameter means "the default" and can no
+ * longer double as "no filter". Expressing All by deleting the param — which is what both controls
+ * used to do — would let the default re-apply on the very next render and make the All option
+ * unclickable. The sentinel is the whole reason the defaults are safe.
+ */
+const ALL_ASSIGNEES_VALUE = "all";
+const ALL_SOURCES_VALUE = "all";
+
+/** The tab the Tasks page opens on. See useTaskSourceFilter. */
+const DEFAULT_TASK_SOURCE: TaskSource = "manual";
+
+/**
+ * Task types that say nothing a reader does not already know.
+ *
+ * `task.type` is the ACTIVITY kind — call, email, meeting, follow_up. On a hand-typed task it is the
+ * literal string "manual", and on a couple of machine paths it is "system"; rendering either put the
+ * word "Manual" on the row directly beneath a Manual/Automated tab that means something completely
+ * different. Suppressing them costs nothing: the source badge and the status chip beside it carry the
+ * information those two values were being read for.
+ */
+const UNINFORMATIVE_TASK_TYPES = new Set(["manual", "system", "other"]);
 
 const GROUP_META: Record<GroupKey, { label: string; eyebrow: string; dotClass: string; defaultOpen: boolean }> = {
   overdue: { label: "Overdue", eyebrow: "Red path", dotClass: "bg-brand-red", defaultOpen: true },
@@ -176,8 +203,19 @@ function TaskRow({
   const locked = busy || refreshing;
   const isDone = isTerminalTaskStatus(task.status);
   const Icon = TYPE_ICONS[task.type] ?? MoreHorizontal;
-  const projectContext = getTaskProjectContext(task);
   const taskTitle = sanitizeHubspotDealIdentifiers(task.title);
+
+  // Office context is URL-driven (lib/api reads ?officeId and sends x-office-id), so an in-app link
+  // that drops it resolves the record against the READER's own office. Carried on both the project
+  // link and the linked-record action for that reason — see TaskProjectLink.
+  const officeId = new URLSearchParams(search).get("officeId")?.trim() || null;
+  const linkedRecordHref = task.dealId
+    ? appendOfficeIdSearch(`/deals/${encodeURIComponent(task.dealId)}`, officeId)
+    : task.contactId
+      ? appendOfficeIdSearch(`/contacts/${encodeURIComponent(task.contactId)}`, officeId)
+      : task.emailId
+        ? appendOfficeIdSearch("/email", officeId)
+        : null;
 
   const openComplete = (event: React.MouseEvent) => {
     event.stopPropagation();
@@ -213,16 +251,34 @@ function TaskRow({
     }
   };
 
-  const openLinkedRecord = (event: React.MouseEvent) => {
-    event.stopPropagation();
-    if (task.dealId) navigate(`/deals/${task.dealId}`);
-    else if (task.contactId) navigate(`/contacts/${task.contactId}`);
-    else if (task.emailId) navigate("/email");
-  };
-
   const openEdit = () => {
     if (isDone || refreshing) return;
     setEditOpen(true);
+  };
+
+  /**
+   * The whole row opens the editor — EXCEPT when the click came from something that already does
+   * its own thing.
+   *
+   * The row used to BE a <button>, which is why the project name could only ever be text: an <a>
+   * inside a <button> is invalid HTML and every browser resolves it differently. Moving the handler
+   * onto the container is what makes a real link possible while keeping the full-width click target.
+   *
+   * The container is deliberately NOT focusable and carries no role, so it adds no tab stop and is
+   * announced as nothing. The row's focusable elements are its real controls — complete, title,
+   * project link, conversation, snooze, open-linked-record — each of which does something distinct.
+   */
+  const handleRowClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    // Links and buttons only. The edit and resolution dialogs are SIBLINGS of this row in the tree,
+    // not descendants, so no `[role="dialog"]` event can ever reach here — a selector entry for them
+    // would be a guard that cannot fire. Form controls are listed because a row is a plausible place
+    // to grow one, and the cost of the two extra tokens is nil.
+    if (target?.closest("a,button,input,select,textarea")) return;
+    // A drag that SELECTS text across the row's plain cells ends in a click on their shared ancestor,
+    // which no interactive-element check can catch. Copying a project name should not open an editor.
+    if (!window.getSelection()?.isCollapsed) return;
+    openEdit();
   };
 
   // Navigates rather than opening local state, so the URL the emails deep-link to and the URL a click
@@ -252,9 +308,11 @@ function TaskRow({
   return (
     <>
       <div
+        data-testid="task-row"
+        onClick={handleRowClick}
         className={cn(
           "group grid gap-3 border-b border-slate-100 bg-white px-4 py-3 transition-colors md:grid-cols-[32px_minmax(0,1fr)_120px_130px_150px_96px]",
-          isDone ? "opacity-65" : "hover:bg-slate-50"
+          isDone ? "opacity-65" : "cursor-pointer hover:bg-slate-50"
         )}
       >
         <button
@@ -273,62 +331,88 @@ function TaskRow({
           <Check className="h-3.5 w-3.5" />
         </button>
 
-        <button
-          type="button"
-          data-testid="task-row-content"
-          disabled={isDone || refreshing}
-          onClick={openEdit}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              openEdit();
-            }
-          }}
-          className={cn(
-            "grid min-w-0 gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red md:col-span-4 md:grid-cols-[minmax(0,1fr)_120px_130px_150px]",
-            isDone ? "cursor-default" : "cursor-pointer"
-          )}
-        >
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-600">
-                <Icon className="h-3.5 w-3.5" />
-              </span>
-              <p className={cn("truncate text-sm font-black text-slate-950", isDone ? "line-through text-slate-500" : "")}>
-                {taskTitle}
-              </p>
-            </div>
-            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 pl-9 text-xs font-semibold text-slate-500">
-              <span className="capitalize">{typeLabel(task.type)}</span>
-              <span>{getTaskStatusLabel(task.status)}</span>
-              {projectContext ? <span className="truncate">{projectContext}</span> : null}
-              {unreadReplies > 0 ? (
-                <span className="flex items-center gap-1.5 font-black text-brand-red">
-                  <span className="h-2 w-2 rounded-full bg-brand-red" aria-hidden />
-                  {unreadReplies} {unreadReplies === 1 ? "reply" : "replies"}
-                </span>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="flex items-center">
-            <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wide", PRIORITY_CLASSES[task.priority] ?? PRIORITY_CLASSES.low)}>
-              <Flag className="h-3 w-3" />
-              {task.priority === "normal" ? "Medium" : task.priority}
-            </span>
-          </div>
-
-          <div className={cn("flex items-center text-xs font-black", task.isOverdue ? "text-brand-red" : "text-slate-600")}>
-            {formatDueDate(task.dueDate)}
-          </div>
-
+        {/*
+          NOT a <button> any more. It used to be one, spanning all four of these cells — which is
+          exactly why the project could only ever be plain text, since an <a> inside a <button> is
+          invalid HTML. The click target lives on the row container now; this is a plain grid subtree.
+        */}
+        <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
-              {getInitials(task.assignedToName)}
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-600">
+              <Icon className="h-3.5 w-3.5" />
             </span>
-            <span className="truncate text-xs font-semibold text-slate-600">{task.assignedToName ?? "Unassigned"}</span>
+            {/*
+              The one tab stop on the row, and the keyboard route to the editor.
+
+              The explicit keydown handler is not redundant with the browser's native Enter-activates-
+              a-button behaviour: Space on a button SCROLLS unless preventDefault is called, and the
+              suite drives these rows with synthetic KeyboardEvents, which never synthesize a click.
+            */}
+            <button
+              type="button"
+              data-testid="task-row-content"
+              disabled={isDone || refreshing}
+              onClick={openEdit}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                // preventDefault only. Space on a button SCROLLS the page without it, and the suite
+                // drives these rows with synthetic KeyboardEvents that never synthesize a click.
+                // No stopPropagation: the row container listens for `click`, not `keydown`, so there
+                // is nothing above to stop.
+                event.preventDefault();
+                openEdit();
+              }}
+              className={cn(
+                "min-w-0 truncate rounded text-left text-sm font-black text-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
+                isDone ? "cursor-default text-slate-500 line-through" : "cursor-pointer"
+              )}
+            >
+              {taskTitle}
+            </button>
           </div>
-        </button>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 pl-9 text-xs font-semibold text-slate-500">
+            {/*
+              `task.type` is the ACTIVITY kind (call, email, meeting…). On a hand-typed task it is the
+              literal string "manual", which used to render right next to a Manual/Automated tab that
+              means something entirely different — two identical words, neither describing the other.
+              Show the type only when it carries information, and say "Automated" only when it is true.
+            */}
+            {UNINFORMATIVE_TASK_TYPES.has(task.type) ? null : (
+              <span className="capitalize">{typeLabel(task.type)}</span>
+            )}
+            {task.source === "automated" ? (
+              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-black uppercase tracking-wide text-slate-500">
+                Automated
+              </span>
+            ) : null}
+            <span>{getTaskStatusLabel(task.status)}</span>
+            <TaskProjectLink task={task} officeId={officeId} />
+            {unreadReplies > 0 ? (
+              <span className="flex items-center gap-1.5 font-black text-brand-red">
+                <span className="h-2 w-2 rounded-full bg-brand-red" aria-hidden />
+                {unreadReplies} {unreadReplies === 1 ? "reply" : "replies"}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex items-center">
+          <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wide", PRIORITY_CLASSES[task.priority] ?? PRIORITY_CLASSES.low)}>
+            <Flag className="h-3 w-3" />
+            {task.priority === "normal" ? "Medium" : task.priority}
+          </span>
+        </div>
+
+        <div className={cn("flex items-center text-xs font-black", task.isOverdue ? "text-brand-red" : "text-slate-600")}>
+          {formatDueDate(task.dueDate)}
+        </div>
+
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
+            {getInitials(task.assignedToName)}
+          </span>
+          <span className="truncate text-xs font-semibold text-slate-600">{task.assignedToName ?? "Unassigned"}</span>
+        </div>
 
         <div className="flex items-center justify-end gap-1 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
           {/* Available on EVERY row, including completed ones: a reply to a task that was closed
@@ -357,16 +441,22 @@ function TaskRow({
               <Clock className="h-4 w-4" />
             </button>
           ) : null}
-          {task.dealId || task.contactId || task.emailId ? (
-            <button
-              type="button"
-              onClick={openLinkedRecord}
-              onKeyDown={stopRowKeyDownPropagation}
-              className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-blue-50 hover:text-blue-600"
-              aria-label={`Open linked record for ${taskTitle}`}
+          {/*
+            An ANCHOR now, not a button, and it opens a new tab. It was drawn with a RefreshCw glyph —
+            the universal "reload" icon — on a control that navigates, and it replaced the page you
+            were triaging from. Both were wrong in the same direction.
+          */}
+          {linkedRecordHref ? (
+            <a
+              href={linkedRecordHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => event.stopPropagation()}
+              className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-blue-50 hover:text-blue-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+              aria-label={`Open linked record for ${taskTitle} in a new tab`}
             >
-              <RefreshCw className="h-4 w-4" />
-            </button>
+              <ExternalLink className="h-4 w-4" />
+            </a>
           ) : null}
         </div>
       </div>
@@ -487,17 +577,43 @@ function TaskGroup({
   );
 }
 
+const MY_TASKS_LABEL = "Assigned to me";
+const EVERYONE_LABEL = "Everyone";
+
+/**
+ * Who the list is scoped to, defaulting to YOU.
+ *
+ * The page used to open on every task in the office — 15,409 of them, 99.7% machine-generated — with
+ * the assignee control sitting on "All assignees". Opening on your own work is the whole of the ask
+ * and needs no interaction to get there.
+ *
+ * `me` is pinned to the top and labelled rather than shown as the user's own name: a trigger that
+ * reads "Adam Shaw" makes the reader recognise themselves before they can tell what the list is
+ * showing, and gets it wrong the moment two people share a first name.
+ */
 function AssigneeFilter({
-  selectedAssignee,
+  selection,
+  currentUserId,
   onChange,
 }: {
-  selectedAssignee: string;
-  onChange: (assigneeId: string) => void;
+  /** `"all"` or a user id. Never empty — absence of a URL param means the current user, not everyone. */
+  selection: string;
+  currentUserId: string;
+  onChange: (value: string) => void;
 }) {
   const { assignees, loading } = useTaskAssignees();
-  const selectedAssigneeLabel = selectedAssignee
-    ? assignees.find((assignee) => assignee.id === selectedAssignee)?.displayName ?? "Selected assignee"
-    : "All assignees";
+  const others = assignees.filter((assignee) => assignee.id !== currentUserId);
+
+  // NO `items` prop on the Select below, deliberately. Base UI consults it only when SelectValue has
+  // no explicit children (SelectValue.js resolves function -> children -> placeholder -> items), and
+  // this trigger passes children. Adding one would look like the fix the two dialogs needed and do
+  // nothing at all here.
+  const options = [
+    { value: currentUserId, label: MY_TASKS_LABEL },
+    { value: ALL_ASSIGNEES_VALUE, label: EVERYONE_LABEL },
+    ...others.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+  ];
+  const selectedLabel = options.find((option) => option.value === selection)?.label ?? "Selected assignee";
 
   return (
     <div data-testid="assignee-filter" className="flex items-center gap-2">
@@ -505,16 +621,17 @@ function AssigneeFilter({
         Assignee
       </label>
       <Select
-        value={selectedAssignee || ALL_ASSIGNEES_VALUE}
-        onValueChange={(value) => onChange(!value || value === ALL_ASSIGNEES_VALUE ? "" : value)}
+        value={selection}
+        onValueChange={(value) => onChange(value || currentUserId)}
         disabled={loading}
       >
         <SelectTrigger id="task-assignee-filter" className="h-9 w-56 border-slate-200 bg-slate-50">
-          <SelectValue>{loading ? "Loading assignees..." : selectedAssigneeLabel}</SelectValue>
+          <SelectValue>{loading ? "Loading assignees..." : selectedLabel}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={ALL_ASSIGNEES_VALUE}>All assignees</SelectItem>
-          {assignees.map((assignee) => (
+          <SelectItem value={currentUserId}>{MY_TASKS_LABEL}</SelectItem>
+          <SelectItem value={ALL_ASSIGNEES_VALUE}>{EVERYONE_LABEL}</SelectItem>
+          {others.map((assignee) => (
             <SelectItem key={assignee.id} value={assignee.id}>
               {assignee.displayName}
             </SelectItem>
@@ -526,6 +643,41 @@ function AssigneeFilter({
 }
 
 /**
+ * The assignee selection, held in the URL as `?assignee=`, defaulting to the signed-in user.
+ *
+ * ⚠️ REPS ARE SCOPED BY THE SERVER, NOT BY THIS. `getTasks` narrows `rep` to `assigned_to = me` and
+ * IGNORES the filter entirely, as does `getTaskCounts`. So a rep gets no control and no parameter —
+ * sending one would be inert, and rendering one would be a lie. Everyone else (including
+ * `construction` and `estimator`, who were handed the whole office with no control at all) gets both.
+ *
+ * Widening the control past admin/director exposes nothing new: `GET /tasks/assignees` has no role
+ * gate today, and these roles can already read every task the filter would hide. It only narrows.
+ */
+export function useTaskAssigneeFilter(role: string, userId: string) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const canFilter = role !== "rep";
+  const raw = searchParams.get("assignee")?.trim();
+
+  // What the CONTROL shows. Only ever rendered when canFilter, so it does not branch on it — a second
+  // copy of the rep rule here would be dead code that makes the real one below untestable.
+  const selection = raw === ALL_ASSIGNEES_VALUE ? ALL_ASSIGNEES_VALUE : raw || userId;
+
+  // What actually goes on the wire, and the ONE place the rep rule lives. `undefined` means "don't
+  // send the param": for a rep because the server ignores it, for Everyone because there is no filter.
+  const assignedTo = !canFilter || selection === ALL_ASSIGNEES_VALUE ? undefined : selection;
+
+  const setAssignee = (next: string) => {
+    const params = new URLSearchParams(searchParams);
+    // ALWAYS written, never deleted — see ALL_ASSIGNEES_VALUE. Deleting it to mean "everyone" would
+    // hand the next render straight back to the default and pin the control on the current user.
+    params.set("assignee", next);
+    setSearchParams(params);
+  };
+
+  return { canFilter, selection, assignedTo, setAssignee };
+}
+
+/**
  * The automated/manual tab selection, held in the URL as `?source=`.
  *
  * DELIBERATELY TAKES NO ROLE. The `?assignee=` filter alongside this one is read behind
@@ -534,22 +686,35 @@ function AssigneeFilter({
  * their lists, so gating this would break the filter for the people who need it most. Taking no role
  * argument means it cannot be gated on one by accident.
  *
- * An unrecognised value falls back to All, matching the server's allowlist for the same param, so a
- * hand-edited URL degrades to "show everything" rather than filtering on a value nothing can match.
+ * ⚠️ ABSENT NOW MEANS **MANUAL**, NOT ALL. The default view was 15,409 tasks of which 15,360 were
+ * machine-generated — a list nobody could use, which is what the tabs were built for in the first
+ * place. Opening on the 49 a person actually typed is the ask.
+ *
+ * Nothing is hidden that cannot be got back in one click, and no URL is rewritten to achieve it: the
+ * default is applied by INTERPRETATION at render, so there is no history entry, no redirect flicker,
+ * and every `/tasks` link ever mailed keeps working untouched.
+ *
+ * An unrecognised value falls back to the default rather than to All — unknown means "we don't know
+ * what you asked for", and answering that with 15,000 rows is not a kindness.
  */
 export function useTaskSourceFilter() {
   const [searchParams, setSearchParams] = useSearchParams();
   const raw = searchParams.get("source");
-  const source = isTaskSource(raw) ? raw : undefined;
 
-  const setSource = (next: TaskSource | undefined) => {
+  const selection: "all" | TaskSource =
+    raw === ALL_SOURCES_VALUE ? "all" : isTaskSource(raw) ? raw : DEFAULT_TASK_SOURCE;
+  const source = selection === "all" ? undefined : selection;
+
+  const setSource = (next: "all" | TaskSource) => {
     const params = new URLSearchParams(searchParams);
-    if (next) params.set("source", next);
-    else params.delete("source");
+    // ALWAYS written, including "all". Deleting the param to mean All is the one change that would
+    // make the All tab unclickable: the very next render would read an absent param as the default
+    // and snap the selection back to Manual.
+    params.set("source", next);
     setSearchParams(params);
   };
 
-  return { source, setSource };
+  return { selection, source, setSource };
 }
 
 /**
@@ -642,13 +807,18 @@ export function TaskListPage() {
 function TaskListPageContent({ role, userId }: { role: string; userId: string }) {
   const { taskId } = useParams();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const [query, setQuery] = useState("");
-  const canAssign = role === "admin" || role === "director";
-  const selectedAssignee = canAssign ? searchParams.get("assignee") ?? "" : "";
-  const assigneeFilter = selectedAssignee || undefined;
-  // Read for EVERY role — see useTaskSourceFilter.
-  const { source: sourceFilter, setSource } = useTaskSourceFilter();
+  // Defaults to YOU, and is rendered for every role the server does not already scope — see
+  // useTaskAssigneeFilter for why `rep` is the exception rather than the rule.
+  const {
+    canFilter: canAssign,
+    selection: assigneeSelection,
+    assignedTo: assigneeFilter,
+    setAssignee,
+  } = useTaskAssigneeFilter(role, userId);
+  // Read for EVERY role — see useTaskSourceFilter. Defaults to Manual.
+  const { selection: sourceSelection, source: sourceFilter, setSource } = useTaskSourceFilter();
   // Per-bucket sort selection (ephemeral view preference, kept in local state — not URL).
   const [sortByGroup, setSortByGroup] = useState<Record<GroupKey, string>>(DEFAULT_SORT);
   const setGroupSort = (groupKey: GroupKey) => (value: string) =>
@@ -693,13 +863,6 @@ function TaskListPageContent({ role, userId }: { role: string; userId: string })
   // zero must never look the same on a surface whose whole job is to say what is waiting.
   const error =
     awaitingMeError ?? linkedTaskError ?? overdueError ?? todayError ?? thisWeekError ?? laterError ?? completedError;
-
-  const updateAssignee = (assigneeId: string) => {
-    const next = new URLSearchParams(searchParams);
-    if (assigneeId) next.set("assignee", assigneeId);
-    else next.delete("assignee");
-    setSearchParams(next);
-  };
 
   const refetchAll = () => {
     refetchCounts();
@@ -833,12 +996,16 @@ function TaskListPageContent({ role, userId }: { role: string; userId: string })
             <ScopeToggle<"all" | TaskSource>
               ariaLabel="Filter tasks by who created them"
               size="touch"
-              value={sourceFilter ?? "all"}
-              onChange={(next) => setSource(next === "all" ? undefined : next)}
+              value={sourceSelection}
+              onChange={setSource}
               options={buildTaskSourceToggleOptions(counts.bySource, countsStale)}
             />
             {canAssign ? (
-              <AssigneeFilter selectedAssignee={selectedAssignee} onChange={updateAssignee} />
+              <AssigneeFilter
+                selection={assigneeSelection}
+                currentUserId={userId}
+                onChange={setAssignee}
+              />
             ) : null}
             <Button type="button" variant="outline" size="sm" onClick={refetchAll}>
               <RefreshCw className="mr-2 h-4 w-4" />

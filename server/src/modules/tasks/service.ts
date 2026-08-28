@@ -1,4 +1,4 @@
-import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray, type SQL } from "drizzle-orm";
+import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray, notInArray, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import crypto from "crypto";
 import {
@@ -343,6 +343,11 @@ export async function transitionTaskStatus(
     .where(
       and(
         eq(tasks.id, taskId),
+        // Same reason as dismissTask: the "is it already closed" check above reads a row that a
+        // concurrent request can close underneath it, so on a TERMINAL move the condition has to be
+        // part of the UPDATE. Scoped to terminal moves only — a non-terminal transition losing a race
+        // is last-write-wins today and this is not the change that should alter that.
+        isTerminalTransition ? notInArray(tasks.status as any, TERMINAL_STATUSES as any) : undefined,
         isTerminalTransition ? terminalTaskCloseAuthorityCondition(userRole, userId) : undefined
       )
     )
@@ -545,6 +550,19 @@ export async function getTasks(
 
   // Subquery to resolve assignee display name from public.users
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+  // WHO handed this work over — resolveHumanTaskAssignerId, in SQL. A reassignment counts whatever
+  // raised the task; otherwise only a MANUAL task has a human assigner.
+  //
+  // ⚠️ NOT a plain COALESCE(last_assigned_by, created_by). Two machine writers stamp a real person on
+  // created_by (deal reassignment, estimate-revision routing), so a COALESCE puts "Assigned by Sarah"
+  // on a row Sarah never wrote. The CASE yields NULL when nobody handed it over, and the subquery
+  // then returns NULL, which renders as no label at all. This expression and
+  // resolveHumanTaskAssignerId must move together — the label and the outcome email make the same
+  // claim, and they are only allowed to be wrong or right together.
+  const assignedByName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = CASE
+      WHEN ${tasks.lastAssignedBy} IS NOT NULL THEN ${tasks.lastAssignedBy}
+      WHEN ${tasks.source} = 'manual' THEN ${tasks.createdBy}
+    END)`.as("assignedByName");
 
   // Per-bucket sort: when the caller picks a sort, order the FULL filtered set in the DB.
   // Otherwise keep the legacy section-aware default ordering (back-compat for other callers).
@@ -570,6 +588,8 @@ export async function getTasks(
       assignedToName,
       createdBy: tasks.createdBy,
       lastAssignedBy: tasks.lastAssignedBy,
+      assignedByName,
+      assignedAt: tasks.assignedAt,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -658,6 +678,19 @@ export async function getProjectTasks(
     startedAt: typeof tasks.createdAt;
   };
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+  // WHO handed this work over — resolveHumanTaskAssignerId, in SQL. A reassignment counts whatever
+  // raised the task; otherwise only a MANUAL task has a human assigner.
+  //
+  // ⚠️ NOT a plain COALESCE(last_assigned_by, created_by). Two machine writers stamp a real person on
+  // created_by (deal reassignment, estimate-revision routing), so a COALESCE puts "Assigned by Sarah"
+  // on a row Sarah never wrote. The CASE yields NULL when nobody handed it over, and the subquery
+  // then returns NULL, which renders as no label at all. This expression and
+  // resolveHumanTaskAssignerId must move together — the label and the outcome email make the same
+  // claim, and they are only allowed to be wrong or right together.
+  const assignedByName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = CASE
+      WHEN ${tasks.lastAssignedBy} IS NOT NULL THEN ${tasks.lastAssignedBy}
+      WHEN ${tasks.source} = 'manual' THEN ${tasks.createdBy}
+    END)`.as("assignedByName");
 
   const projectRows = await tenantDb
     .select({
@@ -672,6 +705,8 @@ export async function getProjectTasks(
       assignedToName,
       createdBy: tasks.createdBy,
       lastAssignedBy: tasks.lastAssignedBy,
+      assignedByName,
+      assignedAt: tasks.assignedAt,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -1040,6 +1075,19 @@ export async function getTaskById(
     startedAt: typeof tasks.createdAt;
   };
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+  // WHO handed this work over — resolveHumanTaskAssignerId, in SQL. A reassignment counts whatever
+  // raised the task; otherwise only a MANUAL task has a human assigner.
+  //
+  // ⚠️ NOT a plain COALESCE(last_assigned_by, created_by). Two machine writers stamp a real person on
+  // created_by (deal reassignment, estimate-revision routing), so a COALESCE puts "Assigned by Sarah"
+  // on a row Sarah never wrote. The CASE yields NULL when nobody handed it over, and the subquery
+  // then returns NULL, which renders as no label at all. This expression and
+  // resolveHumanTaskAssignerId must move together — the label and the outcome email make the same
+  // claim, and they are only allowed to be wrong or right together.
+  const assignedByName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = CASE
+      WHEN ${tasks.lastAssignedBy} IS NOT NULL THEN ${tasks.lastAssignedBy}
+      WHEN ${tasks.source} = 'manual' THEN ${tasks.createdBy}
+    END)`.as("assignedByName");
 
   const result = await tenantDb
     .select({
@@ -1054,6 +1102,8 @@ export async function getTaskById(
       assignedToName,
       createdBy: tasks.createdBy,
       lastAssignedBy: tasks.lastAssignedBy,
+      assignedByName,
+      assignedAt: tasks.assignedAt,
       dealId: tasks.dealId,
       dealName: deals.name,
       dealIsChangeOrder: deals.isChangeOrder,
@@ -1309,7 +1359,18 @@ export async function dismissTask(
       waitingOn: null,
       blockedBy: null,
     } as any)
-    .where(and(eq(tasks.id, taskId), terminalTaskCloseAuthorityCondition(userRole, userId, options)))
+    .where(
+      and(
+        eq(tasks.id, taskId),
+        // The status the read above SAW, re-asserted at write time. Without it the 409 below could
+        // only ever fire on an authority change: two concurrent dismissals (or a dismiss racing a
+        // /transition) both read `pending`, both pass the check, and both UPDATE — writing the
+        // suppression window twice and mailing the assigner twice about one task. completeTask has
+        // carried this predicate all along; this is the same rule, not a new one.
+        notInArray(tasks.status as any, TERMINAL_STATUSES as any),
+        terminalTaskCloseAuthorityCondition(userRole, userId, options)
+      )
+    )
     .returning();
 
   if (result.length === 0) {

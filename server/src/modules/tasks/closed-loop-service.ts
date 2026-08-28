@@ -12,6 +12,8 @@ import { deals, jobQueue, taskComments, tasks, users } from "@trock-crm/shared/s
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { assertTaskCommentAuthority, assertTaskVisible, getTaskRowById } from "./service.js";
+// A leaf module — see task-assigner.ts for why this one line does not live here any more.
+import { resolveTaskAssignerId } from "./task-assigner.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -379,11 +381,7 @@ export async function loadLoopTaskForUpdate(
  * mirrored EXACTLY by 0240's expression index. If this resolution and that index ever disagree the
  * bucket silently stops using the index.
  */
-export function resolveTaskAssignerId(
-  task: { lastAssignedBy: string | null; createdBy: string | null }
-): string | null {
-  return task.lastAssignedBy ?? task.createdBy;
-}
+export { resolveTaskAssignerId };
 
 export async function getTaskLoopDescriptor(
   tenantDb: TenantDb,

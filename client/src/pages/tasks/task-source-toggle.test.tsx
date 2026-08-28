@@ -308,12 +308,15 @@ describe("tasks source filter — URL persistence for every role", () => {
   });
 
   function SourceHarness() {
-    const { source, setSource } = useTaskSourceFilter();
+    const { selection, source, setSource } = useTaskSourceFilter();
     return (
       <div>
         <div data-testid="source">{source ?? "(all)"}</div>
+        {/* What the TOGGLE is showing, which is not the same thing as what goes on the wire: the All
+            tab is a real selection whose wire value is "send no filter". */}
+        <div data-testid="selection">{selection}</div>
         <button data-testid="pick-manual" onClick={() => setSource("manual")} />
-        <button data-testid="pick-all" onClick={() => setSource(undefined)} />
+        <button data-testid="pick-all" onClick={() => setSource("all")} />
       </div>
     );
   }
@@ -330,6 +333,7 @@ describe("tasks source filter — URL persistence for every role", () => {
   };
 
   const shown = () => container.querySelector('[data-testid="source"]')?.textContent;
+  const selected = () => container.querySelector('[data-testid="selection"]')?.textContent;
 
   // C11, structurally. The `?assignee=` filter this sits next to is read behind
   // `role === "admin" || role === "director"`, and copying that shape here would silently break the
@@ -346,33 +350,62 @@ describe("tasks source filter — URL persistence for every role", () => {
     expect(shown()).toBe("automated");
   });
 
-  it("treats a missing param as All rather than defaulting to a tab", async () => {
+  // The default. The page used to open on 15,409 tasks of which 15,360 were machine-generated; it now
+  // opens on the ones a person typed. Absence of the param means the DEFAULT, not "no filter".
+  it("opens on Manual when the URL says nothing", async () => {
     renderAt("/tasks");
     await flush();
-    expect(shown()).toBe("(all)");
+    expect(shown()).toBe("manual");
+    expect(selected()).toBe("manual");
   });
 
-  // An unknown value must not be forwarded to the API as a filter -- it falls back to All, matching
-  // the server's own allowlist behaviour for the same param.
-  it("ignores a source value outside the allowlist", async () => {
+  // An unknown value falls back to the DEFAULT, not to All. "We don't understand what you asked for"
+  // is not a reason to answer with fifteen thousand rows.
+  it("falls back to the default for a source value outside the allowlist", async () => {
     renderAt("/tasks?source=bogus");
     await flush();
+    expect(shown()).toBe("manual");
+  });
+
+  it("honours an explicit ?source=all", async () => {
+    renderAt("/tasks?source=all");
+    await flush();
     expect(shown()).toBe("(all)");
+    expect(selected()).toBe("all");
   });
 
   it("writes the selection to the URL, so a filtered view is linkable and survives a refresh", async () => {
-    renderAt("/tasks");
+    renderAt("/tasks?source=all");
     await flush();
 
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[data-testid="pick-manual"]')!.click();
     });
     expect(shown()).toBe("manual");
+  });
 
-    // ...and clearing it removes the param instead of leaving ?source= behind.
+  /**
+   * THE REGRESSION THIS FEATURE IS ONE LINE AWAY FROM AT ALL TIMES.
+   *
+   * All used to be expressed by DELETING ?source. Now that an absent param means "manual", deleting
+   * it hands the very next render straight back to the default — the selection snaps to Manual and
+   * the All tab becomes unclickable. Selecting All has to SAY "all" out loud.
+   *
+   * Asserted twice on purpose: once on the wire value (no filter) and once on what the toggle shows.
+   * The first alone passes even if the control has bounced back to Manual, because Manual and All
+   * differ in `source` but a broken implementation could still report `undefined` for one render.
+   */
+  it("stays on All after choosing it, instead of snapping back to the default", async () => {
+    renderAt("/tasks");
+    await flush();
+    expect(selected()).toBe("manual");
+
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[data-testid="pick-all"]')!.click();
     });
+    await flush();
+
+    expect(selected()).toBe("all");
     expect(shown()).toBe("(all)");
   });
 });

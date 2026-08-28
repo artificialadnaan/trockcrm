@@ -36,11 +36,15 @@ import {
 import {
   prepareTaskAssignmentEmail,
   prepareTaskReplyEmail,
+  prepareTaskResolutionEmail,
   sendPreparedTaskAssignmentEmail,
   sendPreparedTaskReplyEmail,
+  sendPreparedTaskResolutionEmail,
   TaskTransactionUnusableError,
   type PreparedTaskAssignmentEmail,
   type PreparedTaskReplyEmail,
+  type PreparedTaskResolutionEmail,
+  type TaskResolution,
 } from "./notifications.js";
 
 const router = Router();
@@ -166,6 +170,100 @@ async function sendTaskReplyEmailBestEffort(email: PreparedTaskReplyEmail | null
     await sendPreparedTaskReplyEmail(email);
   } catch (err) {
     console.error("[Tasks] Failed to send task reply email:", err);
+  }
+}
+
+/**
+ * Tell the person who assigned a task that it was closed, and what was done about it.
+ *
+ * ONE helper for all THREE close routes. /complete, /dismiss and /transition(terminal) all reach a
+ * terminal status, and wiring only the first would leave the most-used path silent: the edit dialog's
+ * Dismiss button and the resolution dialog both go through /transition. This is the same reason
+ * assertTaskCloseAuthority is called from all three rather than from completeTask alone.
+ *
+ * The note is read straight off the request body. The service has already validated it by the time we
+ * get here (requireTaskResolutionNote — mandatory, trimmed, length-capped, 400 otherwise), so this is
+ * a read of a value already known good, not a second validation. An empty one would mean an internal
+ * close, which is exempt from the note requirement and has nothing to report.
+ */
+function terminalResolutionFor(status: unknown): TaskResolution | null {
+  return status === "completed" || status === "dismissed" ? status : null;
+}
+
+async function prepareTaskResolutionEmailBestEffort(
+  req: any,
+  task: {
+    id: string;
+    title: string;
+    status: string;
+    dealId?: string | null;
+    createdBy: string | null;
+    lastAssignedBy: string | null;
+    source?: string | null;
+    completedAt?: Date | string | null;
+  }
+): Promise<PreparedTaskResolutionEmail | null> {
+  const resolution = terminalResolutionFor(task.status);
+  if (!resolution) return null;
+
+  // Read, not re-validated. requireTaskResolutionNote has already rejected a missing, non-string or
+  // whitespace-only note with a 400 by the time the service returns, and no HTTP handler can pass a
+  // the internal actor flag that is the only exemption — a route cannot, and a test in
+  // task-close-authority.runtime.test.ts greps this file to keep it that way — so an empty note is
+  // unreachable here. An `if (!note) return`
+  // would therefore be a guard that cannot fire — and the only test able to "prove" it would have to
+  // stub completeTask into resolving on a body the real one rejects. prepareTaskResolutionEmail keeps
+  // the check as its own library contract, where a direct caller CAN reach it and a test can see it.
+  const rawNote = req.body?.resolutionNote;
+  const resolutionNote = typeof rawNote === "string" ? rawNote.trim() : "";
+
+  try {
+    return await prepareTaskResolutionEmail(req.tenantDb!, {
+      task: {
+        id: task.id,
+        title: task.title,
+        dealId: task.dealId ?? null,
+        createdBy: task.createdBy,
+        lastAssignedBy: task.lastAssignedBy,
+        // Decides whether anybody is mailed at all — see resolveHumanTaskAssignerId.
+        source: task.source ?? null,
+      },
+      closedBy: req.user!.id,
+      resolution,
+      resolutionNote,
+      // The row's own close timestamp, not a fresh clock read — the mail should say when the task was
+      // closed, not when the mail happened to be assembled. Every terminal path stamps completedAt,
+      // so the fallback is for an UNPARSEABLE value rather than an absent one: a bad timestamp should
+      // cost the reader a slightly-off "when", not the whole message.
+      resolvedAt: toIsoTimestamp(task.completedAt) ?? new Date().toISOString(),
+      // The office the task lives in. Without it the deep link resolves against the READER's own
+      // office and 404s for a cross-office recipient — see notifications.ts taskUrl.
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
+  } catch (err) {
+    // Best-effort EXCEPT when the failure means the transaction can no longer be committed safely.
+    // Swallowing that would let the COMMIT below degrade to a silent ROLLBACK while we returned 200
+    // for a task that was never actually closed.
+    if (err instanceof TaskTransactionUnusableError) throw err;
+    console.error("[Tasks] Failed to prepare task resolution email:", err);
+    return null;
+  }
+}
+
+function toIsoTimestamp(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+async function sendTaskResolutionEmailBestEffort(email: PreparedTaskResolutionEmail | null) {
+  if (!email) return;
+
+  try {
+    await sendPreparedTaskResolutionEmail(email);
+  } catch (err) {
+    console.error("[Tasks] Failed to send task resolution email:", err);
   }
 }
 
@@ -566,7 +664,16 @@ router.post("/:id/transition", async (req, res, next) => {
       req.user!.id
     );
 
+    // A terminal transition is a close. It reaches `completed`/`dismissed` without ever entering
+    // completeTask/dismissTask, and it is the path BOTH the edit dialog's Dismiss button and the
+    // resolution dialog take — so leaving it out would mean the loop closes silently for most users.
+    // Non-terminal moves return null here and send nothing.
+    const resolutionEmail = await prepareTaskResolutionEmailBestEffort(req, task as any);
+
     await req.commitTransaction!();
+
+    await sendTaskResolutionEmailBestEffort(resolutionEmail);
+
     res.json({ task });
   } catch (err) {
     next(err);
@@ -630,8 +737,16 @@ router.post("/:id/complete", async (req, res, next) => {
       });
     }
 
+    // Tell whoever assigned this task that it is done, and what was done. Prepared inside the open
+    // transaction (savepointed) and sent after the commit — the same split the assignment and reply
+    // emails use, so a mail failure and a write failure stay independent of each other.
+    const resolutionEmail = await prepareTaskResolutionEmailBestEffort(req, task as any);
+
     await req.commitTransaction!();
 
+    // BEFORE the mail send, not after. The send is an outbound HTTPS round-trip to Resend; leaving it
+    // in front of this would delay every other connected client's live task-completed update by the
+    // length of that call, for no gain — the two are independent.
     // Best-effort local emit for SSE push (already persisted via outbox above)
     try {
       eventBus.emitLocal({
@@ -645,6 +760,8 @@ router.post("/:id/complete", async (req, res, next) => {
       console.error("[Tasks] Failed to emit task.completed event:", eventErr);
     }
 
+    await sendTaskResolutionEmailBestEffort(resolutionEmail);
+
     res.json({ task });
   } catch (err) {
     next(err);
@@ -657,7 +774,16 @@ router.post("/:id/dismiss", async (req, res, next) => {
     const task = await dismissTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id, {
       resolutionNote: req.body?.resolutionNote,
     });
+
+    // Dismissal is the MORE consequential close: it writes a suppression window that stops the rules
+    // engine ever raising this task again. An assigner who is told about completions but not
+    // dismissals just watches tasks disappear.
+    const resolutionEmail = await prepareTaskResolutionEmailBestEffort(req, task as any);
+
     await req.commitTransaction!();
+
+    await sendTaskResolutionEmailBestEffort(resolutionEmail);
+
     res.json({ task });
   } catch (err) {
     next(err);

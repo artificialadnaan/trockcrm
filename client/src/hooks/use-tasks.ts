@@ -19,6 +19,21 @@ export function isTaskSource(value: unknown): value is TaskSource {
   return typeof value === "string" && (TASK_SOURCES as readonly string[]).includes(value);
 }
 
+/**
+ * Priority values paired with their display labels.
+ *
+ * ⚠️ THE `items` PROP IS NOT OPTIONAL ON A `<Select>` WHOSE TRIGGER SHOWS A VALUE. Base UI resolves
+ * the trigger's label from `items` and never from the `SelectItem` children, so a select without it
+ * renders the raw enum — `urgent` in lowercase, next to an item labelled `Urgent`. One exported pair
+ * list, fed to both `items` and the items themselves, is what stops the two from drifting.
+ */
+export const TASK_PRIORITY_SELECT_ITEMS: { value: string; label: string }[] = [
+  { value: "urgent", label: "Urgent" },
+  { value: "high", label: "High" },
+  { value: "normal", label: "Normal" },
+  { value: "low", label: "Low" },
+];
+
 export interface Task {
   id: string;
   title: string;
@@ -31,6 +46,14 @@ export interface Task {
   assignedTo: string;
   assignedToName: string | null;
   createdBy: string | null;
+  /**
+   * WHO handed this work over — `last_assigned_by ?? created_by`, resolved server-side by the same
+   * rule the outcome email uses to pick its recipient. Optional so a row from an API that predates
+   * the field still types; null on machine-generated tasks, which have no assigner at all.
+   */
+  assignedByName?: string | null;
+  /** When it was handed over. Re-stamped on reassignment, not on an ordinary edit. */
+  assignedAt?: string | null;
   dealId: string | null;
   dealName?: string | null;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
