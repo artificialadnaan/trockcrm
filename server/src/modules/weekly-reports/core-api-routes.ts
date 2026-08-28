@@ -651,17 +651,35 @@ function currentCursorPayload(
   };
 }
 
-function initialCursorPayload(asOf: string): ReturnType<typeof currentCursorPayload> {
-  const issuedAtMs = Date.parse(asOf);
-  if (!Number.isFinite(issuedAtMs) || new Date(issuedAtMs).toISOString() !== asOf) {
+function initialCursorPayload(
+  asOf: string,
+  issuedAtMs: number,
+): ReturnType<typeof currentCursorPayload> {
+  const asOfMs = Date.parse(asOf);
+  if (
+    !Number.isFinite(asOfMs) ||
+    new Date(asOfMs).toISOString() !== asOf ||
+    !Number.isFinite(issuedAtMs)
+  ) {
+    throw new AppError(503, "Weekly-report delivery boundary is unavailable");
+  }
+  let issuedAt: string;
+  let expiresAt: string;
+  try {
+    issuedAt = new Date(issuedAtMs).toISOString();
+    expiresAt = new Date(
+      issuedAtMs + CORE_WEEKLY_REPORT_CURSOR_TTL_SECONDS * 1_000,
+    ).toISOString();
+  } catch {
     throw new AppError(503, "Weekly-report delivery boundary is unavailable");
   }
   return {
     asOf,
-    issuedAt: asOf,
-    expiresAt: new Date(
-      issuedAtMs + CORE_WEEKLY_REPORT_CURSOR_TTL_SECONDS * 1_000,
-    ).toISOString(),
+    // `asOf` comes from Postgres because it freezes database visibility. Cursor lifetime comes from the
+    // API clock because this same API clock validates the next request. Coupling both to the database
+    // clock made a cursor issued by a slightly-ahead database invalid until the host caught up.
+    issuedAt,
+    expiresAt,
     after: null,
   };
 }
@@ -798,6 +816,7 @@ async function handleListReports(
         // pages carry the signed boundary and deliberately do not take a new one.
         const cursor = suppliedCursor ?? initialCursorPayload(
           await dependencies.captureDeliveryBoundary(client),
+          dependencies.now(),
         );
         throwIfAborted(controller.signal);
         const page = await dependencies.listReports(client, {

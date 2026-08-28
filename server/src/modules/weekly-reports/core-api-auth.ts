@@ -300,19 +300,21 @@ export function decodeCoreWeeklyReportCursor(
   try {
     const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payloadBytes));
     if (!isCursorPayload(parsed)) return null;
+    const asOfMs = Date.parse(parsed.asOf);
     const issuedAtMs = Date.parse(parsed.issuedAt);
     const expiresAtMs = Date.parse(parsed.expiresAt);
     const weekOfMs = Date.parse(`${parsed.weekOf}T00:00:00.000Z`);
     const maximumExpiryMs = issuedAtMs + CORE_WEEKLY_REPORT_CURSOR_TTL_SECONDS * 1_000;
     if (
       !Number.isFinite(nowMs) ||
+      !Number.isFinite(asOfMs) ||
       !Number.isFinite(issuedAtMs) ||
       !Number.isFinite(expiresAtMs) ||
       !Number.isFinite(weekOfMs) ||
+      new Date(asOfMs).toISOString() !== parsed.asOf ||
       new Date(issuedAtMs).toISOString() !== parsed.issuedAt ||
       new Date(expiresAtMs).toISOString() !== parsed.expiresAt ||
       new Date(weekOfMs).toISOString().slice(0, 10) !== parsed.weekOf ||
-      parsed.asOf !== parsed.issuedAt ||
       expiresAtMs <= issuedAtMs ||
       expiresAtMs > maximumExpiryMs ||
       nowMs < issuedAtMs ||

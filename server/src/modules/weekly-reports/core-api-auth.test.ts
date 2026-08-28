@@ -250,8 +250,8 @@ describe("T Rock Core weekly-report pagination cursors", () => {
       { ...CURSOR, reportVersion: Number.MAX_SAFE_INTEGER + 1 },
       SECRET,
     );
-    const mismatchedAsOf = encodeCoreWeeklyReportCursor(
-      { ...CURSOR, asOf: "2026-08-27T19:59:59.999Z" },
+    const malformedAsOf = encodeCoreWeeklyReportCursor(
+      { ...CURSOR, asOf: "2026-08-27T19:59:59Z" },
       SECRET,
     );
     const overlong = encodeCoreWeeklyReportCursor(
@@ -269,11 +269,25 @@ describe("T Rock Core weekly-report pagination cursors", () => {
       impossibleDate,
       badLimit,
       unsafeVersion,
-      mismatchedAsOf,
+      malformedAsOf,
       overlong,
     ]) {
       expect(decodeCoreWeeklyReportCursor(cursor, [SECRET], CURSOR_ISSUED_AT_MS)).toBeNull();
     }
+  });
+
+  it("keeps the database visibility boundary independent from the API-issued lifetime", () => {
+    const databaseAhead = {
+      ...CURSOR,
+      asOf: "2026-08-27T20:00:07.000Z",
+    };
+    expect(
+      decodeCoreWeeklyReportCursor(
+        encodeCoreWeeklyReportCursor(databaseAhead, SECRET),
+        [SECRET],
+        CURSOR_ISSUED_AT_MS,
+      ),
+    ).toEqual(databaseAhead);
   });
 
   it("uses a half-open issued-at/expires-at validity window", () => {

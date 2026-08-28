@@ -44,6 +44,10 @@ import {
   TASK_ASSIGNMENT_ACKNOWLEDGEMENTS_MIGRATION,
   runTaskAssignmentAcknowledgementsMigration,
 } from "./task-assignment-acknowledgements.js";
+import {
+  WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION,
+  runWeeklyReportDeliveryRecordedAtMigration,
+} from "./weekly-report-delivery-recorded-at.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -303,6 +307,13 @@ async function runMigrations(): Promise<void> {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
         await runFilesAssociationCheckRepair(client);
+      } else if (file === WEEKLY_REPORT_DELIVERY_RECORDED_AT_MIGRATION) {
+        // 0242 backfills receipt clocks, replaces statement/row triggers and validates a CHECK. Every one
+        // of those operations takes tenant-table locks. The helper installs the global functions once and
+        // commits the complete tenant template ONE OFFICE AT A TIME, so Dallas is released before Atlanta
+        // is touched instead of all offices blocking writes until one cross-tenant transaction ends.
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await runWeeklyReportDeliveryRecordedAtMigration(client, sql);
       } else {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);

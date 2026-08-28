@@ -201,10 +201,11 @@ function mapListRow(row: Record<string, unknown>): CoreWeeklyReportListItem {
 }
 
 /**
- * Keyset page of provider-accepted frozen sends with no known failure. `send_delivered_at <= asOf`
- * freezes new acceptances across a paginated walk. A failure verdict CRM recorded after the boundary is
- * evaluated as it stood at that boundary, regardless of the provider event's older occurrence time, so
- * a delayed webhook arriving between page requests cannot reshuffle the walk.
+ * Keyset page of provider-accepted frozen sends with no known failure. Migration 0242 owns the live
+ * NULL -> accepted `send_delivered_at` transition and samples it after the same advisory boundary used
+ * by page one, so `send_delivered_at <= asOf` freezes new acceptance commits across the walk. A failure
+ * verdict CRM recorded after the boundary is evaluated as it stood at that boundary, regardless of the
+ * provider event's older occurrence time, so delayed provider facts cannot reshuffle later pages.
  * `(week_of, version, id)` makes ordering total even if a legacy deal has more than one setup row.
  */
 export async function listCoreWeeklyReports(

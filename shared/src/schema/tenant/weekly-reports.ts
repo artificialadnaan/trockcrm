@@ -213,10 +213,12 @@ export const weeklyReports = pgTable(
      *  (so a crash between "provider accepted" and the stamp cannot double-send); a correction is a new
      *  report row and gets its own. */
     sendDeliveryKey: uuid("send_delivery_key"),
-    /** Migration 0226. When the provider ACCEPTED the message. Distinct from `sentAt`, which is stamped
-     *  when the PM commits — the dashboard's counters read `status`, so `sentAt` cannot wait on a mail
-     *  server, and a report that claims delivery the instant a button was clicked hides the failure this
-     *  feature exists to surface. */
+    /** Migration 0226. When the provider ACCEPTED the message. Migration 0242 makes the database own the
+     *  live NULL -> accepted transition so this clock linearizes with client-history pagination even
+     *  while an older worker still supplies transaction-start NOW(). Distinct from `sentAt`, which is
+     *  stamped when the PM commits — the dashboard's counters read `status`, so `sentAt` cannot wait on
+     *  a mail server, and a report that claims delivery the instant a button was clicked hides the
+     *  failure this feature exists to surface. */
     sendDeliveredAt: timestamp("send_delivered_at", { withTimezone: true }),
     /** Migration 0226. `sendAttempts` alone cannot tell "failed twice an hour ago and gave up" from
      *  "failed twice in the last minute and is still retrying". */

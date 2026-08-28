@@ -707,6 +707,55 @@ describe("Core weekly-report HTTP operation isolation and DTOs", () => {
     expect(secondHarness.captureDeliveryBoundary).not.toHaveBeenCalled();
   });
 
+  it("issues an immediately usable cursor when the database clock is ahead of the API clock", async () => {
+    const databaseAsOf = new Date(NOW_MS + 10_000).toISOString();
+    const firstHarness = createHarness({
+      captureDeliveryBoundary: vi.fn(async () => databaseAsOf),
+      listReports: vi.fn(async (): Promise<CoreWeeklyReportListResult> => ({
+        items: [LIST_ITEM],
+        hasMore: true,
+        last: {
+          weekOf: LIST_ITEM.weekOf,
+          reportVersion: LIST_ITEM.version,
+          reportId: LIST_ITEM.id,
+        },
+      })) as unknown as NonNullable<CoreWeeklyReportApiRouterOptions["listReports"]>,
+    });
+    const first = await signedRequest(firstHarness.app, {
+      path: "/reports/list",
+      action: "list-reports",
+      rawBody: listBody(),
+    });
+    expect(first.status).toBe(200);
+    expect(first.body.asOf).toBe(databaseAsOf);
+
+    const cursor = decodeCoreWeeklyReportCursor(first.body.nextCursor, [CURRENT_SECRET], NOW_MS);
+    expect(cursor).toMatchObject({
+      asOf: databaseAsOf,
+      issuedAt: new Date(NOW_MS).toISOString(),
+      expiresAt: new Date(NOW_MS + CORE_WEEKLY_REPORT_CURSOR_TTL_SECONDS * 1_000).toISOString(),
+    });
+
+    const secondHarness = createHarness();
+    const second = await signedRequest(secondHarness.app, {
+      path: "/reports/list",
+      action: "list-reports",
+      rawBody: listBody({ cursor: first.body.nextCursor }),
+      requestId: OTHER_REQUEST_ID,
+    });
+    expect(second.status).toBe(200);
+    expect(secondHarness.listReports).toHaveBeenCalledWith(secondHarness.client, {
+      dealId: DEAL_ID,
+      limit: 25,
+      asOf: databaseAsOf,
+      after: {
+        weekOf: LIST_ITEM.weekOf,
+        reportVersion: LIST_ITEM.version,
+        reportId: LIST_ITEM.id,
+      },
+    });
+  });
+
   it("accepts a previous-key cursor during rotation but rejects tamper/context/limit/expiry before lookup", async () => {
     const issuedAt = new Date(NOW_MS).toISOString();
     const payload = {

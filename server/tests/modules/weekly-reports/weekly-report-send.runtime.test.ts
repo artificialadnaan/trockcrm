@@ -269,6 +269,10 @@ beforeAll(async () => {
   // where the suite is built, not inside an assertion about something else.
   await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
   await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
+  // The send transition clears 0242's CRM-receipt clock when it mints a fresh delivery key, and 0242's
+  // trigger owns the live acceptance timestamp. Keep this send-flow fixture on the production schema;
+  // stopping at 0230 makes every otherwise-valid send fail on the missing receipt column.
+  await pg.exec(migrationSql("0242_weekly_report_delivery_recorded_at"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');

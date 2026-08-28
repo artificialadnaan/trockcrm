@@ -474,6 +474,17 @@ describe("Core weekly-report sent-history list", () => {
       sentAt: "2026-08-27T23:00:00Z",
       deliveredAt: new Date(Date.parse(asOf) + 60_000).toISOString(),
     });
+    // PGlite exposes clock_timestamp() to JS at millisecond precision. Sleep beyond the synthetic +1s
+    // boundary so this behavioural assertion cannot collapse two distinct database instants onto one
+    // JavaScript millisecond. The worker deliberately supplies an ancient transaction-start value: the
+    // migration trigger must replace it after acquiring the statement boundary lock.
+    await pg.exec("SELECT pg_sleep(1.005)");
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports
+          SET send_delivered_at = '2000-01-01T00:00:00Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [REPORT_UNACCEPTED],
+    );
     await pg.exec(
       "ALTER TABLE office_dallas.weekly_reports DISABLE TRIGGER weekly_reports_delivery_recorded_row",
     );
@@ -499,6 +510,14 @@ describe("Core weekly-report sent-history list", () => {
     expect(new Date(delayedReceipt.rows[0]!.recorded_at).getTime()).toBeGreaterThan(
       Date.parse(asOf),
     );
+    const delayedAcceptance = await pg.query<{ accepted_at: Date | string }>(
+      `SELECT send_delivered_at AS accepted_at
+         FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+      [REPORT_UNACCEPTED],
+    );
+    expect(new Date(delayedAcceptance.rows[0]!.accepted_at).getTime()).toBeGreaterThan(
+      Date.parse(asOf),
+    );
     const cursor = decodeCoreWeeklyReportCursor(encoded, [CURSOR_SECRET], Date.parse(asOf));
     expect(cursor).not.toBeNull();
     const second = await listCoreWeeklyReports(db, {
@@ -518,6 +537,17 @@ describe("Core weekly-report sent-history list", () => {
       REPORT_WITHDRAWN,
     ]);
     expect(second.items.map((row) => row.id)).not.toContain(LATE_REPORT);
+    const stableRemainder = await listCoreWeeklyReports(db, {
+      dealId: DEAL,
+      limit: 100,
+      asOf: cursor!.asOf,
+      after: {
+        weekOf: cursor!.weekOf,
+        reportVersion: cursor!.reportVersion,
+        reportId: cursor!.reportId,
+      },
+    });
+    expect(stableRemainder.items.map((row) => row.id)).not.toContain(REPORT_UNACCEPTED);
     // The provider occurrence predates page one, but CRM received this delayed webhook after page one's
     // boundary. Detail excludes it immediately; the signed metadata walk reconstructs what CRM knew.
     expect(second.items.map((row) => row.id)).toContain(REPORT_OLD);
@@ -529,6 +559,7 @@ describe("Core weekly-report sent-history list", () => {
     });
     expect(fresh.items.map((row) => row.id)).not.toContain(REPORT_OLD);
     expect(fresh.items.map((row) => row.id)).toContain(LATE_REPORT);
+    expect(fresh.items.map((row) => row.id)).toContain(REPORT_UNACCEPTED);
     await expectAppError(
       getCoreWeeklyReportDetail(db, { dealId: DEAL, reportId: REPORT_OLD }),
       404,
