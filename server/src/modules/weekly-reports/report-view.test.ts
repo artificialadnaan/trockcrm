@@ -194,9 +194,9 @@ describe("value formatting", () => {
     expect(view.pdf.duration.projectedWeeks).toBe(19);
   });
 
-  it("normalises a Date week_of to an ISO day", () => {
+  it("preserves the local calendar day used by node-postgres for a date column", () => {
     const view = buildWeeklyReportView({
-      report: report({ week_of: new Date("2026-08-13T00:00:00.000Z") }),
+      report: report({ week_of: new Date(2026, 7, 13) }),
       project: LIVE_PROJECT,
       photos: [],
     });

@@ -95,7 +95,14 @@ function text(value: unknown): string | null {
 
 function isoDate(value: unknown): string | null {
   if (value == null) return null;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) {
+    // PostgreSQL `date` values arrive from node-postgres at local midnight. Read the local calendar
+    // components; converting that value to UTC can change the day in positive-offset deployments.
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
   if (typeof value === "string") return value.slice(0, 10);
   return null;
 }

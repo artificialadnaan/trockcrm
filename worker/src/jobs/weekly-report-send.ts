@@ -290,7 +290,10 @@ async function recordAttempt(
         SET send_attempts = send_attempts + 1,
             send_last_attempt_at = NOW(),
             send_error = $2,
-            send_delivered_at = CASE WHEN $3::boolean THEN NOW() ELSE send_delivered_at END,
+            -- Migration 0242's database trigger owns this null -> accepted clock for rolling-deploy
+            -- safety. Use the same wall clock here too: NOW() is fixed at transaction start and can fall
+            -- before a pagination boundary this statement waited behind.
+            send_delivered_at = CASE WHEN $3::boolean THEN clock_timestamp() ELSE send_delivered_at END,
             send_request = CASE
               WHEN $3::boolean AND send_request IS NOT NULL THEN send_request - 'shareUrl'
               ELSE send_request

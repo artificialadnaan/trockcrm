@@ -251,6 +251,9 @@ beforeAll(async () => {
   // than on its subject.
   await pg.exec(migrationSql("0229_weekly_report_rep_escalation_kind"));
   await pg.exec(migrationSql("0230_weekly_reports_carried_from"));
+  // The send transition clears migration 0242's paired publication clocks when minting a new delivery
+  // key. Replaying 0242 keeps this route fixture on the same physical shape as production.
+  await pg.exec(migrationSql("0242_weekly_report_delivery_recorded_at"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');

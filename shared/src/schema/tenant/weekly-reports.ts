@@ -213,11 +213,19 @@ export const weeklyReports = pgTable(
      *  (so a crash between "provider accepted" and the stamp cannot double-send); a correction is a new
      *  report row and gets its own. */
     sendDeliveryKey: uuid("send_delivery_key"),
-    /** Migration 0226. When the provider ACCEPTED the message. Distinct from `sentAt`, which is stamped
-     *  when the PM commits — the dashboard's counters read `status`, so `sentAt` cannot wait on a mail
-     *  server, and a report that claims delivery the instant a button was clicked hides the failure this
-     *  feature exists to surface. */
+    /** Migration 0226. When the provider ACCEPTED the message. Migration 0242 makes the database own the
+     *  live NULL -> accepted transition so this clock linearizes with client-history pagination even
+     *  while an older worker still supplies transaction-start NOW(). Distinct from `sentAt`, which is
+     *  stamped when the PM commits — the dashboard's counters read `status`, so `sentAt` cannot wait on
+     *  a mail server, and a report that claims delivery the instant a button was clicked hides the
+     *  failure this feature exists to surface. */
     sendDeliveredAt: timestamp("send_delivered_at", { withTimezone: true }),
+    /** Migration 0242. When CRM published the acceptance into client history. This differs from the
+     *  provider acceptance clock above for historical imports, whose original timestamp is preserved
+     *  while their receipt into CRM must remain outside any pagination walk already in progress. */
+    sendAcceptanceRecordedAt: timestamp("send_acceptance_recorded_at", {
+      withTimezone: true,
+    }),
     /** Migration 0226. `sendAttempts` alone cannot tell "failed twice an hour ago and gave up" from
      *  "failed twice in the last minute and is still retrying". */
     sendLastAttemptAt: timestamp("send_last_attempt_at", { withTimezone: true }),
@@ -230,6 +238,13 @@ export const weeklyReports = pgTable(
      *  the time we received it. Webhooks arrive out of order, so this — not arrival — decides which
      *  verdict wins; a late `delivered` must not overwrite a later `bounced`. */
     sendDeliveryStatusAt: timestamp("send_delivery_status_at", { withTimezone: true }),
+    /** Migration 0242. When CRM recorded the verdict that currently controls publication. Unlike the
+     *  provider occurrence clock above, this is the local receipt boundary used to keep a paginated
+     *  client-history walk stable when a delayed bounce arrives between pages. For failures it remains
+     *  the first time CRM knew the send had failed, even if a later failure refines the stored detail. */
+    sendDeliveryStatusRecordedAt: timestamp("send_delivery_status_recorded_at", {
+      withTimezone: true,
+    }),
     /** Migration 0227. The bounce class (hard/soft), the provider's own type/subtype, its message and the
      *  message id, verbatim. A hard bounce and a full mailbox need opposite actions from the PM. */
     sendDeliveryDetail: jsonb("send_delivery_detail"),
@@ -265,6 +280,14 @@ export const weeklyReports = pgTable(
     check(
       "weekly_reports_send_delivery_status_check",
       sql`${table.sendDeliveryStatus} is null or ${table.sendDeliveryStatus} in ('delayed', 'delivered', 'complained', 'failed', 'bounced')`,
+    ),
+    check(
+      "weekly_reports_send_acceptance_recorded_pair_check",
+      sql`(${table.sendDeliveredAt} is null) = (${table.sendAcceptanceRecordedAt} is null)`,
+    ),
+    check(
+      "weekly_reports_send_delivery_recorded_pair_check",
+      sql`(${table.sendDeliveryStatus} is null) = (${table.sendDeliveryStatusRecordedAt} is null)`,
     ),
     check(
       "weekly_reports_completion_percent_check",

@@ -1,8 +1,9 @@
 // Runtime suite for the DELIVERY WEBHOOK: what the mail provider says after the send is over, and how it
 // reaches the report row.
 //
-// Every table is built from the migrations READ FROM DISK — 0222, 0226 and 0227 — because the whole
-// feature is three columns, a CHECK and a public lookup table, and a suite that hand-rolled them would be
+// Every table is built from the migrations READ FROM DISK — including 0242's CRM-receipt boundary —
+// because the feature is database-owned columns, checks, triggers and a public lookup table, and a suite
+// that hand-rolled them would be
 // asserting a fixture rather than the schema that ships. The CHECK in particular is load-bearing here: a
 // test that wrote 'delivered!' and passed would prove nothing about production.
 //
@@ -220,6 +221,7 @@ beforeAll(async () => {
   // audit now because a delivery verdict has to be provable all the way to the week's outstanding flag,
   // not merely written to a column.
   await pg.exec(migrationSql("0231_weekly_report_views"));
+  await pg.exec(migrationSql("0242_weekly_report_delivery_recorded_at"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES
@@ -450,6 +452,7 @@ describe("recording what the provider said", () => {
     const after = await reportRow(reportId);
     expect(after.send_delivery_status).toBe("bounced");
     expect(new Date(after.send_delivery_status_at).toISOString()).toBe(T_MID);
+    expect(after.send_delivery_status_recorded_at).not.toBeNull();
     expect(after.send_delivery_detail).toMatchObject({
       eventType: "email.bounced",
       bounceClass: "hard",
@@ -561,6 +564,9 @@ describe("events that arrive out of order and more than once", () => {
         bounce: { type: "Transient", subType: "MailboxFull", message: "552 mailbox full" },
       }),
     );
+    const firstReceipt = new Date(
+      (await reportRow(reportId)).send_delivery_status_recorded_at,
+    ).toISOString();
     const second = await ingest(
       providerEvent({ type: "email.bounced", createdAt: T_LATE, deliveryKey, bounce: HARD_BOUNCE }),
     );
@@ -569,6 +575,27 @@ describe("events that arrive out of order and more than once", () => {
     const row = await reportRow(reportId);
     expect(row.send_delivery_detail).toMatchObject({ bounceClass: "hard", bounceSubType: "NoEmail" });
     expect(new Date(row.send_delivery_status_at).toISOString()).toBe(T_LATE);
+    expect(new Date(row.send_delivery_status_recorded_at).toISOString()).toBe(firstReceipt);
+  });
+
+  it("clears the CRM-receipt boundary when a fresh send mints a new delivery key", async () => {
+    const { reportId } = await seedApprovedReport({ weekOf: WEEK_OF });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports
+          SET send_delivery_status = 'bounced',
+              send_delivery_status_at = $2::timestamptz,
+              send_delivery_detail = '{"eventType":"old-send"}'::jsonb
+        WHERE id = $1::uuid`,
+      [reportId, T_EARLY],
+    );
+    expect((await reportRow(reportId)).send_delivery_status_recorded_at).not.toBeNull();
+
+    await sendReport(reportId);
+    const fresh = await reportRow(reportId);
+    expect(fresh.send_delivery_status).toBeNull();
+    expect(fresh.send_delivery_status_at).toBeNull();
+    expect(fresh.send_delivery_status_recorded_at).toBeNull();
+    expect(fresh.send_delivery_detail).toBeNull();
   });
 
   it("is idempotent — the same event five times writes once", async () => {

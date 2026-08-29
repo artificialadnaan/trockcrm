@@ -1427,9 +1427,11 @@ export async function transitionWeeklyReport(
         `send_attempts = 0`,
         `send_error = NULL`,
         `send_delivered_at = NULL`,
+        `send_acceptance_recorded_at = NULL`,
         `send_last_attempt_at = NULL`,
         `send_delivery_status = NULL`,
         `send_delivery_status_at = NULL`,
+        `send_delivery_status_recorded_at = NULL`,
         `send_delivery_detail = NULL`,
       );
     }
