@@ -1,4 +1,5 @@
 import express, { type Express } from "express";
+import { createPrivateKey, sign as signEd25519, type KeyObject } from "node:crypto";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../middleware/error-handler.js";
@@ -12,6 +13,11 @@ import {
   signCoreWeeklyReportRequest,
   type CoreWeeklyReportAuthAction,
 } from "./core-api-auth.js";
+import {
+  CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER,
+  CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER,
+  coreWeeklyReportWorkloadAuthFrame,
+} from "./core-api-workload-auth.js";
 import {
   CORE_WEEKLY_REPORT_API_BASE_PATH,
   CORE_WEEKLY_REPORT_DEAL_RESPONSE_VERSION,
@@ -40,6 +46,24 @@ import type { QueryExecutor } from "./projects-service.js";
 const CURRENT_SECRET = "crm-current-weekly-report-key-material-0001";
 const PREVIOUS_SECRET = "crm-previous-weekly-report-key-material-001";
 const UNKNOWN_SECRET = "crm-unknown-weekly-report-key-material-00001";
+const CURRENT_WORKLOAD_KEY_ID = "core-weekly-2026-08";
+const PREVIOUS_WORKLOAD_KEY_ID = "core-weekly-2026-07";
+const CURRENT_WORKLOAD_PRIVATE_KEY = createPrivateKey({
+  key: Buffer.from(
+    "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v_VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g",
+    "base64url",
+  ),
+  format: "der",
+  type: "pkcs8",
+});
+const PREVIOUS_WORKLOAD_PRIVATE_KEY = createPrivateKey({
+  key: Buffer.from(
+    "MC4CAQAwBQYDK2VwBCIEIEzNCJso_5banbbDRuwRTg9bijGfNaumJNqM9u1PuKb7",
+    "base64url",
+  ),
+  format: "der",
+  type: "pkcs8",
+});
 const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
 const OTHER_REQUEST_ID = "00000000-0000-4000-8000-000000000002";
 const DEAL_ID = "00000000-0000-4000-8000-000000000011";
@@ -55,6 +79,12 @@ const ENABLED_ENV = {
   ENABLE_CRM_CORE_WEEKLY_REPORT_READ_API: "true",
   TROCK_CORE_WEEKLY_REPORT_API_SECRET: CURRENT_SECRET,
   TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET: PREVIOUS_SECRET,
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID: CURRENT_WORKLOAD_KEY_ID,
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PUBLIC_KEY:
+    "MCowBQYDK2VwAyEA11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID: PREVIOUS_WORKLOAD_KEY_ID,
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY:
+    "MCowBQYDK2VwAyEAPUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw",
 } as const;
 
 const LIST_ITEM: CoreWeeklyReportListItem = {
@@ -91,7 +121,6 @@ interface Harness {
   app: Express;
   client: QueryExecutor;
   auditEvents: CoreWeeklyReportApiAuditEvent[];
-  authorizeCorePeer: ReturnType<typeof vi.fn>;
   resolveActiveOffice: ReturnType<typeof vi.fn>;
   transaction: ReturnType<typeof vi.fn>;
   resolveDeal: ReturnType<typeof vi.fn>;
@@ -104,7 +133,6 @@ interface Harness {
 function createHarness(overrides: CoreWeeklyReportApiRouterOptions = {}): Harness {
   const client = { query: vi.fn() } as unknown as QueryExecutor;
   const auditEvents: CoreWeeklyReportApiAuditEvent[] = [];
-  const authorizeCorePeer = vi.fn(async () => true);
   const resolveActiveOffice = vi.fn(async () => true);
   const transaction = vi.fn(async (
     _officeSlug: string,
@@ -139,7 +167,6 @@ function createHarness(overrides: CoreWeeklyReportApiRouterOptions = {}): Harnes
     observe: (event) => {
       auditEvents.push(event);
     },
-    authorizeCorePeer,
     resolveActiveOffice,
     withOfficeTransaction: transaction as unknown as CoreWeeklyReportOfficeTransaction,
     resolveDeal: resolveDeal as unknown as NonNullable<CoreWeeklyReportApiRouterOptions["resolveDeal"]>,
@@ -161,7 +188,6 @@ function createHarness(overrides: CoreWeeklyReportApiRouterOptions = {}): Harnes
     app,
     client,
     auditEvents,
-    authorizeCorePeer,
     resolveActiveOffice,
     transaction,
     resolveDeal,
@@ -205,6 +231,32 @@ interface SignedRequestOptions {
   requestId?: string;
   timestampSeconds?: number;
   signatureAction?: CoreWeeklyReportAuthAction;
+  workloadKeyId?: string;
+  workloadPrivateKey?: KeyObject;
+  workloadSignatureAction?: CoreWeeklyReportAuthAction;
+  workloadRequestId?: string;
+  workloadTimestampSeconds?: number;
+}
+
+function workloadSignature(input: {
+  action: CoreWeeklyReportAuthAction;
+  requestId: string;
+  timestampSeconds: number;
+  rawBody: Buffer;
+  keyId?: string;
+  privateKey?: KeyObject;
+}): string {
+  return `ed25519=${signEd25519(
+    null,
+    coreWeeklyReportWorkloadAuthFrame({
+      keyId: input.keyId ?? CURRENT_WORKLOAD_KEY_ID,
+      action: input.action,
+      requestId: input.requestId,
+      timestampSeconds: input.timestampSeconds,
+      rawBody: input.rawBody,
+    }),
+    input.privateKey ?? CURRENT_WORKLOAD_PRIVATE_KEY,
+  ).toString("base64url")}`;
 }
 
 function signedRequest(app: Express, options: SignedRequestOptions) {
@@ -226,6 +278,21 @@ function signedRequest(app: Express, options: SignedRequestOptions) {
         timestampSeconds,
         rawBody,
         secret: options.secret ?? CURRENT_SECRET,
+      }),
+    )
+    .set(
+      CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER,
+      options.workloadKeyId ?? CURRENT_WORKLOAD_KEY_ID,
+    )
+    .set(
+      CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER,
+      workloadSignature({
+        keyId: options.workloadKeyId,
+        action: options.workloadSignatureAction ?? options.action,
+        requestId: options.workloadRequestId ?? requestId,
+        timestampSeconds: options.workloadTimestampSeconds ?? timestampSeconds,
+        rawBody,
+        privateKey: options.workloadPrivateKey,
       }),
     );
   if (Buffer.isBuffer(options.rawBody)) {
@@ -270,8 +337,8 @@ function expectTypedError(
   });
 }
 
-describe("Core weekly-report HTTP feature and peer gates", () => {
-  it("is content-free 404 and performs no peer/auth/data work while the exact flag is dark", async () => {
+describe("Core weekly-report HTTP feature and workload-identity gates", () => {
+  it("is content-free 404 and performs no auth/data work while the exact flag is dark", async () => {
     const harness = createHarness({
       env: {
         ...ENABLED_ENV,
@@ -283,7 +350,6 @@ describe("Core weekly-report HTTP feature and peer gates", () => {
       .set("Content-Type", "application/json")
       .send(resolveBody());
     expectBare(response, 404);
-    expect(harness.authorizeCorePeer).not.toHaveBeenCalled();
     expectNoTenantWork(harness);
   });
 
@@ -294,7 +360,15 @@ describe("Core weekly-report HTTP feature and peer gates", () => {
       TROCK_CORE_WEEKLY_REPORT_API_SECRET: CURRENT_SECRET,
       TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET: CURRENT_SECRET,
     },
-  ])("is content-free 503 before peer or lookup for enabled unready secrets: %j", async (keys) => {
+    {
+      TROCK_CORE_WEEKLY_REPORT_API_SECRET: CURRENT_SECRET,
+      TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET: PREVIOUS_SECRET,
+    },
+    {
+      ...ENABLED_ENV,
+      TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY: undefined,
+    },
+  ])("is content-free 503 before lookup for enabled unready trust configuration: %j", async (keys) => {
     const harness = createHarness({
       env: { ENABLE_CRM_CORE_WEEKLY_REPORT_READ_API: "true", ...keys },
     });
@@ -303,36 +377,37 @@ describe("Core weekly-report HTTP feature and peer gates", () => {
       .set("Content-Type", "application/json")
       .send(resolveBody());
     expectBare(response, 503);
-    expect(harness.authorizeCorePeer).not.toHaveBeenCalled();
     expectNoTenantWork(harness);
   });
 
-  it("stays unready when no trusted peer verifier is supplied", async () => {
-    const harness = createHarness({ authorizeCorePeer: undefined });
-    const response = await signedRequest(harness.app, {
+  it("returns the same body-free 401 for missing, unknown, or wrongly signed workload identity", async () => {
+    const missingHarness = createHarness();
+    const missing = await signedRequest(missingHarness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody: resolveBody(),
-    });
-    expectBare(response, 503);
-    expectNoTenantWork(harness);
-  });
+    }).unset(CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER);
+    expectBare(missing, 401);
+    expectNoTenantWork(missingHarness);
 
-  it("returns the same body-free 401 for missing, wrong, or throwing peer identity", async () => {
-    for (const authorizeCorePeer of [
-      vi.fn(async () => false),
-      vi.fn(async () => {
-        throw new Error("untrusted peer detail must not escape");
-      }),
+    for (const options of [
+      {
+        workloadKeyId: "core-weekly-unknown",
+        workloadPrivateKey: CURRENT_WORKLOAD_PRIVATE_KEY,
+      },
+      {
+        workloadKeyId: CURRENT_WORKLOAD_KEY_ID,
+        workloadPrivateKey: PREVIOUS_WORKLOAD_PRIVATE_KEY,
+      },
     ]) {
-      const harness = createHarness({ authorizeCorePeer });
+      const harness = createHarness();
       const response = await signedRequest(harness.app, {
         path: "/deals/resolve",
         action: "resolve-deal",
         rawBody: resolveBody(),
+        ...options,
       });
       expectBare(response, 401);
-      expect(authorizeCorePeer).toHaveBeenCalledTimes(1);
       expectNoTenantWork(harness);
     }
   });
@@ -341,7 +416,7 @@ describe("Core weekly-report HTTP feature and peer gates", () => {
     ["Origin", "https://portal.example.com"],
     ["Referer", "https://portal.example.com/projects/1"],
     ["Sec-Fetch-Site", "cross-site"],
-  ])("rejects browser/direct-origin context before consulting peer auth: %s", async (name, value) => {
+  ])("rejects browser/direct-origin context before raw-body authentication: %s", async (name, value) => {
     const harness = createHarness();
     const response = await signedRequest(harness.app, {
       path: "/deals/resolve",
@@ -349,20 +424,22 @@ describe("Core weekly-report HTTP feature and peer gates", () => {
       rawBody: resolveBody(),
     }).set(name, value);
     expectBare(response, 401);
-    expect(harness.authorizeCorePeer).not.toHaveBeenCalled();
     expectNoTenantWork(harness);
   });
 
-  it("never treats forwarded client-certificate headers as peer identity", async () => {
-    const authorizeCorePeer = vi.fn(async () => false);
-    const harness = createHarness({ authorizeCorePeer });
+  it("never lets header-only proxy or forwarded claims substitute for Ed25519 possession", async () => {
+    const harness = createHarness();
     const response = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody: resolveBody(),
-    }).set("X-Forwarded-Client-Cert", "By=fake;Hash=fake");
+    })
+      .unset(CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER)
+      .unset(CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER)
+      .set("X-Forwarded-Client-Cert", "By=fake;Hash=fake")
+      .set("X-Railway-Service", "trock-core")
+      .set("X-Trock-Core-Workload", "true");
     expectBare(response, 401);
-    expect(authorizeCorePeer).toHaveBeenCalledTimes(1);
     expectNoTenantWork(harness);
   });
 });
@@ -378,6 +455,8 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
     CORE_WEEKLY_REPORT_REQUEST_ID_HEADER,
     CORE_WEEKLY_REPORT_TIMESTAMP_HEADER,
     CORE_WEEKLY_REPORT_SIGNATURE_HEADER,
+    CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER,
+    CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER,
   ])("rejects a missing required authentication header uniformly: %s", async (missing) => {
     const rawBody = resolveBody();
     const response = await signedRequest(harness.app, {
@@ -393,6 +472,8 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
     CORE_WEEKLY_REPORT_REQUEST_ID_HEADER,
     CORE_WEEKLY_REPORT_TIMESTAMP_HEADER,
     CORE_WEEKLY_REPORT_SIGNATURE_HEADER,
+    CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER,
+    CORE_WEEKLY_REPORT_WORKLOAD_SIGNATURE_HEADER,
   ])("rejects duplicate authentication header lines before body/auth processing: %s", async (name) => {
     const rawBody = resolveBody();
     const test = signedRequest(harness.app, {
@@ -404,7 +485,8 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
       ? [REQUEST_ID, OTHER_REQUEST_ID]
       : name === CORE_WEEKLY_REPORT_TIMESTAMP_HEADER
         ? [String(NOW_SECONDS), String(NOW_SECONDS + 1)]
-        : [
+        : name === CORE_WEEKLY_REPORT_SIGNATURE_HEADER
+          ? [
             signCoreWeeklyReportRequest({
               action: "resolve-deal",
               requestId: REQUEST_ID,
@@ -413,18 +495,30 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
               secret: CURRENT_SECRET,
             }),
             "sha256=" + "0".repeat(64),
-          ];
+          ]
+          : name === CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID_HEADER
+            ? [CURRENT_WORKLOAD_KEY_ID, PREVIOUS_WORKLOAD_KEY_ID]
+            : [
+                workloadSignature({
+                  action: "resolve-deal",
+                  requestId: REQUEST_ID,
+                  timestampSeconds: NOW_SECONDS,
+                  rawBody: Buffer.from(rawBody),
+                }),
+                `ed25519=${"A".repeat(86)}`,
+              ];
     const response = await test.set(name, duplicateValues as unknown as string);
     expectBare(response, 401);
     expectNoTenantWork(harness);
   });
 
   it.each([
-    ["bad request id", { requestId: "not-a-uuid" }],
-    ["bad timestamp", { timestampSeconds: 123 }],
+    ["bad request id", { requestId: "not-a-uuid", workloadRequestId: REQUEST_ID }],
+    ["bad timestamp", { timestampSeconds: 123, workloadTimestampSeconds: NOW_SECONDS }],
     ["stale timestamp", { timestampSeconds: NOW_SECONDS - 301 }],
     ["unknown key", { secret: UNKNOWN_SECRET }],
     ["wrong action", { signatureAction: "list-reports" as const }],
+    ["wrong workload action", { workloadSignatureAction: "list-reports" as const }],
   ])("returns one body-free 401 for %s", async (_label, changed) => {
     const response = await signedRequest(harness.app, {
       path: "/deals/resolve",
@@ -452,7 +546,7 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
     expectNoTenantWork(slowHarness);
   });
 
-  it("accepts current and previous HMAC slots only for the exact signed bytes", async () => {
+  it("accepts current and previous HMAC/workload slots only for the exact signed bytes", async () => {
     for (const secret of [CURRENT_SECRET, PREVIOUS_SECRET]) {
       const local = createHarness();
       const response = await signedRequest(local.app, {
@@ -468,6 +562,25 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
       );
     }
 
+    for (const [workloadKeyId, workloadPrivateKey, expectedSlot] of [
+      [CURRENT_WORKLOAD_KEY_ID, CURRENT_WORKLOAD_PRIVATE_KEY, "current"],
+      [PREVIOUS_WORKLOAD_KEY_ID, PREVIOUS_WORKLOAD_PRIVATE_KEY, "previous"],
+    ] as const) {
+      const local = createHarness();
+      const response = await signedRequest(local.app, {
+        path: "/deals/resolve",
+        action: "resolve-deal",
+        rawBody: resolveBody(),
+        workloadKeyId,
+        workloadPrivateKey,
+      });
+      expect(response.status).toBe(200);
+      expect(local.auditEvents.at(-1)).toMatchObject({
+        workloadKeyId,
+        workloadKeySlot: expectedSlot,
+      });
+    }
+
     const original = resolveBody();
     const changed = original.replace("dallas", "atlanta");
     const signature = signCoreWeeklyReportRequest({
@@ -477,18 +590,16 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
       rawBody: Buffer.from(original),
       secret: CURRENT_SECRET,
     });
-    const changedResponse = await request(harness.app)
-      .post(`${CORE_WEEKLY_REPORT_API_BASE_PATH}/deals/resolve`)
-      .set("Content-Type", "application/json")
-      .set(CORE_WEEKLY_REPORT_REQUEST_ID_HEADER, REQUEST_ID)
-      .set(CORE_WEEKLY_REPORT_TIMESTAMP_HEADER, String(NOW_SECONDS))
-      .set(CORE_WEEKLY_REPORT_SIGNATURE_HEADER, signature)
-      .send(changed);
+    const changedResponse = await signedRequest(harness.app, {
+      path: "/deals/resolve",
+      action: "resolve-deal",
+      rawBody: changed,
+    }).set(CORE_WEEKLY_REPORT_SIGNATURE_HEADER, signature);
     expectBare(changedResponse, 401);
     expectNoTenantWork(harness);
   });
 
-  it("accepts exactly 16 KiB of signed UTF-8 JSON bytes and rejects the next byte", async () => {
+  it("accepts exactly 16 KiB of signed UTF-8 JSON bytes and refuses the next byte with a content-free 401", async () => {
     const compact = resolveBody();
     const atLimit = compact + " ".repeat(CORE_WEEKLY_REPORT_MAX_REQUEST_BYTES - Buffer.byteLength(compact));
     expect(Buffer.byteLength(atLimit)).toBe(CORE_WEEKLY_REPORT_MAX_REQUEST_BYTES);
@@ -507,39 +618,49 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
       action: "resolve-deal",
       rawBody: tooLarge,
     });
-    expectTypedError(rejected, 413, null, "request_too_large");
+    // CONTENT-FREE 401, not a typed 413. express.raw() rejects the oversized body BEFORE either proof
+    // is verified, so at that moment the server cannot distinguish this signed caller from an anonymous
+    // one — answering 413 would confirm the route and its size limit to anyone. The true reason is kept
+    // in the audit row. Cost accepted: a legitimate integration debugging a too-large body sees 401.
+    expect(rejected.status).toBe(401);
+    expect(rejected.text).toBe("");
     expectNoTenantWork(rejectedHarness);
   });
 
-  it("rejects missing/wrong/duplicated content type and compressed bodies before lookup", async () => {
+  it("refuses missing/wrong/duplicated content type and compressed bodies with a content-free 401 before lookup", async () => {
     const rawBody = resolveBody();
     const missing = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).unset("Content-Type");
-    expectTypedError(missing, 415, null, "unsupported_media_type");
+    // Pre-verification, so content-free 401 rather than a typed 415 — see the size-limit case above.
+    expect(missing.status).toBe(401);
+    expect(missing.text).toBe("");
 
     const wrong = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).set("Content-Type", "text/plain");
-    expectTypedError(wrong, 415, null, "unsupported_media_type");
+    expect(wrong.status).toBe(401);
+    expect(wrong.text).toBe("");
 
     const duplicate = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).set("Content-Type", ["application/json", "text/plain"] as unknown as string);
-    expectTypedError(duplicate, 415, null, "unsupported_media_type");
+    expect(duplicate.status).toBe(401);
+    expect(duplicate.text).toBe("");
 
     const compressed = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).set("Content-Encoding", "gzip");
-    expectTypedError(compressed, 415, null, "unsupported_media_type");
+    expect(compressed.status).toBe(401);
+    expect(compressed.text).toBe("");
     expectNoTenantWork(harness);
   });
 
@@ -1036,6 +1157,8 @@ describe("Core weekly-report HTTP observability and unsupported surface", () => 
       statusCode: 200,
       resultCode: "ok",
       keySlot: "current",
+      workloadKeyId: CURRENT_WORKLOAD_KEY_ID,
+      workloadKeySlot: "current",
       itemCount: 1,
       paginationCursorPresent: false,
       nextCursorPresent: false,
@@ -1046,6 +1169,7 @@ describe("Core weekly-report HTTP observability and unsupported surface", () => 
     expect(serialized).not.toContain("Synthetic already-sent narrative");
     expect(serialized).not.toContain("Synthetic client-safe caption");
     expect(serialized).not.toContain(CURRENT_SECRET);
+    expect(serialized).not.toContain("MCowBQYDK2Vw");
     expect(serialized).not.toMatch(/signature|rawBody|cursor\"|content|clientName|photo/i);
   });
 
@@ -1077,7 +1201,6 @@ describe("Core weekly-report HTTP observability and unsupported surface", () => 
       `${CORE_WEEKLY_REPORT_API_BASE_PATH}${path}`,
     );
     expectBare(response, 404);
-    expect(harness.authorizeCorePeer).not.toHaveBeenCalled();
     expectNoTenantWork(harness);
   });
 

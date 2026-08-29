@@ -27,7 +27,9 @@ Required headers:
 
 - `x-trock-core-request-id`: a UUID unique to this call;
 - `x-trock-core-timestamp`: ten-digit Unix time in seconds;
-- `x-trock-core-signature`: `sha256=<lowercase hex HMAC-SHA256>`.
+- `x-trock-core-signature`: `sha256=<lowercase hex HMAC-SHA256>`;
+- `x-trock-core-workload-key-id`: the active lowercase Ed25519 rotation id; and
+- `x-trock-core-workload-signature`: `ed25519=<canonical unpadded base64url signature>`.
 
 The HMAC input is the following byte frame, including newlines and the exact request body bytes:
 
@@ -46,35 +48,46 @@ rotation. Keys must contain at least 32 bytes, may not carry leading/trailing wh
 characters, and the two rotation slots must differ. The API fails closed on any missing/unsafe key
 configuration before looking up an office.
 
-Set `TROCK_CORE_WEEKLY_REPORT_API_SECRET` on CRM and the matching secret on Core. During rotation only, set
+Set `TROCK_CORE_WEEKLY_REPORT_API_SECRET` on CRM and the matching secret on Core. During HMAC rotation only, set
 `TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET` to the retiring key.
 
-HMAC is necessary but not sufficient. The HTTP host must also supply `createCoreWeeklyReportApiRouter` an
-`authorizeCorePeer(req)` implementation backed by trusted workload identity or mTLS state. The factory does not
-derive trust from `X-Forwarded-*` headers and defaults unready when that verifier is absent. Requests carrying browser
-origin/referrer/fetch-metadata context are refused before HMAC processing; absence of those headers is not identity
-proof and the peer verifier still runs.
+HMAC is necessary but not sufficient. Core separately Ed25519-signs the exact byte frame
+`UTF8("trock.crm.core-weekly-report-workload.v1\n" + keyId + "\n" + action + "\n" +
+lowercase(requestId) + "\n" + decimal(timestampSeconds) + "\n") || rawBody`. CRM verifies that proof with its
+current/previous public-key ring and independently applies the same five-minute freshness bound. Key ids match
+`^[a-z0-9][a-z0-9._-]{0,63}$`; signatures are exactly 64 bytes after canonical unpadded base64url decoding.
+
+Core stores one canonical unpadded base64url DER PKCS#8 Ed25519 private key. CRM stores only canonical DER SPKI
+public keys. To rotate, install the new CRM current key plus the old key as previous, switch Core's key id/private
+key, wait longer than the five-minute skew plus maximum request duration, then remove CRM's previous pair. The key
+family is independent of the HMAC family.
+
+The assertion cryptographically authenticates the Core workload. Railway private routing reduces network exposure,
+but is defense-in-depth and never identity. CRM derives no trust from `X-Forwarded-*`, client-certificate, Railway,
+or other caller-controlled headers. Requests carrying browser origin/referrer/fetch-metadata context are refused;
+absence of those headers is not proof. Missing, duplicate, malformed, unknown-key, or invalid workload assertions
+receive the same content-free authentication failure as an invalid HMAC.
 
 ## Feature readiness and mount seam
 
 `ENABLE_CRM_CORE_WEEKLY_REPORT_READ_API` is dark unless its value is the exact string `true`. A false/unset flag
-answers the factory's known paths with a content-free `404`; an enabled feature with unsafe HMAC rotation config or no
-peer authorizer answers content-free `503`. Peer/auth/header failures are uniform content-free `401`. Every response,
+answers the factory's known paths with a content-free `404`; an enabled feature with unsafe HMAC or Ed25519 rotation
+configuration answers content-free `503`. Dual-proof/header failures are uniform content-free `401`. Every response,
 including errors, is `Cache-Control: private, no-store`.
 
-This change exports the boundary as `createCoreWeeklyReportApiRouter(...)`; it is intentionally not registered in
-`server/src/app.ts` until the deployment supplies the reviewed peer authorizer. The eventual raw-body mount belongs
-with the other signed integrations, before `express.json()`:
+`server/src/app.ts` mounts the boundary with the other signed integrations, before `express.json()`, so both proofs
+cover the original bounded bytes:
 
 ```ts
 app.use(
   CORE_WEEKLY_REPORT_API_BASE_PATH,
-  createCoreWeeklyReportApiRouter({ authorizeCorePeer: trustedCorePeerAuthorizer }),
+  createCoreWeeklyReportApiRouter(),
 );
 ```
 
-Do not mount it with the default options: that state is deliberately unready, and adding a caller-controlled proxy
-header as the missing authorizer would not satisfy the workload-identity boundary.
+No key material, signatures, request bodies, body hashes, or parsing errors enter responses/logs/traces. Safe audit
+metadata may record only the successfully verified HMAC slot and workload key id/slot. Readiness exposes only key-slot
+presence and a bounded reason, never keys or key-derived values.
 
 ## Deal resolution and binding
 

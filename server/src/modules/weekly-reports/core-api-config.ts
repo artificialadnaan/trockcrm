@@ -2,6 +2,11 @@ import {
   coreWeeklyReportSecretReadiness,
   type CoreWeeklyReportSecretReadiness,
 } from "./core-api-auth.js";
+import {
+  coreWeeklyReportWorkloadKeyReadiness,
+  type CoreWeeklyReportWorkloadKeyReadiness,
+  type CoreWeeklyReportWorkloadKeyring,
+} from "./core-api-workload-auth.js";
 
 export const CORE_WEEKLY_REPORT_READ_API_FLAG =
   "ENABLE_CRM_CORE_WEEKLY_REPORT_READ_API" as const;
@@ -14,6 +19,10 @@ export interface CoreWeeklyReportApiEnvironment {
   ENABLE_CRM_CORE_WEEKLY_REPORT_READ_API?: string;
   TROCK_CORE_WEEKLY_REPORT_API_SECRET?: string;
   TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET?: string;
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID?: string;
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PUBLIC_KEY?: string;
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID?: string;
+  TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY?: string;
 }
 
 export type CoreWeeklyReportApiRuntimeConfig =
@@ -21,13 +30,15 @@ export type CoreWeeklyReportApiRuntimeConfig =
   | {
       state: "unready";
       reason:
-        | "missing_peer_authorizer"
-        | Exclude<CoreWeeklyReportSecretReadiness, { ok: true }>["reason"];
+        | Exclude<CoreWeeklyReportSecretReadiness, { ok: true }>["reason"]
+        | Exclude<CoreWeeklyReportWorkloadKeyReadiness, { ok: true }>["reason"]
+        | "workload_hmac_key_material_reuse";
     }
   | {
       state: "ready";
       currentSecret: string;
       previousSecret: string | null;
+      workloadKeys: CoreWeeklyReportWorkloadKeyring;
     };
 
 export interface CoreWeeklyReportApiReadiness {
@@ -39,17 +50,12 @@ export interface CoreWeeklyReportApiReadiness {
   previousSecretPresent: boolean;
   reason:
     | "disabled"
-    | "missing_peer_authorizer"
     | Exclude<CoreWeeklyReportSecretReadiness, { ok: true }>["reason"]
+    | Exclude<CoreWeeklyReportWorkloadKeyReadiness, { ok: true }>["reason"]
+    | "workload_hmac_key_material_reuse"
     | null;
-}
-
-export interface CoreWeeklyReportApiRuntimeRequirements {
-  /**
-   * True only when the HTTP host supplied a verifier backed by trusted workload identity or mTLS.
-   * Forwarded/header claims are deliberately insufficient.
-   */
-  peerAuthorizerConfigured?: boolean;
+  workloadCurrentKeyPresent: boolean;
+  workloadPreviousKeyPresent: boolean;
 }
 
 /**
@@ -59,7 +65,6 @@ export interface CoreWeeklyReportApiRuntimeRequirements {
  */
 export function resolveCoreWeeklyReportApiRuntimeConfig(
   env: CoreWeeklyReportApiEnvironment,
-  requirements: CoreWeeklyReportApiRuntimeRequirements = {},
 ): CoreWeeklyReportApiRuntimeConfig {
   if (env.ENABLE_CRM_CORE_WEEKLY_REPORT_READ_API !== "true") {
     return { state: "disabled" };
@@ -70,22 +75,31 @@ export function resolveCoreWeeklyReportApiRuntimeConfig(
     env.TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET,
   );
   if (!secrets.ok) return { state: "unready", reason: secrets.reason };
-  if (requirements.peerAuthorizerConfigured !== true) {
-    return { state: "unready", reason: "missing_peer_authorizer" };
+  const workloadKeys = coreWeeklyReportWorkloadKeyReadiness(env);
+  if (!workloadKeys.ok) return { state: "unready", reason: workloadKeys.reason };
+  const encodedWorkloadKeys = [
+    env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PUBLIC_KEY,
+    env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY,
+  ];
+  if (
+    encodedWorkloadKeys.includes(secrets.currentSecret) ||
+    (secrets.previousSecret !== null && encodedWorkloadKeys.includes(secrets.previousSecret))
+  ) {
+    return { state: "unready", reason: "workload_hmac_key_material_reuse" };
   }
   return {
     state: "ready",
     currentSecret: secrets.currentSecret,
     previousSecret: secrets.previousSecret,
+    workloadKeys: workloadKeys.keyring,
   };
 }
 
 /** Redacted operator/readiness projection: it never returns key material or a key-derived value. */
 export function getCoreWeeklyReportApiReadiness(
   env: CoreWeeklyReportApiEnvironment,
-  requirements: CoreWeeklyReportApiRuntimeRequirements = {},
 ): CoreWeeklyReportApiReadiness {
-  const runtime = resolveCoreWeeklyReportApiRuntimeConfig(env, requirements);
+  const runtime = resolveCoreWeeklyReportApiRuntimeConfig(env);
   return {
     feature: "crm_core_weekly_report_read_api",
     state: runtime.state,
@@ -96,6 +110,16 @@ export function getCoreWeeklyReportApiReadiness(
     previousSecretPresent:
       typeof env.TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET === "string" &&
       env.TROCK_CORE_WEEKLY_REPORT_API_PREVIOUS_SECRET.length > 0,
+    workloadCurrentKeyPresent:
+      typeof env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID === "string" &&
+      env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_KEY_ID.length > 0 &&
+      typeof env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PUBLIC_KEY === "string" &&
+      env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PUBLIC_KEY.length > 0,
+    workloadPreviousKeyPresent:
+      typeof env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID === "string" &&
+      env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_KEY_ID.length > 0 &&
+      typeof env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY === "string" &&
+      env.TROCK_CORE_WEEKLY_REPORT_WORKLOAD_PREVIOUS_PUBLIC_KEY.length > 0,
     reason:
       runtime.state === "disabled"
         ? "disabled"
