@@ -599,7 +599,7 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
     expectNoTenantWork(harness);
   });
 
-  it("accepts exactly 16 KiB of signed UTF-8 JSON bytes and rejects the next byte", async () => {
+  it("accepts exactly 16 KiB of signed UTF-8 JSON bytes and refuses the next byte with a content-free 401", async () => {
     const compact = resolveBody();
     const atLimit = compact + " ".repeat(CORE_WEEKLY_REPORT_MAX_REQUEST_BYTES - Buffer.byteLength(compact));
     expect(Buffer.byteLength(atLimit)).toBe(CORE_WEEKLY_REPORT_MAX_REQUEST_BYTES);
@@ -618,39 +618,49 @@ describe("Core weekly-report HTTP authentication and raw transport", () => {
       action: "resolve-deal",
       rawBody: tooLarge,
     });
-    expectTypedError(rejected, 413, null, "request_too_large");
+    // CONTENT-FREE 401, not a typed 413. express.raw() rejects the oversized body BEFORE either proof
+    // is verified, so at that moment the server cannot distinguish this signed caller from an anonymous
+    // one — answering 413 would confirm the route and its size limit to anyone. The true reason is kept
+    // in the audit row. Cost accepted: a legitimate integration debugging a too-large body sees 401.
+    expect(rejected.status).toBe(401);
+    expect(rejected.text).toBe("");
     expectNoTenantWork(rejectedHarness);
   });
 
-  it("rejects missing/wrong/duplicated content type and compressed bodies before lookup", async () => {
+  it("refuses missing/wrong/duplicated content type and compressed bodies with a content-free 401 before lookup", async () => {
     const rawBody = resolveBody();
     const missing = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).unset("Content-Type");
-    expectTypedError(missing, 415, null, "unsupported_media_type");
+    // Pre-verification, so content-free 401 rather than a typed 415 — see the size-limit case above.
+    expect(missing.status).toBe(401);
+    expect(missing.text).toBe("");
 
     const wrong = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).set("Content-Type", "text/plain");
-    expectTypedError(wrong, 415, null, "unsupported_media_type");
+    expect(wrong.status).toBe(401);
+    expect(wrong.text).toBe("");
 
     const duplicate = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).set("Content-Type", ["application/json", "text/plain"] as unknown as string);
-    expectTypedError(duplicate, 415, null, "unsupported_media_type");
+    expect(duplicate.status).toBe(401);
+    expect(duplicate.text).toBe("");
 
     const compressed = await signedRequest(harness.app, {
       path: "/deals/resolve",
       action: "resolve-deal",
       rawBody,
     }).set("Content-Encoding", "gzip");
-    expectTypedError(compressed, 415, null, "unsupported_media_type");
+    expect(compressed.status).toBe(401);
+    expect(compressed.text).toBe("");
     expectNoTenantWork(harness);
   });
 

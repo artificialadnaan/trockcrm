@@ -520,7 +520,12 @@ function routePreflight(
           error.code,
         ),
       );
-      sendError(res, null, error);
+      // CONTENT-FREE 401, NOT THE TYPED 415. This runs before either proof is verified — the checks
+      // above only confirm the auth headers are PRESENT, and any caller can supply arbitrary values for
+      // them. Answering 415 here would tell an unauthenticated caller that the route exists and what it
+      // accepts, which is exactly the distinction this boundary's uniform 401 exists to deny. The real
+      // reason is still recorded in the audit event above, so operators lose no diagnosis.
+      bareStatus(res, 401);
       return;
     }
     next();
@@ -1027,7 +1032,11 @@ function rawBodyErrorHandler(
         ),
       );
     }
-    sendError(res, null, safe);
+    // Same rule as the preflight above, for the same reason: express.raw() fails BEFORE either proof is
+    // verified, so an oversized or wrongly-encoded body from an unauthenticated caller must be
+    // indistinguishable from any other unauthenticated request. The typed 413/415 would otherwise
+    // confirm the route and its limits to someone who has proven nothing. The audit row keeps the truth.
+    bareStatus(res, 401);
   };
 }
 
