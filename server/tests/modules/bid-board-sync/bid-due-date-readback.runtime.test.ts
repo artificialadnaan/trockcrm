@@ -166,9 +166,15 @@ beforeAll(async () => {
       -- migration 0222. The ingest reads it to resolve an estimator NAME to a user; without the column
       -- the sync's roster query errors and every test in this file fails on an unrelated assertion.
       estimates_jobs boolean NOT NULL DEFAULT false,
+      -- migration 0142. The estimator directory excludes test accounts, matching the canonical
+      -- roster in dashboard/service.ts.
+      is_test_data boolean NOT NULL DEFAULT false,
       role text, office_id uuid, created_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE TABLE public.offices (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
+    -- An estimator's PRIMARY office is often not the one being synced, so the directory also
+    -- accepts an explicit grant. Empty here; present so the EXISTS sub-select can run.
+    CREATE TABLE public.user_office_access (user_id uuid NOT NULL, office_id uuid NOT NULL);
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.deals (
       id uuid PRIMARY KEY, name text, stage_id uuid NOT NULL, stage_entered_at timestamptz,

@@ -61,6 +61,8 @@ import { AppError } from "../middleware/error-handler.js";
 import { setDealEstimator } from "../modules/deals/service.js";
 import {
   buildEstimatorDirectory,
+  ESTIMATOR_DIRECTORY_SQL,
+  officeSlugFromSchema,
   resolveEstimatorUserId,
   type EstimatorDirectory,
 } from "../modules/bid-board-sync/estimator-map.js";
@@ -324,9 +326,11 @@ export async function backfillTenantEstimatorColumn(
   // `estimates_jobs` roster. Read here rather than passed in so every caller of this function gets it —
   // a backfill that resolved fewer names than the sync would report rows as skipped:unresolved that the
   // very next sync then fills, which reads as the backfill having missed them.
-  const estimatorUsers = await query(
-    `SELECT id, display_name FROM public.users WHERE is_active = true AND estimates_jobs = true`
-  );
+  //
+  // Scoped by the SCHEMA's office rather than opts.officeId, which is nullable: a null there would
+  // silently widen this to every office, and cross-office attribution is the one thing this predicate
+  // exists to stop. The schema name always carries the office.
+  const estimatorUsers = await query(ESTIMATOR_DIRECTORY_SQL, [officeSlugFromSchema(opts.schema)]);
   // QueryFn hands back loosely-typed rows, so the shape is asserted here rather than assumed. A row
   // whose id is not a uuid is dropped by buildEstimatorDirectory, so a bad cast degrades to "not in the
   // directory" instead of a resolution to garbage.

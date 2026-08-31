@@ -17,6 +17,7 @@ import { BID_BOARD_SYNC } from "../audit/system-processes.js";
 import { canonicalizeProjectNumber, canonicalProjectNumberSql } from "./project-number.js";
 import {
   buildEstimatorDirectory,
+  ESTIMATOR_DIRECTORY_SQL,
   isEstimatorResolutionConfigured,
   normalizeEstimatorKey,
   resolveEstimatorUserId,
@@ -732,15 +733,14 @@ async function loadActiveUserIds(client: { query: Function }): Promise<Set<strin
 /**
  * The `estimates_jobs` half of estimator resolution (see estimator-map.ts).
  *
- * `is_active` is applied HERE rather than left to the activeUserIds gate downstream, so an inactive
- * estimator's name cannot even claim a directory entry — if it did, and a second ACTIVE user shared
- * that display name, the inactive one would poison the key as ambiguous and block a resolution that
- * should have succeeded.
+ * Scoped to the office being synced — the predicate and the reasoning for each of its clauses live on
+ * ESTIMATOR_DIRECTORY_SQL, shared with both backfills so the three cannot drift apart.
  */
-async function loadEstimatorDirectory(client: { query: Function }): Promise<EstimatorDirectory> {
-  const result = await client.query(
-    `SELECT id, display_name FROM public.users WHERE is_active = true AND estimates_jobs = true`
-  );
+async function loadEstimatorDirectory(
+  client: { query: Function },
+  officeSlug: string
+): Promise<EstimatorDirectory> {
+  const result = await client.query(ESTIMATOR_DIRECTORY_SQL, [officeSlug]);
   return buildEstimatorDirectory(
     (result.rows ?? []).map((r: { id: string; display_name: string | null }) => ({
       id: r.id,
@@ -1529,8 +1529,8 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     const changedByUserId = await findSystemChangedByUserId(client, officeSlug);
     const activeUserIds = await loadActiveUserIds(client);
     // Loaded once per sync run, not per deal: a batch can carry hundreds of rows and this is the same
-    // handful of flagged users for all of them.
-    const estimatorDirectory = await loadEstimatorDirectory(client);
+    // handful of flagged users for all of them. Scoped to THIS office — see ESTIMATOR_DIRECTORY_SQL.
+    const estimatorDirectory = await loadEstimatorDirectory(client, officeSlug);
 
     for (const rawRow of rows) {
       const normalized = normalizeBidBoardRow(rawRow);
@@ -1667,6 +1667,24 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           );
         }
         estimatorUserId = null;
+      }
+      // A fill onto an ALREADY-SIGNED deal leaves the column and the booked commission inconsistent.
+      //
+      // The ingest has never minted the additive estimator row — that is the sign-time calc's job, or
+      // setDealEstimator's, or the dedicated backfill-estimator-commissions script's, and by the time a
+      // sync fills a signed deal the sign-time mint has long passed. Pre-existing, and NOT changed here:
+      // minting money inside the Bid Board ingest transaction is a design decision that belongs to a
+      // deliberate PR, not a side effect of a name-resolution change.
+      //
+      // What IS new is how easily it can be reached. Previously a fill required someone to hand-edit a
+      // JSON env var on two services; now ticking "Estimates jobs" is enough. So the run says so, naming
+      // the deal, rather than leaving it for "someone to separately discover" (Codex #1130 P1).
+      const dealIsSigned =
+        (matches[0].contract_signed_at ?? matches[0].contract_signed_date ?? null) != null;
+      if (estimatorUserId && !existingEstimatorUserId && dealIsSigned) {
+        warnings.push(
+          `Deal ${matches[0].id} was already SIGNED when estimator ${estimatorUserId} was filled from "${normalized.bidBoardEstimator}" — the sync writes the column but never mints the additive estimator commission, so run server/src/scripts/backfill-estimator-commissions.ts to book it`
+        );
       }
       // Empties-only guard (SET estimator_user_id = COALESCE(estimator_user_id, $16) above): when the
       // deal already has an estimator, the DB keeps it and this resolved value is dropped on the floor.

@@ -125,6 +125,55 @@ export const EMPTY_ESTIMATOR_DIRECTORY: EstimatorDirectory = {
 };
 
 /**
+ * The ONE query every caller uses to load the directory. `$1` is the office SLUG.
+ *
+ * A string rather than three hand-written copies because this predicate decides who can be handed a
+ * deal — and, once that deal signs, an additive commission. Three copies of it in the ingest and two
+ * backfills is precisely the shape that drifts; the codebase already carries comments recording two
+ * such drifts in the dashboard roster.
+ *
+ * Every clause is load-bearing:
+ *
+ *   is_active            an inactive user must not be resolvable, and filtering here rather than
+ *                        downstream also stops them poisoning a shared display name as ambiguous and
+ *                        blocking an ACTIVE namesake who should have resolved.
+ *
+ *   NOT is_test_data     smoke-test and known-duplicate accounts. The canonical estimator roster in
+ *                        dashboard/service.ts already requires this; without it a test account
+ *                        flagged `estimates_jobs` could be written onto a real deal, or could collide
+ *                        with the real estimator's name and block them.
+ *
+ *   office membership    THE IMPORTANT ONE. The curated env map is a human naming specific ids, so it
+ *                        carries implicit office intent. This directory is automatic, and
+ *                        `public.users` is global — without this clause a flagged user in ANOTHER
+ *                        office whose display name happens to match the export would be written onto
+ *                        this tenant's deal. Nothing downstream would catch it: unlike
+ *                        setDealEstimator, the ingest performs no office-access check at all.
+ *                        Mirrors activeOfficeRepMembershipSql — primary office OR an explicit
+ *                        user_office_access grant, because a multi-office estimator's PRIMARY office
+ *                        is often not the one being synced.
+ */
+export const ESTIMATOR_DIRECTORY_SQL = `
+  SELECT u.id, u.display_name
+    FROM public.users u
+    JOIN public.offices o ON o.slug = $1
+   WHERE u.is_active = true
+     AND COALESCE(u.is_test_data, false) = false
+     AND u.estimates_jobs = true
+     AND (
+           u.office_id = o.id
+        OR EXISTS (
+             SELECT 1 FROM public.user_office_access uo
+              WHERE uo.user_id = u.id AND uo.office_id = o.id
+           )
+         )`;
+
+/** `office_dallas` -> `dallas`. The office schema name is the only office identifier the backfills carry. */
+export function officeSlugFromSchema(schemaName: string): string {
+  return schemaName.replace(/^office_/, "");
+}
+
+/**
  * Index flagged users by normalized display name.
  *
  * A name held by two flagged users is dropped from `byName` rather than resolved to whichever row the

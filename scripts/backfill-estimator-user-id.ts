@@ -21,6 +21,8 @@ import pg from "pg";
 
 import {
   buildEstimatorDirectory,
+  ESTIMATOR_DIRECTORY_SQL,
+  officeSlugFromSchema,
   resolveEstimatorUserId,
   type EstimatorDirectory,
 } from "../server/src/modules/bid-board-sync/estimator-map.js";
@@ -94,17 +96,22 @@ async function main(): Promise<void> {
     // Existing active users — a mapped-but-nonexistent/inactive id is skipped (FK-safe).
     const { rows: userRows } = await pool.query<{ id: string }>(`SELECT id FROM public.users WHERE is_active = true`);
     const activeUserIds = new Set(userRows.map((r) => r.id));
-    // Second resolution source, mirroring the ingest: active users flagged `estimates_jobs`, matched on
-    // display name. Read once for the whole run — it is the same handful of people for every schema.
-    const { rows: estimatorRows } = await pool.query<{ id: string; display_name: string | null }>(
-      `SELECT id, display_name FROM public.users WHERE is_active = true AND estimates_jobs = true`
-    );
-    const directory = buildEstimatorDirectory(
-      estimatorRows.map((r) => ({ id: r.id, displayName: r.display_name }))
-    );
+    // NOTE: the `estimates_jobs` directory is loaded PER SCHEMA below, not here. It is office-scoped, and
+    // this loop walks every office — one directory hoisted out of the loop would let an estimator from
+    // the first office resolve names in all the others, which is exactly the cross-office attribution
+    // ESTIMATOR_DIRECTORY_SQL exists to prevent.
     const { rows: schemas } = await pool.query<{ schema_name: string }>(OFFICE_SCHEMA_DISCOVERY_SQL);
     for (const { schema_name } of schemas) {
       const schema = assertSafeOfficeSchema(schema_name);
+      // Rebuilt for EVERY schema: the directory is office-scoped, so hoisting it out of this loop would
+      // let one office's flagged estimators resolve names in all the others.
+      const { rows: estimatorRows } = await pool.query<{ id: string; display_name: string | null }>(
+        ESTIMATOR_DIRECTORY_SQL,
+        [officeSlugFromSchema(schema)]
+      );
+      const directory = buildEstimatorDirectory(
+        estimatorRows.map((r) => ({ id: r.id, displayName: r.display_name }))
+      );
       const { rows } = await pool.query<{ bid_board_estimator: string | null }>(
         `SELECT DISTINCT bid_board_estimator
            FROM ${schema}.deals
