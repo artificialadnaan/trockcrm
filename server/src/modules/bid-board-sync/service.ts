@@ -15,7 +15,13 @@ import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { BID_BOARD_SYNC } from "../audit/system-processes.js";
 import { canonicalizeProjectNumber, canonicalProjectNumberSql } from "./project-number.js";
-import { resolveEstimatorUserId, isEstimatorMapConfigured } from "./estimator-map.js";
+import {
+  buildEstimatorDirectory,
+  isEstimatorResolutionConfigured,
+  normalizeEstimatorKey,
+  resolveEstimatorUserId,
+  type EstimatorDirectory,
+} from "./estimator-map.js";
 
 type RawBidBoardRow = Record<string, unknown>;
 
@@ -723,6 +729,26 @@ async function loadActiveUserIds(client: { query: Function }): Promise<Set<strin
   return new Set((result.rows ?? []).map((r: { id: string }) => r.id));
 }
 
+/**
+ * The `estimates_jobs` half of estimator resolution (see estimator-map.ts).
+ *
+ * `is_active` is applied HERE rather than left to the activeUserIds gate downstream, so an inactive
+ * estimator's name cannot even claim a directory entry — if it did, and a second ACTIVE user shared
+ * that display name, the inactive one would poison the key as ambiguous and block a resolution that
+ * should have succeeded.
+ */
+async function loadEstimatorDirectory(client: { query: Function }): Promise<EstimatorDirectory> {
+  const result = await client.query(
+    `SELECT id, display_name FROM public.users WHERE is_active = true AND estimates_jobs = true`
+  );
+  return buildEstimatorDirectory(
+    (result.rows ?? []).map((r: { id: string; display_name: string | null }) => ({
+      id: r.id,
+      displayName: r.display_name,
+    }))
+  );
+}
+
 function workflowRoute(value: string | null): WorkflowRoute {
   return value === "service" ? "service" : "normal";
 }
@@ -1383,6 +1409,10 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
   const bidBoardLastUpdatedAt = extractedAt ?? new Date().toISOString();
   const payloadHash = hashRows(rows);
   const warnings: string[] = [];
+  // Ambiguous-estimator names already reported this run. The collision is a CONFIG fact about two user
+  // records, not a fact about the deal in hand — one shared name across fifty rows is one problem with
+  // one fix, and fifty identical lines would bury the rest of the run's warnings.
+  const ambiguousEstimatorsWarned = new Set<string>();
   const errors: string[] = [];
   const unmatchedProjectNumbers: string[] = [];
   const metrics: IngestionMetrics = {
@@ -1498,6 +1528,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     });
     const changedByUserId = await findSystemChangedByUserId(client, officeSlug);
     const activeUserIds = await loadActiveUserIds(client);
+    // Loaded once per sync run, not per deal: a batch can carry hundreds of rows and this is the same
+    // handful of flagged users for all of them.
+    const estimatorDirectory = await loadEstimatorDirectory(client);
 
     for (const rawRow of rows) {
       const normalized = normalizeBidBoardRow(rawRow);
@@ -1578,14 +1611,30 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       // (the live row), never from this snapshot (Codex #741 follow-up).
       const existingEstimatorUserId = matches[0].estimator_user_id ?? null;
       let estimatorUserId: string | null;
-      if (!isEstimatorMapConfigured()) {
+      if (!isEstimatorResolutionConfigured(estimatorDirectory)) {
         estimatorUserId = matches[0].estimator_user_id ?? null;
       } else {
-        const resolvedEstimatorUserId = resolveEstimatorUserId(normalized.bidBoardEstimator);
+        const resolvedEstimatorUserId = resolveEstimatorUserId(
+          normalized.bidBoardEstimator,
+          estimatorDirectory
+        );
         estimatorUserId =
           resolvedEstimatorUserId && activeUserIds.has(resolvedEstimatorUserId)
             ? resolvedEstimatorUserId
             : null;
+        // A name two flagged users share resolves to nothing by design (buildEstimatorDirectory drops
+        // it rather than guessing). Say so: otherwise the deal reads "Missing estimator" forever and
+        // looks identical to a name nobody has flagged, which is a different and differently-fixed
+        // problem — this one is fixed by renaming a user or adding a curated map alias.
+        if (!resolvedEstimatorUserId) {
+          const key = normalizeEstimatorKey(normalized.bidBoardEstimator);
+          if (key && estimatorDirectory.ambiguous.has(key) && !ambiguousEstimatorsWarned.has(key)) {
+            ambiguousEstimatorsWarned.add(key);
+            warnings.push(
+              `Bid Board estimator "${normalized.bidBoardEstimator}" matches more than one active user flagged "estimates jobs" — estimator_user_id left null rather than guessing between them (add a BID_BOARD_ESTIMATOR_USER_MAP entry to disambiguate)`
+            );
+          }
+        }
         if (resolvedEstimatorUserId && !estimatorUserId) {
           // The map resolved to an inactive user, so the incoming id will not be written. Whether the
           // field ends up null depends on the empties-only COALESCE: when the deal already has an

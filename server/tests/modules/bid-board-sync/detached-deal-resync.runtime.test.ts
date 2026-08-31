@@ -95,6 +95,8 @@ beforeAll(async () => {
     );
     CREATE TABLE public.users (
       id uuid PRIMARY KEY, display_name text NOT NULL, is_active boolean NOT NULL DEFAULT true,
+      -- migration 0222, read by the ingest's estimator-name resolution.
+      estimates_jobs boolean NOT NULL DEFAULT false,
       role text, office_id uuid, created_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE TABLE public.offices (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
