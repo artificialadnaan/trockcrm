@@ -45,6 +45,8 @@ beforeAll(async () => {
     );
     CREATE TABLE public.users (
       id uuid PRIMARY KEY, display_name text NOT NULL, is_active boolean NOT NULL DEFAULT true,
+      -- migration 0222, read by the ingest's estimator-name resolution.
+      estimates_jobs boolean NOT NULL DEFAULT false,
       role text, office_id uuid
     );
     CREATE SCHEMA office_test;
