@@ -801,7 +801,19 @@ function ProjectsTable({
                       {project.summary?.nextDueWeekOf ? fmtWeek(project.summary.nextDueWeekOf) : "—"}
                     </td>
                     <td className="px-3.5 py-3 text-right">
-                      <Button variant="outline" size="sm" onClick={() => onEdit(project)}>
+                      {/* Stopping propagation is what the row comment above already promised. Without it
+                          the click ALSO reaches the <tr>, so one press set both `editing` and
+                          `auditProjectId` — and because the audit dialog mounts second it covered the edit
+                          form. Editing a setup looked impossible, and "Stop reporting" (which only renders
+                          in that form's footer) was unreachable with it. */}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onEdit(project);
+                        }}
+                      >
                         Edit
                       </Button>
                     </td>
