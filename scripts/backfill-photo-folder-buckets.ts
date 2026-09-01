@@ -20,6 +20,11 @@ import { buildFolderPath } from "../server/src/modules/files/file-constants.js";
  *    moves zero stored objects — nothing to copy, nothing to orphan.
  *  - narrow: only category='photo' AND taken_at IS NOT NULL AND the stored path already differs from the
  *    derived one. A row whose path is already correct is never touched, in the SELECT or the UPDATE.
+ *  - convention-scoped: a row is a candidate ONLY if its CURRENT path already has the exact shape the
+ *    presign flow produces (buildFolderPath output + a trailing YYYY-MM). `files.folder_path` is not owned
+ *    solely by the upload flow — other modules file category='photo' rows under their own deliberate
+ *    groupings — so anything that isn't already this convention is somebody else's path and is left
+ *    untouched. See followsPresignConvention for the live example this guard exists for.
  *  - per-office: tenant schemas are discovered at runtime (pg_namespace LIKE 'office\_%') and each is
  *    processed independently via search_path; a missing/broken office is skipped, not fatal.
  *  - dry-run by default: pass --commit to write. Dry-run prints the full plan + before census.
@@ -69,8 +74,9 @@ export interface PhotoFileRow {
 export interface PlannedMove {
   id: string;
   /** the row's folder_path before the change — captured so the audit snapshot can fully revert it, AND
-   *  used as the optimistic guard in the UPDATE */
-  from: string | null;
+   *  used as the optimistic guard in the UPDATE. Never null: a row without the convention's shape is
+   *  never planned in the first place (see followsPresignConvention). */
+  from: string;
   to: string;
   /** the taken_at the target path was derived from — pinned in the UPDATE so a concurrent capture-date
    *  correction doesn't get a path derived from the date it replaced */
@@ -81,13 +87,47 @@ export interface BackfillPlan {
   willUpdate: PlannedMove[];
   /** already correct, or an unusable taken_at — either way a no-op */
   skipped: number;
+  /** stored under a path that is NOT the presign convention (a custom/integration folder) — left alone */
+  customPath: number;
   /** count of planned moves per target bucket path (for the dry-run summary) */
   byTarget: Record<string, number>;
 }
 
+/** A trailing month bucket, the only path segment this backfill is ever allowed to rewrite. */
+const TRAILING_MONTH_BUCKET = /^(.*)\/(\d{4}-\d{2})$/;
+
+/**
+ * True only when `folderPath` has the EXACT shape the presign path produces for this row — the
+ * buildFolderPath output for its own category/subcategory, plus some YYYY-MM bucket.
+ *
+ * This is the blast-radius guard, and it is deliberately a SHAPE test rather than a list of known
+ * integrations, because a list rots the moment someone adds another writer. `files.folder_path` is not
+ * owned solely by the upload flow: modules file photo rows under their own grouping conventions, and
+ * those rows are category='photo' with taken_at set, so they match this backfill's WHERE clause and would
+ * otherwise be dragged into Photos/<sub>/YYYY-MM — destroying a deliberate grouping.
+ *
+ * The live example is the glasses walkthrough, whose stills are filed under
+ * GLASSES_WALKTHROUGH_FOLDER_PATH ("Glasses Walkthroughs", glasses-walkthrough-service.ts:50) with
+ * subcategory "glasses-walkthrough", documented as intentional "so the project folder groups them
+ * predictably without a Files-module schema change". It has no trailing bucket, so it fails here and is
+ * left alone. This is the same discipline the EXIF worker already applies to the same column — it rewrites
+ * only a trailing YYYY-MM (worker/src/jobs/exif-extract.ts:119), which that module's docstring calls out
+ * as precisely why the walkthrough grouping survives EXIF backfill.
+ *
+ * The convention prefix is taken FROM buildFolderPath (called without a date, which is exactly the path
+ * minus the bucket) rather than restated as a literal, so the two cannot drift apart.
+ */
+export function followsPresignConvention(folderPath: string | null, subcategory: string | null): boolean {
+  if (!folderPath) return false;
+  const bucketed = TRAILING_MONTH_BUCKET.exec(folderPath);
+  if (!bucketed) return false;
+  return bucketed[1] === buildFolderPath("photo", subcategory ?? undefined);
+}
+
 /**
  * Pure planner: re-derives each photo's folder path from its own taken_at with the SAME buildFolderPath
- * the upload and edit paths use, and keeps only the rows whose stored path disagrees.
+ * the upload and edit paths use, and keeps only the rows that are BOTH under the presign convention and
+ * currently bucketed to the wrong month.
  *
  * A row with an unparseable taken_at is skipped rather than defaulted: buildFolderPath would call
  * toISOString() on an Invalid Date and throw, and there is no correct bucket to guess. timestamptz can't
@@ -97,6 +137,7 @@ export function buildBackfillPlan(rows: PhotoFileRow[]): BackfillPlan {
   const willUpdate: PlannedMove[] = [];
   const byTarget: Record<string, number> = {};
   let skipped = 0;
+  let customPath = 0;
   for (const row of rows) {
     if (row.takenAt == null) {
       skipped += 1;
@@ -107,17 +148,24 @@ export function buildBackfillPlan(rows: PhotoFileRow[]): BackfillPlan {
       skipped += 1;
       continue;
     }
+    // Counted separately from `skipped` so the dry-run summary distinguishes "already right" from "not
+    // ours to touch" — an operator reading a large customPath number is seeing the guard work, not a bug.
+    if (!followsPresignConvention(row.folderPath, row.subcategory)) {
+      customPath += 1;
+      continue;
+    }
     const derived = buildFolderPath("photo", row.subcategory ?? undefined, takenAt);
-    // Already filed correctly (including every row uploaded after the confirmUpload fix) → no-op, which
-    // is what makes a second run of this script find nothing to do.
+    // Already filed correctly (including every row uploaded after the confirmUpload fix, and every
+    // CompanyCam import, whose folder month IS its captured_at month) → no-op, which is what makes a
+    // second run of this script find nothing to do.
     if (derived === row.folderPath) {
       skipped += 1;
       continue;
     }
-    willUpdate.push({ id: row.id, from: row.folderPath, to: derived, takenAt });
+    willUpdate.push({ id: row.id, from: row.folderPath!, to: derived, takenAt });
     byTarget[derived] = (byTarget[derived] ?? 0) + 1;
   }
-  return { willUpdate, skipped, byTarget };
+  return { willUpdate, skipped, customPath, byTarget };
 }
 
 /** Minimal query interface so the planner/runner can be unit-tested with a fake client. */
@@ -224,16 +272,17 @@ export async function runBackfillForSchema(
     try {
       for (const move of plan.willUpdate) {
         // The guard clause is the whole safety story: re-assert category, the EXACT folder_path the plan
-        // read (IS NOT DISTINCT FROM, because a legacy row's path can be NULL) and the EXACT taken_at it
-        // derived from. A row edited since the SELECT matches none of those and is silently left alone,
-        // which also makes a re-run of an interrupted commit idempotent. Only rows actually changed
-        // (rowCount > 0) are recorded as applied, so the audit snapshot matches what was committed.
+        // read — which the planner has already proven carries the presign convention's shape, so this
+        // doubles as the write-time re-check of that guard — and the EXACT taken_at it derived from. A row
+        // edited since the SELECT matches none of those and is silently left alone, which also makes a
+        // re-run of an interrupted commit idempotent. Only rows actually changed (rowCount > 0) are
+        // recorded as applied, so the audit snapshot matches what was committed.
         const res = await client.query(
           `UPDATE files SET folder_path = $1, updated_at = now()
             WHERE id = $2
               AND category = 'photo'
               AND is_active = true
-              AND folder_path IS NOT DISTINCT FROM $3
+              AND folder_path = $3
               AND taken_at = $4`,
           [move.to, move.id, move.from, move.takenAt]
         );
@@ -297,6 +346,12 @@ export async function main(argv = process.argv): Promise<void> {
   let totalPlanned = 0;
   let totalApplied = 0;
   const skippedOffices: string[] = [];
+  // Offices that were COMPATIBLE and were attempted, but threw — a census/SELECT error, or a rolled-back
+  // transaction. Tracked apart from skippedOffices because the two mean different things to an operator:
+  // a skipped office was never going to be processed, a failed one still needs to be. Both are excluded
+  // from `processed` below, and a non-empty list makes the run exit non-zero — a backfill that half-ran
+  // and reported success is worse than one that fails loudly, because nobody re-runs a green run.
+  const failedOffices: string[] = [];
   try {
     const schemas = await discoverOfficeSchemas(client);
     console.log(`[photo-folder-bucket-backfill] offices: ${schemas.join(", ") || "(none found)"}`);
@@ -321,11 +376,11 @@ export async function main(argv = process.argv): Promise<void> {
         console.log(`\n=== ${schema} ===`);
         console.log(`  dated photos: ${result.datedPhotos}`);
         console.log(
-          `  planned: ${result.plan.willUpdate.length} (already correct/skipped ${result.plan.skipped}) → ${JSON.stringify(result.plan.byTarget)}`
+          `  planned: ${result.plan.willUpdate.length} (already correct/skipped ${result.plan.skipped}, custom paths left alone ${result.plan.customPath}) → ${JSON.stringify(result.plan.byTarget)}`
         );
         if (mode === "commit") {
           // Echo applied moves to stdout FIRST (the durable record), then a best-effort audit file.
-          for (const move of result.appliedMoves) console.log(`    ${move.id}: ${move.from ?? "(null)"} → ${move.to}`);
+          for (const move of result.appliedMoves) console.log(`    ${move.id}: ${move.from} → ${move.to}`);
           console.log(`  applied: ${result.appliedMoves.length}`);
           try {
             const snapshot = writeBackupSnapshot(result, mode, stamp);
@@ -334,17 +389,19 @@ export async function main(argv = process.argv): Promise<void> {
             console.warn("  audit snapshot write failed (applied moves already printed above):", snapshotError);
           }
         } else {
-          for (const move of result.plan.willUpdate) console.log(`    ${move.id}: ${move.from ?? "(null)"} → ${move.to}`);
+          for (const move of result.plan.willUpdate) console.log(`    ${move.id}: ${move.from} → ${move.to}`);
         }
       } catch (schemaError) {
-        // Per-office isolation: a missing/broken schema skips only that office, not the whole run.
-        console.error(`\n=== ${schema} === SKIPPED due to error:`, schemaError);
+        // Per-office isolation: one broken office fails only itself, not the whole run — but it IS a
+        // failure, recorded so the summary can't claim it was covered and the process can't exit 0.
+        failedOffices.push(schema);
+        console.error(`\n=== ${schema} === FAILED (changes rolled back, office NOT processed):`, schemaError);
       }
     }
 
-    const processed = schemas.length - skippedOffices.length;
+    const processed = schemas.length - skippedOffices.length - failedOffices.length;
     console.log(
-      `\n[photo-folder-bucket-backfill] ${mode === "commit" ? "applied" : "would update"} ${mode === "commit" ? totalApplied : totalPlanned} photo(s) across ${processed} office(s).`
+      `\n[photo-folder-bucket-backfill] ${mode === "commit" ? "applied" : "would update"} ${mode === "commit" ? totalApplied : totalPlanned} photo(s) across ${processed} of ${schemas.length} office(s).`
     );
     if (skippedOffices.length > 0) {
       console.warn(
@@ -353,6 +410,15 @@ export async function main(argv = process.argv): Promise<void> {
     }
     if (mode !== "commit") {
       console.log("[photo-folder-bucket-backfill] dry-run only — re-run with --commit to apply.");
+    }
+    // Thrown AFTER the summary so the operator still sees the per-office counts, and thrown at all so the
+    // exit code says "incomplete". The offices that succeeded keep their committed work; re-running is
+    // safe because every write is guarded and idempotent.
+    if (failedOffices.length > 0) {
+      throw new Error(
+        `${failedOffices.length} office(s) failed and were NOT processed: ${failedOffices.join(", ")}. ` +
+        "Their errors are logged above. Re-run after fixing them — the run is idempotent."
+      );
     }
   } finally {
     await client.end();
