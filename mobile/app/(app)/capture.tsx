@@ -18,7 +18,17 @@ import type { FieldCaptureTarget } from "../../src/api/types";
 // and nowhere else: `target.name` is forwarded raw into the /walk nav param, where it becomes a walk
 // title persisted to the server.
 import { captureTargetDisplayName, decodeChangeOrderParam, encodeChangeOrderParam } from "../../src/projects/field-projects";
-import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
+import {
+  buildImportMetadata,
+  extractExifMetadata,
+  getImportFallbackCoords,
+  getLiveGps,
+  type PhotoMetadata,
+} from "../../src/capture/metadata";
+import { getLibraryCreationTime } from "../../src/capture/library-asset-time";
+// The pool is generic — its own docstring calls it a bounded-concurrency worker pool; the "Uploads" in the
+// name is historical. Aliased so the import-time Photos-DB lookups read as what they are.
+import { runConcurrentUploads as runBounded } from "../../src/capture/concurrency";
 import { type CaptureTargetRef, type CaptureUploadInput } from "../../src/capture/upload";
 import {
   clearFailedUploads,
@@ -48,6 +58,18 @@ import { ReviewTray } from "../../src/components/ReviewTray";
 // Lazy so the Import path never loads expo-camera's native module (live camera is
 // a physical-device-only surface; the iOS Simulator has no camera).
 const CameraCapture = React.lazy(() => import("../../src/capture/CameraCapture"));
+
+// Ceiling on ONE import. expo-image-picker exports every selected asset out of the Photos library through a
+// serial `for` loop (its asyncMap), and launchImageLibraryAsync does not resolve until the LAST one is
+// copied out — pulling originals down from iCloud on the way when the device is storage-optimised. So an
+// unbounded selection means an unbounded dismiss-to-review wait with no progress the app can show. 100
+// matches the ceiling the scorecard import already enforces, so the app holds one number rather than two.
+const MAX_IMPORT_SELECTION = 100;
+
+// Photos-DB creation-time lookups run concurrently but bounded. Each is cheap (no file read, no decode),
+// but a hundred simultaneous native calls is still a hundred bridge round-trips competing with the staging
+// copies for the same main-thread budget.
+const LIBRARY_TIME_CONCURRENCY = 8;
 
 // `isChangeOrder` is present only when this target arrived from the project detail route, which has
 // the authoritative `deals.is_change_order`. A target picked in TargetPicker has no flag on its payload,
@@ -186,6 +208,13 @@ export default function CaptureScreen() {
   const [reviewPhotos, setReviewPhotos] = useState<SessionPhoto[]>([]);
   const [reviewCtx, setReviewCtx] = useState<{ target: CaptureTargetRef; category: string | null; tags: string[] } | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  // True from the moment Import is tapped until the review tray has the selection. The costly stretch is
+  // AFTER the picker sheet dismisses and BEFORE launchImageLibraryAsync resolves, while expo is still
+  // serially exporting the assets — the app is on screen and, without this, looks idle through all of it.
+  const [importBusy, setImportBusy] = useState(false);
+  // Synchronous latch for the same window: setImportBusy only takes effect on the next render, so a
+  // same-frame double-tap of Import would open a second picker over the same draft before it lands.
+  const importingRef = useRef(false);
   // True while a caption-sheet VoiceRecorder is recording/transcribing — disables the review footer
   // Upload/Cancel so a tap can't stream the caption before the in-flight transcript is appended (lost note).
   const [reviewVoiceBusy, setReviewVoiceBusy] = useState(false);
@@ -659,44 +688,61 @@ export default function CaptureScreen() {
     void kickDrain(true);
   }
 
-  // Library imports keep EXIF → live-GPS fallback; caption starts empty. Instead of streaming immediately,
-  // the whole selection is STAGED INTO THE DURABLE REVIEW DRAFT (a store separate from the upload queue) so
-  // each photo can get its OWN optional caption before anything uploads. On Done each is enqueued into the
-  // normal queue with its own caption; nothing touches the queue/drain until then.
+  // Library imports keep each photo's OWN capture time and position; caption starts empty. Instead of
+  // streaming immediately, the whole selection is STAGED INTO THE DURABLE REVIEW DRAFT (a store separate
+  // from the upload queue) so each photo can get its OWN optional caption before anything uploads. On Done
+  // each is enqueued into the normal queue with its own caption; nothing touches the queue/drain until then.
   async function addAssets(assets: ImagePicker.ImagePickerAsset[]) {
-    // Snapshot the destination NOW — before the awaited getLiveGps — so a project switch during/after the
+    // Snapshot the destination NOW — before the awaited lookups — so a project switch during/after the
     // picker can't retarget the import.
     const ctx = { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current };
-    // Capture the owner at the START. If it changes during the awaited getLiveGps (office switch / sign-out),
+    // Capture the owner at the START. If it changes during the awaited lookups (office switch / sign-out),
     // ABORT and drop the import: the owner-change effect already cleared staged state, and staging under the
     // NEW owner would upload these photos under the wrong account/office — a cross-account/office disclosure.
     const capturedOwner = ownerKey;
-    // Own the draft from the START of the import — BEFORE the awaited getLiveGps and the staging copies, all of
+    // Own the draft from the START of the import — BEFORE the awaited lookups and the staging copies, all of
     // which run while reviewOpenRef is still false (openReview hasn't rendered). Without this, the AppState
     // "active" resume the image picker fires on dismiss could treat a just-staged import as an orphan and
     // enqueue + clear it before the crew captions. Released once openReview has flipped reviewOpenRef true.
     draftBusyRef.current++;
     try {
-      let live: PhotoMetadata | null = null;
-      const needsLive = assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
-      if (needsLive) live = await getLiveGps();
+      // Parse each asset's EXIF ONCE. (This used to run twice per asset — once to decide whether a fallback
+      // fix was needed, once to build the metadata — over a payload that can be a hundred photos.)
+      const exifMetas = assets.map((a) => extractExifMetadata(a.exif as Record<string, unknown>));
+
+      // Rung 2 of the timestamp ladder, for the assets whose FILE carries no capture time (screenshots,
+      // AirDropped photos, anything EXIF-stripped in transit). Skipped entirely on the common path where the
+      // camera wrote a DateTimeOriginal, and bounded when it does run: each is an independent Photos-DB read,
+      // so they go concurrently rather than serially down a long selection.
+      const undatedIndexes = exifMetas.map((m, i) => (m.takenAt === undefined ? i : -1)).filter((i) => i >= 0);
+      const libraryTakenAt = new Array<string | undefined>(assets.length);
+      if (undatedIndexes.length > 0) {
+        const looked = await runBounded(undatedIndexes, LIBRARY_TIME_CONCURRENCY, (i) =>
+          getLibraryCreationTime(assets[i].assetId),
+        );
+        undatedIndexes.forEach((assetIndex, slot) => {
+          const outcome = looked[slot];
+          libraryTakenAt[assetIndex] = outcome?.status === "fulfilled" ? outcome.value : undefined;
+        });
+      }
+
+      // A coordinate fallback ONLY — getImportFallbackCoords cannot carry a timestamp, which is what keeps
+      // an import from stamping every photo in the selection with the same tapped-Import moment. It also
+      // reads the cached fix instead of racing an 8s high-accuracy one, so the review tray is no longer held
+      // behind a GPS acquisition for photos that were taken somewhere else anyway.
+      const needsCoords = exifMetas.some((m) => !hasCoords(m));
+      const fallbackCoords = needsCoords ? await getImportFallbackCoords() : null;
       if (ownerKeyRef.current !== capturedOwner) return;
 
-      const photos: SessionPhoto[] = assets.map((asset) => {
-        const exifMeta = extractExifMetadata(asset.exif as Record<string, unknown>);
-        const metadata: PhotoMetadata = hasCoords(exifMeta)
-          ? exifMeta
-          : { ...(live ?? {}), takenAt: exifMeta.takenAt ?? live?.takenAt ?? new Date().toISOString() };
-        return {
-          key: nextKey(),
-          clientUploadId: newClientUploadId(),
-          uri: asset.uri,
-          width: asset.width,
-          height: asset.height,
-          metadata,
-          caption: "",
-        };
-      });
+      const photos: SessionPhoto[] = assets.map((asset, i) => ({
+        key: nextKey(),
+        clientUploadId: newClientUploadId(),
+        uri: asset.uri,
+        width: asset.width,
+        height: asset.height,
+        metadata: buildImportMetadata(exifMetas[i], libraryTakenAt[i], fallbackCoords),
+        caption: "",
+      }));
       if (photos.length === 0) return;
       // Stage each photo into the durable review DRAFT — fire-and-forget + tracked so Done can await the copies
       // (the copy makes it survive a crash before Done). A per-photo stage failure is isolated inside
@@ -869,23 +915,38 @@ export default function CaptureScreen() {
   }
 
   async function importPhotos() {
+    if (importingRef.current) return;
     if (!ownerKey) {
       setNotice({ tone: "error", text: "Sign in again to import photos." });
       return;
     }
     setNotice(null);
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) {
-      setNotice({ tone: "error", text: "Photo library permission is required to import photos." });
-      return;
+    importingRef.current = true;
+    // Armed BEFORE the picker opens rather than after it returns. Nothing below this line runs until
+    // launchImageLibraryAsync resolves, and that resolution is exactly what the crew is waiting on — so
+    // arming late would leave the spinner off for the whole slow part.
+    setImportBusy(true);
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setNotice({ tone: "error", text: "Photo library permission is required to import photos." });
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: MAX_IMPORT_SELECTION,
+        quality: 1,
+        exif: true,
+      });
+      if (result.canceled) return;
+      // Defensive: hold the ceiling even if a platform ignores selectionLimit (mirrors the scorecard import).
+      const assets = result.assets.slice(0, MAX_IMPORT_SELECTION);
+      if (assets.length > 0) await addAssets(assets);
+    } finally {
+      setImportBusy(false);
+      importingRef.current = false;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      allowsMultipleSelection: true,
-      quality: 1,
-      exif: true,
-    });
-    if (!result.canceled) await addAssets(result.assets);
   }
 
   function openCamera() {
@@ -1158,6 +1219,9 @@ export default function CaptureScreen() {
             title="Open camera"
             icon={<Ionicons name="camera" size={18} color={theme.color.textInverse} />}
             onPress={openCamera}
+            // An import owns the review draft until its tray renders; opening the camera on top of that
+            // would stage a second source into the same draft.
+            disabled={importBusy}
             accessibilityLabel="Open camera"
             style={{ flex: 1 }}
           />
@@ -1166,6 +1230,7 @@ export default function CaptureScreen() {
             variant="ghost"
             icon={<Ionicons name="images-outline" size={18} color={theme.color.textPrimary} />}
             onPress={importPhotos}
+            loading={importBusy}
             accessibilityLabel="Import photos"
             style={{ flex: 1 }}
           />

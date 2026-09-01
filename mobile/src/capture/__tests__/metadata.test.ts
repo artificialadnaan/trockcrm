@@ -1,4 +1,4 @@
-import { extractExifMetadata } from "../metadata";
+import { buildImportMetadata, extractExifMetadata, type FallbackCoords } from "../metadata";
 
 describe("extractExifMetadata", () => {
   it("reads iOS decimal-degree GPS and applies the ref sign", () => {
@@ -59,5 +59,64 @@ describe("extractExifMetadata", () => {
   it("returns empty for null/undefined exif", () => {
     expect(extractExifMetadata(null)).toEqual({});
     expect(extractExifMetadata(undefined)).toEqual({});
+  });
+});
+
+describe("buildImportMetadata", () => {
+  const FIX: FallbackCoords = { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" };
+
+  it("keeps the file's own capture time above the library's", () => {
+    const m = buildImportMetadata({ takenAt: "2026-03-10T14:05:09.000Z" }, "2026-08-01T00:00:00.000Z", null);
+    expect(m.takenAt).toBe("2026-03-10T14:05:09.000Z");
+  });
+
+  it("falls back to the library's creation time when the file carries no date", () => {
+    const m = buildImportMetadata({}, "2026-08-01T00:00:00.000Z", null);
+    expect(m.takenAt).toBe("2026-08-01T00:00:00.000Z");
+  });
+
+  // The regression this whole ladder exists for. The import path used to spread getLiveGps()'s bundled
+  // `takenAt` — one now() computed once per import — so every photo in a selection uploaded stamped with the
+  // moment the crew tapped Import, ordered as one block and filed into the upload month's folder.
+  it("leaves takenAt UNSET when neither the file nor the library knows — never now()", () => {
+    const m = buildImportMetadata({}, undefined, FIX);
+    expect(m.takenAt).toBeUndefined();
+  });
+
+  it("cannot inherit a timestamp from the fallback fix, however many photos share one", () => {
+    const shared = { ...FIX };
+    const a = buildImportMetadata({}, undefined, shared);
+    const b = buildImportMetadata({}, undefined, shared);
+    expect(a.takenAt).toBeUndefined();
+    expect(b.takenAt).toBeUndefined();
+    // The type is the guardrail: a fallback fix has no time field to leak in the first place.
+    expect("takenAt" in shared).toBe(false);
+  });
+
+  it("prefers the photo's own EXIF position and marks the source as exif", () => {
+    const m = buildImportMetadata(
+      { latitude: 1, longitude: 2, addressSource: "exif", takenAt: "2026-03-10T14:05:09.000Z" },
+      undefined,
+      FIX,
+    );
+    expect(m).toEqual({ latitude: 1, longitude: 2, addressSource: "exif", takenAt: "2026-03-10T14:05:09.000Z" });
+  });
+
+  it("borrows the fallback fix only when the photo has no position of its own", () => {
+    const m = buildImportMetadata({ takenAt: "2026-03-10T14:05:09.000Z" }, undefined, FIX);
+    expect(m).toEqual({ ...FIX, takenAt: "2026-03-10T14:05:09.000Z" });
+  });
+
+  it("yields no coordinates at all when there is neither EXIF nor a cached fix", () => {
+    const m = buildImportMetadata({}, "2026-08-01T00:00:00.000Z", null);
+    expect(m.latitude).toBeUndefined();
+    expect(m.longitude).toBeUndefined();
+    expect(m.addressSource).toBeUndefined();
+  });
+
+  // Position and time are resolved independently: a photo can know where it was taken but not when.
+  it("keeps EXIF coordinates while taking the time from the library", () => {
+    const m = buildImportMetadata({ latitude: 1, longitude: 2, addressSource: "exif" }, "2026-08-01T00:00:00.000Z", FIX);
+    expect(m).toEqual({ latitude: 1, longitude: 2, addressSource: "exif", takenAt: "2026-08-01T00:00:00.000Z" });
   });
 });
