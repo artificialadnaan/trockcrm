@@ -34,6 +34,66 @@ export async function getLiveGps(): Promise<PhotoMetadata> {
   }
 }
 
+/**
+ * Coordinates and NOTHING ELSE — deliberately not a PhotoMetadata.
+ *
+ * getLiveGps bundles a `takenAt`, which is correct at a shutter press (now() IS the capture moment) and
+ * wrong for a library import (now() is when the crew tapped Import). The import path used to inherit that
+ * field, stamping every photo in a selection with the same import-time timestamp. Giving the import
+ * fallback a type that CANNOT carry a time is what stops that from being reintroduced.
+ */
+export type FallbackCoords = { latitude: number; longitude: number; addressSource: "live_gps" };
+
+/**
+ * A coordinate fallback for LIBRARY IMPORTS, for photos whose EXIF recorded no position of their own.
+ *
+ * Unlike getLiveGps this does NOT race an 8s high-accuracy fix. An imported photo was taken somewhere else
+ * at some other time, so a precise fix acquired NOW is no more truthful about where it was taken than the
+ * cached one — both are guesses about a location the file never recorded. Spending eight seconds of frozen
+ * screen to sharpen a guess is a bad trade, so this reads only the last known position.
+ *
+ * Null on denial, no cached fix, or any failure — the photo then uploads with no coordinates rather than
+ * borrowed ones.
+ */
+export async function getImportFallbackCoords(): Promise<FallbackCoords | null> {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== "granted") return null;
+    const coords = (await Location.getLastKnownPositionAsync())?.coords;
+    if (!coords || !Number.isFinite(coords.latitude) || !Number.isFinite(coords.longitude)) return null;
+    return { latitude: coords.latitude, longitude: coords.longitude, addressSource: "live_gps" };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The metadata ONE imported photo should upload with. Pure, so the ladder below is unit-proven without a
+ * device.
+ *
+ * TIME ladder, in descending order of authority — and it deliberately ENDS:
+ *   1. the file's own EXIF DateTimeOriginal (the camera's record)
+ *   2. the Photos library's creation time for the asset (covers stripped/absent EXIF)
+ *   3. nothing. `takenAt` stays undefined, the server stores null, and every consumer falls back to
+ *      COALESCE(taken_at, created_at) while the UI says "Same as uploaded".
+ *
+ * There is no now() rung on purpose. A wrong-but-non-null timestamp is worse than an absent one: it reads
+ * as a real capture time everywhere, reorders the CRM photo timeline, and files the photo into the wrong
+ * month bucket, with nothing marking it as a guess.
+ *
+ * POSITION is independent of time: EXIF coordinates win, else the caller's fallback fix is borrowed (an
+ * approximation the crew can see and correct), else the photo simply has none.
+ */
+export function buildImportMetadata(
+  exifMeta: PhotoMetadata,
+  libraryTakenAt: string | undefined,
+  fallbackCoords: FallbackCoords | null,
+): PhotoMetadata {
+  const takenAt = exifMeta.takenAt ?? libraryTakenAt;
+  if (hasPhotoCoords(exifMeta)) return { ...exifMeta, takenAt };
+  return fallbackCoords ? { ...fallbackCoords, takenAt } : { takenAt };
+}
+
 /** True when a shot carries a usable fix. BOTH coordinates — one without the other is not a location. */
 export function hasPhotoCoords(metadata: PhotoMetadata): boolean {
   return metadata.latitude !== undefined && metadata.longitude !== undefined;
