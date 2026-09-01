@@ -15,7 +15,15 @@ describe("getLibraryCreationTime", () => {
     const ms = Date.UTC(2026, 2, 10, 14, 5, 9);
     mockInfo({ creationTime: ms });
     await expect(getLibraryCreationTime("asset-1")).resolves.toBe(new Date(ms).toISOString());
-    expect(MediaLibrary.getAssetInfoAsync).toHaveBeenCalledWith("asset-1");
+  });
+
+  // The flag defaults to TRUE, and the true path pulls the full original down from iCloud before it will
+  // return a creation time — reintroducing, inside a best-effort metadata lookup, the very network wait
+  // this change removes. Asserted rather than commented because the default is the dangerous one.
+  it("never lets the lookup touch the network", async () => {
+    mockInfo({ creationTime: Date.UTC(2026, 2, 10) });
+    await getLibraryCreationTime("asset-1");
+    expect(MediaLibrary.getAssetInfoAsync).toHaveBeenCalledWith("asset-1", { shouldDownloadFromNetwork: false });
   });
 
   // A limited photo-library grant can leave assetId null on the picker result. That is a normal outcome,
