@@ -64,6 +64,8 @@ function makeWalk(over: Partial<GlassesWalkthrough> & Pick<GlassesWalkthrough, "
     capturedAt: CAPTURED_AT,
     capturedByUserId: null,
     capturedByName: null,
+    captureCensus: null,
+    narrationShortfallMs: null,
     state: "processing",
     scope: null,
     ...over,

@@ -27,6 +27,8 @@ function walk(id: string): GlassesWalkthrough {
     capturedAt: "2026-08-02T22:21:47.702Z",
     capturedByUserId: null,
     capturedByName: null,
+    captureCensus: null,
+    narrationShortfallMs: null,
     state: "processing",
     scope: null,
   };

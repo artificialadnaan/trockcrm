@@ -32,6 +32,7 @@ import { desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { glassesWalkthroughs, users } from "@trock-crm/shared/schema";
+import { glassesWalkNarrationShortfallMs, type GlassesWalkCaptureCensus } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -128,6 +129,20 @@ export interface GlassesWalkthroughPanelEntry {
    * or the join found no row. Neither is an error, and neither is worth a distinct badge.
    */
   capturedByName: string | null;
+  /**
+   * What the phone's recorder actually wrote during this walk, as the phone counted it, or null for a walk
+   * whose client did not send one. Carried whole rather than summarised, because the person reading it is
+   * diagnosing a bad walk and the counters ARE the diagnosis — which of frames or audio failed, how long
+   * the drop runs were, whether the engine restarted. See shared/src/types/glasses-walk-capture-census.ts.
+   */
+  captureCensus: GlassesWalkCaptureCensus | null;
+  /**
+   * The one number the office needs from the census: how much of the walk has NO narration behind it, in
+   * milliseconds — `walkMs` less the longer of the two audio recordings, floored at zero. Null when there
+   * is no census, which the panel must not confuse with zero: "we do not know" and "nothing was lost" are
+   * different claims. Derived here at read time and never stored, so it cannot disagree with the counts.
+   */
+  narrationShortfallMs: number | null;
   state: GlassesWalkthroughState;
   scope: { status: "ready"; items: GlassesWalkthroughScopeItem[] } | null;
 }
@@ -141,6 +156,7 @@ export interface GlassesWalkthroughRow {
   capturedAt: Date;
   capturedByUserId: string | null;
   capturedByName: string | null;
+  captureCensus: GlassesWalkCaptureCensus | null;
 }
 
 /**
@@ -230,6 +246,7 @@ export async function loadDealGlassesWalkthroughRows(
       capturedAt: glassesWalkthroughs.capturedAt,
       capturedByUserId: glassesWalkthroughs.capturedByUserId,
       capturedByName: users.displayName,
+      captureCensus: glassesWalkthroughs.captureCensus,
     })
     .from(glassesWalkthroughs)
     // LEFT, not inner: `captured_by_user_id` is nullable AND ON DELETE SET NULL, so an inner join would
@@ -247,6 +264,7 @@ export async function loadDealGlassesWalkthroughRows(
     capturedAt: row.capturedAt,
     capturedByUserId: row.capturedByUserId ?? null,
     capturedByName: nonEmptyStringOrNull(row.capturedByName),
+    captureCensus: row.captureCensus ?? null,
   }));
 }
 
@@ -478,6 +496,10 @@ export async function resolveGlassesWalkthroughScope(
     capturedAt: row.capturedAt.toISOString(),
     capturedByUserId: row.capturedByUserId,
     capturedByName: row.capturedByName,
+    captureCensus: row.captureCensus,
+    // Derived from our own row, so it is settled here with the other database facts and no TROCK Scope
+    // outcome below can touch it: a walk whose scope read fails still says how much narration it lost.
+    narrationShortfallMs: glassesWalkNarrationShortfallMs(row.captureCensus),
     // The starting value is the one state that needs no evidence: a row with no scope walkthrough id is
     // "processing" as a fact about our own table, and a row WITH one has not been read yet, so anything
     // that prevents the read from happening at all — an unconfigured reader, the deadline firing before a
