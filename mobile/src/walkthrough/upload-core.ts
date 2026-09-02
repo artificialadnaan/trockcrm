@@ -8,9 +8,9 @@
  * DELIBERATELY NOT the photo queue's shape. ../capture/upload-queue-core.ts's QueuedUpload models a
  * stream of individually-compressed camera captures: enqueue-time compression, a `staging` flag that
  * guards against double-encoding, GPS back-patching onto shots taken before a fix resolved. A walk's
- * artifacts are a fixed, small set of large files (~14 MB video with muxed audio + N stills) produced
- * once by a dedicated recorder — there is no compression pass to stage, and no GPS fix to patch in
- * after the fact.
+ * artifacts are a fixed, small set of large files (~14 MB video with muxed audio, the narration on
+ * its own as narration.m4a, + N stills) produced once by a dedicated recorder — there is no
+ * compression pass to stage, and no GPS fix to patch in after the fact.
  *
  * TWO-PHASE, not one-shot, unlike the photo queue. The server (glasses-walkthroughs-service) takes
  * every artifact's BYTES first (one presigned PUT per artifact, server-derived deterministic key —
@@ -23,7 +23,7 @@
  * would otherwise leave bytes in R2 with no `files` row pointing at them and no local copy to retry
  * from — invisible to the crew, never forwarded, unrecoverable.
  */
-import { MAX_WALK_ARTIFACT_BYTES, type StillSource, type Walk } from "./session";
+import { MAX_WALK_ARTIFACT_BYTES, type StillSource, type Walk, type WalkCaptureCensus } from "./session";
 import { withWalkTitleNote } from "./walk-meta";
 
 export type WalkArtifactKind = "audio" | "video" | "photo";
@@ -116,6 +116,14 @@ export type QueuedWalk = {
    *  and enqueued forwarding, in one transaction. Until this is set the walk is NOT finished, no
    *  matter how many of its artifacts show putAt. */
   completedAt?: number;
+  /**
+   * What the recorder saw, filed with the walk as the completion request's `captureCensus`
+   * (session.ts's `WalkCaptureCensus`). Absent — not null — when the walk has none: a manifest
+   * entry written before the census existed, a recovered walk (no reducer history), or a native
+   * side that reported a partial one. The completion call omits the field in that case, and the
+   * server treats it as optional.
+   */
+  captureCensus?: WalkCaptureCensus;
 };
 
 /** After this many failed PUT attempts a single artifact is TERMINAL: the drain stops retrying it.
@@ -175,11 +183,11 @@ export type WalkQueueMeta = {
  * state the reducer only reaches via a `finalized` event — i.e., a file native itself confirmed.
  *
  * `audioUri` needs no equivalent guard: the reducer only ever sets it from `finalized` too (never
- * from `failed`), so it is already null on every failed walk today. It is currently always null in
- * practice (audio is muxed into the video track — see session.ts), so the "audio" branch below is
- * dead code today. It stays for the documented future fallback path (a walk that fails before the
- * muxed video finalizes may one day land an audio-only file), and because kind:"audio" is a value the
- * server contract already accepts.
+ * from `failed`), so it is null on every failed walk. On a completed walk it is `narration.m4a` —
+ * the phone microphone recorded by native independently of the video writer, so that an engine iOS
+ * stopped mid-walk (the 2026-09-02 failure: 3.8 minutes of narration lost across two walks) costs
+ * the muxed track and not the narration. Queued as kind "audio", which the server forwards to TROCK
+ * Scope as an audio clip; null — native could not produce the file — simply means one artifact fewer.
  */
 export function toQueuedWalk(
   walkId: string,
@@ -239,6 +247,9 @@ export function toQueuedWalk(
     enqueuedAt: now,
     artifacts,
     completionAttempts: 0,
+    // Spread rather than assigned so a walk without one has NO key, matching every manifest entry
+    // written before the census existed — the completion call omits absent, never sends null.
+    ...(walk.captureCensus ? { captureCensus: walk.captureCensus } : {}),
   };
 }
 
@@ -526,9 +537,9 @@ export function sanitizeWalkOwnerKey(ownerKey: string): string {
  *  So identity is written next to the bytes, at the one moment it is known and before any bytes
  *  exist. Not in the manifest: the manifest is the thing that is absent exactly when this is needed.
  *
- *  The name has no extension on purpose — `classifyWalkDirFileNames` recognises only `walk.mp4` and
- *  the still pattern and silently ignores everything else, so this can never be mistaken for an
- *  artifact, and it is removed with the directory by the ordinary cleanup delete. */
+ *  The name has no extension on purpose — `classifyWalkDirFileNames` recognises only `walk.mp4`,
+ *  `narration.m4a` and the still pattern and silently ignores everything else, so this can never be
+ *  mistaken for an artifact, and it is removed with the directory by the ordinary cleanup delete. */
 export const WALK_OWNER_FILE_NAME = "owner";
 
 /** The marker's contents: the SANITIZED key, so it compares equal to the owner directory name the
@@ -578,6 +589,12 @@ export function isWalkOwnedBy(markerContents: string | null, ownerKey: string): 
  *  `dir.appendingPathComponent("walk.mp4")`. One fixed name, unlike stills. */
 const RECOVERED_VIDEO_FILE_NAME = "walk.mp4";
 
+/** The standalone narration native writes beside the video — `WalkAudioCapture`'s
+ *  `dir.appendingPathComponent("narration.m4a")`. One fixed name, like the video. An app kill
+ *  mid-walk leaves it the way it leaves walk.mp4: present, and missing the index its close would
+ *  have written — so recovery asks it the same moov question (see ./upload.ts's scan). */
+const RECOVERED_AUDIO_FILE_NAME = "narration.m4a";
+
 /** Stills are named `still-NNN.jpg`, zero-padded to 3 digits (WalkthroughRecorder.swift's
  *  `deliverStill`: `String(format: "still-%03d.jpg", stillIndex)`). Lexicographic sort on that fixed
  *  width IS numeric sort, up to 999 stills — comfortably above MAX_WALK_ARTIFACTS (200) — so sorting
@@ -587,6 +604,8 @@ const RECOVERED_STILL_FILE_PATTERN = /^still-\d+\.jpg$/;
 export type ClassifiedWalkDirFiles = {
   /** Non-null iff RECOVERED_VIDEO_FILE_NAME is among the directory's entries. */
   videoFileName: string | null;
+  /** Non-null iff RECOVERED_AUDIO_FILE_NAME is among the directory's entries. */
+  audioFileName: string | null;
   /** In capture order (see RECOVERED_STILL_FILE_PATTERN's doc comment) — NOT raw directory-listing
    *  order, which FileSystem.readDirectoryAsync makes no guarantee about. */
   stillFileNames: string[];
@@ -594,13 +613,14 @@ export type ClassifiedWalkDirFiles = {
 
 /**
  * Sort one Documents/walkthroughs/<walkId>/ directory's raw entries into what this module recognizes
- * as walk artifacts. Anything else (there shouldn't be — native writes nothing but these two shapes —
- * but a stray .DS_Store or a future native change is not this function's problem to interpret) is
- * silently ignored rather than surfaced as a mystery artifact.
+ * as walk artifacts. Anything else (there shouldn't be — native writes nothing but these three
+ * shapes — but a stray .DS_Store or a future native change is not this function's problem to
+ * interpret) is silently ignored rather than surfaced as a mystery artifact.
  */
 export function classifyWalkDirFileNames(fileNames: string[]): ClassifiedWalkDirFiles {
   return {
     videoFileName: fileNames.includes(RECOVERED_VIDEO_FILE_NAME) ? RECOVERED_VIDEO_FILE_NAME : null,
+    audioFileName: fileNames.includes(RECOVERED_AUDIO_FILE_NAME) ? RECOVERED_AUDIO_FILE_NAME : null,
     stillFileNames: fileNames.filter((name) => RECOVERED_STILL_FILE_PATTERN.test(name)).sort(),
   };
 }
@@ -678,6 +698,11 @@ export type RecoveredWalkArtifactFiles = {
   /** Video's own capture timestamp, epoch ms — see toRecoveredQueuedWalk for why this should be the
    *  file's own timestamp, not the moment recovery ran. Ignored when videoUri is null. */
   videoAt?: number;
+  /** narration.m4a, under the same rule as the video: only when the container on disk is one the
+   *  recorder actually closed. Optional so a caller without one (or older than the file) omits it. */
+  audioUri?: string | null;
+  /** Its own timestamp, like `videoAt`. Ignored when audioUri is null or absent. */
+  audioAt?: number;
   /** In capture order (see classifyWalkDirFileNames). Empty if none were taken. */
   stills: Array<{ uri: string; at: number }>;
 };
@@ -696,7 +721,8 @@ export type RecoveredWalkArtifactFiles = {
  * above `classifyWalkDirFileNames`) and MUST come from the caller — who, unlike this module, is
  * allowed to ask a human which deal this belongs to. This function never guesses.
  *
- * Returns null under the same "nothing to enqueue" rule as toQueuedWalk: no video AND no stills.
+ * Returns null under the same "nothing to enqueue" rule as toQueuedWalk: no video, no narration AND
+ * no stills.
  */
 export function toRecoveredQueuedWalk(
   walkId: string,
@@ -707,6 +733,16 @@ export function toRecoveredQueuedWalk(
   now: number,
 ): QueuedWalk | null {
   const artifacts: QueuedWalkArtifact[] = [];
+  if (files.audioUri) {
+    artifacts.push({
+      idempotencyKey: walkArtifactIdempotencyKey(walkId, "audio"),
+      kind: "audio",
+      uri: files.audioUri,
+      at: files.audioAt ?? now,
+      order: ORDER_MEDIA,
+      attempts: 0,
+    });
+  }
   if (files.videoUri) {
     artifacts.push({
       idempotencyKey: walkArtifactIdempotencyKey(walkId, "video"),

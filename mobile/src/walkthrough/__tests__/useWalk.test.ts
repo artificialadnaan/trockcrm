@@ -17,6 +17,10 @@ jest.mock("expo-file-system/legacy", () => ({
 }));
 let stillListener: ((still: { uri: string; bytes: number; source: string }) => void) | null = null;
 let errorListener: ((error: { message: string }) => void) | null = null;
+let audioLevelListener: ((event: { rms: number }) => void) | null = null;
+let audioStalledListener:
+  | ((event: { attempt: number; restarted: boolean; sinceMs: number }) => void)
+  | null = null;
 
 jest.mock("../native", () => ({
   isAvailable: true,
@@ -39,6 +43,18 @@ jest.mock("../native", () => ({
     errorListener = cb;
     return () => {
       errorListener = null;
+    };
+  },
+  onAudioLevel: (cb: (event: { rms: number }) => void) => {
+    audioLevelListener = cb;
+    return () => {
+      audioLevelListener = null;
+    };
+  },
+  onAudioStalled: (cb: (event: { attempt: number; restarted: boolean; sinceMs: number }) => void) => {
+    audioStalledListener = cb;
+    return () => {
+      audioStalledListener = null;
     };
   },
 }));
@@ -76,6 +92,8 @@ beforeEach(() => {
   mockVideoBytes.size = 0;
   stillListener = null;
   errorListener = null;
+  audioLevelListener = null;
+  audioStalledListener = null;
 });
 
 describe("useWalk", () => {
@@ -336,7 +354,8 @@ describe("useWalk", () => {
 
     expect(result.current.walk.state).toBe("complete");
     expect(result.current.walk.videoUri).toBe("file:///docs/walkthroughs/w1/walk.mp4");
-    // Null by design — audio is a track inside the .mp4, not a separate artifact.
+    // No `audioUri` key at all here — a dev client older than narration.m4a — which reads as no
+    // narration file, not as a failure. The walk still completed.
     expect(result.current.walk.audioUri).toBeNull();
   });
 
@@ -560,15 +579,16 @@ describe("useWalk", () => {
       expect(result.current.captureEnabled).toBe(true);
       expect(result.current.atCaptureLimit).toBe(false);
 
-      // Drive the walk up to MAX_WALK_ARTIFACTS - 1 stills — the video artifact already accounts
-      // for the other slot in the server's per-walk cap.
+      // Drive the walk up to MAX_WALK_ARTIFACTS - 2 stills — the video artifact and the narration
+      // file native writes beside it already account for the other two slots in the server's
+      // per-walk cap (session.ts's canCaptureMore).
       act(() => {
-        for (let i = 0; i < MAX_WALK_ARTIFACTS - 1; i++) {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
           stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
         }
       });
 
-      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 1);
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2);
       expect(result.current.captureEnabled).toBe(false);
       expect(result.current.atCaptureLimit).toBe(true);
 
@@ -602,15 +622,15 @@ describe("useWalk", () => {
         await result.current.start();
       });
 
-      // Fill to exactly one remaining slot: MAX_WALK_ARTIFACTS - 2 delivered stills, the video
-      // artifact accounting for the other reserved slot (same boundary as canCaptureMore's own
-      // test in session.test.ts).
+      // Fill to exactly one remaining slot: MAX_WALK_ARTIFACTS - 3 delivered stills, the video
+      // and narration artifacts accounting for the other two reserved slots (same boundary as
+      // canCaptureMore's own test in session.test.ts).
       act(() => {
-        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 3; i++) {
           stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
         }
       });
-      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2);
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 3);
       expect(result.current.captureEnabled).toBe(true);
 
       // Two fast taps, back to back — both calls share the exact same render's `capture`
@@ -641,7 +661,7 @@ describe("useWalk", () => {
         await result.current.start();
       });
       act(() => {
-        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 3; i++) {
           stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
         }
       });
@@ -650,7 +670,7 @@ describe("useWalk", () => {
         await result.current.capture();
       });
       // The one remaining slot is now reserved (in flight) but not yet delivered.
-      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2);
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 3);
       expect(result.current.captureEnabled).toBe(false);
 
       act(() => {
@@ -659,7 +679,7 @@ describe("useWalk", () => {
 
       // Delivered: the reservation is released, but the walk is correctly AT the real cap now —
       // not stuck one slot short because of a leaked reservation.
-      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 1);
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2);
       expect(result.current.captureEnabled).toBe(false);
       expect(result.current.atCaptureLimit).toBe(true);
     });
@@ -682,7 +702,7 @@ describe("useWalk", () => {
         await result.current.start();
       });
       act(() => {
-        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 3; i++) {
           stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
         }
       });
@@ -721,7 +741,7 @@ describe("useWalk", () => {
         await result.current.start();
       });
       act(() => {
-        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 3; i++) {
           stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
         }
       });
@@ -736,7 +756,7 @@ describe("useWalk", () => {
         errorListener!({ message: "still write failed: disk full" });
       });
 
-      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2); // never delivered
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 3); // never delivered
       expect(result.current.captureEnabled).toBe(true); // but the slot is free again
     });
   });
@@ -1441,8 +1461,8 @@ describe("useWalk in-flight reservations across walks", () => {
     return mockCaptureStill.mock.calls.length;
   }
 
-  /** Every slot but the one the walk's own video occupies. */
-  const FULL_ALLOWANCE = MAX_WALK_ARTIFACTS - 1;
+  /** Every slot but the two the walk's own video and narration file occupy. */
+  const FULL_ALLOWANCE = MAX_WALK_ARTIFACTS - 2;
 
   it("does not carry a never-resolved reservation from a finished walk into the next one", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
@@ -1515,7 +1535,7 @@ describe("useWalk in-flight reservations across walks", () => {
       await result.current.start();
     });
     act(() => {
-      for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+      for (let i = 0; i < MAX_WALK_ARTIFACTS - 3; i++) {
         stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
       }
     });
@@ -1653,5 +1673,187 @@ describe("useWalk recording-size bound", () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+// ── narration.m4a and the live microphone ─────────────────────────────────────────────────────────
+//
+// The hook's half of the 2026-09-02 fix: the standalone narration file native now resolves beside
+// the video reaches the reducer, the two live microphone events reach it while recording, and the
+// census is filed only when native reports the whole pinned shape.
+describe("useWalk narration and microphone events", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/PARTIAL.mp4",
+    inputPortName: "iPhone Microphone",
+    negotiatedSampleRate: 48000,
+  };
+  const HEALTHY_VIDEO = {
+    videoFramesReceived: 36_000,
+    videoFramesAppended: 36_000,
+    videoFramesDropped: 0,
+    secondsSinceLastFrameArrived: 0.03,
+    writerStatus: 2,
+    writerError: "none",
+    failedLatched: false,
+  };
+  const AUDIO = {
+    buffersReceived: 56_250,
+    buffersAppended: 56_250,
+    buffersDropped: 0,
+    longestDropRun: 0,
+    secondsAppended: 1_200.4,
+    engineRestarts: 2,
+    standaloneSecondsRecorded: 1_200.6,
+    events: [
+      { atMs: 47_800, kind: "routeChange:2:MicrophoneBuiltIn" },
+      { atMs: 49_900, kind: "engineRestarted:watchdog" },
+    ],
+  };
+
+  function withClock(): { advance: (ms: number) => void; restore: () => void } {
+    let now = 1_000_000;
+    const spy = jest.spyOn(Date, "now").mockImplementation(() => now);
+    return {
+      advance: (ms: number) => {
+        now += ms;
+      },
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  it("carries narration.m4a from endWalk into the finished walk", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      audioUri: "file:///docs/walkthroughs/w1/narration.m4a",
+      stills: 0,
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.audioUri).toBe("file:///docs/walkthroughs/w1/narration.m4a");
+  });
+
+  // Native resolves null when the recorder could not start or recorded nothing. That is one
+  // artifact fewer, never a failed walk — a failed walk uploads no video at all.
+  it("reads a null audioUri as no narration file, and the walk still completes", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      audioUri: null,
+      stills: 0,
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.audioUri).toBeNull();
+    expect(result.current.walk.videoUri).toBe("file:///docs/walkthroughs/w1/walk.mp4");
+  });
+
+  it("forwards audioStalled and audioLevel into the walk while recording", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.audioAlive).toBe(true);
+
+    act(() => {
+      audioStalledListener!({ attempt: 1, restarted: true, sinceMs: 2100 });
+    });
+    expect(result.current.walk.audioAlive).toBe(false);
+    expect(result.current.walk.audioStall).toEqual({ attempt: 1, restarted: true, sinceMs: 2100 });
+
+    act(() => {
+      audioLevelListener!({ rms: 0.2 });
+    });
+    expect(result.current.walk.audioAlive).toBe(true);
+    expect(result.current.walk.audioLevel).toBe(0.2);
+    expect(result.current.walk.audioStall).toBeNull();
+  });
+
+  it("files the census, stamped with the walk's wall clock, when native reports the whole pinned shape", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      audioUri: "file:///docs/walkthroughs/w1/narration.m4a",
+      stills: 0,
+      census: {
+        ...HEALTHY_VIDEO,
+        audioBuffersReceived: AUDIO.buffersReceived,
+        audioBuffersAppended: AUDIO.buffersAppended,
+        audioBuffersDropped: AUDIO.buffersDropped,
+        audioSecondsAppended: AUDIO.secondsAppended,
+        longestAudioDropRun: AUDIO.longestDropRun,
+        audio: AUDIO,
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(20 * 60 * 1000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.captureCensus).toEqual({
+      walkMs: 20 * 60 * 1000,
+      video: {
+        framesReceived: 36_000,
+        framesAppended: 36_000,
+        framesDropped: 0,
+        secondsSinceLastFrameArrived: 0.03,
+      },
+      audio: AUDIO,
+    });
+    // The two verdicts are unchanged by the census riding alongside them.
+    expect(isAudioTruncated(result.current.walk.audioCoverage)).toBe(false);
+    expect(isVideoTruncated(result.current.walk.videoCoverage)).toBe(false);
+    clock.restore();
+  });
+
+  // The same trap as `audioSecondsAppended`, one level up: a dev client that reports every
+  // top-level counter and no `audio` object cannot fill the pinned shape, and zeros in a record
+  // the office reads as "what the recorder saw" would be a fabricated record.
+  it("files no census when native's report is missing the audio object", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 0,
+      census: { ...HEALTHY_VIDEO, audioBuffersAppended: 56_250, audioSecondsAppended: 1_200.4 },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.captureCensus).toBeNull();
+    // The verdict input that WAS reported is still read — the census gate is separate from it.
+    expect(result.current.walk.audioCoverage).not.toBeNull();
   });
 });

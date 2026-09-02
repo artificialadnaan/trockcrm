@@ -24,7 +24,14 @@ import { theme } from "../../src/theme/theme";
 import { useWalk } from "../../src/walkthrough/useWalk";
 import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/wearables/native";
 import { describePairing, type Pairing } from "../../src/walkthrough/pairing";
-import { isAudioTruncated, isVideoTruncated, isWalkActive, type Walk } from "../../src/walkthrough/session";
+import {
+  isAudioRestartExhausted,
+  isAudioTruncated,
+  isVideoTruncated,
+  isWalkActive,
+  meterFractionForRms,
+  type Walk,
+} from "../../src/walkthrough/session";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
 // Display-only change-order prefix, used for the "About to record" headline ONLY. `targetName` itself
 // stays RAW: deriveWalkTitle builds the walk title the office sees, and that title is PERSISTED — the
@@ -580,6 +587,12 @@ export default function WalkScreen() {
   // without re-testing the threshold (session.ts's isVideoTruncated owns it) or asserting past null.
   const shortVideo = isVideoTruncated(walk.videoCoverage) ? walk.videoCoverage : null;
   const shortAudio = isAudioTruncated(walk.audioCoverage) ? walk.audioCoverage : null;
+  // The microphone, LIVE. Two walks on 2026-09-02 lost 3.8 minutes of narration to an engine iOS
+  // stopped, and the estimator learned of it from the completion screen — after walking away from
+  // the site. The meter is what makes a dead microphone visible in seconds: it goes flat before
+  // native's watchdog has even decided anything. The banner is the watchdog's verdict.
+  const micFraction = walk.audioAlive ? meterFractionForRms(walk.audioLevel) : 0;
+  const micPercent = Math.round(micFraction * 100);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -707,7 +720,40 @@ export default function WalkScreen() {
             <View style={styles.topRow}>
               <View style={styles.recordingDot} />
               <Text style={styles.timer}>{formatElapsed(elapsedMs)}</Text>
+              {/* Small on purpose — the timer is what the estimator glances at, and the meter only
+                  has to be noticed when it stops moving. Red the moment native says the microphone
+                  has gone quiet, so the stall reads from the same place the level did. */}
+              <View
+                style={styles.micMeter}
+                accessibilityRole="progressbar"
+                accessibilityLabel="Microphone level"
+                accessibilityValue={{ min: 0, max: 100, now: micPercent }}
+              >
+                <View
+                  style={[
+                    styles.micMeterFill,
+                    !walk.audioAlive && styles.micMeterFillStalled,
+                    { width: `${micPercent}%` },
+                  ]}
+                />
+              </View>
             </View>
+
+            {/* Native's watchdog found the microphone silent. Danger colour, unlike every other
+                notice on this screen, because for once something IS going wrong right now and the
+                estimator can act on it: stop talking through the elevation until the mic is back.
+                Two sentences, one of them a dead end — after native's third failed restart the
+                honest instruction is a new walk, and the wording says so rather than "restarting"
+                forever. Cleared by the next audio buffer, whatever brought it back. */}
+            {!walk.audioAlive ? (
+              <View style={styles.narrationBanner} accessibilityRole="alert">
+                <Text style={styles.narrationBannerText}>
+                  {isAudioRestartExhausted(walk.audioStall)
+                    ? "Narration failed — end this walk and start a new one"
+                    : "Narration stopped — restarting mic"}
+                </Text>
+              </View>
+            ) : null}
 
             <Text style={styles.stillCount}>
               {stillCount} still{stillCount === 1 ? "" : "s"} captured
@@ -1049,6 +1095,40 @@ const styles = StyleSheet.create({
     fontSize: 34,
     fontFamily: theme.font.bold,
     fontVariant: ["tabular-nums"],
+  },
+  // The meter's track is the same dim white the disabled capture ring uses, so an empty meter reads
+  // as "quiet", not as a control that has been turned off.
+  micMeter: {
+    width: 64,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    overflow: "hidden",
+    marginLeft: theme.space.sm,
+  },
+  micMeterFill: {
+    height: "100%",
+    borderRadius: 4,
+    backgroundColor: theme.color.success,
+  },
+  micMeterFillStalled: { backgroundColor: theme.color.danger },
+  // The same red as the error banner at the top of the screen — this is the one notice while
+  // recording that IS an error, and it should look like the others that are.
+  narrationBanner: {
+    alignSelf: "stretch",
+    marginHorizontal: theme.space.lg,
+    marginTop: theme.space.md,
+    backgroundColor: theme.color.danger,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.space.lg,
+    paddingVertical: theme.space.md,
+  },
+  narrationBannerText: {
+    color: theme.color.textInverse,
+    fontSize: 15,
+    lineHeight: 21,
+    fontFamily: theme.font.semibold,
+    textAlign: "center",
   },
   stillCount: {
     color: theme.color.border,

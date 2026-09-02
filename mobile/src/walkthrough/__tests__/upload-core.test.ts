@@ -68,7 +68,7 @@ function failedWalk(stillCount = 1): Walk {
 // ── toQueuedWalk ─────────────────────────────────────────────────────────────────────────────────
 
 describe("toQueuedWalk", () => {
-  it("enqueues every artifact of a completed walk: video + every photo (audio is muxed into video, so never separate)", () => {
+  it("enqueues every artifact of a completed walk: video + every photo (no audio when native produced no narration file)", () => {
     const walk = completedWalk(2);
     expect(walk.audioUri).toBeNull();
     const queued = toQueuedWalk("walk-1", walk, META, 9999)!;
@@ -86,11 +86,49 @@ describe("toQueuedWalk", () => {
     expect(queued.completedAt).toBeUndefined();
   });
 
-  it("still enqueues an audio artifact if a walk somehow carries one (the documented future fallback path)", () => {
-    // audioUri is always null in practice today, but toQueuedWalk must not assume that forever.
-    const walk: Walk = { ...completedWalk(0), audioUri: "file:///docs/walkthroughs/walk-1/audio.m4a" };
+  // narration.m4a: the phone microphone native records independently of the video writer, so an
+  // engine iOS stops mid-walk (2026-09-02: 3.8 minutes of narration lost across two walks) costs the
+  // muxed track and not the narration the scope is written from.
+  it("queues narration.m4a as an audio artifact when native produced one", () => {
+    const walk: Walk = reduceWalk(reduceWalk(withStills(started, 1), { type: "ended", at: 5000 }), {
+      type: "finalized",
+      audioUri: "file:///docs/walkthroughs/walk-1/narration.m4a",
+    });
     const queued = toQueuedWalk("walk-1", walk, META, 9999)!;
-    expect(queued.artifacts.map((a) => a.kind).sort()).toEqual(["audio", "video"]);
+    expect(queued.artifacts.map((a) => a.kind).sort()).toEqual(["audio", "photo", "video"]);
+    const audio = queued.artifacts.find((a) => a.kind === "audio")!;
+    expect(audio.uri).toBe("file:///docs/walkthroughs/walk-1/narration.m4a");
+    expect(audio.idempotencyKey).toBe(walkArtifactIdempotencyKey("walk-1", "audio"));
+    // Drained with the video, ahead of the photos: the narration is what the scope is written from.
+    expect(audio.order).toBe(queued.artifacts.find((a) => a.kind === "video")!.order);
+    expect(audio.at).toBe(walk.startedAt);
+  });
+
+  it("carries the capture census onto the queue entry, and leaves the key OFF when there is none", () => {
+    const census = {
+      walkMs: 4000,
+      video: { framesReceived: 120, framesAppended: 120, framesDropped: 0, secondsSinceLastFrameArrived: 0.03 },
+      audio: {
+        buffersReceived: 190,
+        buffersAppended: 190,
+        buffersDropped: 0,
+        longestDropRun: 0,
+        secondsAppended: 4.05,
+        engineRestarts: 0,
+        standaloneSecondsRecorded: 4.1,
+        events: [],
+      },
+    };
+    const ended = reduceWalk(started, { type: "ended", at: 5000 });
+    const measured = reduceWalk(ended, {
+      type: "finalized",
+      audioUri: null,
+      captureCensus: { video: census.video, audio: census.audio },
+    });
+    expect(toQueuedWalk("walk-1", measured, META, 9999)!.captureCensus).toEqual(census);
+    // Absent, not null — a manifest entry written before the census existed looks exactly like this,
+    // and the completion call omits the field rather than sending null.
+    expect("captureCensus" in toQueuedWalk("walk-1", completedWalk(1), META, 9999)!).toBe(false);
   });
 
   it("carries the photo's own source and capture time, not the walk's", () => {
@@ -555,14 +593,32 @@ describe("classifyWalkDirFileNames", () => {
     expect(result.stillFileNames).toEqual(["still-001.jpg"]);
   });
 
-  it("ignores anything that isn't one of native's two known artifact shapes", () => {
-    const result = classifyWalkDirFileNames([".DS_Store", "notes.txt", "still-abc.jpg", "walk.mov"]);
+  it("recognizes narration.m4a as the walk's standalone audio", () => {
+    const result = classifyWalkDirFileNames(["narration.m4a", "walk.mp4"]);
+    expect(result.audioFileName).toBe("narration.m4a");
+    expect(result.videoFileName).toBe("walk.mp4");
+  });
+
+  it("ignores anything that isn't one of native's three known artifact shapes", () => {
+    const result = classifyWalkDirFileNames([
+      ".DS_Store",
+      "notes.txt",
+      "still-abc.jpg",
+      "walk.mov",
+      "narration.wav",
+      "owner",
+    ]);
     expect(result.videoFileName).toBeNull();
+    expect(result.audioFileName).toBeNull();
     expect(result.stillFileNames).toEqual([]);
   });
 
   it("returns empty classification for an empty directory (nothing to recover, not a leak)", () => {
-    expect(classifyWalkDirFileNames([])).toEqual({ videoFileName: null, stillFileNames: [] });
+    expect(classifyWalkDirFileNames([])).toEqual({
+      videoFileName: null,
+      audioFileName: null,
+      stillFileNames: [],
+    });
   });
 });
 
@@ -643,5 +699,41 @@ describe("toRecoveredQueuedWalk", () => {
     expect(queued.artifacts.map((a) => a.idempotencyKey).sort()).toEqual(
       [walkArtifactIdempotencyKey("walk-9", "video"), walkArtifactIdempotencyKey("walk-9", "photo", 0)].sort(),
     );
+  });
+});
+
+describe("toRecoveredQueuedWalk: narration.m4a", () => {
+  it("files a recovered narration as an audio artifact with its own timestamp, and alone is enough to file", () => {
+    const queued = toRecoveredQueuedWalk(
+      "walk-9",
+      "deal-42",
+      null,
+      {
+        videoUri: null,
+        audioUri: "file:///docs/walkthroughs/walk-9/narration.m4a",
+        audioAt: 7000,
+        stills: [],
+      },
+      META,
+      9_999_999,
+    )!;
+    expect(queued).not.toBeNull();
+    expect(queued.artifacts.map((a) => a.kind)).toEqual(["audio"]);
+    expect(queued.artifacts[0]!.at).toBe(7000);
+    expect(queued.artifacts[0]!.idempotencyKey).toBe(walkArtifactIdempotencyKey("walk-9", "audio"));
+    // A recovered walk has no reducer history, so it has no census to file either.
+    expect("captureCensus" in queued).toBe(false);
+  });
+
+  it("omits the audio artifact when the caller reports none, without disturbing the rest", () => {
+    const queued = toRecoveredQueuedWalk(
+      "walk-9",
+      "deal-42",
+      null,
+      { videoUri: "file:///docs/walkthroughs/walk-9/walk.mp4", videoAt: 5000, audioUri: null, stills: [] },
+      META,
+      9_999_999,
+    )!;
+    expect(queued.artifacts.map((a) => a.kind)).toEqual(["video"]);
   });
 });

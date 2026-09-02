@@ -19,9 +19,18 @@ import {
   reduceWalk,
   WALK_VIDEO_SIZE_POLL_MS,
   type Walk,
+  type WalkCaptureCensusInput,
   type WalkVideoSizeVerdict,
 } from "./session";
-import { isAvailable, onRecorderError, onStill, Recorder } from "./native";
+import {
+  isAvailable,
+  onAudioLevel,
+  onAudioStalled,
+  onRecorderError,
+  onStill,
+  Recorder,
+  type WalkEnded,
+} from "./native";
 // The SDK bridge, not the recorder bridge — two different native modules. This is the only consumer
 // of the error the root layout retains when its launch-time `configure()` fails.
 import { getStartupConfigureError } from "../wearables/native";
@@ -56,6 +65,41 @@ function isNotConfiguredRejection(err: unknown, nativeMessage: string): boolean 
   const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
   if (typeof code === "string" && /not[_ ]configured/i.test(code)) return true;
   return /not[_ ]configured/i.test(nativeMessage);
+}
+
+/**
+ * The census in the shape the server files, or null when native did not report the whole of it.
+ *
+ * All-or-nothing on purpose, and the `audio` object is the gate. It was added to a census that had
+ * already shipped, so a dev client can resolve every top-level counter and no `audio` — and the
+ * pinned contract has no way to say "audio unmeasured" short of zeros, which for narration are the
+ * worst numbers in the range (the same trap `audioCensus` below guards with its typeof). The four
+ * video fields are checked for the same reason: a census is a record, and a record with holes
+ * filled in by `?? 0` is a fabricated one.
+ */
+function captureCensusFrom(census: WalkEnded["census"]): WalkCaptureCensusInput | null {
+  if (!census || !census.audio) return null;
+  const video = {
+    framesReceived: census.videoFramesReceived,
+    framesAppended: census.videoFramesAppended,
+    framesDropped: census.videoFramesDropped,
+    secondsSinceLastFrameArrived: census.secondsSinceLastFrameArrived,
+  };
+  if (!Object.values(video).every((value) => typeof value === "number")) return null;
+  const { audio } = census;
+  return {
+    video,
+    audio: {
+      buffersReceived: audio.buffersReceived,
+      buffersAppended: audio.buffersAppended,
+      buffersDropped: audio.buffersDropped,
+      longestDropRun: audio.longestDropRun,
+      secondsAppended: audio.secondsAppended,
+      engineRestarts: audio.engineRestarts,
+      standaloneSecondsRecorded: audio.standaloneSecondsRecorded,
+      events: Array.isArray(audio.events) ? audio.events : [],
+    },
+  };
 }
 
 /** `walk.mp4`'s size on disk right now, or null when it cannot be read for ANY reason — no path yet,
@@ -279,9 +323,20 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       adjustInFlight(-1);
       setError(e.message);
     });
+    // The two live microphone signals. Dispatched straight into the reducer, which is where the
+    // "only while recording" rule lives (a level landing during "finalizing" must not touch a walk
+    // that has stopped) — this hook adds nothing but the plumbing.
+    const offAudioLevel = onAudioLevel((e) => {
+      dispatch({ type: "audioLevel", rms: e.rms });
+    });
+    const offAudioStalled = onAudioStalled((e) => {
+      dispatch({ type: "audioStalled", attempt: e.attempt, restarted: e.restarted, sinceMs: e.sinceMs });
+    });
     return () => {
       offStill();
       offError();
+      offAudioLevel();
+      offAudioStalled();
     };
   }, [adjustInFlight]);
 
@@ -495,7 +550,10 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       // A finished .mp4 cannot say whether frames stopped arriving or the writer refused them,
       // and that distinction decides whether the bug is ours or the glasses'.
       console.log("[walk census]", JSON.stringify(result.census ?? "none"));
-      // audioUri is null by design: audio is a track inside the .mp4, not a separate artifact.
+      // audioUri is narration.m4a — the phone microphone recorded on its own, independent of the
+      // video writer — when native produced one, and null when it could not (or on a dev client
+      // older than the file, where the key is absent). Null is not a failure: the walk still has
+      // its muxed track, and a walk failed over a missing extra would upload no video at all.
       // videoUri comes from here rather than from `started` because native only resolves once
       // AVAssetWriter reports .completed — so this path, unlike that one, is a finalised file.
       //
@@ -509,8 +567,11 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       // still evidence and the stills were never in question.
       dispatch({
         type: "finalized",
-        audioUri: null,
+        audioUri: typeof result.audioUri === "string" && result.audioUri.length > 0 ? result.audioUri : null,
         videoUri: result.videoUri,
+        // The whole record, for the server, gated on the pinned shape being complete — see
+        // captureCensusFrom for why a partial census is filed as none rather than as zeros.
+        captureCensus: captureCensusFrom(result.census),
         videoCensus: result.census
           ? {
               secondsSinceLastFrameArrived: result.census.secondsSinceLastFrameArrived,

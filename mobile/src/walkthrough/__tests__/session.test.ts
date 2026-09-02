@@ -2,8 +2,10 @@ import {
   assessAudioCoverage,
   assessVideoCoverage,
   initialWalk,
+  isAudioRestartExhausted,
   isAudioTruncated,
   isVideoTruncated,
+  meterFractionForRms,
   reduceWalk,
   canCapture,
   canAcceptStill,
@@ -15,6 +17,7 @@ import {
   MAX_WALK_ARTIFACTS,
   WALK_VIDEO_STOP_BYTES,
   WALK_VIDEO_WARN_BYTES,
+  WALK_AUDIO_RESTART_ATTEMPTS,
   WALK_AUDIO_SHORTFALL_TOLERANCE_MS,
   WALK_VIDEO_SHORTFALL_TOLERANCE_MS,
   type Walk,
@@ -283,39 +286,12 @@ describe("canCaptureMore", () => {
     expect(canCaptureMore(finalizing)).toBe(false);
   });
 
-  // Every walk that reached "recording" always carries a video artifact, so the effective still
-  // cap is MAX_WALK_ARTIFACTS - 1. Capturing right up to that boundary must still be allowed;
-  // the very next one (which would push the total to MAX_WALK_ARTIFACTS + 1) must not be.
+  // Every walk that reached "recording" always carries a video artifact, and native now writes
+  // narration.m4a beside it — which this reducer only learns of at "finalized", so a slot is held
+  // for it throughout — so the effective still cap is MAX_WALK_ARTIFACTS - 2. Capturing right up
+  // to that boundary must still be allowed; the very next one (which would push the total to
+  // MAX_WALK_ARTIFACTS + 1) must not be.
   it("is false exactly when capturing again would push the walk's total artifacts past the server's cap", () => {
-    let walk = started;
-    for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
-      walk = reduceWalk(walk, {
-        type: "still",
-        uri: `file:///s${i}.jpg`,
-        at: 1000 + i,
-        source: "phone",
-      });
-    }
-    expect(walk.stills.length).toBe(MAX_WALK_ARTIFACTS - 2);
-    // One more still fits: stills (MAX-1) + video (1) === MAX_WALK_ARTIFACTS.
-    expect(canCaptureMore(walk)).toBe(true);
-
-    const atCap = reduceWalk(walk, {
-      type: "still",
-      uri: "file:///cap.jpg",
-      at: 9999,
-      source: "phone",
-    });
-    expect(atCap.stills.length).toBe(MAX_WALK_ARTIFACTS - 1);
-    // Capturing again now would make stills (MAX) + video (1) === MAX_WALK_ARTIFACTS + 1.
-    expect(canCaptureMore(atCap)).toBe(false);
-  });
-
-  // `reserved` accounts for capture requests already ACCEPTED by native but not yet delivered as
-  // a `still` event — useWalk.ts's in-flight tracker. Without it, a DELIVERED-only count lets two
-  // requests issued back-to-back both look safe, because neither photo has landed in
-  // `walk.stills` yet when the second one is checked.
-  it("also refuses once DELIVERED stills plus `reserved` in-flight requests would push the total past the cap", () => {
     let walk = started;
     for (let i = 0; i < MAX_WALK_ARTIFACTS - 3; i++) {
       walk = reduceWalk(walk, {
@@ -326,14 +302,43 @@ describe("canCaptureMore", () => {
       });
     }
     expect(walk.stills.length).toBe(MAX_WALK_ARTIFACTS - 3);
-    // Two slots remain (stills + video === MAX_WALK_ARTIFACTS - 2): with nothing in flight, a
-    // capture is fine.
+    // One more still fits: stills (MAX-2) + video (1) + narration (1) === MAX_WALK_ARTIFACTS.
+    expect(canCaptureMore(walk)).toBe(true);
+
+    const atCap = reduceWalk(walk, {
+      type: "still",
+      uri: "file:///cap.jpg",
+      at: 9999,
+      source: "phone",
+    });
+    expect(atCap.stills.length).toBe(MAX_WALK_ARTIFACTS - 2);
+    // Capturing again now would make stills (MAX-1) + video (1) + narration (1) === MAX + 1.
+    expect(canCaptureMore(atCap)).toBe(false);
+  });
+
+  // `reserved` accounts for capture requests already ACCEPTED by native but not yet delivered as
+  // a `still` event — useWalk.ts's in-flight tracker. Without it, a DELIVERED-only count lets two
+  // requests issued back-to-back both look safe, because neither photo has landed in
+  // `walk.stills` yet when the second one is checked.
+  it("also refuses once DELIVERED stills plus `reserved` in-flight requests would push the total past the cap", () => {
+    let walk = started;
+    for (let i = 0; i < MAX_WALK_ARTIFACTS - 4; i++) {
+      walk = reduceWalk(walk, {
+        type: "still",
+        uri: `file:///s${i}.jpg`,
+        at: 1000 + i,
+        source: "phone",
+      });
+    }
+    expect(walk.stills.length).toBe(MAX_WALK_ARTIFACTS - 4);
+    // Two slots remain (stills + video + narration === MAX_WALK_ARTIFACTS - 2): with nothing in
+    // flight, a capture is fine.
     expect(canCaptureMore(walk, 0)).toBe(true);
     // With ONE request already accepted but not yet delivered, one more still fits exactly.
     expect(canCaptureMore(walk, 1)).toBe(true);
-    // With TWO already in flight, a third would make stills(MAX-3) + reserved(2) + new(1) +
-    // video(1) === MAX_WALK_ARTIFACTS + 1 — over the cap, even though NOT ONE of those two
-    // in-flight requests has actually landed in `walk.stills` yet.
+    // With TWO already in flight, a third would make stills(MAX-4) + reserved(2) + new(1) +
+    // video(1) + narration(1) === MAX_WALK_ARTIFACTS + 1 — over the cap, even though NOT ONE of
+    // those two in-flight requests has actually landed in `walk.stills` yet.
     expect(canCaptureMore(walk, 2)).toBe(false);
   });
 });
@@ -607,5 +612,165 @@ describe("assessWalkVideoSize", () => {
     expect(assessWalkVideoSize(Number.NaN)).toBe("ok");
     expect(assessWalkVideoSize(Number.POSITIVE_INFINITY)).toBe("ok");
     expect(assessWalkVideoSize(-1)).toBe("ok");
+  });
+});
+
+// ── The microphone, live: what native's two audio events do to a recording walk ──────────────────
+//
+// Two walks on 2026-09-02 lost 3.8 minutes of narration to an engine iOS stopped and nothing
+// restarted, and the estimator learned of it from the completion screen — after leaving the site.
+// These pin the state the walk screen draws the meter and the banner from, and the one rule that
+// keeps the banner honest: only a buffer ARRIVING ends a stall, never a restart that merely started
+// an engine.
+describe("reduceWalk audio liveness", () => {
+  it("starts alive and unmeasured, so a build that never reports never opens under a banner", () => {
+    expect(started.audioAlive).toBe(true);
+    expect(started.audioLevel).toBe(0);
+    expect(started.audioStall).toBeNull();
+  });
+
+  it("records the level and keeps the microphone alive on audioLevel", () => {
+    const live = reduceWalk(started, { type: "audioLevel", rms: 0.12 });
+    expect(live.audioAlive).toBe(true);
+    expect(live.audioLevel).toBe(0.12);
+  });
+
+  it("clamps a level native reports out of range, and draws a non-finite one as silence", () => {
+    expect(reduceWalk(started, { type: "audioLevel", rms: 4 }).audioLevel).toBe(1);
+    expect(reduceWalk(started, { type: "audioLevel", rms: -1 }).audioLevel).toBe(0);
+    expect(reduceWalk(started, { type: "audioLevel", rms: Number.NaN }).audioLevel).toBe(0);
+  });
+
+  it("marks the microphone dead on audioStalled, zeroes the meter, and keeps native's report", () => {
+    const stalled = reduceWalk(reduceWalk(started, { type: "audioLevel", rms: 0.2 }), {
+      type: "audioStalled",
+      attempt: 1,
+      restarted: true,
+      sinceMs: 2100,
+    });
+    expect(stalled.audioAlive).toBe(false);
+    expect(stalled.audioLevel).toBe(0);
+    expect(stalled.audioStall).toEqual({ attempt: 1, restarted: true, sinceMs: 2100 });
+  });
+
+  // A restart that succeeded is an engine that STARTED, not a microphone that is delivering — the
+  // walk screen must keep saying "restarting" until a buffer proves otherwise.
+  it("stays stalled after a successful restart until a buffer actually arrives", () => {
+    const restarted = reduceWalk(started, {
+      type: "audioStalled",
+      attempt: 1,
+      restarted: true,
+      sinceMs: 2100,
+    });
+    expect(restarted.audioAlive).toBe(false);
+    const back = reduceWalk(restarted, { type: "audioLevel", rms: 0.05 });
+    expect(back.audioAlive).toBe(true);
+    expect(back.audioStall).toBeNull();
+  });
+
+  it("ignores both events unless the walk is recording", () => {
+    const idle = initialWalk("d", null);
+    expect(reduceWalk(idle, { type: "audioStalled", attempt: 1, restarted: false, sinceMs: 5000 })).toBe(idle);
+    const finalizing = reduceWalk(started, { type: "ended", at: 5000 });
+    expect(reduceWalk(finalizing, { type: "audioLevel", rms: 0.3 })).toBe(finalizing);
+    expect(
+      reduceWalk(finalizing, { type: "audioStalled", attempt: 1, restarted: false, sinceMs: 5000 }),
+    ).toBe(finalizing);
+  });
+});
+
+describe("isAudioRestartExhausted", () => {
+  it("is false while native is still restarting, and while nothing is wrong", () => {
+    expect(isAudioRestartExhausted(null)).toBe(false);
+    expect(isAudioRestartExhausted({ attempt: 1, restarted: false, sinceMs: 2000 })).toBe(false);
+    expect(
+      isAudioRestartExhausted({ attempt: WALK_AUDIO_RESTART_ATTEMPTS - 1, restarted: false, sinceMs: 6000 }),
+    ).toBe(false);
+  });
+
+  // The last restart STARTING an engine is still hope, not failure; the report that follows it
+  // with nothing delivered is the one that says so.
+  it("is true only once the last allowed restart has been made and reported failed", () => {
+    expect(
+      isAudioRestartExhausted({ attempt: WALK_AUDIO_RESTART_ATTEMPTS, restarted: true, sinceMs: 6000 }),
+    ).toBe(false);
+    expect(
+      isAudioRestartExhausted({ attempt: WALK_AUDIO_RESTART_ATTEMPTS, restarted: false, sinceMs: 8000 }),
+    ).toBe(true);
+  });
+
+  // The escape: a buffer arriving from ANY restart — an interruption ending after the watchdog gave
+  // up — clears the stall, and the banner with it.
+  it("clears with the stall when audio comes back", () => {
+    const gaveUp = reduceWalk(started, {
+      type: "audioStalled",
+      attempt: WALK_AUDIO_RESTART_ATTEMPTS,
+      restarted: false,
+      sinceMs: 8000,
+    });
+    expect(isAudioRestartExhausted(gaveUp.audioStall)).toBe(true);
+    const back = reduceWalk(gaveUp, { type: "audioLevel", rms: 0.1 });
+    expect(isAudioRestartExhausted(back.audioStall)).toBe(false);
+  });
+});
+
+describe("meterFractionForRms", () => {
+  it("draws speech in the middle of the bar and a raised voice at the end of it", () => {
+    const quiet = meterFractionForRms(0.02);
+    const speech = meterFractionForRms(0.1);
+    expect(quiet).toBeGreaterThan(0);
+    expect(speech).toBeGreaterThan(quiet);
+    expect(speech).toBeGreaterThan(0.3);
+    expect(speech).toBeLessThan(0.8);
+    expect(meterFractionForRms(0.5)).toBe(1);
+  });
+
+  it("draws nothing for silence and for readings that are not numbers", () => {
+    expect(meterFractionForRms(0)).toBe(0);
+    expect(meterFractionForRms(-0.1)).toBe(0);
+    expect(meterFractionForRms(Number.NaN)).toBe(0);
+    expect(meterFractionForRms(Number.POSITIVE_INFINITY)).toBe(0);
+  });
+});
+
+// ── The narration file, and the census the walk is filed with ────────────────────────────────────
+describe("reduceWalk finalized: narration and the capture census", () => {
+  const ended = reduceWalk(started, { type: "ended", at: 21_000 });
+  const CENSUS = {
+    video: { framesReceived: 600, framesAppended: 600, framesDropped: 0, secondsSinceLastFrameArrived: 0.03 },
+    audio: {
+      buffersReceived: 940,
+      buffersAppended: 940,
+      buffersDropped: 0,
+      longestDropRun: 0,
+      secondsAppended: 20.05,
+      engineRestarts: 1,
+      standaloneSecondsRecorded: 20.1,
+      events: [
+        { atMs: 8000, kind: "configurationChange" },
+        { atMs: 8050, kind: "engineRestarted:configurationChange" },
+      ],
+    },
+  };
+
+  it("carries narration.m4a from endWalk as the walk's audioUri", () => {
+    const done = reduceWalk(ended, {
+      type: "finalized",
+      audioUri: "file:///docs/walkthroughs/w1/narration.m4a",
+    });
+    expect(done.state).toBe("complete");
+    expect(done.audioUri).toBe("file:///docs/walkthroughs/w1/narration.m4a");
+  });
+
+  it("stamps the walk's own wall clock onto the census it files, and keeps native's record verbatim", () => {
+    const done = reduceWalk(ended, { type: "finalized", audioUri: null, captureCensus: CENSUS });
+    expect(done.captureCensus).toEqual({ walkMs: 20_000, ...CENSUS });
+  });
+
+  it("files no census when native reported none — null, never zeros", () => {
+    expect(reduceWalk(ended, { type: "finalized", audioUri: null }).captureCensus).toBeNull();
+    expect(
+      reduceWalk(ended, { type: "finalized", audioUri: null, captureCensus: null }).captureCensus,
+    ).toBeNull();
   });
 });
