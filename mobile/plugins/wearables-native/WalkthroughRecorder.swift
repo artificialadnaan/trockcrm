@@ -130,6 +130,20 @@ final class WalkthroughRecorder: RCTEventEmitter {
     return error.localizedDescription
   }
 
+  /// `error` with `audioUri` added to its `userInfo` — React Native hands a rejected promise's
+  /// `NSError.userInfo` to JS as `err.userInfo` (RCTUtils' `RCTJSErrorFromCodeMessageAndNSError`),
+  /// which is the only channel a rejection has for anything but a string.
+  ///
+  /// Wrapped rather than replaced: the original's domain, code and every key it already carried are
+  /// preserved, so nothing the writer's own error said is dropped. The explicit `message` passed
+  /// alongside still wins over `localizedDescription`, so the census in that string is unaffected.
+  private static func rejection(_ error: Error, carrying audioUri: Any) -> NSError {
+    let original = error as NSError
+    var info = original.userInfo
+    info["audioUri"] = audioUri
+    return NSError(domain: original.domain, code: original.code, userInfo: info)
+  }
+
   /// Ask iOS for recording permission, and wait for the answer.
   ///
   /// iOS 17 moved this off `AVAudioSession` onto `AVAudioApplication`; the app deploys to 15.2
@@ -725,9 +739,17 @@ final class WalkthroughRecorder: RCTEventEmitter {
         // it looks like success. Reject rather than resolve with a URI nobody finalized.
         // The census rides along in the message: a walk that failed to finalize is exactly when
         // knowing how many frames arrived versus were refused matters most.
+        //
+        // THE NARRATION RIDES OUT TOO, on `userInfo`, because it is not the video's failure.
+        // `stop()` closed narration.m4a before finalize ran and the teardown above kept the
+        // directory for it — but a walk that took even one still is filed from that directory and
+        // then DELETED (upload.ts's `finishWalkCleanup` removes the whole directory once the
+        // artifacts it knows about are filed). A rejection that mentioned only the video would lose
+        // the one recording that survived, on exactly the walk this class exists for. JS reads it
+        // off `err.userInfo` and queues it as the failed walk's audio artifact.
         reject("walk_video_finalize_failed",
                "endWalk failed to finalize walk.mp4: \(Self.describe(error)) — census: \(census)",
-               error)
+               Self.rejection(error, carrying: audioUri))
       case nil:
         reject("walk_video_finalize_failed",
                "endWalk failed to finalize walk.mp4: no writer was ever created", nil)
@@ -1282,7 +1304,14 @@ private final class WalkVideoWriter: @unchecked Sendable {
         self.drainPendingAudio()
         if !self.pendingAudio.isEmpty {
           self.audioBuffersDropped += self.pendingAudio.count
-          self.longestAudioDropRun = max(self.longestAudioDropRun, self.pendingAudio.count)
+          // ADDED to the run already in progress, not compared against it. A queue that overflowed
+          // and never recovered has already evicted buffers into `consecutiveAudioDrops`, and those
+          // evictions and these leftovers are one uninterrupted loss — nothing was appended between
+          // them, which is what would have reset the counter. Taking the larger of the two instead
+          // understates a sustained stall by up to the queue's whole capacity and files it as a
+          // shorter one, which is the exact distinction `longestAudioDropRun` exists to draw.
+          self.consecutiveAudioDrops += self.pendingAudio.count
+          self.longestAudioDropRun = max(self.longestAudioDropRun, self.consecutiveAudioDrops)
           self.pendingAudio.removeAll()
         }
         self.videoInput.markAsFinished()
@@ -1378,7 +1407,24 @@ private final class WalkAudioCapture: @unchecked Sendable {
     let events: [[String: Any]]
   }
 
-  private let startedAt = Date()
+  /// The monotonic reading everything below is measured against — `systemUptime`, which cannot be
+  /// set, stepped or corrected. It does not advance while the device sleeps, which a foregrounded
+  /// walk holding a keep-awake lock does not do.
+  private static func monotonicNow() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+  /// A MONOTONIC origin, in `systemUptime` seconds — not a wall clock. Every elapsed measurement in
+  /// this class is taken against it: the census's `atMs`, the watchdog's silence, the spacing
+  /// between restarts, the meter's cadence.
+  ///
+  /// `Date()` is settable and NTP-corrected, and a step backwards mid-walk is not a rounding
+  /// nuisance here. It produces a NEGATIVE `atMs`, which the completion contract refuses outright —
+  /// and by then the walk's bytes are already in object storage, so the completion retries a fixed
+  /// number of times and goes terminal, taking the video and every still with it. The quieter half
+  /// is the watchdog: a jumped clock either stops it noticing silence or has it restart an engine
+  /// that was fine. `WalkVideoWriter` already stamps every sample against the host clock for the
+  /// same reason, one layer over.
+  private let startedAt = ProcessInfo.processInfo.systemUptime
+
   // Owned by audioQueue from here on.
   /// A `var` because a media-services reset invalidates every audio object, the engine included,
   /// and Apple's instruction for that case is to build a new one.
@@ -1391,15 +1437,15 @@ private final class WalkAudioCapture: @unchecked Sendable {
   private var watchdog: DispatchSourceTimer?
   private var running = false
   private var report: Report?
-  private var lastBufferAt: Date?
-  private var lastRestartAt: Date?
+  private var lastBufferAt: TimeInterval?
+  private var lastRestartAt: TimeInterval?
   private var stalled = false
   private var watchdogRestarts = 0
   private var exhaustionReported = false
   private var engineRestarts = 0
   private var events: [[String: Any]] = []
   private var peakRms: Float = 0
-  private var lastLevelAt: Date?
+  private var lastLevelAt: TimeInterval?
 
   init(narrationUrl: URL, onEvent: @escaping (String, [String: Any]) -> Void) {
     self.narrationUrl = narrationUrl
@@ -1516,7 +1562,7 @@ private final class WalkAudioCapture: @unchecked Sendable {
   /// Runs on `audioQueue`, once per delivered buffer.
   private func bufferArrived(rms: Float) {
     guard running else { return }
-    let now = Date()
+    let now = Self.monotonicNow()
     lastBufferAt = now
     if stalled {
       // Whatever brought the buffers back — a watchdog restart, an interruption ending, iOS on its
@@ -1527,7 +1573,7 @@ private final class WalkAudioCapture: @unchecked Sendable {
       note("audioResumed")
     }
     peakRms = max(peakRms, rms)
-    if let last = lastLevelAt, now.timeIntervalSince(last) < Self.levelInterval { return }
+    if let last = lastLevelAt, now - last < Self.levelInterval { return }
     lastLevelAt = now
     // The PEAK since the last report, not the latest buffer: a syllable that lands between two
     // reports would otherwise never move the meter.
@@ -1559,7 +1605,7 @@ private final class WalkAudioCapture: @unchecked Sendable {
   /// interruption or a configuration change.
   private func restartEngine(reason: String, rebuild: Bool) -> Bool {
     guard running else { return false }
-    lastRestartAt = Date()
+    lastRestartAt = Self.monotonicNow()
     let audio = AVAudioSession.sharedInstance()
     do {
       // The same category and options `startWalk` chose — no `.allowBluetoothHFP`, for the reason
@@ -1699,7 +1745,7 @@ private final class WalkAudioCapture: @unchecked Sendable {
     guard running else { return }
     // A restart can itself post one of these a moment later, for the configuration it just applied.
     // Acting on that would restart an engine that is running fine, and the tap with it.
-    if let last = lastRestartAt, Date().timeIntervalSince(last) < 0.5 {
+    if let last = lastRestartAt, Self.monotonicNow() - last < 0.5 {
       note("configurationChange:coalesced")
       return
     }
@@ -1750,13 +1796,13 @@ private final class WalkAudioCapture: @unchecked Sendable {
     // Once a second, whether or not anything is wrong — this is the only place narration.m4a's
     // length is observed while it can still be read. See `sampleNarrationSeconds`.
     sampleNarrationSeconds()
-    let now = Date()
-    let since = now.timeIntervalSince(lastBufferAt ?? startedAt)
+    let now = Self.monotonicNow()
+    let since = now - (lastBufferAt ?? startedAt)
     guard since > Self.stallThreshold else { return }
     stalled = true
     let sinceMs = Int(since * 1000)
     if watchdogRestarts < Self.maxWatchdogRestarts {
-      if let last = lastRestartAt, now.timeIntervalSince(last) < Self.stallThreshold { return }
+      if let last = lastRestartAt, now - last < Self.stallThreshold { return }
       watchdogRestarts += 1
       let restarted = restartEngine(reason: "watchdog", rebuild: false)
       onEvent("walkthrough:audioStalled", [
@@ -1777,7 +1823,7 @@ private final class WalkAudioCapture: @unchecked Sendable {
   /// see `maxEvents`; the last slot says the list was cut rather than silently dropping the rest.
   private func note(_ kind: String) {
     guard events.count < Self.maxEvents else { return }
-    let atMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+    let atMs = Int((Self.monotonicNow() - startedAt) * 1000)
     let last = events.count == Self.maxEvents - 1
     events.append(["atMs": atMs, "kind": last ? "eventsTruncated" : kind])
   }

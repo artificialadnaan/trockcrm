@@ -188,6 +188,24 @@ describe("toQueuedWalk", () => {
     expect(toQueuedWalk("walk-1", failed, META, 9999)).toBeNull();
   });
 
+  // A finalize failure is exactly when the standalone narration matters, and exactly when it is most
+  // easily lost: the walk is filed with its stills and `finishWalkCleanup` then deletes the whole
+  // directory. Native names the closed file on the rejection, the reducer keeps it, and it is queued
+  // here — the ONE artifact a failed walk may carry besides its photos. The video is still refused.
+  it("queues a failed walk's narration.m4a, and still refuses its untrustworthy video", () => {
+    const failed = reduceWalk(withStills(started, 1), {
+      type: "failed",
+      reason: "endWalk failed to finalize walk.mp4",
+      audioUri: "file:///docs/walkthroughs/walk-1/narration.m4a",
+    });
+    const queued = toQueuedWalk("walk-1", failed, META, 9999)!;
+    expect(queued).not.toBeNull();
+    const audio = queued.artifacts.find((a) => a.kind === "audio")!;
+    expect(audio.uri).toBe("file:///docs/walkthroughs/walk-1/narration.m4a");
+    expect(queued.artifacts.some((a) => a.kind === "video")).toBe(false);
+    expect(queued.artifacts.filter((a) => a.kind === "photo")).toHaveLength(1);
+  });
+
   it("returns null for a terminal walk that captured nothing at all", () => {
     // Fails immediately from "starting", before "started" ever lands a videoUri.
     const neverStarted = reduceWalk(initialWalk("deal-1", null), { type: "starting" });

@@ -86,20 +86,46 @@ function captureCensusFrom(census: WalkEnded["census"]): WalkCaptureCensusInput 
     secondsSinceLastFrameArrived: census.secondsSinceLastFrameArrived,
   };
   if (!Object.values(video).every((value) => typeof value === "number")) return null;
-  const { audio } = census;
-  return {
-    video,
-    audio: {
-      buffersReceived: audio.buffersReceived,
-      buffersAppended: audio.buffersAppended,
-      buffersDropped: audio.buffersDropped,
-      longestDropRun: audio.longestDropRun,
-      secondsAppended: audio.secondsAppended,
-      engineRestarts: audio.engineRestarts,
-      standaloneSecondsRecorded: audio.standaloneSecondsRecorded,
-      events: Array.isArray(audio.events) ? audio.events : [],
-    },
+  const audio = {
+    buffersReceived: census.audio.buffersReceived,
+    buffersAppended: census.audio.buffersAppended,
+    buffersDropped: census.audio.buffersDropped,
+    longestDropRun: census.audio.longestDropRun,
+    secondsAppended: census.audio.secondsAppended,
+    engineRestarts: census.audio.engineRestarts,
+    standaloneSecondsRecorded: census.audio.standaloneSecondsRecorded,
   };
+  // The SAME check the video half gets, and for a reason stronger than symmetry: the `audio` object
+  // grows a counter at a time, so an intermediate native build can supply the object and omit the
+  // newest field. `undefined` disappears entirely in `JSON.stringify`, so the manifest would carry a
+  // census the server then refuses — after every artifact has been uploaded — and the completion
+  // retries to terminal, taking the walk with it. A record with a hole in it is not a record.
+  if (!Object.values(audio).every((value) => typeof value === "number")) return null;
+  // Events are a list of `{ atMs, kind }` and the server checks each retained one; a census whose
+  // events are not even an array is not the pinned shape.
+  if (!Array.isArray(census.audio.events)) return null;
+  return { video, audio: { ...audio, events: census.audio.events } };
+}
+
+/**
+ * The narration file native attached to a REJECTED `endWalk`, or null.
+ *
+ * A finalize failure rejects, because walk.mp4 cannot be trusted — but narration.m4a is a different
+ * file, closed before finalize ran and checked for bytes on disk before native would name it. It
+ * arrives on the rejection's `userInfo` (`WalkthroughRecorder.swift`'s `rejection(_:carrying:)`;
+ * React Native copies an NSError's userInfo onto the JS error). Without reading it the walk is filed
+ * with its stills alone and `finishWalkCleanup` deletes the whole directory afterwards, taking the
+ * one recording that survived the failure.
+ *
+ * Defensive at every step: a dev client older than this sends no `userInfo`, and nothing about a
+ * rejection guarantees its shape.
+ */
+function narrationUriFromRejection(err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const info = (err as { userInfo?: unknown }).userInfo;
+  if (typeof info !== "object" || info === null) return null;
+  const uri = (info as { audioUri?: unknown }).audioUri;
+  return typeof uri === "string" && uri.length > 0 ? uri : null;
 }
 
 /** `walk.mp4`'s size on disk right now, or null when it cannot be read for ANY reason — no path yet,
@@ -617,7 +643,11 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
     } catch (err) {
       const message = errorMessage(err);
       setError(message);
-      dispatch({ type: "failed", reason: message });
+      // The walk is failed — walk.mp4 did not finalize — but narration.m4a is a separate file that
+      // native closed before finalize ran, and it names it on the rejection when it has one. Filed
+      // as the failed walk's audio artifact, because the alternative is not "the office waits for
+      // it": the stills are queued, and cleanup then deletes the directory it was sitting in.
+      dispatch({ type: "failed", reason: message, audioUri: narrationUriFromRejection(err) });
     } finally {
       // Released whichever way the call settled. A rejected endWalk leaves the walk terminal-failed,
       // and the estimator's next action is a NEW walk on this same mounted screen — a guard left

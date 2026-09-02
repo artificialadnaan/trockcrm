@@ -843,4 +843,24 @@ describe("reduceWalk finalized: narration and the capture census", () => {
     const done = reduceWalk(ended, { type: "finalized", audioUri: null, captureCensus: CENSUS });
     expect(done.captureCensus?.video.secondsSinceLastFrameArrived).toBe(0.03);
   });
+
+  // A finalize failure rejects because walk.mp4 cannot be trusted; narration.m4a is a different file,
+  // closed before finalize ran. Native names it on the rejection, and it has to survive into the
+  // walk — a failed walk filed with its stills alone has its directory deleted afterwards.
+  it("keeps the narration native named on a rejected endWalk", () => {
+    const failed = reduceWalk(ended, {
+      type: "failed",
+      reason: "endWalk failed to finalize walk.mp4",
+      audioUri: "file:///docs/walkthroughs/w1/narration.m4a",
+    });
+    expect(failed.state).toBe("failed");
+    expect(failed.audioUri).toBe("file:///docs/walkthroughs/w1/narration.m4a");
+  });
+
+  it("invents no narration for a failure that named none", () => {
+    expect(reduceWalk(ended, { type: "failed", reason: "glasses disconnected" }).audioUri).toBeNull();
+    expect(
+      reduceWalk(ended, { type: "failed", reason: "glasses disconnected", audioUri: null }).audioUri,
+    ).toBeNull();
+  });
 });

@@ -1857,6 +1857,74 @@ describe("useWalk narration and microphone events", () => {
     expect(result.current.walk.audioCoverage).not.toBeNull();
   });
 
+  // The finalize failure this recorder can produce with a perfectly good narration beside it. Native
+  // rejects (walk.mp4 is not to be trusted) and names the closed narration on the rejection's
+  // userInfo; without reading it the walk is filed with its stills alone and the directory holding
+  // narration.m4a is deleted by cleanup a moment later.
+  it("keeps the narration native named on a rejected endWalk, and still fails the walk", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    const rejection = Object.assign(new Error("endWalk failed to finalize walk.mp4"), {
+      code: "walk_video_finalize_failed",
+      userInfo: { audioUri: "file:///docs/walkthroughs/w1/narration.m4a" },
+    });
+    mockEndWalk.mockRejectedValue(rejection);
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("failed");
+    expect(result.current.walk.audioUri).toBe("file:///docs/walkthroughs/w1/narration.m4a");
+  });
+
+  it("invents no narration when the rejection carries none", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockRejectedValue(new Error("endWalk failed to finalize walk.mp4"));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("failed");
+    expect(result.current.walk.audioUri).toBeNull();
+  });
+
+  // The `audio` object grows a counter at a time, so an intermediate build can send the object and
+  // omit the newest field. `undefined` vanishes in JSON.stringify, and the server refuses a census
+  // missing a counter — after every artifact has already been uploaded.
+  it("files no census when the audio object is missing one of its counters", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    const partialAudio: Partial<typeof AUDIO> = { ...AUDIO };
+    delete partialAudio.engineRestarts;
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      audioUri: "file:///docs/walkthroughs/w1/narration.m4a",
+      stills: 0,
+      census: { ...HEALTHY_VIDEO, audioSecondsAppended: AUDIO.secondsAppended, audio: partialAudio },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.captureCensus).toBeNull();
+    // The verdict inputs are read independently of the census gate, as they always were.
+    expect(result.current.walk.audioCoverage).not.toBeNull();
+  });
+
   // THE 2026-09-02 WALK, end to end through the hook: the engine stopped at 47.8s of a 274s walk,
   // so the muxed track is short and narration.m4a is not. The verdict must follow the file that
   // holds the narration, or the completion screen sends the estimator back to a site that does not

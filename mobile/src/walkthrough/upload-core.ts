@@ -182,8 +182,13 @@ export type WalkQueueMeta = {
  * filed either. So a video artifact is only ever built from `walk.state === "complete"`, the ONE
  * state the reducer only reaches via a `finalized` event — i.e., a file native itself confirmed.
  *
- * `audioUri` needs no equivalent guard: the reducer only ever sets it from `finalized` too (never
- * from `failed`), so it is null on every failed walk. On a completed walk it is `narration.m4a` —
+ * `audioUri` needs no equivalent guard, but not because a failed walk cannot have one. The reducer
+ * sets it from `finalized`, and from `failed` ONLY when native named the file on the rejection
+ * itself — which it does only after `WalkAudioCapture.stop()` closed narration.m4a and
+ * `narrationFileUrl()` confirmed bytes on disk. So unlike `videoUri`, a failed walk's `audioUri` is
+ * a file native finished, and queueing it is the point: a finalize failure that is filed with its
+ * stills alone has its whole directory deleted by `finishWalkCleanup` a moment later. On a completed
+ * walk it is the same `narration.m4a` —
  * the phone microphone recorded by native independently of the video writer, so that an engine iOS
  * stopped mid-walk (the 2026-09-02 failure: 3.8 minutes of narration lost across two walks) costs
  * the muxed track and not the narration. Queued as kind "audio", which the server forwards to TROCK

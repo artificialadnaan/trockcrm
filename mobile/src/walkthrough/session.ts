@@ -328,7 +328,16 @@ export type WalkEvent =
   | { type: "audioLevel"; rms: number }
   /** Native's watchdog found the microphone silent — see `WalkAudioStall` for the fields. */
   | { type: "audioStalled"; attempt: number; restarted: boolean; sinceMs: number }
-  | { type: "failed"; reason: string }
+  /**
+   * `audioUri` is the ONE file a failed walk may still carry, and only when native named it on the
+   * rejection itself (`err.userInfo.audioUri` — WalkthroughRecorder.swift's `rejection(_:carrying:)`).
+   * A finalize failure rejects because walk.mp4 cannot be trusted; narration.m4a is a different file,
+   * closed by `WalkAudioCapture.stop()` before finalize ever ran and checked for bytes on disk before
+   * native would name it. Without this the walk is filed with its stills, and `finishWalkCleanup`
+   * then deletes the whole directory — the narration with it, on the exact walk the standalone
+   * recorder exists for. Omitted means "no narration": a failed walk never invents one.
+   */
+  | { type: "failed"; reason: string; audioUri?: string | null }
   /**
    * Snaps the walk back to a fresh `idle` for (dealId, projectId), discarding whatever walk —
    * complete, failed, or otherwise — was here before. REFUSED, however, while the walk is ACTIVE
@@ -753,6 +762,13 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
     case "failed":
       // Everything captured so far is kept. A walk is a site visit that physically happened;
       // its stills cannot be re-taken from a desk, so a failure must never be a delete.
-      return { ...walk, state: "failed", error: event.reason };
+      return {
+        ...walk,
+        state: "failed",
+        error: event.reason,
+        // Only ever ADDS one. A failure cannot clear a narration file an earlier `finalized` already
+        // recorded, and cannot invent one native did not name — see the event's doc.
+        audioUri: event.audioUri ? event.audioUri : walk.audioUri,
+      };
   }
 }
