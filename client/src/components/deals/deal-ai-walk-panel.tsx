@@ -444,6 +444,9 @@ export function AiWalkCard({
   // yet — and gating the control on media already being present hid the refresh exactly when it was
   // the only way to discover that the pictures had since landed. This panel does not poll.
   const hasCitations = items.some((item) => item.evidence.length > 0);
+  // Computed once and read twice below (a condition and the text it guards), so the threshold can never
+  // be applied differently in the two places.
+  const narrationWarning = describeNarrationShortfall(walkthrough.narrationShortfallMs);
 
   return (
     <div className="rounded-lg border bg-background p-4">
@@ -503,10 +506,10 @@ export function AiWalkCard({
             `ready` with a short list needs this to explain why the list is short. Nothing here is
             recoverable by retrying — the audio was never captured — so it is a statement, not an error
             with a control. */}
-        {describeNarrationShortfall(walkthrough.narrationShortfallMs) ? (
+        {narrationWarning ? (
           <p className="mb-2 flex items-start gap-2 text-sm text-amber-700">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{describeNarrationShortfall(walkthrough.narrationShortfallMs)}</span>
+            <span>{narrationWarning}</span>
           </p>
         ) : null}
 
