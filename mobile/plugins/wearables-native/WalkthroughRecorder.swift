@@ -601,6 +601,20 @@ final class WalkthroughRecorder: RCTEventEmitter {
     sendEvent(withName: name, body: body)
   }
 
+  /// The census keys `WalkVideoWriter.finalize()` can still move after `endWalk` has read the
+  /// census once — every audio counter its final drain touches. Re-read from the writer after
+  /// finalize returns; see `endWalk`. The video counters cannot move there (no frame reaches the
+  /// writer once `frameToken` is nil) and `writerStatus` deliberately must not.
+  private static let audioCounterKeys = [
+    "audioBuffersReceived",
+    "audioBuffersAppended",
+    "audioBuffersDropped",
+    "audioSecondsAppended",
+    "longestAudioDropRun",
+    "audioBuffersRefusedForFormat",
+    "audioBuffersPending",
+  ]
+
   /// The `audio` object of the census `endWalk` resolves — the writer's per-buffer counters and the
   /// capture's restart record, folded into the one shape the server's `captureCensus` pins:
   /// `{ buffersReceived, buffersAppended, buffersDropped, longestDropRun, secondsAppended,
@@ -639,13 +653,27 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // `writer.status` reports the outcome of finishWriting rather than what happened during
       // the walk, which is the part in question.
       var census = videoWriter?.census() ?? [:]
-      census["audio"] = Self.audioCensus(from: census, capture: narration)
       // Resolved beside videoUri, and nil is an ordinary answer: the recorder could not start, or
       // recorded nothing. The walk is never failed over it — see `WalkAudioCapture.startNarration`.
       let audioUri: Any
       if let url = narration?.audioUri { audioUri = url.absoluteString } else { audioUri = NSNull() }
 
       let result = await videoWriter?.finalize()
+
+      // The AUDIO counters are read again here, and only those. `finalize()` is not a passive step
+      // for them: it drains the buffers the input refused during the last seconds of the walk and
+      // counts whatever it still will not take, so the numbers read above are stale by up to a full
+      // queue — 500 buffers, about ten seconds of narration. Narration that actually landed would be
+      // reported as a shortfall (session.ts's `assessAudioCoverage` compares seconds against a
+      // five-second tolerance) and the drops the drain could not place would be missing from the
+      // filed census entirely. Everything else stays as it was read above, where the writer's own
+      // status still described the walk rather than the outcome of finishWriting.
+      if let drained = videoWriter?.census() {
+        for key in Self.audioCounterKeys {
+          if let value = drained[key] { census[key] = value }
+        }
+      }
+      census["audio"] = Self.audioCensus(from: census, capture: narration)
 
       // Placed AFTER finalize and BEFORE teardown, deliberately. A still that lands here costs
       // nothing — deliverStill only writes a JPEG and emits an event, it never touches the writer —
@@ -677,9 +705,17 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // every path on the phone agrees to ignore, accumulating for the life of the install on a
       // device whose storage is the reason walks get deleted after upload in the first place.
       // Discarding a recording is the graver mistake, so this asks for a still — one photo of the
-      // site is a reason to keep everything — and only discards when the walk produced neither a
-      // finished video nor a single frame anyone could look at.
-      await teardown(finalized || stills > 0 ? .keep : .discard)
+      // site is a reason to keep everything — or a narration file, and only discards when the walk
+      // produced none of the three.
+      //
+      // narration.m4a counts for exactly the same reason a still does, and it is the finalize
+      // failure this whole class exists for: the muxed track is the thing that broke, and the
+      // standalone recording of the same twenty minutes is sitting closed in that directory.
+      // `WalkAudioCapture.stop()` ran at the top of this method, so the file's index is written, and
+      // upload.ts's recovery scan asks an .m4a the same moov question it asks walk.mp4 and offers
+      // the walk on the strength of either — but only while the directory still exists.
+      let narrationKept = narration?.audioUri != nil
+      await teardown(finalized || stills > 0 || narrationKept ? .keep : .discard)
 
       switch result {
       case .success(let url):
@@ -704,9 +740,9 @@ final class WalkthroughRecorder: RCTEventEmitter {
   /// deletes a finished site visit.
   private enum WalkDirectoryDisposition {
     /// A walk that produced nothing anyone can look at: a `startWalk` that failed, or an `endWalk`
-    /// whose finalize failed without a single still on disk. Nothing in the directory is a
-    /// recording — at most a `walk.mp4` the writer never finished — and leaving it is not merely
-    /// untidy. At login, `upload.ts`'s `findRecoverableWalks` scans `Documents/walkthroughs/` for
+    /// whose finalize failed with neither a still nor a narration file on disk. Nothing in the
+    /// directory is a recording — at most a `walk.mp4` the writer never finished — and leaving it is
+    /// not merely untidy. At login, `upload.ts`'s `findRecoverableWalks` scans `Documents/walkthroughs/` for
     /// directories with no manifest entry; it refuses an unfinalized `walk.mp4` and skips a
     /// directory left holding only that, so nothing on the phone will ever open one of these again.
     /// A failed start additionally reaches this on the one path where the app has ALREADY told the
@@ -1443,8 +1479,11 @@ private final class WalkAudioCapture: @unchecked Sendable {
       engine.inputNode.removeTap(onBus: 0)
       engine.stop()
       if let recorder {
-        // Read BEFORE stop(): `currentTime` is zero once the recorder has stopped.
-        narrationSeconds = recorder.currentTime
+        // Read BEFORE stop(): `currentTime` is zero once the recorder has stopped. It reads zero
+        // while the recorder is merely PAUSED, too — which is where an interruption that is still
+        // in progress when the walk ends leaves it — so this takes the high-water mark rather than
+        // the instantaneous value. See `sampleNarrationSeconds`.
+        sampleNarrationSeconds()
         recorder.stop()
       }
       recorder = nil
@@ -1566,6 +1605,21 @@ private final class WalkAudioCapture: @unchecked Sendable {
     return true
   }
 
+  /// How long narration.m4a runs, kept as a HIGH-WATER MARK sampled while the recorder is actually
+  /// recording. Runs on `audioQueue`.
+  ///
+  /// `AVAudioRecorder.currentTime` is documented to read zero whenever the recorder is not
+  /// recording, and "not recording" includes paused — which is exactly where an interruption still
+  /// in progress at `endWalk`, or a media-services reset, leaves it. Read only at `stop()`, those
+  /// walks reported zero seconds of narration, and `narrationFileUrl()` reads zero seconds as
+  /// "recorded nothing" and DISCARDS the file: the walk that most needed the standalone recording
+  /// would have been the one to throw it away. Sampled once a second by the watchdog instead, so
+  /// the number survives the recorder going quiet whatever stopped it.
+  private func sampleNarrationSeconds() {
+    guard let recorder, recorder.isRecording else { return }
+    narrationSeconds = max(narrationSeconds, recorder.currentTime)
+  }
+
   /// `AVAudioRecorder` pauses across an interruption and needs `record()` again to continue —
   /// into the same file, appending. A recorder that refuses is noted, never replaced: a new one at
   /// the same URL would truncate everything recorded so far.
@@ -1657,10 +1711,24 @@ private final class WalkAudioCapture: @unchecked Sendable {
     guard running else { return }
     note("mediaServicesReset")
     // Every audio object is invalid after a reset, the engine included — Apple's instruction is to
-    // dispose and recreate. The recorder is the one exception, deliberately: recreating it at the
-    // same URL truncates narration.m4a, so it is asked to carry on and its answer is recorded.
+    // dispose and recreate. The engine is rebuilt below.
+    //
+    // THE RECORDER IS CLOSED RATHER THAN RESUMED, and it cannot be replaced. A new AVAudioRecorder
+    // at the same URL truncates narration.m4a to nothing, and a second file has nowhere to go: a
+    // walk files exactly one audio artifact (upload-core.ts's `toQueuedWalk`). Calling `record()` on
+    // the recorder the reset invalidated is not the third option it looks like — it is an object
+    // the media server no longer knows, which may answer yes and write nothing, and whose `stop()`
+    // may never write the m4a's index, leaving an unplayable file where the narration was. So what
+    // was recorded up to the reset is closed HERE, while closing it still means something, and the
+    // narration from the reset on rides the muxed track the rebuilt engine feeds. The census says
+    // which walk this was.
+    if let recorder {
+      sampleNarrationSeconds()
+      recorder.stop()
+      self.recorder = nil
+      note("narrationClosedAtReset")
+    }
     _ = restartEngine(reason: "mediaServicesReset", rebuild: true)
-    resumeNarration(reason: "mediaServicesReset")
   }
 
   // MARK: - Watchdog
@@ -1679,6 +1747,9 @@ private final class WalkAudioCapture: @unchecked Sendable {
   /// restarts are still armed, and a buffer arriving from any of them resets all of this.
   private func watchdogTick() {
     guard running else { return }
+    // Once a second, whether or not anything is wrong — this is the only place narration.m4a's
+    // length is observed while it can still be read. See `sampleNarrationSeconds`.
+    sampleNarrationSeconds()
     let now = Date()
     let since = now.timeIntervalSince(lastBufferAt ?? startedAt)
     guard since > Self.stallThreshold else { return }

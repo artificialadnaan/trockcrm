@@ -510,6 +510,52 @@ describe("assessAudioCoverage", () => {
     expect(coverage.audioMs).toBe(0);
     expect(coverage.shortfallMs).toBe(600_000);
   });
+
+  // THE WALK THIS WHOLE MECHANISM EXISTS FOR. 2026-09-02: the muxed track ended at 47.8s of a 274s
+  // walk because iOS stopped the engine — but narration.m4a, which does not depend on that engine,
+  // ran the whole way. Reading only the muxed counter would put "Narration is short" on the
+  // completion screen and "(audio cut short)" in the title of a walk whose narration is intact and
+  // already uploading, and send the estimator back to a site that does not need re-walking.
+  it("counts the standalone narration when the muxed track is the half that died", () => {
+    const coverage = assessAudioCoverage(274_000, {
+      audioSecondsAppended: 47.8,
+      standaloneSecondsRecorded: 273.9,
+    });
+    expect(coverage.audioMs).toBe(273_900);
+    expect(coverage.shortfallMs).toBe(100);
+    expect(isAudioTruncated(coverage)).toBe(false);
+  });
+
+  // The LARGER, never the sum: they are two recordings of the same minutes. Summing them would
+  // report a walk as covered twice over and mask a real shortfall — 20s of muxed audio plus 20s of
+  // narration is 20s of narration, not 40.
+  it("takes the larger of the two recordings rather than adding them", () => {
+    const coverage = assessAudioCoverage(600_000, {
+      audioSecondsAppended: 20,
+      standaloneSecondsRecorded: 20,
+    });
+    expect(coverage.audioMs).toBe(20_000);
+    expect(coverage.shortfallMs).toBe(580_000);
+    expect(isAudioTruncated(coverage)).toBe(true);
+  });
+
+  // The other direction, which is the ordinary one: the standalone recorder never started, or left
+  // nothing worth uploading, so useWalk.ts withholds the counter entirely. The muxed track is then
+  // the only measurement there is, and it must still be able to raise the warning.
+  it("falls back to the muxed track when no narration file is being filed", () => {
+    const coverage = assessAudioCoverage(600_000, { audioSecondsAppended: 12 });
+    expect(coverage.audioMs).toBe(12_000);
+    expect(isAudioTruncated(coverage)).toBe(true);
+  });
+
+  it("ignores a standalone counter that is not a usable number", () => {
+    const coverage = assessAudioCoverage(600_000, {
+      audioSecondsAppended: 599,
+      standaloneSecondsRecorded: Number.NaN,
+    });
+    expect(coverage.audioMs).toBe(599_000);
+    expect(coverage.shortfallMs).toBe(1_000);
+  });
 });
 
 describe("isAudioTruncated", () => {
@@ -772,5 +818,29 @@ describe("reduceWalk finalized: narration and the capture census", () => {
     expect(
       reduceWalk(ended, { type: "finalized", audioUri: null, captureCensus: null }).captureCensus,
     ).toBeNull();
+  });
+
+  // `-1` is native's sentinel for "not one frame ever arrived", and it is the only value in the
+  // whole census that is not a measurement. The completion contract pins every counter as a
+  // NON-NEGATIVE number and refuses the request with a 400 otherwise — which would strand a walk
+  // whose bytes are already in object storage, since a completion that cannot succeed goes terminal
+  // and takes the video and every still with it. Translated the way assessVideoCoverage reads it:
+  // no frame ever arrived means the whole walk was quiet.
+  it("translates the no-frames sentinel into the walk's own length before filing it", () => {
+    const done = reduceWalk(ended, {
+      type: "finalized",
+      audioUri: null,
+      captureCensus: {
+        ...CENSUS,
+        video: { ...CENSUS.video, framesReceived: 0, framesAppended: 0, secondsSinceLastFrameArrived: -1 },
+      },
+    });
+    expect(done.captureCensus?.walkMs).toBe(20_000);
+    expect(done.captureCensus?.video.secondsSinceLastFrameArrived).toBe(20);
+  });
+
+  it("leaves a real quiet-tail measurement exactly as native reported it", () => {
+    const done = reduceWalk(ended, { type: "finalized", audioUri: null, captureCensus: CENSUS });
+    expect(done.captureCensus?.video.secondsSinceLastFrameArrived).toBe(0.03);
   });
 });

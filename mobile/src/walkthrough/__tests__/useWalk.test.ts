@@ -1856,4 +1856,68 @@ describe("useWalk narration and microphone events", () => {
     // The verdict input that WAS reported is still read — the census gate is separate from it.
     expect(result.current.walk.audioCoverage).not.toBeNull();
   });
+
+  // THE 2026-09-02 WALK, end to end through the hook: the engine stopped at 47.8s of a 274s walk,
+  // so the muxed track is short and narration.m4a is not. The verdict must follow the file that
+  // holds the narration, or the completion screen sends the estimator back to a site that does not
+  // need re-walking and the title says "(audio cut short)" about a walk that is not.
+  it("clears the narration warning when the standalone file covers the walk the muxed track lost", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      audioUri: "file:///docs/walkthroughs/w1/narration.m4a",
+      stills: 0,
+      census: {
+        ...HEALTHY_VIDEO,
+        audioSecondsAppended: 47.8,
+        audio: { ...AUDIO, secondsAppended: 47.8, standaloneSecondsRecorded: 273.9 },
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(274_000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.audioCoverage!.audioMs).toBe(273_900);
+    expect(isAudioTruncated(result.current.walk.audioCoverage)).toBe(false);
+    clock.restore();
+  });
+
+  // The counter and the FILE are two different facts. Native reports seconds it recorded even when
+  // `narrationFileUrl()` then refuses the file (nothing on disk), and a walk that will upload no
+  // narration must not have its warning talked away by seconds nobody will ever hear.
+  it("ignores the standalone seconds when native produced no narration file to upload", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      audioUri: null,
+      stills: 0,
+      census: {
+        ...HEALTHY_VIDEO,
+        audioSecondsAppended: 47.8,
+        audio: { ...AUDIO, secondsAppended: 47.8, standaloneSecondsRecorded: 273.9 },
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(274_000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.audioUri).toBeNull();
+    expect(result.current.walk.audioCoverage!.audioMs).toBe(47_800);
+    expect(isAudioTruncated(result.current.walk.audioCoverage)).toBe(true);
+    clock.restore();
+  });
 });

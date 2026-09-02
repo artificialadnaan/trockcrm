@@ -565,9 +565,14 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       // visit. session.ts's reducer owns the verdict (it is the only place the wall clock lives)
       // and records it as `walk.videoCoverage`; the walk still completes, because a short video is
       // still evidence and the stills were never in question.
+
+      // Read once and reused below: the narration file is both an artifact and the reason the
+      // coverage verdict may count the standalone recording at all.
+      const audioUri =
+        typeof result.audioUri === "string" && result.audioUri.length > 0 ? result.audioUri : null;
       dispatch({
         type: "finalized",
-        audioUri: typeof result.audioUri === "string" && result.audioUri.length > 0 ? result.audioUri : null,
+        audioUri,
         videoUri: result.videoUri,
         // The whole record, for the server, gated on the pinned shape being complete — see
         // captureCensusFrom for why a partial census is filed as none rather than as zeros.
@@ -589,9 +594,24 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
         // a `?? 0` would report NO NARRATION for every walk recorded by that build — zero is the
         // worst value in this range, the exact inverse of the video sentinel's `-1` reading as the
         // healthiest. Unmeasured must stay null, which session.ts then leaves as "unknown".
+        //
+        // `standaloneSecondsRecorded` rides along under two conditions, both of them the same
+        // typeof trap read twice: native has to have reported it (the `audio` object postdates the
+        // rest of the census), and native has to have produced a FILE. `audioUri` is null exactly
+        // when the recorder left nothing worth uploading, and seconds nobody will ever hear must
+        // not be what talks the verdict out of a warning. When both hold, session.ts's
+        // `assessAudioCoverage` takes the larger of the two recordings — which is the whole point:
+        // a walk whose muxed track died at 47s and whose narration.m4a ran the full 274s is not a
+        // walk anyone needs to repeat.
         audioCensus:
           result.census && typeof result.census.audioSecondsAppended === "number"
-            ? { audioSecondsAppended: result.census.audioSecondsAppended }
+            ? {
+                audioSecondsAppended: result.census.audioSecondsAppended,
+                ...(audioUri !== null &&
+                typeof result.census.audio?.standaloneSecondsRecorded === "number"
+                  ? { standaloneSecondsRecorded: result.census.audio.standaloneSecondsRecorded }
+                  : {}),
+              }
             : null,
       });
     } catch (err) {

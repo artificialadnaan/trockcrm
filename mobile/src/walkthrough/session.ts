@@ -99,6 +99,17 @@ export type WalkAudioCensus = {
    * that distinction is enforced, because that is where the raw native payload is still visible.
    */
   audioSecondsAppended: number;
+  /**
+   * Seconds `narration.m4a` holds — the standalone recording `WalkAudioCapture` keeps independently
+   * of the writer, and the walk this whole mechanism exists for is the one where the muxed track
+   * above is short and this one is not.
+   *
+   * Optional, and absent means "no narration file is being filed", not "zero seconds": a dev client
+   * older than the recorder reports nothing here, and useWalk.ts deliberately withholds it when
+   * native produced no `audioUri` — a recording nobody will ever hear must not talk the verdict out
+   * of a warning.
+   */
+  standaloneSecondsRecorded?: number;
 };
 
 /**
@@ -137,6 +148,39 @@ export type WalkCaptureCensus = {
 /** What the `finalized` event carries for the census: everything but the wall clock, which only
  *  this reducer holds. */
 export type WalkCaptureCensusInput = Omit<WalkCaptureCensus, "walkMs">;
+
+/**
+ * The census as the SERVER will accept it: native's numbers, this reducer's wall clock, and the one
+ * value in the whole record that is not a measurement translated into one.
+ *
+ * `secondsSinceLastFrameArrived` is `-1` when not a single frame ever arrived — a sentinel, not a
+ * duration (see `WalkVideoCensus`). Every counter the completion contract pins must be a
+ * NON-NEGATIVE finite number, and the server refuses the whole completion with a 400 otherwise. That
+ * is not a lost diagnostic: the artifacts' bytes are already in object storage by the time the
+ * completion call runs, and a completion that cannot succeed retries a fixed number of times and
+ * then goes terminal (upload-core.ts's `isCompletionTerminal`) — so a census the server will not
+ * take strands the walk's video and every still with it. A walk with no video at all is not a
+ * hypothetical here; it is the near miss of the very failure this recorder keeps having.
+ *
+ * Translated the way `assessVideoCoverage` already reads the sentinel — no frame ever arrived means
+ * the whole walk was quiet — which is also the value the server's own contract describes as the
+ * "video died and never came back" signature. `walkMs` is clamped for the same reason: the wall
+ * clock is a subtraction of two device timestamps, and a clock that steps backwards mid-walk must
+ * not be what refuses the walk.
+ */
+function filedCaptureCensus(walkMs: number, census: WalkCaptureCensusInput): WalkCaptureCensus {
+  const walk = Math.max(0, walkMs);
+  const quiet = census.video.secondsSinceLastFrameArrived;
+  return {
+    walkMs: walk,
+    video: {
+      ...census.video,
+      secondsSinceLastFrameArrived:
+        Number.isFinite(quiet) && quiet >= 0 ? quiet : walk / 1000,
+    },
+    audio: census.audio,
+  };
+}
 
 /**
  * Native's most recent `walkthrough:audioStalled` report — the microphone has delivered nothing
@@ -412,24 +456,42 @@ export const WALK_AUDIO_SHORTFALL_TOLERANCE_MS = 5_000;
 /**
  * Turn one audio census into a coverage estimate against the walk's own wall clock.
  *
- * Direct, not inferred: `audioSecondsAppended` is what native actually wrote, so the shortfall is
- * simply what the walk clock has and the track does not — and unlike the video estimate, it counts
- * gaps wherever they fall rather than assuming they are all at the end. Two clamps:
+ * Direct, not inferred: the counters are what native actually wrote, so the shortfall is simply what
+ * the walk clock has and the recordings do not — and unlike the video estimate, it counts gaps
+ * wherever they fall rather than assuming they are all at the end.
+ *
+ * THE LARGER OF THE TWO RECORDINGS, never their sum. The muxed track and narration.m4a are two
+ * recordings of the SAME minutes, and the question this verdict answers is whether the narration
+ * exists anywhere the office can read it — not how many copies of it there are. Taking the sum would
+ * declare a walk covered twice over; taking only the muxed track is the bug this whole change
+ * exists to fix, and would put "Narration is short" and an "(audio cut short)" title on exactly the
+ * walk the standalone recorder saved. The server computes its shortfall the same way
+ * (shared's `glassesWalkNarrationShortfallMs` takes the same max), so the completion screen and the
+ * filed row cannot disagree about one walk.
+ *
+ * Two clamps:
  *
  *   - Audio is clamped to `walkMs`, because the tap outlives the walk clock at both ends (see
  *     WALK_AUDIO_SHORTFALL_TOLERANCE_MS) and a walk must never report negative shortfall.
- *   - A non-finite counter is treated as ZERO coverage. useWalk.ts already refuses to build a census
- *     out of a missing counter, so this is a backstop — but the failure it prevents is quiet:
- *     `undefined * 1000` is NaN, NaN compares false against every threshold, and the warning would
- *     disappear rather than misfire.
+ *   - A non-finite or absent counter is treated as ZERO coverage. useWalk.ts already refuses to
+ *     build a census out of a missing counter, so this is a backstop — but the failure it prevents
+ *     is quiet: `undefined * 1000` is NaN, NaN compares false against every threshold, and the
+ *     warning would disappear rather than misfire.
  */
 export function assessAudioCoverage(walkMs: number, census: WalkAudioCensus): WalkAudioCoverage {
   const walk = Math.max(0, walkMs);
-  const appendedMs = Number.isFinite(census.audioSecondsAppended)
-    ? Math.max(0, census.audioSecondsAppended * 1000)
-    : 0;
-  const audioMs = Math.min(walk, Math.round(appendedMs));
+  const recordedSeconds = Math.max(
+    finiteSeconds(census.audioSecondsAppended),
+    finiteSeconds(census.standaloneSecondsRecorded),
+  );
+  const audioMs = Math.min(walk, Math.round(recordedSeconds * 1000));
   return { walkMs: walk, audioMs, shortfallMs: walk - audioMs };
+}
+
+/** A seconds counter as a non-negative finite number — anything else (absent, NaN, Infinity,
+ *  negative) is zero, which is the "unmeasured is not narration" rule the null census follows. */
+function finiteSeconds(seconds: number | undefined): number {
+  return typeof seconds === "number" && Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
 }
 
 /**
@@ -664,7 +726,7 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
         // verdicts below to the millisecond. Same rule as the verdicts for a walk with no clock.
         captureCensus:
           durationMs !== null && event.captureCensus
-            ? { walkMs: durationMs, video: event.captureCensus.video, audio: event.captureCensus.audio }
+            ? filedCaptureCensus(durationMs, event.captureCensus)
             : null,
         // Only overwrite when the event actually carries one, so a caller that omits it
         // keeps whatever `started` recorded rather than having it silently nulled.
