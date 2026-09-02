@@ -1714,9 +1714,19 @@ async function recordGlassesWalkthrough(
       and(eq(glassesWalkthroughs.dealId, input.dealId), eq(glassesWalkthroughs.walkId, input.walkId))
     )
     .limit(1);
-  // `?? input.jobType` covers only the unreachable case of the row vanishing between the two statements
-  // inside one transaction; it is a fallback, not a merge rule.
-  return { censusLanded, jobType: existing?.jobType ?? input.jobType };
+  // "THE ROW SAYS NULL" AND "THERE IS NO ROW" ARE DIFFERENT ANSWERS, and `?? input.jobType` merged them.
+  //
+  // Every walk filed before migration 0243 legitimately holds NULL, and that is not an absence waiting to
+  // be filled — it is what the migration deliberately declines to backfill, because the deal's project
+  // type TODAY is not evidence of what it was on the day of the walk. Reading that NULL as "nobody has
+  // answered yet" would let a replacement forward grade a historical walk under the deal's current
+  // catalog, quietly re-categorising a scope somebody may already have reviewed, while the row it is
+  // filed under still says NULL.
+  //
+  // So the row's answer is taken whatever it is. The `input` fallback is only for the row vanishing
+  // between these two statements inside one transaction, which cannot happen.
+  if (existing) return { censusLanded, jobType: existing.jobType };
+  return { censusLanded, jobType: input.jobType };
 }
 
 /**

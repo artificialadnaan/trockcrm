@@ -756,6 +756,27 @@ describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () 
     expect((replacement[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
   });
 
+  it("REGRESSION: a replacement forward keeps a PRE-0243 walk's NULL rather than inferring one", async () => {
+    // "The row says NULL" and "there is no row" are different answers. Every walk filed before the column
+    // existed holds NULL, and migration 0243 deliberately declines to backfill it — the deal's project
+    // type today is not evidence of what it was on the day of the walk. Read as "nobody has answered
+    // yet", that NULL would let a replacement forward re-grade a historical walk under the deal's current
+    // catalog, quietly re-categorising a scope somebody may already have reviewed, while the row it is
+    // filed under still says NULL.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBeNull();
+
+    const replacement = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect((replacement[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
   it("leaves the job type NULL when there is nothing to record", async () => {
     // The shape every historical row has. NULL reaches the forward job, which omits the field and lets
     // TROCK Scope apply its own default — so a re-filed legacy walk behaves exactly as it did.
