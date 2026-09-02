@@ -1437,6 +1437,13 @@ private final class WalkAudioCapture: @unchecked Sendable {
   private var watchdog: DispatchSourceTimer?
   private var running = false
   private var report: Report?
+  /// When the engine actually started, monotonic. The watchdog measures silence from HERE, not from
+  /// `startedAt`: this object is built a few AVAssetWriter calls BEFORE `start(format:onBuffer:)` (the
+  /// writer's audio input is built from the format this object reports), and a slow setup would
+  /// otherwise read as a stall on the very first tick and restart an engine that had just started —
+  /// a tap reinstall, a census entry and a red banner, all for nothing. `startedAt` stays the
+  /// census's origin, which is the walk's, not the engine's.
+  private var runningSince: TimeInterval?
   private var lastBufferAt: TimeInterval?
   private var lastRestartAt: TimeInterval?
   private var stalled = false
@@ -1450,6 +1457,20 @@ private final class WalkAudioCapture: @unchecked Sendable {
   init(narrationUrl: URL, onEvent: @escaping (String, [String: Any]) -> Void) {
     self.narrationUrl = narrationUrl
     self.onEvent = onEvent
+  }
+
+  /// A safety net, not a path. Every exit from `startWalk`/`endWalk` reaches `teardown()`, which
+  /// calls `stop()` before dropping the reference — but the cost of being wrong about that is not a
+  /// leak. `DispatchSource` traps on the RELEASE of a resumed timer ("BUG IN CLIENT OF LIBDISPATCH"),
+  /// so an instance that ever reached `start()` and was then dropped without `stop()` would take the
+  /// app down mid-walk; and block-based notification observers are retained by the center until
+  /// their token is removed, so they would outlive the object that stopped caring.
+  ///
+  /// No `audioQueue` hop: `deinit` runs when the last reference is gone, so there is nothing left to
+  /// race with, and hopping onto a queue from here would resurrect `self` inside its own closure.
+  deinit {
+    watchdog?.cancel()
+    for observer in observers { NotificationCenter.default.removeObserver(observer) }
   }
 
   /// The input node's format as it stands right now. `startWalk` builds the writer's audio input
@@ -1504,6 +1525,7 @@ private final class WalkAudioCapture: @unchecked Sendable {
         throw error
       }
       running = true
+      runningSince = Self.monotonicNow()
       installObservers()
       startWatchdog()
     }
@@ -1797,7 +1819,7 @@ private final class WalkAudioCapture: @unchecked Sendable {
     // length is observed while it can still be read. See `sampleNarrationSeconds`.
     sampleNarrationSeconds()
     let now = Self.monotonicNow()
-    let since = now - (lastBufferAt ?? startedAt)
+    let since = now - (lastBufferAt ?? runningSince ?? startedAt)
     guard since > Self.stallThreshold else { return }
     stalled = true
     let sinceMs = Int(since * 1000)

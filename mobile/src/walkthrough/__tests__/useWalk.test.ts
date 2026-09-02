@@ -976,6 +976,27 @@ describe("useWalk unmount while recording", () => {
     expect(mockEndWalk).toHaveBeenCalledTimes(1);
   });
 
+  // Every native subscription this hook opens has to be closed on the way out, and the two
+  // microphone ones are the newest. A level or a stall arriving after the hook is gone would
+  // dispatch into a dead reducer — harmless today, but the listener holding the closure alive is
+  // what makes a hidden Tabs.Screen leak one per mount.
+  it("unsubscribes from every native event on unmount, microphone included", async () => {
+    const { unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+    expect(audioLevelListener).not.toBeNull();
+    expect(audioStalledListener).not.toBeNull();
+    expect(stillListener).not.toBeNull();
+    expect(errorListener).not.toBeNull();
+
+    await act(async () => {
+      unmount();
+    });
+
+    expect(audioLevelListener).toBeNull();
+    expect(audioStalledListener).toBeNull();
+    expect(stillListener).toBeNull();
+    expect(errorListener).toBeNull();
+  });
+
   it("does not touch native when the hook unmounts with no walk in flight", async () => {
     const { unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
     await act(async () => {
