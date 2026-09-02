@@ -390,6 +390,88 @@ describe("handleGlassesWalkthroughForward", () => {
       expect(beginBodyFor(calls, 1).capturedAtSource).toBe("manual");
     });
 
+    it("REGRESSION: does NOT declare a RECOVERED video's timestamp as the recording's start", async () => {
+      /**
+       * A walk recovered from a directory scan has no `startedAt` — mobile deliberately refuses to
+       * fabricate one — so the video's `capturedAtMs` falls back to the file's last-modified time
+       * (roughly when recording ENDED) or to the recovery moment. Declared as a start, that puts the
+       * footage AFTER every still it contains: a worse timeline than the upload-order one this change
+       * exists to replace, and one nobody looking at the panel could diagnose.
+       *
+       * The tell is that a live walk stamps the media artifacts and the walk itself from the same clock,
+       * so they agree exactly; a recovered one cannot. Disagreement therefore means "we do not have a
+       * start time", and the honest answer is silence.
+       */
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+      const stillAt = Date.parse(WALK_STARTED_AT) - 600_000;
+
+      await handleGlassesWalkthroughForward(
+        makePayload({
+          artifacts: [
+            // The video's mtime: after the walk's own recorded instant, not equal to it.
+            { ...makePayload().artifacts[0], capturedAtMs: Date.parse(WALK_STARTED_AT) + 1_800_000 },
+            {
+              fileId: "file-2",
+              idempotencyKey: "artifact-2",
+              kind: "photo",
+              r2Key: "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-2.jpg",
+              mimeType: "image/jpeg",
+              originalFilename: "still-001.jpg",
+              fileSizeBytes: 2048,
+              capturedAtMs: stillAt,
+            },
+          ],
+        }),
+        "office-1",
+        {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: "https://scope.example.com",
+          token: "shared-token",
+          downloadRange: makeDownloadRange(),
+        }
+      );
+
+      expect(beginBodyFor(calls, 0)).not.toHaveProperty("capturedAt");
+      // The STILL beside it is unaffected: a photo file's last-modified time IS when the photo was taken,
+      // so a recovered walk's stills keep the fix even when its video cannot have it.
+      expect(beginBodyFor(calls, 1).capturedAt).toBe(new Date(stillAt).toISOString());
+    });
+
+    it("does not declare a start for standalone audio whose timestamp disagrees with the walk", async () => {
+      // Same rule, same reason, on the artifact whose alignment depends on it most.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await handleGlassesWalkthroughForward(
+        makePayload({
+          artifacts: [
+            {
+              fileId: "file-2",
+              idempotencyKey: "artifact-2",
+              kind: "audio",
+              r2Key: "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-2.m4a",
+              mimeType: "audio/mp4",
+              originalFilename: "narration.m4a",
+              fileSizeBytes: 4096,
+              capturedAtMs: Date.parse(WALK_STARTED_AT) + 42,
+            },
+          ],
+        }),
+        "office-1",
+        {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: "https://scope.example.com",
+          token: "shared-token",
+          downloadRange: makeDownloadRange(),
+        }
+      );
+
+      expect(beginBodyFor(calls, 0)).not.toHaveProperty("capturedAt");
+    });
+
     it("sends NEITHER field when the artifact has no capture time", async () => {
       // A walk recovered from a directory scan reports null rather than inventing the recovery moment.
       // Absent, TROCK Scope falls back to upload_order — today's behaviour, which is the right one when
@@ -422,7 +504,22 @@ describe("handleGlassesWalkthroughForward", () => {
       const { fetchImpl, calls } = makeScopeFetch();
 
       await handleGlassesWalkthroughForward(
-        makePayload({ artifacts: [{ ...makePayload().artifacts[0], capturedAtMs: 1e300 }] }),
+        // A PHOTO, so the range guard is the only thing that can drop it: a media artifact would also be
+        // dropped by the walk-start check above, and the test would pass with this guard deleted.
+        makePayload({
+          artifacts: [
+            {
+              fileId: "file-1",
+              idempotencyKey: "artifact-1",
+              kind: "photo",
+              r2Key: "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-1.jpg",
+              mimeType: "image/jpeg",
+              originalFilename: "still-001.jpg",
+              fileSizeBytes: 1024,
+              capturedAtMs: 1e300,
+            },
+          ],
+        }),
         "office-1",
         {
           db,

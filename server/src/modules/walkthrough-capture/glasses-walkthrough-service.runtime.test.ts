@@ -732,6 +732,30 @@ describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () 
     expect((jobs[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
   });
 
+  it("REGRESSION: a REPLACEMENT forward carries the job type on the ROW, not the retry's own", async () => {
+    // The row's job type belongs to the first completion and nothing rewrites it. A re-completion,
+    // however, rebuilds the forward payload from scratch — so taking that payload's job type from the
+    // retry's input let the two disagree the moment the deal's project type was corrected while the bytes
+    // were still draining: the deal page would show the catalog the walk was filed under while TROCK
+    // Scope graded it under a different one, with nothing anywhere recording the disagreement.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
+
+    // The same walk, re-filed after somebody retyped the deal. The route resolves a different answer.
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "interior_finish_out" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.jobType).toBe("roofing_envelope");
+
+    const replacement = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect((replacement[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
+  });
+
   it("leaves the job type NULL when there is nothing to record", async () => {
     // The shape every historical row has. NULL reaches the forward job, which omits the field and lets
     // TROCK Scope apply its own default — so a re-filed legacy walk behaves exactly as it did.

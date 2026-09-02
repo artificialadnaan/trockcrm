@@ -483,23 +483,36 @@ interface BeginClipResult {
  * caller), and `capturedAt` is REQUIRED once the source says manual. So the two fields go together or
  * neither goes: sending the source alone is a 400 that fails the whole forward.
  *
- * WHAT `capturedAtMs` ALREADY MEANS IS EXACTLY WHAT IS WANTED HERE, which is why there is no per-kind
- * branch below. The phone sets it per artifact (mobile/src/walkthrough/upload-core.ts): a still carries
- * its OWN capture instant, and the video and the standalone narration audio both carry the walk's
- * `startedAt` — because both recorders are started at walk start. That last part is TROCK Scope's
- * alignment assumption too: it lays an audio clip alongside the footage by START TIME, so narration that
- * arrives without a `capturedAt` sorts after the video it was spoken over and every quote lands in the
- * wrong place. Branching on `kind` here would restate the phone's own answer, and restate it worse.
+ * A STILL AND A RECORDING ARE DIFFERENT CLAIMS, which is what the `kind` branch below is for.
  *
- * WHY THIS IS SENT AT ALL NOW, where it was once deliberately omitted. The old note argued TROCK Scope
- * derives a better timeline from embedded exif/container metadata. That is true of the VIDEO and false of
- * everything else: 597 forwarded stills carry no usable container time, so they were ordered by the
- * accident of upload order — unattachable to the moment they document — and the narration file the app
- * is about to start sending alongside the footage has no way to be aligned at all without this.
+ * A still's `capturedAtMs` is the instant it was taken, and that is true however the walk reached us —
+ * on a live walk the phone stamps it at capture, and on one recovered from a directory scan it is the
+ * photo file's own last-modified time, which for a file written once IS when the photo was taken. So a
+ * still always states its own moment. That is the fix the 597 already-forwarded stills needed: with no
+ * timestamp they were ordered by UPLOAD order, which is drain order — media before photos — and never
+ * walk order, so no still could be attached to the moment it documents.
  *
- * OMITTED, never guessed, when the artifact has no capture time (a walk recovered from a directory scan
- * reports null rather than inventing the recovery moment). Absent, TROCK Scope falls back to
- * `upload_order` — today's behaviour, unchanged.
+ * A VIDEO OR AUDIO CLIP'S TIMESTAMP IS A CLAIM ABOUT WHERE THE RECORDING STARTED, and `capturedAtMs` is
+ * only that when the phone had a walk clock to read it from. On a live walk it does: mobile stamps both
+ * the media artifacts and the walk itself from the same `startedAt`, so the two agree exactly, and that
+ * is the fact this function tests. On a RECOVERED walk it does not — `startedAt` is null, mobile
+ * deliberately refuses to fabricate one, and the video's `capturedAtMs` falls back to the file's
+ * last-modified time (roughly when recording ENDED) or to the recovery moment. Declaring either as a
+ * start would put the footage after every still it contains, which is a worse timeline than no timeline.
+ *
+ * So: equal to the walk's own start ⇒ the phone knew, and we say so; anything else ⇒ we do not have a
+ * start time and say nothing. The check degrades in the safe direction — a future mobile build that
+ * stamps the two differently silently returns to `upload_order`, today's behaviour, rather than shipping
+ * a confident wrong instant.
+ *
+ * WHY IT MATTERS FOR AUDIO ESPECIALLY: TROCK Scope lays a narration clip alongside the footage by START
+ * TIME. The standalone recording the app is about to start sending has no other way to be aligned, and
+ * without this every quote in it lands against the wrong moment of the walk.
+ *
+ * `capturedAtSource: "manual"` is the only source TROCK Scope accepts from a client (upload-service.ts:
+ * `exif` and `container` are written by its own worker from file metadata), and `capturedAt` is REQUIRED
+ * once the source says manual — so the two fields go together or neither goes. Sending the source alone
+ * is a 400 that fails the whole forward.
  *
  * The range guard is not ceremony. `payload` is jsonb that a human edits by hand when reconciling a dead
  * letter, and `new Date(1e300).toISOString()` THROWS a RangeError — which here would fail a delivery whose
@@ -507,20 +520,31 @@ interface BeginClipResult {
  * "not stated". `>= 0` rather than truthiness for the same class of reason: 0 is a real (if absurd)
  * instant and `!capturedAtMs` would silently drop it.
  */
-function clipCapturedAtFields(artifact: JobArtifact): Record<string, string> {
+function clipCapturedAtFields(artifact: JobArtifact, walkCapturedAt: string): Record<string, string> {
   const ms = artifact.capturedAtMs;
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 || ms > MAX_REPRESENTABLE_TIME_MS) {
     return {};
   }
+  if (artifact.kind !== "photo") {
+    // `Date.parse` of the walk's own ISO timestamp, which the ingest route validated — but parsed
+    // defensively anyway, because this value comes off a jsonb payload rather than off that route.
+    const walkStartedAtMs = Date.parse(walkCapturedAt);
+    if (!Number.isFinite(walkStartedAtMs) || walkStartedAtMs !== ms) return {};
+  }
   return { capturedAt: new Date(ms).toISOString(), capturedAtSource: "manual" };
 }
 
-async function beginClip(deps: ScopeDeps, walkthroughId: string, artifact: JobArtifact): Promise<BeginClipResult> {
+async function beginClip(
+  deps: ScopeDeps,
+  walkthroughId: string,
+  artifact: JobArtifact,
+  walkCapturedAt: string
+): Promise<BeginClipResult> {
   const { status, json } = await scopeRequest(deps, "POST", `/api/walkthroughs/${walkthroughId}/clips`, {
     originalFilename: artifact.originalFilename,
     mimeType: artifact.mimeType,
     sizeBytes: artifact.fileSizeBytes,
-    ...clipCapturedAtFields(artifact),
+    ...clipCapturedAtFields(artifact, walkCapturedAt),
   });
   if (status !== 201) {
     throw new Error(`TROCK Scope begin-clip failed for artifact ${artifact.idempotencyKey}: ${status} ${JSON.stringify(json)}`);
@@ -696,9 +720,13 @@ async function uploadClip(
   deps: ScopeDeps,
   walkthroughId: string,
   artifact: JobArtifact,
+  /** The walk's own start, which decides whether a media artifact's timestamp is a startable claim —
+   *  see `clipCapturedAtFields`. Threaded rather than read off a closure so this function stays callable
+   *  for one artifact in isolation. */
+  walkCapturedAt: string,
   downloadRange: (r2Key: string, start: number, end: number, timeoutMs: number) => Promise<Buffer>
 ): Promise<void> {
-  const begin = await beginClip(deps, walkthroughId, artifact);
+  const begin = await beginClip(deps, walkthroughId, artifact, walkCapturedAt);
   const partNumbers = Array.from({ length: begin.partCount }, (_, index) => index + 1);
   const signedParts = await signParts(deps, walkthroughId, begin.clipId, partNumbers);
 
@@ -1221,7 +1249,7 @@ export async function handleGlassesWalkthroughForward(
   await stampGlassesWalkthroughScopeId(writeJobQueue, p, scopeWalkthroughId);
 
   for (const artifact of p.artifacts) {
-    await uploadClip(scopeDeps, scopeWalkthroughId, artifact, downloadRange);
+    await uploadClip(scopeDeps, scopeWalkthroughId, artifact, p.capturedAt, downloadRange);
   }
 
   // The delivery has stopped. THIS is the only moment at which the row can safely be taken out of the

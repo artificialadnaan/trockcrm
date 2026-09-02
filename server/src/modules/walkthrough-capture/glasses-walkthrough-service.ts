@@ -1657,7 +1657,7 @@ async function recordCreatedGlassesWalkthroughStills(
 async function recordGlassesWalkthrough(
   tenantDb: TenantDb,
   input: IngestGlassesWalkthroughInput
-): Promise<{ censusLanded: boolean }> {
+): Promise<{ censusLanded: boolean; jobType: string | null }> {
   const written = await tenantDb
     .insert(glassesWalkthroughs)
     .values({
@@ -1681,8 +1681,42 @@ async function recordGlassesWalkthrough(
     })
     // RETURNING yields a row for the insert and for the fill, and nothing when `setWhere` declined — which
     // is the whole signal: a row came back AND this call carried a census means the census landed now.
-    .returning({ id: glassesWalkthroughs.id });
-  return { censusLanded: written.length > 0 && input.captureCensus !== null };
+    //
+    // `jobType` rides along because the ROW's answer is the one the forward must carry, and this
+    // statement is where the row's answer is decided — see below.
+    .returning({ id: glassesWalkthroughs.id, jobType: glassesWalkthroughs.jobType });
+
+  const censusLanded = written.length > 0 && input.captureCensus !== null;
+  if (written[0]) return { censusLanded, jobType: written[0].jobType };
+
+  /**
+   * THE ROW ALREADY EXISTED AND THIS CALL HAD NOTHING TO ADD, so nothing came back — and this is exactly
+   * the path where the job type must be read rather than assumed.
+   *
+   * A re-completion rebuilds the forward payload from scratch (a mobile retry after a lost response, a
+   * walk re-filed from a directory scan, a replacement for a dead forward). `job_type` on the row belongs
+   * to the FIRST completion and this statement does not touch it, so taking the payload's job type from
+   * `input` instead would let the two disagree the moment the deal's project type is corrected while the
+   * bytes are still draining: the read model would show the catalog the walk was filed under and TROCK
+   * Scope would grade it under a different one, with nothing anywhere recording the disagreement.
+   *
+   * A read, not a write. The first completion's answer wins for the same reason every other fact on this
+   * row belongs to it — the census is the single deliberate exception, and it is one because a census can
+   * only ever ARRIVE later, never change.
+   *
+   * One statement, and only on this branch: an insert and a census fill both answered above, so the
+   * ordinary first completion pays nothing for it.
+   */
+  const [existing] = await tenantDb
+    .select({ jobType: glassesWalkthroughs.jobType })
+    .from(glassesWalkthroughs)
+    .where(
+      and(eq(glassesWalkthroughs.dealId, input.dealId), eq(glassesWalkthroughs.walkId, input.walkId))
+    )
+    .limit(1);
+  // `?? input.jobType` covers only the unreachable case of the row vanishing between the two statements
+  // inside one transaction; it is a fallback, not a merge rule.
+  return { censusLanded, jobType: existing?.jobType ?? input.jobType };
 }
 
 /**
@@ -1912,7 +1946,9 @@ export async function ingestGlassesWalkthrough(
   // written past that return the row would exist only for walks whose FIRST completion reached this line —
   // so a walk whose first attempt died after its `files` write would be filed, forwarded, scoped, and
   // invisible on the deal page forever. Cheap to keep here: the insert is a no-op on every retry.
-  const { censusLanded } = await recordGlassesWalkthrough(tenantDb, input);
+  // `recordedJobType` is the ROW's answer, which is the first completion's — not necessarily this
+  // request's. See `recordGlassesWalkthrough` for why a replacement forward must carry the row's.
+  const { censusLanded, jobType: recordedJobType } = await recordGlassesWalkthrough(tenantDb, input);
 
   // SAY SO THE MOMENT A BAD WALK LANDS. The two walks that motivated the census were short by 30 s and
   // 3.8 min of narration, and nobody knew until an estimator opened the deal. This line is for ops: it
@@ -2038,7 +2074,7 @@ export async function ingestGlassesWalkthrough(
      * queue dead-letters a walk that would otherwise have landed with a merely-imperfect catalog. The
      * full argument, and how to widen it, is on `SCOPE_GROUNDABLE_JOB_TYPES`.
      */
-    jobType: scopeForwardableJobType(input.jobType),
+    jobType: scopeForwardableJobType(recordedJobType),
     // The DEAD row's artifacts are inherited too, not just this call's list — the same union the live
     // branch above applies, for the same reason, and leaving it off here was an asymmetry with a real
     // casualty. A recovered manifest is assembled from a directory scan and can legitimately OMIT an
@@ -2136,10 +2172,10 @@ export async function ingestGlassesWalkthrough(
     // Both values, always, because their DIFFERENCE is the interesting fact. `filed` is what the walk
     // is; `sent` is what TROCK Scope was told, and it reads `(omitted)` when that deployment has no
     // catalog for the type — the one case where a mis-catalogued scope is expected and is not a bug.
-    const forwardedJobType = scopeForwardableJobType(input.jobType);
+    const forwardedJobType = scopeForwardableJobType(recordedJobType);
     console.log(
       `[glasses-walkthrough] walk ${input.walkId} on deal ${input.dealId}: job type filed as ` +
-        `${input.jobType ?? "(none)"}, forwarded to TROCK Scope as ${forwardedJobType ?? "(omitted)"}`
+        `${recordedJobType ?? "(none)"}, forwarded to TROCK Scope as ${forwardedJobType ?? "(omitted)"}`
     );
 
     // The dead row this replacement inherited from is now SUPERSEDED, and must stop alerting.
