@@ -34,6 +34,14 @@
  * writer's session is opened once, on whichever sample — video or audio — arrives first. Both
  * tracks are always expressed against that one shared origin; neither source's own clock is ever
  * read as a presentation timestamp. See `WalkVideoWriter` below for where this actually happens.
+ *
+ * THE NARRATION IS ALSO RECORDED ON ITS OWN, to `narration.m4a` beside `walk.mp4`, by an
+ * `AVAudioRecorder` that shares nothing with the engine or the writer. Measured 2026-09-02, two
+ * production walks: the engine's tap went silent 47.8s and 238s in — cleanly, no holes, no writer
+ * refusals — because iOS stops `AVAudioEngine` on an interruption, a route change or a
+ * configuration change and nothing restarted it. `WalkAudioCapture` below now restarts it, but a
+ * restart that fails still costs the muxed track, and the narration is the input the scope is
+ * written from. The standalone file is the copy that does not depend on any of that going right.
  */
 import AVFoundation
 import CoreMedia
@@ -48,7 +56,9 @@ final class WalkthroughRecorder: RCTEventEmitter {
   private var stream: MWDATCamera.Stream?
   private var photoToken: AnyListenerToken?
   private var frameToken: AnyListenerToken?
-  private var audioEngine: AVAudioEngine?
+  /// The phone-microphone side of the walk — engine, tap, standalone narration file, restart
+  /// observers and watchdog — behind one object with one queue. See `WalkAudioCapture`.
+  private var audioCapture: WalkAudioCapture?
   private var videoWriter: WalkVideoWriter?
   private var hasListeners = false
 
@@ -68,9 +78,10 @@ final class WalkthroughRecorder: RCTEventEmitter {
   /// had. `DispatchQueue.sync` and not `NSLock`, because `lock()`/`unlock()` are unavailable from
   /// the async contexts `startWalk` and `endWalk` reach this state from under Swift 6.
   ///
-  /// Deliberately NOT extended to `session`/`stream`/`videoWriter`/`audioEngine`: those are touched
+  /// Deliberately NOT extended to `session`/`stream`/`videoWriter`/`audioCapture`: those are touched
   /// only by `startWalk` and `endWalk`, and `walkActive` below is what keeps those two from ever
-  /// running against each other in the first place.
+  /// running against each other in the first place. (`audioCapture` restarts its engine from other
+  /// threads, but behind its own queue — the REFERENCE is only ever set and cleared here.)
   private let walkStateQueue = DispatchQueue(label: "com.trockcam.walkthrough.state")
 
   /// Set by the one `startWalk` that wins `claimWalkSlot()`, cleared only by `teardown()`. This
@@ -104,13 +115,33 @@ final class WalkthroughRecorder: RCTEventEmitter {
   private static let streamResolution: StreamingResolution = .high
 
   override static func requiresMainQueueSetup() -> Bool { true }
-  override func supportedEvents() -> [String] { ["walkthrough:still", "walkthrough:error"] }
+  /// `audioLevel` (~4/s, `{rms}`) and `audioStalled` (`{attempt, restarted, sinceMs}`) are the two
+  /// live microphone signals — the meter and the banner walk.tsx draws while recording. Neither
+  /// carries anything the census does not also keep; they exist so a dead microphone is seen in
+  /// seconds, on site, rather than read off a title after the walk has been uploaded.
+  override func supportedEvents() -> [String] {
+    ["walkthrough:still", "walkthrough:error", "walkthrough:audioLevel", "walkthrough:audioStalled"]
+  }
   override func startObserving() { hasListeners = true }
   override func stopObserving() { hasListeners = false }
 
   private static func describe(_ error: Error) -> String {
     if let dat = error as? DatError { return dat.description }
     return error.localizedDescription
+  }
+
+  /// `error` with `audioUri` added to its `userInfo` — React Native hands a rejected promise's
+  /// `NSError.userInfo` to JS as `err.userInfo` (RCTUtils' `RCTJSErrorFromCodeMessageAndNSError`),
+  /// which is the only channel a rejection has for anything but a string.
+  ///
+  /// Wrapped rather than replaced: the original's domain, code and every key it already carried are
+  /// preserved, so nothing the writer's own error said is dropped. The explicit `message` passed
+  /// alongside still wins over `localizedDescription`, so the census in that string is unaffected.
+  private static func rejection(_ error: Error, carrying audioUri: Any) -> NSError {
+    let original = error as NSError
+    var info = original.userInfo
+    info["audioUri"] = audioUri
+    return NSError(domain: original.domain, code: original.code, userInfo: info)
   }
 
   /// Ask iOS for recording permission, and wait for the answer.
@@ -362,6 +393,22 @@ final class WalkthroughRecorder: RCTEventEmitter {
           return
         }
 
+        // The microphone side is built now, against the route that just settled, and held on
+        // `audioCapture` from this line — BEFORE its narration recorder or engine start — so every
+        // failure path below reaches `teardown()` with something that knows how to stop them.
+        //
+        // The standalone narration file starts FIRST, ahead of the engine: it is its own client of
+        // the audio session, and whatever the hardware does when a second input client arrives is
+        // best done before the input node's format is read and the writer is built around it.
+        // It never fails the walk — see `WalkAudioCapture.startNarration`.
+        let capture = WalkAudioCapture(
+          narrationUrl: dir.appendingPathComponent("narration.m4a")
+        ) { [weak self] name, body in
+          self?.emitAudioEvent(name, body)
+        }
+        audioCapture = capture
+        capture.startNarration()
+
         // The writer and both its inputs are built only now: video's dimensions were known all
         // along, but audio's format is only known once the route has settled, and AVAssetWriter
         // requires every input to be added before startWriting() — so there is no point building
@@ -383,13 +430,11 @@ final class WalkthroughRecorder: RCTEventEmitter {
         }
         writer.add(vInput)
 
-        // AVAudioEngine's input node is configured only now, against the route that just
-        // settled above. Building it any earlier would ask the engine to describe a route that
-        // has not switched over yet — the same "asked too early" mistake Meta's ordering
-        // constraint exists to prevent, one layer further down.
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
+        // AVAudioEngine's input node is read only now, against the route that just settled above
+        // and with the narration recorder already running. Reading it any earlier would ask the
+        // engine to describe a route that has not switched over yet — the same "asked too early"
+        // mistake Meta's ordering constraint exists to prevent, one layer further down.
+        let recordingFormat = capture.inputFormat()
         let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
           AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
           // Whatever the route actually negotiated — 48 kHz mono is expected from the phone's
@@ -415,33 +460,30 @@ final class WalkthroughRecorder: RCTEventEmitter {
           return
         }
 
-        let vw = WalkVideoWriter(writer: writer, videoInput: vInput, audioInput: aInput, videoUrl: videoUrl) {
-          [weak self] reason in
+        let vw = WalkVideoWriter(
+          writer: writer, videoInput: vInput, audioInput: aInput, audioFormat: recordingFormat, videoUrl: videoUrl
+        ) { [weak self] reason in
           self?.reportWriterFailure(reason)
         }
         videoWriter = vw
 
         // Subscribing here, right before start(), is still well before anything can fire: no
         // frames exist until newStream.start() below, and no audio buffers exist until
-        // engine.start() succeeds just after this.
+        // `capture.start` gets the engine running just after this.
         frameToken = newStream.videoFramePublisher.listen { [weak vw] (frame: VideoFrame) in
           vw?.appendVideoFrame(frame)
         }
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: recordingFormat) { [weak vw] buffer, _ in
-          vw?.appendAudioBuffer(buffer)
-        }
-        engine.prepare()
         do {
-          try engine.start()
+          try capture.start(format: recordingFormat) { [weak vw] buffer in
+            vw?.appendAudioBuffer(buffer)
+          }
         } catch {
-          // The tap was installed above; remove it before tearing down, or it outlives the
-          // engine reference this failure path never got to store.
-          inputNode.removeTap(onBus: 0)
+          // `capture` is already on `audioCapture`, so teardown() removes the tap it installed and
+          // stops the narration recorder along with everything else.
           await teardown(.discard)
           reject("walk_audio_engine_failed", "AVAudioEngine.start() failed: \(Self.describe(error))", error)
           return
         }
-        audioEngine = engine
 
         // Meta step: only now.
         newStream.start()
@@ -566,6 +608,45 @@ final class WalkthroughRecorder: RCTEventEmitter {
               body: ["message": "Walk video recording failed: \(reason)"])
   }
 
+  /// Called by `WalkAudioCapture` (from its own queue) for `walkthrough:audioLevel` and
+  /// `walkthrough:audioStalled`. Same off-main-thread `sendEvent` the two callers above rely on.
+  private func emitAudioEvent(_ name: String, _ body: [String: Any]) {
+    guard hasListeners else { return }
+    sendEvent(withName: name, body: body)
+  }
+
+  /// The census keys `WalkVideoWriter.finalize()` can still move after `endWalk` has read the
+  /// census once — every audio counter its final drain touches. Re-read from the writer after
+  /// finalize returns; see `endWalk`. The video counters cannot move there (no frame reaches the
+  /// writer once `frameToken` is nil) and `writerStatus` deliberately must not.
+  private static let audioCounterKeys = [
+    "audioBuffersReceived",
+    "audioBuffersAppended",
+    "audioBuffersDropped",
+    "audioSecondsAppended",
+    "longestAudioDropRun",
+    "audioBuffersRefusedForFormat",
+    "audioBuffersPending",
+  ]
+
+  /// The `audio` object of the census `endWalk` resolves — the writer's per-buffer counters and the
+  /// capture's restart record, folded into the one shape the server's `captureCensus` pins:
+  /// `{ buffersReceived, buffersAppended, buffersDropped, longestDropRun, secondsAppended,
+  ///    engineRestarts, standaloneSecondsRecorded, events: [{ atMs, kind }] }`.
+  /// Every existing top-level key of the census is left where it was; the JS reducer reads those.
+  private static func audioCensus(from census: [String: Any], capture: WalkAudioCapture.Report?) -> [String: Any] {
+    [
+      "buffersReceived": (census["audioBuffersReceived"] as? Int) ?? 0,
+      "buffersAppended": (census["audioBuffersAppended"] as? Int) ?? 0,
+      "buffersDropped": (census["audioBuffersDropped"] as? Int) ?? 0,
+      "longestDropRun": (census["longestAudioDropRun"] as? Int) ?? 0,
+      "secondsAppended": (census["audioSecondsAppended"] as? Double) ?? 0,
+      "engineRestarts": capture?.engineRestarts ?? 0,
+      "standaloneSecondsRecorded": capture?.narrationSeconds ?? 0,
+      "events": capture?.events ?? [],
+    ]
+  }
+
   // MARK: - End
 
   @objc(endWalk:rejecter:)
@@ -576,18 +657,37 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // `videoWriter` once finalize() starts, or markAsFinished()/finishWriting() could race a
       // still-arriving append.
       frameToken = nil
-      if let engine = audioEngine {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-      }
-      audioEngine = nil
+      // Synchronous, and before the census: `stop()` removes the tap, stops the engine, and closes
+      // narration.m4a — whose index is written by that close, the same way walk.mp4's is by
+      // finishWriting. It also hands back what the capture saw, which the census below carries.
+      let narration = audioCapture?.stop()
+      audioCapture = nil
 
       // Taken BEFORE finalize(), while the writer still holds its live state — afterwards
       // `writer.status` reports the outcome of finishWriting rather than what happened during
       // the walk, which is the part in question.
-      let census = videoWriter?.census() ?? [:]
+      var census = videoWriter?.census() ?? [:]
+      // Resolved beside videoUri, and nil is an ordinary answer: the recorder could not start, or
+      // recorded nothing. The walk is never failed over it — see `WalkAudioCapture.startNarration`.
+      let audioUri: Any
+      if let url = narration?.audioUri { audioUri = url.absoluteString } else { audioUri = NSNull() }
 
       let result = await videoWriter?.finalize()
+
+      // The AUDIO counters are read again here, and only those. `finalize()` is not a passive step
+      // for them: it drains the buffers the input refused during the last seconds of the walk and
+      // counts whatever it still will not take, so the numbers read above are stale by up to a full
+      // queue — 500 buffers, about ten seconds of narration. Narration that actually landed would be
+      // reported as a shortfall (session.ts's `assessAudioCoverage` compares seconds against a
+      // five-second tolerance) and the drops the drain could not place would be missing from the
+      // filed census entirely. Everything else stays as it was read above, where the writer's own
+      // status still described the walk rather than the outcome of finishWriting.
+      if let drained = videoWriter?.census() {
+        for key in Self.audioCounterKeys {
+          if let value = drained[key] { census[key] = value }
+        }
+      }
+      census["audio"] = Self.audioCensus(from: census, capture: narration)
 
       // Placed AFTER finalize and BEFORE teardown, deliberately. A still that lands here costs
       // nothing — deliverStill only writes a JPEG and emits an event, it never touches the writer —
@@ -619,21 +719,37 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // every path on the phone agrees to ignore, accumulating for the life of the install on a
       // device whose storage is the reason walks get deleted after upload in the first place.
       // Discarding a recording is the graver mistake, so this asks for a still — one photo of the
-      // site is a reason to keep everything — and only discards when the walk produced neither a
-      // finished video nor a single frame anyone could look at.
-      await teardown(finalized || stills > 0 ? .keep : .discard)
+      // site is a reason to keep everything — or a narration file, and only discards when the walk
+      // produced none of the three.
+      //
+      // narration.m4a counts for exactly the same reason a still does, and it is the finalize
+      // failure this whole class exists for: the muxed track is the thing that broke, and the
+      // standalone recording of the same twenty minutes is sitting closed in that directory.
+      // `WalkAudioCapture.stop()` ran at the top of this method, so the file's index is written, and
+      // upload.ts's recovery scan asks an .m4a the same moov question it asks walk.mp4 and offers
+      // the walk on the strength of either — but only while the directory still exists.
+      let narrationKept = narration?.audioUri != nil
+      await teardown(finalized || stills > 0 || narrationKept ? .keep : .discard)
 
       switch result {
       case .success(let url):
-        resolve(["videoUri": url.absoluteString, "stills": stills, "census": census])
+        resolve(["videoUri": url.absoluteString, "audioUri": audioUri, "stills": stills, "census": census])
       case .failure(let error):
         // A truncated walk.mp4 that the upload queue then ships is worse than a failure here —
         // it looks like success. Reject rather than resolve with a URI nobody finalized.
         // The census rides along in the message: a walk that failed to finalize is exactly when
         // knowing how many frames arrived versus were refused matters most.
+        //
+        // THE NARRATION RIDES OUT TOO, on `userInfo`, because it is not the video's failure.
+        // `stop()` closed narration.m4a before finalize ran and the teardown above kept the
+        // directory for it — but a walk that took even one still is filed from that directory and
+        // then DELETED (upload.ts's `finishWalkCleanup` removes the whole directory once the
+        // artifacts it knows about are filed). A rejection that mentioned only the video would lose
+        // the one recording that survived, on exactly the walk this class exists for. JS reads it
+        // off `err.userInfo` and queues it as the failed walk's audio artifact.
         reject("walk_video_finalize_failed",
                "endWalk failed to finalize walk.mp4: \(Self.describe(error)) — census: \(census)",
-               error)
+               Self.rejection(error, carrying: audioUri))
       case nil:
         reject("walk_video_finalize_failed",
                "endWalk failed to finalize walk.mp4: no writer was ever created", nil)
@@ -646,9 +762,9 @@ final class WalkthroughRecorder: RCTEventEmitter {
   /// deletes a finished site visit.
   private enum WalkDirectoryDisposition {
     /// A walk that produced nothing anyone can look at: a `startWalk` that failed, or an `endWalk`
-    /// whose finalize failed without a single still on disk. Nothing in the directory is a
-    /// recording — at most a `walk.mp4` the writer never finished — and leaving it is not merely
-    /// untidy. At login, `upload.ts`'s `findRecoverableWalks` scans `Documents/walkthroughs/` for
+    /// whose finalize failed with neither a still nor a narration file on disk. Nothing in the
+    /// directory is a recording — at most a `walk.mp4` the writer never finished — and leaving it is
+    /// not merely untidy. At login, `upload.ts`'s `findRecoverableWalks` scans `Documents/walkthroughs/` for
     /// directories with no manifest entry; it refuses an unfinalized `walk.mp4` and skips a
     /// directory left holding only that, so nothing on the phone will ever open one of these again.
     /// A failed start additionally reaches this on the one path where the app has ALREADY told the
@@ -679,11 +795,11 @@ final class WalkthroughRecorder: RCTEventEmitter {
   /// here, so the claim is given back whether the walk succeeded, failed, or never got going.
   private func teardown(_ disposition: WalkDirectoryDisposition) async {
     frameToken = nil
-    if let engine = audioEngine {
-      engine.inputNode.removeTap(onBus: 0)
-      engine.stop()
-    }
-    audioEngine = nil
+    // Idempotent: the endWalk path has already stopped it and pays nothing here. On the startWalk
+    // failure paths this is what removes the tap, stops the engine and closes the narration file —
+    // before the directory holding that file is removed below, on the `.discard` paths.
+    audioCapture?.stop()
+    audioCapture = nil
     stream?.stop()
     session?.stop()
     photoToken = nil
@@ -730,8 +846,21 @@ private final class WalkVideoWriter: @unchecked Sendable {
   private let writer: AVAssetWriter
   private let videoInput: AVAssetWriterInput
   private let audioInput: AVAssetWriterInput
+  /// The format `audioInput` was built for. A buffer in any other sample rate or channel count is
+  /// declined in `appendAudioBuffer` rather than handed to the writer — see there.
+  private let audioFormat: AVAudioFormat
   let videoUrl: URL
   private let onFailure: (String) -> Void
+
+  /// Audio sample buffers the input was not ready for, oldest first, drained at the head of every
+  /// later append — video or audio — while the input is ready again. See `append(_:to:track:)`.
+  ///
+  /// Bounded at ~10 s of narration (1024-frame buffers at 48 kHz are ~21 ms each), which is several
+  /// times the longest encoder stall that ever recovers; past it the OLDEST buffer is dropped, so
+  /// what survives a long stall is the speech that runs into the moment the writer came back. A
+  /// mono buffer is ~4 KB, so a full queue is ~2 MB.
+  private var pendingAudio: [CMSampleBuffer] = []
+  private static let maxPendingAudio = 500
 
   private var sessionStarted = false
   private var failed = false
@@ -769,17 +898,23 @@ private final class WalkVideoWriter: @unchecked Sendable {
   /// of a forty-second site visit is the single most expensive failure this recorder can have.
   ///
   /// The audio counters answer a DIFFERENT question, because audio fails differently. The glasses
-  /// go quiet and never resume, so video is diagnosed by its tail. The phone microphone does not go
-  /// quiet: the tap keeps delivering for the whole walk while `audioInput.isReadyForMoreMediaData`
-  /// says no, so the losses land in the MIDDLE of the recording and a tail measurement would call
-  /// that walk perfect. `audioSecondsAppended` is what actually got written, which is the only
-  /// number that survives that.
+  /// go quiet and never resume, so video is diagnosed by its tail. The phone microphone fails two
+  /// ways: the tap keeps delivering while `audioInput.isReadyForMoreMediaData` says no, so losses
+  /// land in the MIDDLE of the recording where a tail measurement would call the walk perfect — or
+  /// iOS stops the engine and the tap goes quiet for good (measured 2026-09-02; `WalkAudioCapture`
+  /// now restarts it and keeps its own record of doing so). `audioSecondsAppended` is what actually
+  /// got written, which is the one number that survives both.
   private(set) var videoFramesReceived = 0
   private(set) var videoFramesAppended = 0
   private(set) var videoFramesDropped = 0
   private(set) var audioBuffersReceived = 0
   private(set) var audioBuffersAppended = 0
   private(set) var audioBuffersDropped = 0
+  /// Buffers that arrived in a format other than `audioFormat` — after an engine restart against a
+  /// route whose hardware format changed. Counted apart from `audioBuffersDropped` because the
+  /// remedy is different: these are on narration.m4a, and a census reading only "dropped" would
+  /// send someone looking for a writer stall that never happened.
+  private(set) var audioBuffersRefusedForFormat = 0
   /// Longest unbroken run of refused audio buffers. Separates one sustained stall (the encoder
   /// never recovered) from scattered hiccups that happen to add up to the same total — the audio
   /// analogue of `secondsSinceLastFrameArrived` being the video discriminator.
@@ -817,11 +952,13 @@ private final class WalkVideoWriter: @unchecked Sendable {
   init(writer: AVAssetWriter,
        videoInput: AVAssetWriterInput,
        audioInput: AVAssetWriterInput,
+       audioFormat: AVAudioFormat,
        videoUrl: URL,
        onFailure: @escaping (String) -> Void) {
     self.writer = writer
     self.videoInput = videoInput
     self.audioInput = audioInput
+    self.audioFormat = audioFormat
     self.videoUrl = videoUrl
     self.onFailure = onFailure
   }
@@ -868,6 +1005,21 @@ private final class WalkVideoWriter: @unchecked Sendable {
   /// synchronous because there is no such copy step available before the SDK's own callback ends.
   func appendAudioBuffer(_ buffer: AVAudioPCMBuffer) {
     let receivedAt = CMClockGetTime(mediaClock)
+    // Declined, not converted, when the tap's format no longer matches the input's. `WalkAudioCapture`
+    // reinstalls its tap against the input node's CURRENT format after a restart — it has to, the
+    // tap raises otherwise — and that format can differ from the one this writer was built around
+    // (a 44.1 kHz route after a 48 kHz start). What AVAssetWriterInput does with a mid-stream format
+    // change is not documented well enough to bet twenty minutes of video on; narration.m4a has this
+    // audio either way. Counted as received AND refused, so the shortfall it leaves in the muxed
+    // track is attributed here rather than read as the microphone going quiet.
+    guard buffer.format.sampleRate == audioFormat.sampleRate,
+          buffer.format.channelCount == audioFormat.channelCount else {
+      mediaQueue.async {
+        self.audioBuffersReceived += 1
+        self.audioBuffersRefusedForFormat += 1
+      }
+      return
+    }
     guard let sampleBuffer = Self.makeAudioSampleBuffer(from: buffer, presentationTime: receivedAt) else {
       // Counted as received even though it never became a sample buffer: the tap DID deliver
       // narration here, and a census that only counted the ones we managed to wrap would make this
@@ -908,49 +1060,90 @@ private final class WalkVideoWriter: @unchecked Sendable {
       sessionStarted = true
     }
 
-    // Real-time input: if the encoder/writer is behind, drop this sample rather than queue it.
-    // `expectsMediaDataInRealTime` makes `isReadyForMoreMediaData` reflect exactly this.
+    // Whatever audio the input refused earlier goes first, whichever track this sample is on —
+    // the writer becoming ready again is only ever observed from inside an append, and video
+    // frames arrive thirty times a second whether or not the microphone does.
+    drainPendingAudio()
+    guard !failed else { return }
+
+    // Real-time input: `expectsMediaDataInRealTime` makes `isReadyForMoreMediaData` say exactly
+    // whether the encoder/writer is keeping up.
     //
-    // A DROP IS NORMAL. A RUN OF DROPS IS NOT. An encoder that stalls never becomes ready again,
-    // so an unbounded silent drop turns a dead video track into a walk that looks successful —
-    // which is what happened on 2026-08-01: 3.4s of video, 46.8s of audio, no error anywhere.
-    // Roughly two seconds of 30fps footage is long enough to rule out ordinary backpressure.
+    // VIDEO IS DROPPED, and A DROP IS NORMAL. A RUN OF DROPS IS NOT. An encoder that stalls never
+    // becomes ready again, so an unbounded silent drop turns a dead video track into a walk that
+    // looks successful — which is what happened on 2026-08-01: 3.4s of video, 46.8s of audio, no
+    // error anywhere. Roughly two seconds of 30fps footage is long enough to rule out ordinary
+    // backpressure. (A frame the writer refuses is a frame nobody misses; a queued one would only
+    // arrive late, and there is another along in 33 ms.)
     //
-    // AUDIO IS COUNTED, NOT LATCHED. Dropping phone-mic buffers silently was the same defect one
-    // track over — the video track stays healthy, the writer reaches `.completed`, and the walk
-    // ships with a narration full of holes — but the remedy cannot be the same. `fail(reason:)`
-    // makes `endWalk` reject, JS marks the walk failed, and a failed walk queues no video at all,
-    // so latching here would answer "we lost some of the audio" by throwing away all of the video
-    // too. These counters travel out in `census()` instead, and session.ts turns them into a
-    // shortfall the completion screen states outright.
-    guard input.isReadyForMoreMediaData else {
-      if track == "video" {
+    // AUDIO IS QUEUED, NOT DROPPED — AND NEVER LATCHED. Dropping phone-mic buffers was the same
+    // defect one track over — the video track stays healthy, the writer reaches `.completed`, and
+    // the walk ships with a narration full of holes — but neither of video's remedies fits. Latching
+    // makes `endWalk` reject, JS marks the walk failed, and a failed walk queues no video at all, so
+    // it would answer "we lost some of the audio" by throwing away all of the video too. And a
+    // dropped buffer is a hole in speech, which is the input the scope is written from. So refused
+    // audio waits in `pendingAudio`, in order, and is written the moment the input takes it again;
+    // a drop is counted only past the queue's cap. The counters travel out in `census()`, and
+    // session.ts turns them into a shortfall the completion screen states outright.
+    if track == "audio" {
+      // Behind a non-empty queue this buffer must queue too, ready or not: the input requires
+      // strictly increasing timestamps per track, and this one is newer than everything waiting.
+      guard pendingAudio.isEmpty, input.isReadyForMoreMediaData else {
+        enqueueAudio(sampleBuffer)
+        return
+      }
+    } else {
+      guard input.isReadyForMoreMediaData else {
         videoFramesDropped += 1
         consecutiveVideoDrops += 1
         if consecutiveVideoDrops == 60 {
           fail(reason: "video track: the writer stopped accepting frames and has not recovered "
             + "after 60 consecutive drops — the recording will have little or no video")
         }
-      } else {
-        audioBuffersDropped += 1
-        consecutiveAudioDrops += 1
-        longestAudioDropRun = max(longestAudioDropRun, consecutiveAudioDrops)
+        return
       }
-      return
+      consecutiveVideoDrops = 0
     }
-    if track == "video" { consecutiveVideoDrops = 0 } else { consecutiveAudioDrops = 0 }
 
+    write(sampleBuffer, to: input, track: track)
+  }
+
+  /// Runs on `mediaQueue`. Hold one refused audio buffer for a later append; past the cap the
+  /// oldest is let go and counted, exactly as every refused buffer used to be.
+  private func enqueueAudio(_ sampleBuffer: CMSampleBuffer) {
+    pendingAudio.append(sampleBuffer)
+    guard pendingAudio.count > Self.maxPendingAudio else { return }
+    pendingAudio.removeFirst()
+    audioBuffersDropped += 1
+    consecutiveAudioDrops += 1
+    longestAudioDropRun = max(longestAudioDropRun, consecutiveAudioDrops)
+  }
+
+  /// Runs on `mediaQueue`. Write queued audio, oldest first, for as long as the input will take it.
+  /// Stops at the first refusal or failure and leaves the rest queued for the next append.
+  private func drainPendingAudio() {
+    while !failed, !pendingAudio.isEmpty, audioInput.isReadyForMoreMediaData {
+      let next = pendingAudio.removeFirst()
+      guard write(next, to: audioInput, track: "audio") else { return }
+    }
+  }
+
+  /// The actual append, for a sample the input has just said it is ready for. Runs on `mediaQueue`.
+  /// Returns false when the write latched a failure.
+  @discardableResult
+  private func write(_ sampleBuffer: CMSampleBuffer, to input: AVAssetWriterInput, track: String) -> Bool {
     guard input.append(sampleBuffer) else {
       // append() returning false and being ignored is exactly the AVAudioRecorder.record()
       // mistake this codebase was already cleaned of elsewhere — except here it means the
       // walk's video file is quietly corrupt rather than merely silent.
       fail(reason: "\(track) append() returned false — "
         + "\(writer.error?.localizedDescription ?? "no error reported")")
-      return
+      return false
     }
     if track == "video" {
       videoFramesAppended += 1
     } else {
+      consecutiveAudioDrops = 0
       audioBuffersAppended += 1
       // Measured per buffer rather than assumed, and only for buffers the writer actually took.
       // `CMSampleBufferGetDuration` is the total across the buffer's samples (it was built with one
@@ -962,6 +1155,7 @@ private final class WalkVideoWriter: @unchecked Sendable {
       let seconds = CMTimeGetSeconds(CMSampleBufferGetDuration(sampleBuffer))
       if seconds.isFinite, seconds > 0 { audioSecondsAppended += seconds }
     }
+    return true
   }
 
   /// What actually happened, read on `mediaQueue` so the counters are consistent with each other.
@@ -985,6 +1179,8 @@ private final class WalkVideoWriter: @unchecked Sendable {
         "audioBuffersDropped": audioBuffersDropped,
         "audioSecondsAppended": audioSecondsAppended,
         "longestAudioDropRun": longestAudioDropRun,
+        "audioBuffersRefusedForFormat": audioBuffersRefusedForFormat,
+        "audioBuffersPending": pendingAudio.count,
         "secondsSinceLastFrameArrived": quiet,
         "writerStatus": writer.status.rawValue,
         "writerError": writer.error?.localizedDescription ?? "none",
@@ -1102,6 +1298,22 @@ private final class WalkVideoWriter: @unchecked Sendable {
             returning: .failure(WalkVideoError.latchedFailure(reason: self.failureReason ?? "unknown")))
           return
         }
+        // One last chance for audio the input refused during the final seconds. Whatever it still
+        // will not take is lost with the file closing, and counted so the census says so rather
+        // than reporting a queue that quietly emptied itself.
+        self.drainPendingAudio()
+        if !self.pendingAudio.isEmpty {
+          self.audioBuffersDropped += self.pendingAudio.count
+          // ADDED to the run already in progress, not compared against it. A queue that overflowed
+          // and never recovered has already evicted buffers into `consecutiveAudioDrops`, and those
+          // evictions and these leftovers are one uninterrupted loss — nothing was appended between
+          // them, which is what would have reset the counter. Taking the larger of the two instead
+          // understates a sustained stall by up to the queue's whole capacity and files it as a
+          // shorter one, which is the exact distinction `longestAudioDropRun` exists to draw.
+          self.consecutiveAudioDrops += self.pendingAudio.count
+          self.longestAudioDropRun = max(self.longestAudioDropRun, self.consecutiveAudioDrops)
+          self.pendingAudio.removeAll()
+        }
         self.videoInput.markAsFinished()
         self.audioInput.markAsFinished()
         self.writer.finishWriting {
@@ -1122,10 +1334,537 @@ private final class WalkVideoWriter: @unchecked Sendable {
   /// a documented no-op.
   func cancel() {
     mediaQueue.async {
+      self.pendingAudio.removeAll()
       guard self.writer.status == .writing else { return }
       self.videoInput.markAsFinished()
       self.audioInput.markAsFinished()
       self.writer.cancelWriting()
     }
+  }
+}
+
+/// Owns the phone-microphone half of a walk: the `AVAudioEngine` whose input tap feeds
+/// `WalkVideoWriter`, the standalone `narration.m4a` recorder that survives whatever happens to that
+/// engine, the notification observers that restart the engine when iOS stops it, and the watchdog
+/// that notices when nothing has arrived for a while.
+///
+/// WHY THIS EXISTS. Two production walks on 2026-09-02 (City View at Mueller, 12:10 and 12:25)
+/// recorded 274s and 266s of video against audio tracks that end cleanly at 47.8s and 238s — no
+/// holes, no writer refusals, just nothing from one moment on. Each stop came seconds after a
+/// disturbance on the glasses' video transport, i.e. a Bluetooth event. `AVAudioEngine` STOPS on an
+/// audio-session interruption, on a configuration change, and on a media-services reset, and
+/// nothing here restarted it: `engine.start()` ran exactly once, in `startWalk`, and the tap simply
+/// never fired again. The only thing that noticed was `assessAudioCoverage`, at the end of the
+/// walk, which titled it "(audio cut short)". 3.8 minutes of narration were lost between the two —
+/// and narration is the input the scope is written from.
+///
+/// Three defences, in the order of how much each one saves:
+///
+///   1. The standalone recorder. `AVAudioRecorder` is its own client of the audio session with its
+///      own file: a stopped engine costs it nothing, iOS itself carries it across the route changes
+///      that stop the engine, and an interruption only pauses it. It is the same shape
+///      `WearablesBridge.measureStreamWithPhoneAudio` already records with. Uploaded BESIDE walk.mp4
+///      as an audio clip, so the office has the narration whatever the muxed track holds.
+///   2. The restart observers, so the MUXED track — the one that plays in sync with the picture —
+///      comes back too, instead of staying dead for the remaining twenty minutes.
+///   3. The watchdog, for the stops no notification announces. Two seconds without a buffer is
+///      ~95 missed deliveries at the tap's cadence; nothing healthy is that quiet.
+///
+/// Every piece of mutable state below `startedAt` is touched only on `audioQueue`. The tap block
+/// (CoreAudio's real-time thread) and the notification blocks (whichever thread posts them) hop
+/// onto it carrying nothing but scalars. `@unchecked Sendable` documents that discipline, exactly as
+/// `WalkVideoWriter` does for `mediaQueue`.
+private final class WalkAudioCapture: @unchecked Sendable {
+  /// Its own queue rather than the writer's `mediaQueue`: `AVAudioEngine.start()` takes tens of
+  /// milliseconds and sometimes far more, and video frames must not queue behind it.
+  private let audioQueue = DispatchQueue(label: "com.trockcam.walkthrough.audio")
+  let narrationUrl: URL
+  private let onEvent: (String, [String: Any]) -> Void
+
+  /// How long the tap may stay silent before the watchdog acts. ~95 missed buffers at 1024 frames
+  /// / 48 kHz — nothing healthy is that quiet — and long enough not to restart an engine over an
+  /// interruption iOS is about to end on its own. Also the minimum gap BETWEEN restart attempts:
+  /// an engine that started but delivers nothing for two seconds is not going to.
+  static let stallThreshold: TimeInterval = 2.0
+  /// Consecutive watchdog restarts before it stops trying and says so. Mirrored in session.ts as
+  /// `WALK_AUDIO_RESTART_ATTEMPTS`, which is what turns the third failure into "end this walk".
+  /// Not a cap on the NOTIFICATION-driven restarts: an interruption ending after the watchdog gave
+  /// up still restarts the engine, and a buffer arriving resets the count — that is the escape.
+  static let maxWatchdogRestarts = 3
+  /// How often the level meter reports. Four times a second reads as live and costs nothing on
+  /// the bridge.
+  static let levelInterval: TimeInterval = 0.25
+  /// The census keeps every event of an ordinary walk (a handful) and stays bounded on a route that
+  /// flaps for twenty minutes.
+  static let maxEvents = 200
+
+  /// What `stop()` hands back — what `endWalk` folds into the census and resolves beside the video.
+  struct Report {
+    /// narration.m4a, or nil when there is nothing worth uploading. See `narrationFileUrl`.
+    let audioUri: URL?
+    let narrationSeconds: Double
+    let engineRestarts: Int
+    let events: [[String: Any]]
+  }
+
+  /// The monotonic reading everything below is measured against — `systemUptime`, which cannot be
+  /// set, stepped or corrected. It does not advance while the device sleeps, which a foregrounded
+  /// walk holding a keep-awake lock does not do.
+  private static func monotonicNow() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+  /// A MONOTONIC origin, in `systemUptime` seconds — not a wall clock. Every elapsed measurement in
+  /// this class is taken against it: the census's `atMs`, the watchdog's silence, the spacing
+  /// between restarts, the meter's cadence.
+  ///
+  /// `Date()` is settable and NTP-corrected, and a step backwards mid-walk is not a rounding
+  /// nuisance here. It produces a NEGATIVE `atMs`, which the completion contract refuses outright —
+  /// and by then the walk's bytes are already in object storage, so the completion retries a fixed
+  /// number of times and goes terminal, taking the video and every still with it. The quieter half
+  /// is the watchdog: a jumped clock either stops it noticing silence or has it restart an engine
+  /// that was fine. `WalkVideoWriter` already stamps every sample against the host clock for the
+  /// same reason, one layer over.
+  private let startedAt = ProcessInfo.processInfo.systemUptime
+
+  // Owned by audioQueue from here on.
+  /// A `var` because a media-services reset invalidates every audio object, the engine included,
+  /// and Apple's instruction for that case is to build a new one.
+  private var engine = AVAudioEngine()
+  private var recorder: AVAudioRecorder?
+  private var narrationStarted = false
+  private var narrationSeconds: Double = 0
+  private var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
+  private var observers: [NSObjectProtocol] = []
+  private var watchdog: DispatchSourceTimer?
+  private var running = false
+  private var report: Report?
+  /// When the engine actually started, monotonic. The watchdog measures silence from HERE, not from
+  /// `startedAt`: this object is built a few AVAssetWriter calls BEFORE `start(format:onBuffer:)` (the
+  /// writer's audio input is built from the format this object reports), and a slow setup would
+  /// otherwise read as a stall on the very first tick and restart an engine that had just started —
+  /// a tap reinstall, a census entry and a red banner, all for nothing. `startedAt` stays the
+  /// census's origin, which is the walk's, not the engine's.
+  private var runningSince: TimeInterval?
+  private var lastBufferAt: TimeInterval?
+  private var lastRestartAt: TimeInterval?
+  private var stalled = false
+  private var watchdogRestarts = 0
+  private var exhaustionReported = false
+  private var engineRestarts = 0
+  private var events: [[String: Any]] = []
+  private var peakRms: Float = 0
+  private var lastLevelAt: TimeInterval?
+
+  init(narrationUrl: URL, onEvent: @escaping (String, [String: Any]) -> Void) {
+    self.narrationUrl = narrationUrl
+    self.onEvent = onEvent
+  }
+
+  /// A safety net, not a path. Every exit from `startWalk`/`endWalk` reaches `teardown()`, which
+  /// calls `stop()` before dropping the reference — but the cost of being wrong about that is not a
+  /// leak. `DispatchSource` traps on the RELEASE of a resumed timer ("BUG IN CLIENT OF LIBDISPATCH"),
+  /// so an instance that ever reached `start()` and was then dropped without `stop()` would take the
+  /// app down mid-walk; and block-based notification observers are retained by the center until
+  /// their token is removed, so they would outlive the object that stopped caring.
+  ///
+  /// No `audioQueue` hop: `deinit` runs when the last reference is gone, so there is nothing left to
+  /// race with, and hopping onto a queue from here would resurrect `self` inside its own closure.
+  deinit {
+    watchdog?.cancel()
+    for observer in observers { NotificationCenter.default.removeObserver(observer) }
+  }
+
+  /// The input node's format as it stands right now. `startWalk` builds the writer's audio input
+  /// from this, and then hands it back to `start(format:onBuffer:)` for the tap.
+  func inputFormat() -> AVAudioFormat {
+    audioQueue.sync { engine.inputNode.outputFormat(forBus: 0) }
+  }
+
+  /// Start the standalone recorder. Never throws and never fails the walk: a walk without this
+  /// file still has its muxed track, and a walk refused over it would upload nothing at all — a
+  /// failed walk queues no video (upload-core.ts's `toQueuedWalk`). What went wrong rides out in
+  /// the census instead, and `endWalk` resolves `audioUri: null`.
+  ///
+  /// AAC at 48 kHz mono — the format `WearablesBridge.measureStreamWithPhoneAudio` measured with;
+  /// `.m4a` is what the upload queue already sends as `audio/mp4`.
+  func startNarration() {
+    audioQueue.sync {
+      do {
+        let recorder = try AVAudioRecorder(url: narrationUrl, settings: [
+          AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+          AVSampleRateKey: 48_000.0,
+          AVNumberOfChannelsKey: 1,
+        ])
+        // record() returning false and being ignored is the exact mistake this codebase was
+        // cleaned of elsewhere — here it is recorded rather than thrown, for the reason above.
+        guard recorder.record() else {
+          note("narrationStartRefused")
+          return
+        }
+        self.recorder = recorder
+        narrationStarted = true
+      } catch {
+        note("narrationStartFailed")
+      }
+    }
+  }
+
+  /// Install the tap and start the engine, then arm the observers and the watchdog. Throws only
+  /// what `AVAudioEngine.start()` throws — the one microphone failure `startWalk` still refuses a
+  /// walk over, exactly as it did before this class existed.
+  func start(format: AVAudioFormat, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    try audioQueue.sync {
+      self.onBuffer = onBuffer
+      installTap(format: format)
+      engine.prepare()
+      do {
+        try engine.start()
+      } catch {
+        // The tap was installed above; remove it before the error propagates, or it outlives the
+        // engine `stop()` is about to be handed.
+        engine.inputNode.removeTap(onBus: 0)
+        throw error
+      }
+      running = true
+      runningSince = Self.monotonicNow()
+      installObservers()
+      startWatchdog()
+    }
+  }
+
+  /// Tear the microphone side down in the order that loses nothing: observers and watchdog first,
+  /// so nothing restarts what is being stopped; then the tap and the engine; then the recorder,
+  /// whose `stop()` is what writes the m4a's index. Idempotent — `teardown()` calls this again after
+  /// `endWalk` already has, and the second call returns the same report without touching anything.
+  @discardableResult
+  func stop() -> Report {
+    audioQueue.sync { () -> Report in
+      if let report { return report }
+      running = false
+      watchdog?.cancel()
+      watchdog = nil
+      for observer in observers { NotificationCenter.default.removeObserver(observer) }
+      observers.removeAll()
+      engine.inputNode.removeTap(onBus: 0)
+      engine.stop()
+      if let recorder {
+        // Read BEFORE stop(): `currentTime` is zero once the recorder has stopped. It reads zero
+        // while the recorder is merely PAUSED, too — which is where an interruption that is still
+        // in progress when the walk ends leaves it — so this takes the high-water mark rather than
+        // the instantaneous value. See `sampleNarrationSeconds`.
+        sampleNarrationSeconds()
+        recorder.stop()
+      }
+      recorder = nil
+      let audioUri = narrationFileUrl()
+      let built = Report(
+        audioUri: audioUri,
+        narrationSeconds: narrationSeconds,
+        engineRestarts: engineRestarts,
+        events: events
+      )
+      report = built
+      return built
+    }
+  }
+
+  // MARK: - The tap
+
+  /// Runs on `audioQueue`. The block runs on CoreAudio's real-time thread: the buffer goes to the
+  /// writer synchronously — `WalkVideoWriter.appendAudioBuffer` copies it out right there, as it
+  /// always did — and only one number hops back onto this queue, for the meter and the watchdog.
+  private func installTap(format: AVAudioFormat?) {
+    guard let sink = onBuffer else { return }
+    engine.inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak self] buffer, _ in
+      sink(buffer)
+      let rms = Self.rms(of: buffer)
+      self?.audioQueue.async { self?.bufferArrived(rms: rms) }
+    }
+  }
+
+  /// Runs on `audioQueue`, once per delivered buffer.
+  private func bufferArrived(rms: Float) {
+    guard running else { return }
+    let now = Self.monotonicNow()
+    lastBufferAt = now
+    if stalled {
+      // Whatever brought the buffers back — a watchdog restart, an interruption ending, iOS on its
+      // own — the stall is over, and the watchdog's budget starts again from zero.
+      stalled = false
+      watchdogRestarts = 0
+      exhaustionReported = false
+      note("audioResumed")
+    }
+    peakRms = max(peakRms, rms)
+    if let last = lastLevelAt, now - last < Self.levelInterval { return }
+    lastLevelAt = now
+    // The PEAK since the last report, not the latest buffer: a syllable that lands between two
+    // reports would otherwise never move the meter.
+    onEvent("walkthrough:audioLevel", ["rms": Double(min(1, max(0, peakRms)))])
+    peakRms = 0
+  }
+
+  /// Root-mean-square of the buffer's first channel, in its own [-1, 1] float units. The tap's
+  /// format on the phone is Float32 (`floatChannelData` non-nil); any other layout reports 0 rather
+  /// than being converted — this is a meter, not a measurement.
+  private static func rms(of buffer: AVAudioPCMBuffer) -> Float {
+    guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+    let samples = channels[0]
+    var sum: Float = 0
+    for index in 0..<Int(buffer.frameLength) {
+      let sample = samples[index]
+      sum += sample * sample
+    }
+    return (sum / Float(buffer.frameLength)).squareRoot()
+  }
+
+  // MARK: - Restart
+
+  /// Bring the engine back. Runs on `audioQueue`. Returns whether `start()` succeeded — which is
+  /// not yet "buffers are flowing": only the tap can say that, and JS's `audioAlive` waits for it.
+  ///
+  /// `rebuild` is for the media-services reset, after which the old engine is not an engine any
+  /// more. Everywhere else the same instance is restarted, which is what Apple documents for an
+  /// interruption or a configuration change.
+  private func restartEngine(reason: String, rebuild: Bool) -> Bool {
+    guard running else { return false }
+    lastRestartAt = Self.monotonicNow()
+    let audio = AVAudioSession.sharedInstance()
+    do {
+      // The same category and options `startWalk` chose — no `.allowBluetoothHFP`, for the reason
+      // the file header measures out. An interruption can leave the session deactivated and a route
+      // change can leave it active on a configuration the engine no longer matches; re-applying
+      // both costs nothing when nothing changed.
+      try audio.setCategory(.playAndRecord, mode: .default, options: [])
+      try audio.setActive(true)
+    } catch {
+      // Another app still holds the session (a call that has not ended yet). The watchdog, or the
+      // interruption ending, will be back.
+      note("restartSessionFailed:\(reason)")
+      return false
+    }
+    if rebuild {
+      engine = AVAudioEngine()
+    }
+    let inputNode = engine.inputNode
+    inputNode.removeTap(onBus: 0)
+    let format = inputNode.outputFormat(forBus: 0)
+    // A 0 Hz format is what the input node reports when there is no input to describe — the session
+    // lost the microphone. Installing a tap against it raises an Objective-C exception, which is a
+    // crash mid-walk rather than an error, so it is refused here.
+    guard format.sampleRate > 0, format.channelCount > 0 else {
+      note("restartNoInput:\(reason)")
+      return false
+    }
+    // `format: nil` — the node's CURRENT output format — rather than the format the walk started
+    // with. The tap's format must match the node's or `installTap` raises, and the very reason the
+    // engine stopped may be that the format changed. `WalkVideoWriter.appendAudioBuffer` checks each
+    // buffer against the format the writer was built for and declines the ones that no longer
+    // match; narration.m4a carries those regardless.
+    installTap(format: nil)
+    engine.prepare()
+    do {
+      try engine.start()
+    } catch {
+      note("restartFailed:\(reason)")
+      return false
+    }
+    engineRestarts += 1
+    note("engineRestarted:\(reason)")
+    return true
+  }
+
+  /// How long narration.m4a runs, kept as a HIGH-WATER MARK sampled while the recorder is actually
+  /// recording. Runs on `audioQueue`.
+  ///
+  /// `AVAudioRecorder.currentTime` is documented to read zero whenever the recorder is not
+  /// recording, and "not recording" includes paused — which is exactly where an interruption still
+  /// in progress at `endWalk`, or a media-services reset, leaves it. Read only at `stop()`, those
+  /// walks reported zero seconds of narration, and `narrationFileUrl()` reads zero seconds as
+  /// "recorded nothing" and DISCARDS the file: the walk that most needed the standalone recording
+  /// would have been the one to throw it away. Sampled once a second by the watchdog instead, so
+  /// the number survives the recorder going quiet whatever stopped it.
+  private func sampleNarrationSeconds() {
+    guard let recorder, recorder.isRecording else { return }
+    narrationSeconds = max(narrationSeconds, recorder.currentTime)
+  }
+
+  /// `AVAudioRecorder` pauses across an interruption and needs `record()` again to continue —
+  /// into the same file, appending. A recorder that refuses is noted, never replaced: a new one at
+  /// the same URL would truncate everything recorded so far.
+  private func resumeNarration(reason: String) {
+    guard narrationStarted, let recorder else { return }
+    if recorder.isRecording { return }
+    note(recorder.record() ? "narrationResumed:\(reason)" : "narrationResumeRefused:\(reason)")
+  }
+
+  // MARK: - What iOS announces
+
+  /// Each block reads what it needs out of the notification on the posting thread and carries only
+  /// scalars onto `audioQueue` — a `Notification` must not cross into a `@Sendable` closure.
+  private func installObservers() {
+    let center = NotificationCenter.default
+    observers.append(center.addObserver(
+      forName: AVAudioSession.interruptionNotification, object: nil, queue: nil
+    ) { [weak self] notification in
+      let type = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+      let options = (notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
+      self?.audioQueue.async { self?.interruption(typeRaw: type, optionsRaw: options) }
+    })
+    observers.append(center.addObserver(
+      forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil
+    ) { [weak self] notification in
+      let reason = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+      self?.audioQueue.async { self?.routeChanged(reasonRaw: reason) }
+    })
+    observers.append(center.addObserver(
+      forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil
+    ) { [weak self] _ in
+      self?.audioQueue.async { self?.configurationChanged() }
+    })
+    observers.append(center.addObserver(
+      forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil
+    ) { [weak self] _ in
+      self?.audioQueue.async { self?.mediaServicesReset() }
+    })
+  }
+
+  private func interruption(typeRaw: UInt, optionsRaw: UInt) {
+    guard running, let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else { return }
+    switch type {
+    case .began:
+      // iOS has already stopped the engine and paused the recorder. Restarting now would fail
+      // (the session belongs to whoever interrupted), so this is only recorded; the watchdog covers
+      // a `.began` that is never followed by an `.ended`.
+      note("interruptionBegan")
+    case .ended:
+      let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+      note(options.contains(.shouldResume) ? "interruptionEnded:shouldResume" : "interruptionEnded")
+      // Restarted whether or not iOS says to resume: this is the walk's own recording, not
+      // background playback, and a buffer arriving is what tells JS the microphone is back.
+      _ = restartEngine(reason: "interruption", rebuild: false)
+      resumeNarration(reason: "interruption")
+    @unknown default:
+      note("interruption:\(typeRaw)")
+    }
+  }
+
+  private func routeChanged(reasonRaw: UInt) {
+    guard running else { return }
+    let input = AVAudioSession.sharedInstance().currentRoute.inputs.first
+    // The reason and the port the route landed on, because the one this file cannot survive — the
+    // route switching to the glasses over HFP mid-walk — would show up here as the video dying a
+    // few seconds later, and the census is the only place the two facts sit next to each other.
+    note("routeChange:\(reasonRaw):\(input?.portType.rawValue ?? "none")")
+    // Only an engine the change actually stopped. Restarting a running one would cut the buffers it
+    // is delivering for nothing.
+    if !engine.isRunning {
+      _ = restartEngine(reason: "routeChange", rebuild: false)
+    }
+    resumeNarration(reason: "routeChange")
+  }
+
+  private func configurationChanged() {
+    guard running else { return }
+    // A restart can itself post one of these a moment later, for the configuration it just applied.
+    // Acting on that would restart an engine that is running fine, and the tap with it.
+    if let last = lastRestartAt, Self.monotonicNow() - last < 0.5 {
+      note("configurationChange:coalesced")
+      return
+    }
+    note("configurationChange")
+    _ = restartEngine(reason: "configurationChange", rebuild: false)
+  }
+
+  private func mediaServicesReset() {
+    guard running else { return }
+    note("mediaServicesReset")
+    // Every audio object is invalid after a reset, the engine included — Apple's instruction is to
+    // dispose and recreate. The engine is rebuilt below.
+    //
+    // THE RECORDER IS CLOSED RATHER THAN RESUMED, and it cannot be replaced. A new AVAudioRecorder
+    // at the same URL truncates narration.m4a to nothing, and a second file has nowhere to go: a
+    // walk files exactly one audio artifact (upload-core.ts's `toQueuedWalk`). Calling `record()` on
+    // the recorder the reset invalidated is not the third option it looks like — it is an object
+    // the media server no longer knows, which may answer yes and write nothing, and whose `stop()`
+    // may never write the m4a's index, leaving an unplayable file where the narration was. So what
+    // was recorded up to the reset is closed HERE, while closing it still means something, and the
+    // narration from the reset on rides the muxed track the rebuilt engine feeds. The census says
+    // which walk this was.
+    if let recorder {
+      sampleNarrationSeconds()
+      recorder.stop()
+      self.recorder = nil
+      note("narrationClosedAtReset")
+    }
+    _ = restartEngine(reason: "mediaServicesReset", rebuild: true)
+  }
+
+  // MARK: - Watchdog
+
+  private func startWatchdog() {
+    let timer = DispatchSource.makeTimerSource(queue: audioQueue)
+    timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+    timer.setEventHandler { [weak self] in self?.watchdogTick() }
+    timer.resume()
+    watchdog = timer
+  }
+
+  /// Runs on `audioQueue`, once a second while the walk records. Silence past `stallThreshold` is
+  /// a stall; each tick of a stall makes at most one restart, at least `stallThreshold` apart, and
+  /// after `maxWatchdogRestarts` it reports once that it has given up — the notification-driven
+  /// restarts are still armed, and a buffer arriving from any of them resets all of this.
+  private func watchdogTick() {
+    guard running else { return }
+    // Once a second, whether or not anything is wrong — this is the only place narration.m4a's
+    // length is observed while it can still be read. See `sampleNarrationSeconds`.
+    sampleNarrationSeconds()
+    let now = Self.monotonicNow()
+    let since = now - (lastBufferAt ?? runningSince ?? startedAt)
+    guard since > Self.stallThreshold else { return }
+    stalled = true
+    let sinceMs = Int(since * 1000)
+    if watchdogRestarts < Self.maxWatchdogRestarts {
+      if let last = lastRestartAt, now - last < Self.stallThreshold { return }
+      watchdogRestarts += 1
+      let restarted = restartEngine(reason: "watchdog", rebuild: false)
+      onEvent("walkthrough:audioStalled", [
+        "attempt": watchdogRestarts, "restarted": restarted, "sinceMs": sinceMs,
+      ])
+    } else if !exhaustionReported {
+      exhaustionReported = true
+      note("watchdogGaveUp")
+      onEvent("walkthrough:audioStalled", [
+        "attempt": watchdogRestarts, "restarted": false, "sinceMs": sinceMs,
+      ])
+    }
+  }
+
+  // MARK: - Census
+
+  /// One census event, `{ atMs, kind }` with `atMs` measured from the capture starting. Bounded —
+  /// see `maxEvents`; the last slot says the list was cut rather than silently dropping the rest.
+  private func note(_ kind: String) {
+    guard events.count < Self.maxEvents else { return }
+    let atMs = Int((Self.monotonicNow() - startedAt) * 1000)
+    let last = events.count == Self.maxEvents - 1
+    events.append(["atMs": atMs, "kind": last ? "eventsTruncated" : kind])
+  }
+
+  /// The narration file, or nil when there is nothing worth uploading: the recorder never started,
+  /// recorded nothing, or left no bytes on disk. Checked on disk rather than trusted — a URL to an
+  /// empty file would queue an artifact whose PUT fails five times and takes the walk's stills down
+  /// with it (upload-core.ts's `isWalkTerminal`). Runs on `audioQueue`, once, from `stop()`.
+  private func narrationFileUrl() -> URL? {
+    guard narrationStarted else { return nil }
+    guard narrationSeconds > 0 else {
+      note("narrationEmpty")
+      return nil
+    }
+    let bytes = (try? FileManager.default.attributesOfItem(atPath: narrationUrl.path))?[.size] as? Int
+    guard let bytes, bytes > 0 else {
+      note("narrationNoBytes")
+      return nil
+    }
+    return narrationUrl
   }
 }

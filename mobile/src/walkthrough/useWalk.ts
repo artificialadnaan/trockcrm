@@ -19,9 +19,18 @@ import {
   reduceWalk,
   WALK_VIDEO_SIZE_POLL_MS,
   type Walk,
+  type WalkCaptureCensusInput,
   type WalkVideoSizeVerdict,
 } from "./session";
-import { isAvailable, onRecorderError, onStill, Recorder } from "./native";
+import {
+  isAvailable,
+  onAudioLevel,
+  onAudioStalled,
+  onRecorderError,
+  onStill,
+  Recorder,
+  type WalkEnded,
+} from "./native";
 // The SDK bridge, not the recorder bridge — two different native modules. This is the only consumer
 // of the error the root layout retains when its launch-time `configure()` fails.
 import { getStartupConfigureError } from "../wearables/native";
@@ -56,6 +65,67 @@ function isNotConfiguredRejection(err: unknown, nativeMessage: string): boolean 
   const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
   if (typeof code === "string" && /not[_ ]configured/i.test(code)) return true;
   return /not[_ ]configured/i.test(nativeMessage);
+}
+
+/**
+ * The census in the shape the server files, or null when native did not report the whole of it.
+ *
+ * All-or-nothing on purpose, and the `audio` object is the gate. It was added to a census that had
+ * already shipped, so a dev client can resolve every top-level counter and no `audio` — and the
+ * pinned contract has no way to say "audio unmeasured" short of zeros, which for narration are the
+ * worst numbers in the range (the same trap `audioCensus` below guards with its typeof). The four
+ * video fields are checked for the same reason: a census is a record, and a record with holes
+ * filled in by `?? 0` is a fabricated one.
+ */
+function captureCensusFrom(census: WalkEnded["census"]): WalkCaptureCensusInput | null {
+  if (!census || !census.audio) return null;
+  const video = {
+    framesReceived: census.videoFramesReceived,
+    framesAppended: census.videoFramesAppended,
+    framesDropped: census.videoFramesDropped,
+    secondsSinceLastFrameArrived: census.secondsSinceLastFrameArrived,
+  };
+  if (!Object.values(video).every((value) => typeof value === "number")) return null;
+  const audio = {
+    buffersReceived: census.audio.buffersReceived,
+    buffersAppended: census.audio.buffersAppended,
+    buffersDropped: census.audio.buffersDropped,
+    longestDropRun: census.audio.longestDropRun,
+    secondsAppended: census.audio.secondsAppended,
+    engineRestarts: census.audio.engineRestarts,
+    standaloneSecondsRecorded: census.audio.standaloneSecondsRecorded,
+  };
+  // The SAME check the video half gets, and for a reason stronger than symmetry: the `audio` object
+  // grows a counter at a time, so an intermediate native build can supply the object and omit the
+  // newest field. `undefined` disappears entirely in `JSON.stringify`, so the manifest would carry a
+  // census the server then refuses — after every artifact has been uploaded — and the completion
+  // retries to terminal, taking the walk with it. A record with a hole in it is not a record.
+  if (!Object.values(audio).every((value) => typeof value === "number")) return null;
+  // Events are a list of `{ atMs, kind }` and the server checks each retained one; a census whose
+  // events are not even an array is not the pinned shape.
+  if (!Array.isArray(census.audio.events)) return null;
+  return { video, audio: { ...audio, events: census.audio.events } };
+}
+
+/**
+ * The narration file native attached to a REJECTED `endWalk`, or null.
+ *
+ * A finalize failure rejects, because walk.mp4 cannot be trusted — but narration.m4a is a different
+ * file, closed before finalize ran and checked for bytes on disk before native would name it. It
+ * arrives on the rejection's `userInfo` (`WalkthroughRecorder.swift`'s `rejection(_:carrying:)`;
+ * React Native copies an NSError's userInfo onto the JS error). Without reading it the walk is filed
+ * with its stills alone and `finishWalkCleanup` deletes the whole directory afterwards, taking the
+ * one recording that survived the failure.
+ *
+ * Defensive at every step: a dev client older than this sends no `userInfo`, and nothing about a
+ * rejection guarantees its shape.
+ */
+function narrationUriFromRejection(err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const info = (err as { userInfo?: unknown }).userInfo;
+  if (typeof info !== "object" || info === null) return null;
+  const uri = (info as { audioUri?: unknown }).audioUri;
+  return typeof uri === "string" && uri.length > 0 ? uri : null;
 }
 
 /** `walk.mp4`'s size on disk right now, or null when it cannot be read for ANY reason — no path yet,
@@ -279,9 +349,20 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       adjustInFlight(-1);
       setError(e.message);
     });
+    // The two live microphone signals. Dispatched straight into the reducer, which is where the
+    // "only while recording" rule lives (a level landing during "finalizing" must not touch a walk
+    // that has stopped) — this hook adds nothing but the plumbing.
+    const offAudioLevel = onAudioLevel((e) => {
+      dispatch({ type: "audioLevel", rms: e.rms });
+    });
+    const offAudioStalled = onAudioStalled((e) => {
+      dispatch({ type: "audioStalled", attempt: e.attempt, restarted: e.restarted, sinceMs: e.sinceMs });
+    });
     return () => {
       offStill();
       offError();
+      offAudioLevel();
+      offAudioStalled();
     };
   }, [adjustInFlight]);
 
@@ -495,7 +576,10 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       // A finished .mp4 cannot say whether frames stopped arriving or the writer refused them,
       // and that distinction decides whether the bug is ours or the glasses'.
       console.log("[walk census]", JSON.stringify(result.census ?? "none"));
-      // audioUri is null by design: audio is a track inside the .mp4, not a separate artifact.
+      // audioUri is narration.m4a — the phone microphone recorded on its own, independent of the
+      // video writer — when native produced one, and null when it could not (or on a dev client
+      // older than the file, where the key is absent). Null is not a failure: the walk still has
+      // its muxed track, and a walk failed over a missing extra would upload no video at all.
       // videoUri comes from here rather than from `started` because native only resolves once
       // AVAssetWriter reports .completed — so this path, unlike that one, is a finalised file.
       //
@@ -507,10 +591,18 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       // visit. session.ts's reducer owns the verdict (it is the only place the wall clock lives)
       // and records it as `walk.videoCoverage`; the walk still completes, because a short video is
       // still evidence and the stills were never in question.
+
+      // Read once and reused below: the narration file is both an artifact and the reason the
+      // coverage verdict may count the standalone recording at all.
+      const audioUri =
+        typeof result.audioUri === "string" && result.audioUri.length > 0 ? result.audioUri : null;
       dispatch({
         type: "finalized",
-        audioUri: null,
+        audioUri,
         videoUri: result.videoUri,
+        // The whole record, for the server, gated on the pinned shape being complete — see
+        // captureCensusFrom for why a partial census is filed as none rather than as zeros.
+        captureCensus: captureCensusFrom(result.census),
         videoCensus: result.census
           ? {
               secondsSinceLastFrameArrived: result.census.secondsSinceLastFrameArrived,
@@ -528,15 +620,34 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
         // a `?? 0` would report NO NARRATION for every walk recorded by that build — zero is the
         // worst value in this range, the exact inverse of the video sentinel's `-1` reading as the
         // healthiest. Unmeasured must stay null, which session.ts then leaves as "unknown".
+        //
+        // `standaloneSecondsRecorded` rides along under two conditions, both of them the same
+        // typeof trap read twice: native has to have reported it (the `audio` object postdates the
+        // rest of the census), and native has to have produced a FILE. `audioUri` is null exactly
+        // when the recorder left nothing worth uploading, and seconds nobody will ever hear must
+        // not be what talks the verdict out of a warning. When both hold, session.ts's
+        // `assessAudioCoverage` takes the larger of the two recordings — which is the whole point:
+        // a walk whose muxed track died at 47s and whose narration.m4a ran the full 274s is not a
+        // walk anyone needs to repeat.
         audioCensus:
           result.census && typeof result.census.audioSecondsAppended === "number"
-            ? { audioSecondsAppended: result.census.audioSecondsAppended }
+            ? {
+                audioSecondsAppended: result.census.audioSecondsAppended,
+                ...(audioUri !== null &&
+                typeof result.census.audio?.standaloneSecondsRecorded === "number"
+                  ? { standaloneSecondsRecorded: result.census.audio.standaloneSecondsRecorded }
+                  : {}),
+              }
             : null,
       });
     } catch (err) {
       const message = errorMessage(err);
       setError(message);
-      dispatch({ type: "failed", reason: message });
+      // The walk is failed — walk.mp4 did not finalize — but narration.m4a is a separate file that
+      // native closed before finalize ran, and it names it on the rejection when it has one. Filed
+      // as the failed walk's audio artifact, because the alternative is not "the office waits for
+      // it": the stills are queued, and cleanup then deletes the directory it was sitting in.
+      dispatch({ type: "failed", reason: message, audioUri: narrationUriFromRejection(err) });
     } finally {
       // Released whichever way the call settled. A rejected endWalk leaves the walk terminal-failed,
       // and the estimator's next action is a NEW walk on this same mounted screen — a guard left
