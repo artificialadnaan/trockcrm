@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { GlassesWalkCaptureCensus } from "@trock-crm/shared/types";
 import { api } from "@/lib/api";
 
 /**
@@ -74,6 +75,20 @@ export interface GlassesWalkthrough {
    *  either the walk carries no user or that user has since been deleted. The panel omits the clause
    *  entirely rather than rendering "by Unknown", which reads as a data error rather than an absence. */
   capturedByName: string | null;
+  /**
+   * What the phone's recorder actually wrote during the walk, as the phone counted it — frames and audio
+   * buffers received/appended/dropped, seconds of narration landed, engine restarts — or null for a walk
+   * whose client did not send one. The shape is the shared contract, not a client mirror, because the
+   * phone authors it. NOT RENDERED YET: carried so the panel can show a coverage warning in a follow-up
+   * without another wire change; nothing here reads it today.
+   */
+  captureCensus: GlassesWalkCaptureCensus | null;
+  /**
+   * How much of the walk has NO narration behind it, in milliseconds, derived server-side from the census.
+   * Null when there is no census — which is "we do not know", never "nothing was lost", and a future
+   * warning must keep the two apart. Not rendered yet, for the same reason as `captureCensus`.
+   */
+  narrationShortfallMs: number | null;
   /**
    * What the panel is allowed to claim about this walk:
    *   processing   the forward has not confirmed a remote walkthrough yet. No scope, and none was asked for.

@@ -202,6 +202,64 @@ describe("validateGlassesWalkthroughCompleteInput", () => {
     expect(result.projectId).toBeNull();
   });
 
+  describe("captureCensus", () => {
+    /** The census of a walk that went badly, shaped exactly as the phone sends it. */
+    const census = () => ({
+      walkMs: 1_800_000,
+      video: { framesReceived: 54_000, framesAppended: 1_800, framesDropped: 52_200, secondsSinceLastFrameArrived: 1_740.5 },
+      audio: {
+        buffersReceived: 90_000,
+        buffersAppended: 78_600,
+        buffersDropped: 11_400,
+        longestDropRun: 11_400,
+        secondsAppended: 1_572,
+        engineRestarts: 2,
+        standaloneSecondsRecorded: 1_500,
+        events: [{ atMs: 60_000, kind: "video-stalled" }],
+      },
+    });
+
+    it("carries a well-formed census through verbatim", () => {
+      const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: census() }));
+      expect(result.captureCensus).toEqual(census());
+    });
+
+    it("normalises an ABSENT or null census to null — an app build that does not count is not a walk that recorded nothing", () => {
+      expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput()).captureCensus).toBeNull();
+      expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: null })).captureCensus).toBeNull();
+    });
+
+    it("rejects a malformed census with the SAME 400 a bad title gets, naming the field", () => {
+      let caught: unknown;
+      try {
+        validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: "lots of frames" }));
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(AppError);
+      expect((caught as AppError).statusCode).toBe(400);
+      expect((caught as AppError).message).toBe("captureCensus must be an object.");
+    });
+
+    it("names the offending nested field, so the phone's author can read the 400 and fix it", () => {
+      const bad = census();
+      bad.audio.secondsAppended = -1;
+      expect(() => validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: bad }))).toThrow(
+        /captureCensus\.audio\.secondsAppended must be a non-negative number/
+      );
+      expect(() =>
+        validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: { ...census(), video: undefined } }))
+      ).toThrow(/captureCensus\.video must be an object/);
+    });
+
+    it("KEEPS unknown keys — the census is the phone's testimony, recorded rather than curated", () => {
+      const result = validateGlassesWalkthroughCompleteInput(
+        baseCompleteInput({ captureCensus: { ...census(), recorderBuild: "2.14.0" } })
+      );
+      expect(result.captureCensus).toMatchObject({ recorderBuild: "2.14.0" });
+    });
+  });
+
   it("rejects a non-ISO capturedAt", () => {
     expect(() => validateGlassesWalkthroughCompleteInput(baseCompleteInput({ capturedAt: "not-a-date" }))).toThrow(
       /capturedAt must be an ISO-8601 timestamp/

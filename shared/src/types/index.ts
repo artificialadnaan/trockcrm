@@ -42,3 +42,4 @@ export * from "./estimator-pipeline-report.js";
 export * from "./walkthrough-ingress.js";
 export * from "./showcase-route-filter.js";
 export * from "./weekly-report.js";
+export * from "./glasses-walk-capture-census.js";
