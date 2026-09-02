@@ -2212,10 +2212,19 @@ export async function ingestGlassesWalkthrough(
     // Both values, always, because their DIFFERENCE is the interesting fact. `filed` is what the walk
     // is; `sent` is what TROCK Scope was told, and it reads `(omitted)` when that deployment has no
     // catalog for the type — the one case where a mis-catalogued scope is expected and is not a bug.
+    //
+    // EVERY VALUE QUOTED THROUGH `JSON.stringify`, the same rule the inherited-id warning below follows.
+    // `walkId` is a client-supplied string that is length-bounded and nothing else — no character class is
+    // enforced on it — so interpolated raw, a newline inside it writes a second line into the log that
+    // looks exactly like one of ours. `recordedJobType` comes off a `varchar(40)` column that carries no
+    // CHECK by design, so it is a hand-editable string too. The other two are provably from a closed set;
+    // they are quoted anyway, because a log line where only some values are escaped is one whose next
+    // editor has to work out which category a new value falls into.
     const forwardedJobType = scopeForwardableJobType(recordedJobType);
     console.log(
-      `[glasses-walkthrough] walk ${input.walkId} on deal ${input.dealId}: job type filed as ` +
-        `${recordedJobType ?? "(none)"}, forwarded to TROCK Scope as ${forwardedJobType ?? "(omitted)"}`
+      `[glasses-walkthrough] walk ${JSON.stringify(input.walkId)} on deal ${JSON.stringify(input.dealId)}: ` +
+        `job type filed as ${JSON.stringify(recordedJobType ?? "(none)")}, forwarded to TROCK Scope as ` +
+        `${JSON.stringify(forwardedJobType ?? "(omitted)")}`
     );
 
     // The dead row this replacement inherited from is now SUPERSEDED, and must stop alerting.
