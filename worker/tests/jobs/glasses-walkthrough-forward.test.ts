@@ -256,6 +256,35 @@ describe("handleGlassesWalkthroughForward", () => {
     expect(JSON.parse(calls[0]!.init.body).jobType).toBe("roofing_envelope");
   });
 
+  it.each([
+    ["a type this deployment of TROCK Scope has no catalog for", "service_repair"],
+    ["a type outside TROCK Scope's vocabulary", "exterior"],
+    ["a value that is not a string at all", 7],
+  ])("WITHHOLDS %s from a hand-repaired payload", async (_label, jobType) => {
+    /**
+     * `payload` is jsonb, and this file's own dead-letter instructions ask a human to edit it. That is a
+     * caller the ingest's validator never sees, so the gate is repeated here.
+     *
+     * A bad value is not merely wrong, it is unrecoverable: TROCK Scope answers 4xx, `createScopeWalkthrough`
+     * reads that as "refused before it created anything" and retries, and the answer cannot change
+     * without a deploy on that side — so the job repeats the identical refusal until the queue
+     * dead-letters it and the walk reaches TROCK Scope not at all. Omitting costs it nothing but that
+     * service's own default.
+     */
+    const db = makeDb();
+    const { fetchImpl, calls } = makeScopeFetch();
+
+    await handleGlassesWalkthroughForward(makePayload({ jobType }), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      baseUrl: "https://scope.example.com",
+      token: "shared-token",
+      downloadRange: makeDownloadRange(),
+    });
+
+    expect(JSON.parse(calls[0]!.init.body)).not.toHaveProperty("jobType");
+  });
+
   it("OMITS the job type when nobody stated one, rather than sending a default", async () => {
     /**
      * The field's absence is the signal. Sending an explicit `interior_finish_out` would be

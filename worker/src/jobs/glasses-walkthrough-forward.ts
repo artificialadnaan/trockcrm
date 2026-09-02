@@ -87,6 +87,39 @@ const MAX_PARTS_PER_SIGN_REQUEST = 100;
 const MAX_REPRESENTABLE_TIME_MS = 8_640_000_000_000_000;
 
 /**
+ * The job types TROCK Scope can actually GROUND today — the only ones this job may put on a create.
+ *
+ * A SECOND GATE BEHIND THE SERVER'S, on a different door. The ingest already withholds a job type this
+ * deployment cannot ground (`SCOPE_GROUNDABLE_JOB_TYPES`, glasses-walkthrough-job-type.ts), but what
+ * arrives here is `job_queue.payload` — jsonb, and jsonb that a human edits by hand while reconciling a
+ * dead letter. That is the caller the server's gate never sees, and this file's own dead-letter
+ * instructions invite exactly that edit.
+ *
+ * WHY A BAD VALUE HERE IS UNRECOVERABLE RATHER THAN MERELY WRONG. TROCK Scope answers 422
+ * `job_type_unavailable` for a job type with no seeded work-type catalog, and 400 for one outside its
+ * enum. `createScopeWalkthrough` reads any 4xx as "refused before it created anything" — correctly, it
+ * is — retracts its pre-create marker, and retries. The answer cannot change without a deploy on that
+ * side, so the job repeats the identical refusal until the queue dead-letters it and the walk reaches
+ * TROCK Scope not at all. Omitting the field instead costs the walk nothing but TROCK Scope's own
+ * default, which is what every walk before this feature got.
+ *
+ * A LOCAL COPY, like `MAX_REPRESENTABLE_TIME_MS` above and for the same reason: `worker/` does not depend
+ * on `server/`. The duplication is the safe kind — both lists are subsets of the same vocabulary, and the
+ * two disagreeing can only ever cause an OMISSION, never a refusal.
+ */
+const SCOPE_FORWARDABLE_JOB_TYPES: ReadonlySet<string> = new Set([
+  "interior_finish_out",
+  "roofing_envelope",
+]);
+
+/** The `jobType` field for the create call, or nothing at all — see the set above for why anything
+ *  unrecognised is dropped rather than passed along to be refused. */
+function forwardableJobTypeFields(jobType: unknown): Record<string, string> {
+  if (typeof jobType !== "string" || !SCOPE_FORWARDABLE_JOB_TYPES.has(jobType)) return {};
+  return { jobType };
+}
+
+/**
  * Wall-clock ceilings on every outbound request. `fetch` has NO default timeout, and this job runs on a
  * dedicated poller with a reentrancy guard and a concurrency of 1 (queue.ts,
  * pollGlassesWalkthroughForwardJobs) — so one TROCK Scope (or R2) socket that is accepted and then goes
@@ -405,15 +438,15 @@ async function createScopeWalkthrough(
       officeSlug: payload.officeSlug,
       capturedBy: payload.capturedByUserId,
       /**
-       * OMITTED rather than defaulted when nobody stated one.
+       * OMITTED rather than defaulted when there is nothing groundable to send.
        *
-       * Sending an explicit `interior_finish_out` here would be indistinguishable, at the far end, from
-       * a walker who chose it — and TROCK Scope records what it was told. Leaving the field out lets
-       * that side apply its own default and keeps "nobody said" as a fact rather than a guess. It also
-       * means a queue row enqueued before 0243, which carries no job type at all, forwards exactly as it
-       * would have before this existed.
+       * Three cases collapse into the same silence, and all three are right: a queue row enqueued before
+       * 0243 that carries no job type at all; a walk filed under a type this deployment of TROCK Scope
+       * has no catalog for; and a hand-repaired payload carrying something that is not a job type. In
+       * each, leaving the field out lets that side apply its own default — the behaviour every walk had
+       * before this feature — rather than putting a value on the wire that would be refused.
        */
-      ...(payload.jobType ? { jobType: payload.jobType } : {}),
+      ...forwardableJobTypeFields(payload.jobType),
       // The dedupe key TROCK Scope actually deduplicates on — not a hint. A repeat create under this ref
       // returns the walkthrough it already has, `dealUuid` and all, so this field decides which remote
       // walkthrough this delivery's clips land in. `dealUuid` above does NOT: it is stored, never matched.

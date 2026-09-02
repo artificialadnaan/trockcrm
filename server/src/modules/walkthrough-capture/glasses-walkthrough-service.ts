@@ -1748,7 +1748,28 @@ async function stampScopeWalkthroughId(
 ): Promise<void> {
   await tenantDb
     .update(glassesWalkthroughs)
-    .set({ scopeWalkthroughId, updatedAt: new Date() })
+    /**
+     * THE JOB TYPE IS CLEARED ALONGSIDE, because a walkthrough this row did not know about is one this
+     * row did not decide the catalog for.
+     *
+     * This statement only ever runs when an id is INHERITED from an older forward, and only on a row
+     * that did not already carry one. The case that matters is a walk predating migration 0214: it has
+     * no read-model row at all, so re-completing it INSERTS one — with a job type freshly resolved from
+     * the deal, for a remote walkthrough that was created long ago under whatever default applied then.
+     * The column would then claim a catalog TROCK Scope is not using and never will: a repeat create
+     * under the same `externalRef` returns the existing walkthrough untouched, and a forward holding the
+     * checkpoint skips the create entirely.
+     *
+     * NULL is the honest value there — the same "nobody has answered" every pre-0243 row holds, and the
+     * same reason migration 0243 declines to backfill them: the deal's project type today is not
+     * evidence of what it was on the day of the walk.
+     *
+     * It can also fire when the WORKER's own stamp lagged — the forward checkpointed but had not yet
+     * filled this column — in which case a correct value is replaced by "unknown". Accepted knowingly:
+     * that walkthrough already exists, so no later forward sends a job type for it at all, and losing a
+     * true-but-unused value costs less than keeping an untrue one that reads as a statement.
+     */
+    .set({ scopeWalkthroughId, jobType: null, updatedAt: new Date() })
     .where(
       and(
         eq(glassesWalkthroughs.dealId, input.dealId),
@@ -1958,7 +1979,11 @@ export async function ingestGlassesWalkthrough(
   // invisible on the deal page forever. Cheap to keep here: the insert is a no-op on every retry.
   // `recordedJobType` is the ROW's answer, which is the first completion's — not necessarily this
   // request's. See `recordGlassesWalkthrough` for why a replacement forward must carry the row's.
-  const { censusLanded, jobType: recordedJobType } = await recordGlassesWalkthrough(tenantDb, input);
+  //
+  // `let`, because inheriting a TROCK Scope walkthrough this row never knew about retracts it — see the
+  // `stampScopeWalkthroughId` call below, which clears the same value in the database.
+  const { censusLanded, jobType: rowJobType } = await recordGlassesWalkthrough(tenantDb, input);
+  let recordedJobType = rowJobType;
 
   // SAY SO THE MOMENT A BAD WALK LANDS. The two walks that motivated the census were short by 30 s and
   // 3.8 min of narration, and nobody knew until an estimator opened the deal. This line is for ops: it
@@ -2045,6 +2070,11 @@ export async function ingestGlassesWalkthrough(
     // Validating above is what makes the catch unnecessary: the only failure this write can now raise
     // is a genuine database failure, and that one SHOULD abort the completion.
     await stampScopeWalkthroughId(tenantDb, input, knownJobState.scopeWalkthroughId);
+    // Kept in step with the column that statement just cleared, so the payload and the log line cannot
+    // claim a catalog the row no longer does. It makes no difference on the wire — a forward that
+    // inherits a checkpoint skips the create entirely, and never sends a job type at all — which is
+    // exactly why the two must not be allowed to drift unnoticed here.
+    recordedJobType = null;
   }
 
   if (knownJobState?.isLive) {

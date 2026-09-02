@@ -2109,4 +2109,33 @@ describe("recording an inherited TROCK Scope id", () => {
     const [row] = await tenantDb.select().from(glassesWalkthroughs);
     expect(row!.scopeWalkthroughId).toBe(scopeId);
   });
+
+  it("RETRACTS the job type it just inferred, because that walkthrough's catalog was not ours to pick", async () => {
+    // Same pre-0214 shape as above, and the same reasoning one column over. Re-completing the walk
+    // INSERTS the read-model row for the first time, with a job type freshly resolved from the deal —
+    // for a remote walkthrough created long ago under whatever default applied then. Left in place, the
+    // column would claim a catalog TROCK Scope is not using and never will: a repeat create under the
+    // same externalRef returns the existing walkthrough untouched, and a forward holding the checkpoint
+    // skips the create entirely. NULL is the honest value, and it is the one every pre-0243 row holds.
+    const scopeId = "b91a5bfd-eca9-4dbd-bde4-06528658b2b7";
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "completed",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', ${JSON.stringify(scopeId)}::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+    await tenantDb.delete(glassesWalkthroughs);
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const [row] = await tenantDb.select().from(glassesWalkthroughs);
+    expect(row!.scopeWalkthroughId).toBe(scopeId);
+    expect(row!.jobType).toBeNull();
+  });
 });
