@@ -228,10 +228,11 @@ export function describeNarrationShortfall(shortfallMs: number | null): string |
 /**
  * The chip for TROCK Scope's OWN account of a walk, as distinct from the CRM's.
  *
- * THREE TIERS, and the middle one is the point. `failed` and `held` are the states an estimator has to
- * act on and they carry the warning style; `processing` says work is genuinely under way over there, in a
- * neutral style that reads as motion rather than as a problem; `settled` and `empty` are quiet, because
- * the state badge beside them has already said the same thing in words the estimator cares about more.
+ * THREE TONES, and the middle one is the point. `failed`, `held` and `stale` are the states an estimator
+ * has to act on and they carry the warning style; `processing` says work is genuinely under way over
+ * there, in a neutral style that reads as motion rather than as a problem; `settled` and `empty` are
+ * quiet, because the state badge beside them has already said the same thing in words the estimator
+ * cares about more.
  *
  * QUIET IS NOT ABSENT, deliberately. A rendered chip is how anyone can tell the field ARRIVED — during a
  * rollout where most responses carry nothing, "no chip" would be indistinguishable from "TROCK Scope says
@@ -249,9 +250,17 @@ const PIPELINE_CHIP: Record<string, { className: string; tone: "warning" | "neut
   stale: { className: "border-amber-200 bg-amber-100 text-amber-800", tone: "warning" },
 };
 
-/** The fallback for a pipeline state this build predates. Neutral and NAMED: TROCK Scope owns this
- *  vocabulary and adds to it without asking, and showing the unrecognised word is strictly more useful
- *  than hiding it — the reader can at least quote it. Mirrors UNKNOWN_STATE_BADGE's reasoning. */
+/**
+ * The fallback for a pipeline state this build predates. NAMED, and quiet.
+ *
+ * Named because TROCK Scope owns this vocabulary and adds to it without asking: showing the unrecognised
+ * word is strictly more useful than hiding it, since the reader can at least quote it. Mirrors
+ * UNKNOWN_STATE_BADGE's reasoning.
+ *
+ * Quiet because guessing the other way is worse. An unknown state given the warning tone would put an
+ * amber paragraph on every walk the day TROCK Scope adds a routine one ("consolidating"), which is how a
+ * warning becomes wallpaper. The reason is not lost either way — it is on the badge's title.
+ */
 const UNKNOWN_PIPELINE_CHIP = { className: "border-gray-200 bg-gray-100 text-gray-700", tone: "quiet" as const };
 
 /**
