@@ -18,6 +18,8 @@ import { enqueueRfpBidBoardCreate } from "../../../src/modules/deals/rfp-enqueue
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
 const OWNER = "00000000-0000-0000-0000-0000000000a1";
 const COMPANY = "00000000-0000-0000-0000-0000000000c1";
+// Deliberately unlike COMPANY: a swapped id has to be visible in the failure output, not plausible.
+const PROPERTY = "00000000-0000-0000-0000-000000009999";
 const CONTACT = "00000000-0000-0000-0000-0000000000b1";
 const LEAD = "00000000-0000-0000-0000-0000000000e1";
 const EVENT = "00000000-0000-0000-0000-0000000000f1";
@@ -61,7 +63,7 @@ async function setup() {
       bid_board_detached_at timestamptz, created_at timestamptz DEFAULT now(),
       rfp_approval_request_event_id uuid, rfp_approval_request_id integer,
       assigned_rep_id uuid, hubspot_owner_email text, created_by_user_id uuid,
-      company_id uuid, primary_contact_id uuid, source_lead_id uuid
+      company_id uuid, property_id uuid, primary_contact_id uuid, source_lead_id uuid
     );
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, lead_id uuid, is_active boolean NOT NULL DEFAULT true,
@@ -88,15 +90,15 @@ async function setup() {
        awarded_amount, description, estimator,
        property_address, property_city, property_state, property_zip, property_country,
        bid_due_date, rfp_approval_request_event_id, rfp_approval_request_id,
-       assigned_rep_id, company_id, primary_contact_id, source_lead_id
+       assigned_rep_id, company_id, property_id, primary_contact_id, source_lead_id
      ) VALUES (
        $1, 'Jason Ranches', 'TR-2001', 'TR-2001', 'TR-2001', 'roofing', 'normal',
        '125000.00', 'Full roof replacement', 'Colby',
        '100 Main St', 'Dallas', 'TX', '75001', 'US',
        '2026-08-01T00:00:00Z', $2, NULL,
-       $3, $4, $5, $6
+       $3, $4, $5, $6, $7
      )`,
-    [DEAL, EVENT, OWNER, COMPANY, CONTACT, LEAD],
+    [DEAL, EVENT, OWNER, COMPANY, PROPERTY, CONTACT, LEAD],
   );
   return db;
 }
@@ -139,6 +141,10 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     // Resolved owner (assigned rep -> users) — NOT null:
     expect(deal.ownerEmail).toBe("rep@trockgc.com");
     expect(deal.ownerName).toBe("Rep One");
+    // The deal's identity FKs, read straight off `SELECT d.*` — these are what lets a downstream
+    // consumer resolve the customer and the job site by uuid instead of by the names below.
+    expect(deal.companyId).toBe(COMPANY);
+    expect(deal.propertyId).toBe(PROPERTY);
     // JOIN-sourced fields:
     expect(deal.companyName).toBe("Acme Roofing Co");
     expect(deal.contactName).toBe("Pat Client");

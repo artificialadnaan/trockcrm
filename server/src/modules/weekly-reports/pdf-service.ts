@@ -85,6 +85,9 @@ export async function loadWeeklyReportPdfSource(
 ): Promise<WeeklyReportPdfSource | null> {
   const result = await client.query(
     `SELECT wr.*,
+            -- PostgreSQL date is a calendar value, not an instant. Keep it as text rather than letting
+            -- node-postgres turn local midnight into a Date that a later UTC conversion can shift.
+            wr.week_of::text AS report_week_of,
             d.name           AS deal_name,
             d.deal_number    AS deal_number,
             proj.property_display_name, proj.client_name,
@@ -137,7 +140,7 @@ ${trockTeamJoins("proj")}
   if (!row) return null;
 
   const view = buildWeeklyReportView({
-    report: row,
+    report: { ...row, week_of: row.report_week_of },
     // The joined columns ARE the live setup row; `projected_duration_weeks` is aliased above because the
     // report carries a column of the same name and the report's value is the authoritative one.
     project: { ...row, projected_duration_weeks: row.project_projected_duration_weeks },

@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   retryWeeklyReportSend: vi.fn(),
   sendDialogReportId: null as string | null,
   auditDialogProjectId: null as string | null,
+  // "new" when the setup dialog opened to CREATE, the project id when it opened to EDIT, null when it
+  // never opened at all. Three states, because "did not open" and "opened blank" are different bugs.
+  projectDialogTarget: null as string | null,
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
@@ -55,6 +58,15 @@ vi.mock("./weekly-report-project-audit-dialog", () => ({
 vi.mock("./weekly-report-send-dialog", () => ({
   WeeklyReportSendDialog: ({ reportId }: { reportId: string }) => {
     mocks.sendDialogReportId = reportId;
+    return null;
+  },
+}));
+// Stand-in for the setup form, so an Edit click can be asserted by WHICH project it opens. Rendering the
+// real dialog would not distinguish the bug this guards: both it and the record dialog would be mounted,
+// and the one the user actually SEES is decided by mount order, which no assertion on text can read.
+vi.mock("./weekly-report-project-dialog", () => ({
+  WeeklyReportProjectDialog: ({ project }: { project: { id: string } | null }) => {
+    mocks.projectDialogTarget = project?.id ?? "new";
     return null;
   },
 }));
@@ -155,6 +167,7 @@ beforeEach(() => {
   // dialog at all inherit the previous one's and pass.
   mocks.sendDialogReportId = null;
   mocks.auditDialogProjectId = null;
+  mocks.projectDialogTarget = null;
   mocks.useWeeklyReportProjects.mockReturnValue({
     projects: [],
     loading: false,
@@ -760,5 +773,80 @@ describe("opening a project's record from This Week", () => {
 
     expect(mocks.sendDialogReportId).toBe("r-approved");
     expect(mocks.auditDialogProjectId).toBeNull();
+  });
+});
+
+function projectRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "p1",
+    dealId: "d1",
+    dealName: "4123 Cedar Springs",
+    propertyDisplayName: "4123 Cedar Springs",
+    projectNumber: "DFW-10432",
+    clientName: "Mack Real Estate Group",
+    cadenceWeekday: 3,
+    trockPmName: "Adam Sherwood",
+    trockSuperName: "Steve Sanchez",
+    summary: null,
+    ...overrides,
+  };
+}
+
+/**
+ * EDITING A SETUP, on the tab that owns it.
+ *
+ * The Projects row opens the record, and Edit sits inside that row. Without stopPropagation one press ran
+ * BOTH handlers — `setEditing` AND `setAuditProjectId` — so both dialogs mounted and the record, mounted
+ * second, covered the form. It was reported as "there is no way to edit the setup", and, because
+ * "Stop reporting" renders only in that form's footer, as no way to remove one either. Two symptoms, one
+ * missing line.
+ *
+ * Asserting the form opened is not enough on its own: it opened before the fix too. The load-bearing
+ * assertion is that the record did NOT.
+ */
+describe("editing a project setup from the Projects tab", () => {
+  function showProjectsTab(projects: Array<Record<string, unknown>>) {
+    mocks.useWeeklyReportProjects.mockReturnValue({ projects, loading: false, error: null, refetch: vi.fn() });
+    mockDashboard([]);
+    renderPage();
+    const tab = Array.from(container.querySelectorAll("button")).find(
+      (element) => element.textContent?.trim() === "Projects",
+    );
+    expect(tab).toBeTruthy();
+    act(() => {
+      (tab as HTMLButtonElement).click();
+    });
+  }
+
+  function editButton(): HTMLButtonElement {
+    const button = Array.from(container.querySelectorAll("tbody button")).find(
+      (element) => element.textContent?.trim() === "Edit",
+    );
+    expect(button).toBeTruthy();
+    return button as HTMLButtonElement;
+  }
+
+  it("opens the setup form for that project WITHOUT stacking the record over it", () => {
+    showProjectsTab([projectRow({ id: "p-edit" })]);
+
+    act(() => {
+      editButton().click();
+    });
+
+    expect(mocks.projectDialogTarget).toBe("p-edit");
+    expect(mocks.auditDialogProjectId).toBeNull();
+  });
+
+  it("still opens the record when the row itself is clicked — the control", () => {
+    // The other direction of the same fix: stopping propagation on Edit must not cost the row its own
+    // click, which is the only mouse affordance the record has on this tab.
+    showProjectsTab([projectRow({ id: "p-row" })]);
+
+    act(() => {
+      (container.querySelector("tbody tr") as HTMLTableRowElement).click();
+    });
+
+    expect(mocks.auditDialogProjectId).toBe("p-row");
+    expect(mocks.projectDialogTarget).toBeNull();
   });
 });

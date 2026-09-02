@@ -15,7 +15,14 @@ import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { BID_BOARD_SYNC } from "../audit/system-processes.js";
 import { canonicalizeProjectNumber, canonicalProjectNumberSql } from "./project-number.js";
-import { resolveEstimatorUserId, isEstimatorMapConfigured } from "./estimator-map.js";
+import {
+  buildEstimatorDirectory,
+  ESTIMATOR_DIRECTORY_SQL,
+  isEstimatorResolutionConfigured,
+  normalizeEstimatorKey,
+  resolveEstimatorUserId,
+  type EstimatorDirectory,
+} from "./estimator-map.js";
 
 type RawBidBoardRow = Record<string, unknown>;
 
@@ -723,6 +730,25 @@ async function loadActiveUserIds(client: { query: Function }): Promise<Set<strin
   return new Set((result.rows ?? []).map((r: { id: string }) => r.id));
 }
 
+/**
+ * The `estimates_jobs` half of estimator resolution (see estimator-map.ts).
+ *
+ * Scoped to the office being synced — the predicate and the reasoning for each of its clauses live on
+ * ESTIMATOR_DIRECTORY_SQL, shared with both backfills so the three cannot drift apart.
+ */
+async function loadEstimatorDirectory(
+  client: { query: Function },
+  officeSlug: string
+): Promise<EstimatorDirectory> {
+  const result = await client.query(ESTIMATOR_DIRECTORY_SQL, [officeSlug]);
+  return buildEstimatorDirectory(
+    (result.rows ?? []).map((r: { id: string; display_name: string | null }) => ({
+      id: r.id,
+      displayName: r.display_name,
+    }))
+  );
+}
+
 function workflowRoute(value: string | null): WorkflowRoute {
   return value === "service" ? "service" : "normal";
 }
@@ -1383,6 +1409,10 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
   const bidBoardLastUpdatedAt = extractedAt ?? new Date().toISOString();
   const payloadHash = hashRows(rows);
   const warnings: string[] = [];
+  // Ambiguous-estimator names already reported this run. The collision is a CONFIG fact about two user
+  // records, not a fact about the deal in hand — one shared name across fifty rows is one problem with
+  // one fix, and fifty identical lines would bury the rest of the run's warnings.
+  const ambiguousEstimatorsWarned = new Set<string>();
   const errors: string[] = [];
   const unmatchedProjectNumbers: string[] = [];
   const metrics: IngestionMetrics = {
@@ -1498,6 +1528,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     });
     const changedByUserId = await findSystemChangedByUserId(client, officeSlug);
     const activeUserIds = await loadActiveUserIds(client);
+    // Loaded once per sync run, not per deal: a batch can carry hundreds of rows and this is the same
+    // handful of flagged users for all of them. Scoped to THIS office — see ESTIMATOR_DIRECTORY_SQL.
+    const estimatorDirectory = await loadEstimatorDirectory(client, officeSlug);
 
     for (const rawRow of rows) {
       const normalized = normalizeBidBoardRow(rawRow);
@@ -1578,14 +1611,30 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       // (the live row), never from this snapshot (Codex #741 follow-up).
       const existingEstimatorUserId = matches[0].estimator_user_id ?? null;
       let estimatorUserId: string | null;
-      if (!isEstimatorMapConfigured()) {
+      if (!isEstimatorResolutionConfigured(estimatorDirectory)) {
         estimatorUserId = matches[0].estimator_user_id ?? null;
       } else {
-        const resolvedEstimatorUserId = resolveEstimatorUserId(normalized.bidBoardEstimator);
+        const resolvedEstimatorUserId = resolveEstimatorUserId(
+          normalized.bidBoardEstimator,
+          estimatorDirectory
+        );
         estimatorUserId =
           resolvedEstimatorUserId && activeUserIds.has(resolvedEstimatorUserId)
             ? resolvedEstimatorUserId
             : null;
+        // A name two flagged users share resolves to nothing by design (buildEstimatorDirectory drops
+        // it rather than guessing). Say so: otherwise the deal reads "Missing estimator" forever and
+        // looks identical to a name nobody has flagged, which is a different and differently-fixed
+        // problem — this one is fixed by renaming a user or adding a curated map alias.
+        if (!resolvedEstimatorUserId) {
+          const key = normalizeEstimatorKey(normalized.bidBoardEstimator);
+          if (key && estimatorDirectory.ambiguous.has(key) && !ambiguousEstimatorsWarned.has(key)) {
+            ambiguousEstimatorsWarned.add(key);
+            warnings.push(
+              `Bid Board estimator "${normalized.bidBoardEstimator}" matches more than one active user flagged "estimates jobs" — estimator_user_id left null rather than guessing between them (add a BID_BOARD_ESTIMATOR_USER_MAP entry to disambiguate)`
+            );
+          }
+        }
         if (resolvedEstimatorUserId && !estimatorUserId) {
           // The map resolved to an inactive user, so the incoming id will not be written. Whether the
           // field ends up null depends on the empties-only COALESCE: when the deal already has an
@@ -1618,6 +1667,24 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           );
         }
         estimatorUserId = null;
+      }
+      // A fill onto an ALREADY-SIGNED deal leaves the column and the booked commission inconsistent.
+      //
+      // The ingest has never minted the additive estimator row — that is the sign-time calc's job, or
+      // setDealEstimator's, or the dedicated backfill-estimator-commissions script's, and by the time a
+      // sync fills a signed deal the sign-time mint has long passed. Pre-existing, and NOT changed here:
+      // minting money inside the Bid Board ingest transaction is a design decision that belongs to a
+      // deliberate PR, not a side effect of a name-resolution change.
+      //
+      // What IS new is how easily it can be reached. Previously a fill required someone to hand-edit a
+      // JSON env var on two services; now ticking "Estimates jobs" is enough. So the run says so, naming
+      // the deal, rather than leaving it for "someone to separately discover" (Codex #1130 P1).
+      const dealIsSigned =
+        (matches[0].contract_signed_at ?? matches[0].contract_signed_date ?? null) != null;
+      if (estimatorUserId && !existingEstimatorUserId && dealIsSigned) {
+        warnings.push(
+          `Deal ${matches[0].id} was already SIGNED when estimator ${estimatorUserId} was filled from "${normalized.bidBoardEstimator}" — the sync writes the column but never mints the additive estimator commission, so run server/src/scripts/backfill-estimator-commissions.ts to book it`
+        );
       }
       // Empties-only guard (SET estimator_user_id = COALESCE(estimator_user_id, $16) above): when the
       // deal already has an estimator, the DB keeps it and this resolved value is dropped on the floor.

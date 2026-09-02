@@ -167,6 +167,55 @@ describe("RFP normalized payload builder", () => {
     });
   });
 
+  describe("identity uuids (company / property)", () => {
+    it("carries the deal's company and property uuids alongside the display names", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-ids",
+        deal: {
+          id: "deal-ids",
+          name: "Identified",
+          dealNumber: "dfw-4-12345-aa",
+          companyId: "11111111-1111-1111-1111-111111111111",
+          propertyId: "22222222-2222-2222-2222-222222222222",
+          companyName: "Palm Group",
+        },
+      });
+
+      expect(payload.deal.companyId).toBe("11111111-1111-1111-1111-111111111111");
+      expect(payload.deal.propertyId).toBe("22222222-2222-2222-2222-222222222222");
+      // The names still ship — the ids are additive, not a replacement.
+      expect(payload.deal.companyName).toBe("Palm Group");
+    });
+
+    it("emits null (not undefined) for an id the deal does not have", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-noids",
+        deal: {
+          id: "deal-noids",
+          name: "Unidentified",
+          dealNumber: "dfw-4-12346-aa",
+          companyId: "11111111-1111-1111-1111-111111111111",
+        },
+      });
+
+      expect(payload.deal.propertyId).toBeNull();
+      // On the wire: an omitted key and a null are different things downstream, and only null says
+      // "the CRM looked and there is nothing there".
+      const onTheWire = JSON.parse(JSON.stringify(payload)).deal;
+      expect(onTheWire).toHaveProperty("propertyId", null);
+      expect(onTheWire).toHaveProperty("companyId", "11111111-1111-1111-1111-111111111111");
+    });
+
+    it("treats a blank id as absent", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-blankids",
+        deal: { id: "deal-blankids", name: "Blank", dealNumber: "dfw-4-12347-aa", companyId: "  " },
+      });
+
+      expect(payload.deal.companyId).toBeNull();
+    });
+  });
+
   it("falls back from CRM-native fields to Bid Board mirror fields", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-2",

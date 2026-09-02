@@ -6,8 +6,9 @@
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import type { GlassesWalkCaptureCensus } from "@trock-crm/shared/types";
 import { migrationSql } from "../../../tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -118,6 +119,7 @@ function baseInput(overrides: Partial<IngestGlassesWalkthroughInput> = {}): Inge
     // Null by default: the client stating no job type is the shape every walk filed to date has, so
     // that is what the unmodified fixture must exercise.
     jobType: null,
+    captureCensus: null,
     artifacts: [
       {
         idempotencyKey: "artifact-1",
@@ -130,6 +132,35 @@ function baseInput(overrides: Partial<IngestGlassesWalkthroughInput> = {}): Inge
     ],
     ...overrides,
   };
+}
+
+/** The census of a walk that went badly — 30 min on the clock, 26.2 min of glasses audio, two engine
+ *  restarts — shaped exactly as the phone sends it. `overrides` reach into `audio` so one test can vary one
+ *  counter without restating the rest. */
+function census(audio: Partial<GlassesWalkCaptureCensus["audio"]> = {}): GlassesWalkCaptureCensus {
+  return {
+    walkMs: 1_800_000,
+    video: { framesReceived: 54_000, framesAppended: 1_800, framesDropped: 52_200, secondsSinceLastFrameArrived: 1_740.5 },
+    audio: {
+      buffersReceived: 90_000,
+      buffersAppended: 78_600,
+      buffersDropped: 11_400,
+      longestDropRun: 11_400,
+      secondsAppended: 1_572,
+      engineRestarts: 2,
+      standaloneSecondsRecorded: 1_500,
+      events: [
+        { atMs: 60_000, kind: "video-stalled" },
+        { atMs: 1_572_000, kind: "engine-restart" },
+      ],
+      ...audio,
+    },
+  };
+}
+
+/** A census with nothing wrong in it: audio covers the walk, the engine never restarted. */
+function cleanCensus(): GlassesWalkCaptureCensus {
+  return census({ secondsAppended: 1_800, engineRestarts: 0, events: [] });
 }
 
 describe("ingestGlassesWalkthrough", () => {
@@ -784,6 +815,150 @@ describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.capturedAt.toISOString()).toBe("2026-07-30T15:04:00.000Z");
     expect(rows[0]!.capturedByUserId).toBe(USER);
+  });
+});
+
+describe("ingestGlassesWalkthrough — the capture census", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function storedCensus(): Promise<unknown> {
+    const rows = await tenantDb.select().from(glassesWalkthroughs).where(eq(glassesWalkthroughs.walkId, WALK));
+    expect(rows).toHaveLength(1);
+    return rows[0]!.captureCensus;
+  }
+
+  it("stores the phone's census on the walk's row, verbatim", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+
+    expect(await storedCensus()).toEqual(census());
+    // The walk above is short by 228 s and restarted twice: the log line the census exists for.
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores NULL when the completion carries none — an older app build, not a walk that recorded nothing", async () => {
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    expect(await storedCensus()).toBeNull();
+  });
+
+  it("REGRESSION: a retry carrying a DIFFERENT census keeps the FIRST one", async () => {
+    // Every column on this row is a first-completion fact, and the census is no exception: a retry —
+    // plausibly from a different session on a recovered walk — has no better count than the completion
+    // that was actually there while the recorder ran.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: cleanCensus() }), {
+      artifactStore: healthyStore(),
+    });
+
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("fills the census on a retry when the FIRST completion carried none — the first NON-NULL census wins", async () => {
+    // Not a disagreement, a fact arriving late: the first completion came from a build that did not count,
+    // or from a recovery path with nothing to send. NULL is "we do not know", and a retry that does know
+    // must be allowed to say so.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    expect(await storedCensus()).toBeNull();
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("GUARD: a retry with no census does not erase the one already stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("GUARD: the late fill still happens on the retry whose forward is ALREADY LIVE and returns early", async () => {
+    // The census write shares `recordGlassesWalkthrough`'s placement BEFORE the live-forward early return,
+    // for the same reason that placement is load-bearing for the row itself: the retry of a walk whose
+    // forward is already queued is the most common second call this endpoint gets.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+
+    expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("GUARD: the same walkId filed against a SECOND deal carries its own census", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL, captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL, captureCensus: cleanCensus() }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r: { dealId: string }) => r.dealId === DEAL)!.captureCensus).toEqual(census());
+    expect(rows.find((r: { dealId: string }) => r.dealId === OTHER_DEAL)!.captureCensus).toEqual(cleanCensus());
+  });
+
+  it("WARNS the moment a walk lands short of narration, naming the walk, the shortfall and the restarts", async () => {
+    // 1,800,000 ms walk, 1,572 s of glasses audio, 1,500 s standalone: 228,000 ms missing. This line is
+    // what lets ops see a bad walk without anyone opening the deal.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0]![0]);
+    expect(line).toContain("[glasses-walkthrough]");
+    expect(line).toContain(`Walk ${WALK} on deal ${DEAL}`);
+    expect(line).toContain("228000 ms of narration missing from a 1800000 ms walk");
+    expect(line).toContain("2 audio engine restart(s)");
+  });
+
+  it("warns for an engine restart even when the audio covers the walk", async () => {
+    // A restart that lost nothing this time is the same engine that lost 3.8 min last time; ops wants
+    // to know the recorder is misbehaving before the walk where it costs something.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ captureCensus: census({ secondsAppended: 1_800, engineRestarts: 1 }) }),
+      { artifactStore: healthyStore() }
+    );
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("0 ms of narration missing");
+  });
+
+  it("stays silent for a clean census, for a walk with none, and on the retry that changes nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: cleanCensus() }), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL }), { artifactStore: healthyStore() });
+    expect(warn).not.toHaveBeenCalled();
+
+    // A bad walk is announced ONCE, when its census lands — not again on every retry of the completion.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ walkId: "walk-bad", captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ walkId: "walk-bad", captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a shortfall just inside the threshold raise the alarm", async () => {
+    // Audio legitimately starts a beat after the walk clock does; five seconds is the line, not zero.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ captureCensus: census({ secondsAppended: 1_795, engineRestarts: 0 }) }),
+      { artifactStore: healthyStore() }
+    );
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

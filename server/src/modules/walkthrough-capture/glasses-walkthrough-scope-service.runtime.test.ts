@@ -6,6 +6,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { glassesWalkthroughs } from "@trock-crm/shared/schema";
+import type { GlassesWalkCaptureCensus } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { loadDealGlassesWalkthroughRows } from "./glasses-walkthrough-scope-service.js";
 
@@ -48,6 +49,7 @@ async function seed(args: {
   capturedAt: string;
   scopeWalkthroughId?: string | null;
   capturedByUserId?: string | null;
+  captureCensus?: GlassesWalkCaptureCensus | null;
 }) {
   const [inserted] = await tenantDb
     .insert(glassesWalkthroughs)
@@ -57,9 +59,28 @@ async function seed(args: {
       capturedAt: new Date(args.capturedAt),
       scopeWalkthroughId: args.scopeWalkthroughId ?? null,
       capturedByUserId: args.capturedByUserId === undefined ? USER : args.capturedByUserId,
+      captureCensus: args.captureCensus ?? null,
     })
     .returning({ id: glassesWalkthroughs.id });
   return inserted.id as string;
+}
+
+/** The census of a walk that went badly, as the ingest stores it. */
+function census(): GlassesWalkCaptureCensus {
+  return {
+    walkMs: 1_800_000,
+    video: { framesReceived: 54_000, framesAppended: 1_800, framesDropped: 52_200, secondsSinceLastFrameArrived: 1_740.5 },
+    audio: {
+      buffersReceived: 90_000,
+      buffersAppended: 78_600,
+      buffersDropped: 11_400,
+      longestDropRun: 11_400,
+      secondsAppended: 1_572,
+      engineRestarts: 2,
+      standaloneSecondsRecorded: 1_500,
+      events: [{ atMs: 60_000, kind: "video-stalled" }],
+    },
+  };
 }
 
 describe("loadDealGlassesWalkthroughRows", () => {
@@ -112,7 +133,21 @@ describe("loadDealGlassesWalkthroughRows", () => {
       capturedAt: new Date("2026-08-02T22:21:47.702Z"),
       capturedByUserId: USER,
       capturedByName: "Dana Reyes",
+      captureCensus: null,
     });
+  });
+
+  it("carries the stored capture census through the read, and null for a walk filed without one", async () => {
+    // The whole document, not a summary: the reader is diagnosing a bad walk and the counters ARE the
+    // diagnosis. jsonb round-trips the object; only the key order is Postgres's, which toEqual ignores.
+    await seed({ dealId: DEAL, walkId: "walk-counted", capturedAt: "2026-09-02T14:00:00.000Z", captureCensus: census() });
+    await seed({ dealId: DEAL, walkId: "walk-uncounted", capturedAt: "2026-09-02T13:00:00.000Z" });
+
+    const rows = await loadDealGlassesWalkthroughRows(tenantDb, DEAL);
+    expect(rows.map((row) => [row.walkId, row.captureCensus])).toEqual([
+      ["walk-counted", census()],
+      ["walk-uncounted", null],
+    ]);
   });
 
   it("RESOLVES the capturer's display name, which is what the panel heading shows", async () => {

@@ -31,7 +31,14 @@ import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from "drizzl
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
-import { DOMAIN_EVENTS, type FileCategory } from "@trock-crm/shared/types";
+import {
+  DOMAIN_EVENTS,
+  GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS,
+  glassesWalkNarrationShortfallMs,
+  validateGlassesWalkCaptureCensus,
+  type FileCategory,
+  type GlassesWalkCaptureCensus,
+} from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -591,6 +598,14 @@ export interface IngestGlassesWalkthroughInput {
    * a column a reader would take for a statement.
    */
   jobType: string | null;
+  /**
+   * What the phone's recorder actually wrote during the walk, as the phone counted it, or null when the
+   * client did not send one (every app build before the census shipped). Validated and bounded by
+   * `validateGlassesWalkCaptureCensus`; stored verbatim on the walk's `glasses_walkthroughs` row and never
+   * forwarded to TROCK Scope, which derives its own timeline from the media. See
+   * shared/src/types/glasses-walk-capture-census.ts for why the server keeps it at all.
+   */
+  captureCensus: GlassesWalkCaptureCensus | null;
   artifacts: GlassesWalkthroughArtifactInput[];
 }
 
@@ -600,6 +615,13 @@ export function validateGlassesWalkthroughCompleteInput(raw: Record<string, unkn
   const title = assertNonEmptyString(raw.title, "title", MAX_TITLE_CHARS);
   const siteLabel = assertOptionalString(raw.siteLabel, "siteLabel", MAX_SITE_LABEL_CHARS);
   const projectId = assertOptionalString(raw.projectId, "projectId", 100);
+  // The shared validator owns the census contract (it is the same shape the phone builds and the deal page
+  // reads); this is only the translation of its verdict into this route's 400, the same one a bad `title`
+  // gets. Its messages already carry the `captureCensus.<path> must …` field naming used above.
+  const captureCensus = validateGlassesWalkCaptureCensus(raw.captureCensus, "captureCensus");
+  if (!captureCensus.ok) {
+    throw new AppError(400, captureCensus.error);
+  }
 
   // SHAPE first, then parse. `Date.parse` accepts implementation-defined shorthand — `"1"` is a valid
   // JavaScript date string and becomes 2001-01-01 — so a parse-only check admitted values that are not
@@ -690,6 +712,7 @@ export function validateGlassesWalkthroughCompleteInput(raw: Record<string, unkn
     officeSlug: assertNonEmptyString(raw.officeSlug, "officeSlug", 100),
     officeId: assertOptionalString(raw.officeId, "officeId", 100),
     jobType: assertOptionalJobType(raw.jobType, "jobType"),
+    captureCensus: captureCensus.value,
     artifacts,
   };
 }
@@ -1560,25 +1583,35 @@ async function recordCreatedGlassesWalkthroughStills(
  * does not exist. The forward job stamps it when it learns it (worker/src/jobs/
  * glasses-walkthrough-forward.ts), and NULL until then is what the panel renders as "processing".
  *
- * `onConflictDoNothing` on (deal_id, walk_id), for the same reason and with the same shape as the `files`
- * insert above: a completion is retried as a matter of course — a response lost in flight, or a recovered
- * walk re-filed from an on-disk directory scan — and a second row per retry would put a duplicate panel
- * entry on the deal page and fan a duplicate request out to TROCK Scope for it. DO NOTHING rather than DO
- * UPDATE because every column here is a fact about the WALK and the first completion's copy is the one to
- * keep: `capturedAt` is the phone's end-of-walk clock and `capturedByUserId` is whoever recorded it, and a
- * later retry — potentially from a different session on a recovered walk — has no better information about
- * either. (The unique index is what actually arbitrates; a SELECT-then-INSERT would not, for the same
- * reason 0213 exists.)
+ * ON CONFLICT on (deal_id, walk_id), for the same reason and with the same shape as the `files` insert
+ * above: a completion is retried as a matter of course — a response lost in flight, or a recovered walk
+ * re-filed from an on-disk directory scan — and a second row per retry would put a duplicate panel entry
+ * on the deal page and fan a duplicate request out to TROCK Scope for it. The conflict path keeps every
+ * fact from the FIRST completion because every column here is a fact about the WALK: `capturedAt` is the
+ * phone's end-of-walk clock and `capturedByUserId` is whoever recorded it, and a later retry — potentially
+ * from a different session on a recovered walk — has no better information about either. (The unique
+ * index is what actually arbitrates; a SELECT-then-INSERT would not, for the same reason 0213 exists.)
+ *
+ * THE ONE EXCEPTION IS A NULL CENSUS, and it is the same rule seen from the other side. The census is also
+ * a first-completion fact, so a retry carrying a DIFFERENT one is ignored — but a retry carrying one where
+ * the row has NONE is not a disagreement, it is the fact arriving late: the first completion came from an
+ * app build that did not count, or from a recovery path that had no census to send. `DO UPDATE` fills the
+ * column only in that case (`setWhere`), so on every other retry the statement writes nothing, exactly as
+ * the old `DO NOTHING` did. First non-null wins; nothing is ever overwritten.
  *
  * NOT reported in the response. `IngestGlassesWalkthroughResult` is the contract mobile parses to retire
  * its upload-queue entries, and this row is a CRM-side read model the phone has no use for; widening that
  * shape would make a mobile change a prerequisite for a server-only feature.
+ *
+ * @returns whether THIS call is the one that put a census on the row — the fresh insert that carried one,
+ *          or the late fill — so the caller can announce a bad walk exactly once, when it lands, rather than
+ *          on every retry of it.
  */
 async function recordGlassesWalkthrough(
   tenantDb: TenantDb,
   input: IngestGlassesWalkthroughInput
-): Promise<void> {
-  await tenantDb
+): Promise<{ censusLanded: boolean }> {
+  const written = await tenantDb
     .insert(glassesWalkthroughs)
     .values({
       dealId: input.dealId,
@@ -1589,8 +1622,20 @@ async function recordGlassesWalkthrough(
       capturedAt: new Date(input.capturedAt),
       capturedByUserId: input.userId,
       jobType: input.jobType,
+      captureCensus: input.captureCensus,
     })
-    .onConflictDoNothing({ target: [glassesWalkthroughs.dealId, glassesWalkthroughs.walkId] });
+    .onConflictDoUpdate({
+      target: [glassesWalkthroughs.dealId, glassesWalkthroughs.walkId],
+      set: { captureCensus: sql`excluded.capture_census`, updatedAt: new Date() },
+      // The existing row is addressed by its table name inside an ON CONFLICT DO UPDATE, and `excluded` is
+      // the row this call proposed. Both halves matter: without the second, a retry with no census would
+      // "fill" NULL with NULL and bump updated_at for nothing.
+      setWhere: sql`${glassesWalkthroughs.captureCensus} IS NULL AND excluded.capture_census IS NOT NULL`,
+    })
+    // RETURNING yields a row for the insert and for the fill, and nothing when `setWhere` declined — which
+    // is the whole signal: a row came back AND this call carried a census means the census landed now.
+    .returning({ id: glassesWalkthroughs.id });
+  return { censusLanded: written.length > 0 && input.captureCensus !== null };
 }
 
 /**
@@ -1820,7 +1865,30 @@ export async function ingestGlassesWalkthrough(
   // written past that return the row would exist only for walks whose FIRST completion reached this line —
   // so a walk whose first attempt died after its `files` write would be filed, forwarded, scoped, and
   // invisible on the deal page forever. Cheap to keep here: the insert is a no-op on every retry.
-  await recordGlassesWalkthrough(tenantDb, input);
+  const { censusLanded } = await recordGlassesWalkthrough(tenantDb, input);
+
+  // SAY SO THE MOMENT A BAD WALK LANDS. The two walks that motivated the census were short by 30 s and
+  // 3.8 min of narration, and nobody knew until an estimator opened the deal. This line is for ops: it
+  // names the walk, the shortfall and the restart count, so the log is enough to decide whether to send
+  // the crew back before the site is closed up. Once per walk, not per retry — `censusLanded` is true only
+  // for the call that put the census on the row.
+  //
+  // BEFORE THE COMMIT, and that is accepted: the route owns the transaction (`runFieldDealWrite`), so a
+  // rollback after this line would leave a warning about a walk that was never filed. A log line is not a
+  // domain event — the stills' `file.uploaded` above goes through `job_queue` inside this transaction for
+  // exactly that reason — and a stray warning about a walk the phone will retry costs nothing, while a bad
+  // walk that lands silently is the defect this exists to end.
+  if (censusLanded && input.captureCensus) {
+    const shortfallMs = glassesWalkNarrationShortfallMs(input.captureCensus) ?? 0;
+    const engineRestarts = input.captureCensus.audio.engineRestarts;
+    if (shortfallMs > GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS || engineRestarts > 0) {
+      console.warn(
+        `[glasses-walkthrough] Walk ${input.walkId} on deal ${input.dealId} filed with a capture census ` +
+          `showing ${shortfallMs} ms of narration missing from a ${input.captureCensus.walkMs} ms walk ` +
+          `and ${engineRestarts} audio engine restart(s).`
+      );
+    }
+  }
 
   // Keyed by idempotency key, never by array position. `fileResults` and `input.artifacts` line up today
   // only because one loop happens to preserve order; positional lookup silently forwards every artifact

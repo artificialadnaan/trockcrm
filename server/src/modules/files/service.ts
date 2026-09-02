@@ -916,12 +916,32 @@ export async function confirmUpload(
       geocodedAt: null,
     };
 
+  // The capture time only becomes known HERE, in step 3. `pending.folderPath` was derived back in step 1
+  // from now() — before anyone could know it — and for photos that path carries a YYYY-MM bucket
+  // ("Photos/Site Visits/2026-04"), so an April photo imported in September files itself under September.
+  // Re-derive from the row's OWN date, which is the rule updateFile already documents for the edit path
+  // ("never uses now(), which would move it"); create was the one call site violating it.
+  //
+  // Moving zero bytes: buildR2Key takes no date and has no month segment, so folder_path is a purely
+  // virtual column and correcting it never orphans a stored object.
+  //
+  // The parse is guarded because neither confirm route validates takenAt (only the corrective-action route
+  // does, at corrective-action-routes.ts:275): an unparseable value yields an Invalid Date whose
+  // toISOString() THROWS, inside this request's transaction. Such a value is dropped rather than trusted,
+  // leaving the step-1 path standing exactly as before this fix — and dropping it also stops `takenAt`
+  // below from handing that Invalid Date to the driver, which was a 500 on the same unvalidated input.
+  const parsedTakenAt = input.takenAt ? new Date(input.takenAt) : null;
+  const takenAt = parsedTakenAt && !Number.isNaN(parsedTakenAt.getTime()) ? parsedTakenAt : null;
+  const folderPath = pending.category === "photo" && takenAt
+    ? buildFolderPath(pending.category, pending.subcategory, takenAt)
+    : pending.folderPath;
+
   const result = await tenantDb
     .insert(files)
     .values({
       category: pending.category,
       subcategory: pending.subcategory ?? null,
-      folderPath: pending.folderPath,
+      folderPath,
       tags: pending.tags ?? [],
       displayName: pending.displayName,
       systemFilename: pending.systemFilename,
@@ -943,7 +963,7 @@ export async function confirmUpload(
       notes: null,
       version: pending.version ?? 1,
       parentFileId: pending.parentFileId ?? null,
-      takenAt: input.takenAt ? new Date(input.takenAt) : null,
+      takenAt,
       geoLat: photoAddress.geoLat,
       geoLng: photoAddress.geoLng,
       latitude: photoAddress.latitude,
