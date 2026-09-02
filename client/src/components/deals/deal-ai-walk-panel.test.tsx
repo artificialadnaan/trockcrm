@@ -24,15 +24,21 @@ vi.mock("@/hooks/use-glasses-walkthroughs", () => ({
   useDealGlassesWalkthroughs: (dealId: string) => mocks.walksMock(dealId),
 }));
 
+import { GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS } from "@trock-crm/shared/types";
 import {
   AiWalkCard,
   DealAiWalkPanel,
   describeConfidence,
+  describeNarrationShortfall,
   formatCapturedAt,
   formatWalkQuantity,
   summarizeScopeItems,
 } from "./deal-ai-walk-panel";
-import type { GlassesWalkthrough, GlassesWalkthroughScopeItem } from "@/hooks/use-glasses-walkthroughs";
+import type {
+  GlassesWalkthrough,
+  GlassesWalkthroughPipelineHealth,
+  GlassesWalkthroughScopeItem,
+} from "@/hooks/use-glasses-walkthroughs";
 
 const CAPTURED_AT = "2026-08-02T22:21:47.702Z";
 const SCOPE_ID = "b91a5bfd-1111-4222-8333-444455556666";
@@ -66,6 +72,9 @@ function makeWalk(over: Partial<GlassesWalkthrough> & Pick<GlassesWalkthrough, "
     capturedByName: null,
     captureCensus: null,
     narrationShortfallMs: null,
+    // Null by default: TROCK Scope does not send the health object yet, so an absent one is the shape
+    // every real response has and the shape the unmodified fixture must exercise.
+    pipeline: null,
     state: "processing",
     scope: null,
     ...over,
@@ -200,6 +209,127 @@ describe("summarizeScopeItems", () => {
       makeItem({ id: "4", confidence: 0.7 }),
     ]);
     expect(summary).toEqual({ total: 4, needsVerification: 2 });
+  });
+});
+
+describe("describeNarrationShortfall", () => {
+  it("says nothing when there is no census, because 'we do not know' is not 'nothing was lost'", () => {
+    expect(describeNarrationShortfall(null)).toBeNull();
+  });
+
+  it("says nothing for a walk whose audio covered it", () => {
+    expect(describeNarrationShortfall(0)).toBeNull();
+  });
+
+  it("stays quiet inside the noise floor, so a healthy walk never wears an amber line", () => {
+    // A second or two of shortfall is an encoder tail and a rounding difference between two counters that
+    // were never meant to agree to the millisecond. Warning on it is how a warning becomes wallpaper.
+    expect(describeNarrationShortfall(GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS)).toBeNull();
+  });
+
+  it("speaks up past the threshold, in seconds", () => {
+    expect(describeNarrationShortfall(97_000)).toBe(
+      "Narration 97 s short — audio stopped during the walk."
+    );
+  });
+
+  it("survives a shortfall that is not a finite number", () => {
+    // `narrationShortfallMs` is derived from a jsonb column a human can repair by hand. A NaN must not
+    // render as "Narration NaN s short".
+    expect(describeNarrationShortfall(Number.NaN)).toBeNull();
+  });
+});
+
+describe("AiWalkCard — TROCK Scope's pipeline health", () => {
+  const health = (over: Partial<GlassesWalkthroughPipelineHealth> = {}): GlassesWalkthroughPipelineHealth => ({
+    state: "settled",
+    stage: null,
+    reason: null,
+    since: null,
+    ...over,
+  });
+
+  it("renders nothing when TROCK Scope did not say — the shape of every response today", async () => {
+    const { container } = await render(
+      <AiWalkCard walkthrough={makeWalk({ id: "w1", pipeline: null })} onRetry={vi.fn()} />
+    );
+    // Absent, not "unknown": a chip claiming a state nobody reported would be worse than no chip.
+    expect(container.textContent).not.toContain("settled");
+  });
+
+  it("names the state, and the stage beside it when there is one", async () => {
+    const { container } = await render(
+      <AiWalkCard
+        walkthrough={makeWalk({ id: "w1", pipeline: health({ state: "failed", stage: "transcribe" }) })}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(container.textContent).toContain("failed · transcribe");
+  });
+
+  it("shows the REASON for a state worth acting on", async () => {
+    const { container } = await render(
+      <AiWalkCard
+        walkthrough={makeWalk({
+          id: "w1",
+          pipeline: health({ state: "held", stage: "grounding", reason: "no active catalog for job type" }),
+        })}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(container.textContent).toContain("no active catalog for job type");
+  });
+
+  it("does NOT give a quiet state's reason its own line", async () => {
+    // A reason on a settled walk is bookkeeping. Rendering every reason would put a paragraph on healthy
+    // walks and teach estimators to skip the region where the failures also appear.
+    const { container } = await render(
+      <AiWalkCard
+        walkthrough={makeWalk({ id: "w1", pipeline: health({ state: "settled", reason: "consolidated 41 items" }) })}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(container.textContent).not.toContain("consolidated 41 items");
+    // It is still reachable — the badge carries it as its title.
+    expect(container.innerHTML).toContain("consolidated 41 items");
+  });
+
+  it("RENDERS a state this build has never heard of, rather than hiding it", async () => {
+    // TROCK Scope owns this vocabulary and adds to it without asking. An unrecognised state that vanished
+    // would leave the panel silently confident about a walk nobody had classified.
+    const { container } = await render(
+      <AiWalkCard walkthrough={makeWalk({ id: "w1", pipeline: health({ state: "quarantined" }) })} onRetry={vi.fn()} />
+    );
+    expect(container.textContent).toContain("quarantined");
+  });
+
+  it("warns about lost narration on a walk that otherwise looks healthy", async () => {
+    // The state badge says "Scope ready" and the list is short. Without this, the short list reads as a
+    // quiet site visit rather than as minutes of audio that were never recorded.
+    const { container } = await render(
+      <AiWalkCard
+        walkthrough={makeWalk({
+          id: "w1",
+          state: "ready",
+          narrationShortfallMs: 142_000,
+          scope: { status: "ready", items: [] },
+        })}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(container.textContent).toContain("Narration 142 s short");
+  });
+
+  it("warns about lost narration even when the scope read FAILED", async () => {
+    // The audio was lost whatever happened afterwards, and this is the one fact the panel can still state
+    // about a walk it could not read.
+    const { container } = await render(
+      <AiWalkCard
+        walkthrough={makeWalk({ id: "w1", state: "unavailable", scopeWalkthroughId: SCOPE_ID, narrationShortfallMs: 60_000 })}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(container.textContent).toContain("Narration 60 s short");
   });
 });
 

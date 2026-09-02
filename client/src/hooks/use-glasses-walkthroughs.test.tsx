@@ -29,6 +29,9 @@ function walk(id: string): GlassesWalkthrough {
     capturedByName: null,
     captureCensus: null,
     narrationShortfallMs: null,
+    // Null by default: TROCK Scope does not send the health object yet, so an absent one is the shape
+    // every real response has and the shape the unmodified fixture must exercise.
+    pipeline: null,
     state: "processing",
     scope: null,
   };

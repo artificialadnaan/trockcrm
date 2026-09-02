@@ -694,10 +694,13 @@ const domainEvents = () =>
 // project folder, and the `job_queue` row says a forward is scheduled — neither answers "which glasses
 // walks does this deal have, and which TROCK Scope walkthrough did each become".
 describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () => {
-  it("stores the job type the client stated, and puts it on the forward job's payload", async () => {
+  it("stores the resolved job type, and puts it on the forward job's payload", async () => {
     // Two writes, one fact. The read-model column is what a reader of the CRM sees; the payload copy is
     // what actually reaches TROCK Scope. They are written in different statements, so a change that
     // updates one and not the other looks correct on the deal page and grades against the wrong catalog.
+    //
+    // The value arrives already resolved — the route settles it against the deal before calling in (see
+    // `resolveGlassesWalkthroughJobTypeForDeal`), which is why this suite can pass one in directly.
     await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
       artifactStore: healthyStore(),
     });
@@ -709,9 +712,29 @@ describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () 
     expect((jobs[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
   });
 
-  it("leaves the job type NULL when nobody stated one", async () => {
-    // The shape of every walk filed to date. NULL has to reach the forward job so it can omit the field
-    // and let TROCK Scope apply its own default, which is what makes this change a no-op on ingest.
+  it("STORES a job type TROCK Scope cannot ground, but withholds it from the forward", async () => {
+    // The one place the row and the wire deliberately disagree, and the reason is severe: TROCK Scope
+    // answers 422 `job_type_unavailable` for a job type with no seeded work-type catalog, and the
+    // forwarder reads any 4xx as "safe to retry" — so the walk would loop into the same refusal until the
+    // queue dead-letters it and NOTHING reaches that service. Withheld, the walk lands under TROCK
+    // Scope's default, exactly as it does today.
+    //
+    // The column still records the truth, so the day `service_repair` gets a catalog the walks already on
+    // file are correctly labelled and a re-forward needs no backfill.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "service_repair" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBe("service_repair");
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
+  it("leaves the job type NULL when there is nothing to record", async () => {
+    // The shape every historical row has. NULL reaches the forward job, which omits the field and lets
+    // TROCK Scope apply its own default — so a re-filed legacy walk behaves exactly as it did.
     await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
 
     const rows = await tenantDb.select().from(glassesWalkthroughs);

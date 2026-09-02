@@ -215,15 +215,27 @@ export function createGlassesWalkthroughScopeReader(): GlassesWalkthroughScopeRe
         );
       }
 
-      if (items.length > 0) return { outcome: "found", items, pipeline: "finished" };
+      // TROCK Scope's own health object, passed through UNREAD. Absent on every build before it shipped,
+      // which is why nothing here checks for it: `toPanelPipelineHealth` (the scope service) is the single
+      // place that decides what a usable one looks like, and duplicating that judgement here would give
+      // the panel two chances to disagree with itself about the same bytes.
+      const pipelineHealth = (json as { pipeline?: unknown } | null)?.pipeline;
+
+      if (items.length > 0) return { outcome: "found", items, pipeline: "finished", pipelineHealth };
 
       // EMPTY, so the ambiguous case: ask the walkthrough whether it is finished. A failure here is not
       // fatal — an empty scope we cannot qualify is reported as still-processing, which costs the
       // estimator a re-check and never tells them the machine found nothing when it had not looked yet.
+      //
+      // Still asked even when `pipelineHealth` is present. That object is TROCK Scope's account of its
+      // OWN processing and this is the CRM's decision about what it may claim; reading the first as an
+      // answer to the second would make a state we have never seen — one added over there next month —
+      // silently decide whether an empty list is reported as a finished result.
       return {
         outcome: "found",
         items,
         pipeline: await pipelineOutcome(baseUrl, token, scopeWalkthroughId, signal),
+        pipelineHealth,
       };
     },
 

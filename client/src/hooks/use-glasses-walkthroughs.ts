@@ -64,6 +64,16 @@ export interface GlassesWalkthroughScopeEvidence {
   clipUrl: string | null;
 }
 
+/** TROCK Scope's health report for one walkthrough. Mirrors the server's own type — see
+ *  `GlassesWalkthroughPipelineHealth` in glasses-walkthrough-scope-service.ts for why `state` is a
+ *  string and why every field but `state` is independently nullable. */
+export interface GlassesWalkthroughPipelineHealth {
+  state: string;
+  stage: string | null;
+  reason: string | null;
+  since: string | null;
+}
+
 export interface GlassesWalkthrough {
   /** The CRM's own `glasses_walkthroughs.id`, not TROCK Scope's. Stable across polls; the list keys on it. */
   id: string;
@@ -101,6 +111,19 @@ export interface GlassesWalkthrough {
    *                narration would simply never be bid.
    */
   state: GlassesWalkthroughState;
+  /**
+   * What TROCK Scope says about ITS OWN processing of this walk, or null when it did not say — which is
+   * every response until that service ships the field, and every response from an older build of it.
+   *
+   * A different claim from `state` above, and the panel renders them side by side for that reason.
+   * `state` is what the CRM can vouch for ("we read it", "we could not"); this is the far end's account
+   * of what it has done — including two answers the CRM cannot infer at all: `held`, meaning it stopped
+   * on purpose, and `stale`, meaning the scope on screen no longer matches the media behind it.
+   *
+   * `state` is a bare string, not a union, ON PURPOSE: the vocabulary belongs to TROCK Scope and grows
+   * without asking the CRM. The chip renders an unrecognised one neutrally, saying its own name.
+   */
+  pipeline: GlassesWalkthroughPipelineHealth | null;
   scope: { status: "ready"; items: GlassesWalkthroughScopeItem[] } | null;
 }
 

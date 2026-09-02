@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import { deals, files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
   GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS,
@@ -40,6 +40,14 @@ import {
   type GlassesWalkCaptureCensus,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  GLASSES_WALKTHROUGH_JOB_TYPES,
+  MAX_GLASSES_WALKTHROUGH_JOB_TYPE_CHARS,
+  isGlassesWalkthroughJobType,
+  resolveGlassesWalkthroughJobType,
+  scopeForwardableJobType,
+  type GlassesWalkthroughJobType,
+} from "./glasses-walkthrough-job-type.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -180,36 +188,69 @@ const MAX_FILENAME_CHARS = 500; // files.original_filename / files.display_name 
 const MAX_WALK_ID_CHARS = 100;
 
 /**
- * The work-type catalogs TROCK Scope can grade a walk against.
+ * A job type the CLIENT stated, or null when it said nothing — which is every walk filed to date, and
+ * will stay so until a capture app grows a picker.
  *
- * A LOCAL COPY of `JOB_TYPES` (trock-scope, shared/src/schema/enums.ts), because that repo is not a
- * dependency of this one. Validated here so a bad value is a 400 to the caller who can still fix it,
- * rather than a 422 discovered three hops later inside a retrying background job — where the walk is
- * already filed, the bytes are already in R2, and the only symptom is a deal panel stuck on
- * "processing" with the reason buried in a dead letter.
+ * Validated against TROCK Scope's vocabulary here so a bad value is a 400 to the caller who can still
+ * fix it, rather than a 422 discovered three hops later inside a retrying background job — where the
+ * walk is already filed, the bytes are already in R2, and the only symptom is a deal panel stuck on
+ * "processing" with the reason buried in a dead letter. The list, and why there is deliberately no CHECK
+ * behind it, live in ./glasses-walkthrough-job-type.ts.
  *
- * Adding a value here without TROCK Scope having it is the harmless direction (that end refuses it);
- * the reverse just means a new type cannot be sent yet. `job_type` deliberately carries no CHECK, so
- * this list and TROCK Scope's own validation are the only two gates — see migration 0243.
+ * Null here is NOT the value that reaches the column: the route resolves it against the deal (see
+ * `resolveGlassesWalkthroughJobTypeForDeal`). This function answers only "did the client say", because
+ * a client that says something wrong and a client that says nothing need different answers.
  */
-const GLASSES_WALKTHROUGH_JOB_TYPES = [
-  "interior_finish_out",
-  "roofing_envelope",
-  "commercial_ti",
-  "service_repair",
-] as const;
-const MAX_JOB_TYPE_CHARS = 40;
-
 function assertOptionalJobType(value: unknown, field: string): string | null {
-  const jobType = assertOptionalString(value, field, MAX_JOB_TYPE_CHARS);
+  const jobType = assertOptionalString(value, field, MAX_GLASSES_WALKTHROUGH_JOB_TYPE_CHARS);
   if (jobType === null) return null;
-  if (!(GLASSES_WALKTHROUGH_JOB_TYPES as readonly string[]).includes(jobType)) {
+  if (!isGlassesWalkthroughJobType(jobType)) {
     throw new AppError(
       400,
       `${field} must be one of: ${GLASSES_WALKTHROUGH_JOB_TYPES.join(", ")}.`
     );
   }
   return jobType;
+}
+
+/**
+ * The job type this walk is filed under: what the client stated, or — for every walk today — what the
+ * DEAL says it is.
+ *
+ * ONE ROUND TRIP, on a route that runs once per completed walk. Not on the artifact presign (which runs
+ * once per file) and not on anything polled, so the cost is a single indexed primary-key read per site
+ * visit. It reads the three signals in `resolveProjectTypeCode`'s canonical order, including the scalar
+ * subquery for the configured digit — without that tier, roughly half of active deals carry no project
+ * type TEXT at all and would fall through to `workflow_route`, which has never meant what it looks like.
+ *
+ * A DEAL THAT IS NOT THERE resolves to the default, exactly as a deal with no type does. It cannot
+ * happen from the route — `assertGlassesWalkthroughDealAccess` has already 404'd — and treating it as an
+ * error would put a walk's delivery at the mercy of a read that has nothing to do with it.
+ */
+export async function resolveGlassesWalkthroughJobTypeForDeal(
+  tenantDb: TenantDb,
+  dealId: string,
+  statedJobType: string | null
+): Promise<GlassesWalkthroughJobType> {
+  if (statedJobType !== null && isGlassesWalkthroughJobType(statedJobType)) return statedJobType;
+
+  const [deal] = await tenantDb
+    .select({
+      projectType: deals.projectType,
+      // The same scalar subquery the deal card and the RFP reads use. `project_type_config` is a PUBLIC
+      // table reached from a tenant-schema one, which is why this is raw SQL rather than a join.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
+      workflowRoute: deals.workflowRoute,
+    })
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+
+  return resolveGlassesWalkthroughJobType({
+    projectType: deal?.projectType ?? null,
+    projectTypeCode: deal?.projectTypeCode ?? null,
+    workflowRoute: deal?.workflowRoute ?? null,
+  });
 }
 
 const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -571,11 +612,13 @@ export interface GlassesWalkthroughArtifactInput {
    * and upload.ts), NOT an offset from the walk's start. The name reads like an offset; it is not one.
    * Do not add this to another absolute timestamp (e.g. the walk's own `capturedAt`) — see the `takenAt`
    * assignment below, where doing exactly that once shipped a bug that filed every photo decades in the
-   * future. Used directly to stamp `files.takenAt`. Otherwise informational only for the TROCK Scope
-   * forward — TROCK Scope derives the real clip timeline from the media's own embedded metadata
-   * (exif/container), not from a client claim, so it is not sent on to TROCK Scope's API (see
-   * worker/src/jobs/glasses-walkthrough-forward.ts's beginClip). Kept in the job payload for the
-   * project-folder record and future use.
+   * future. Used directly to stamp `files.takenAt`.
+   *
+   * ALSO SENT ON TO TROCK SCOPE, as the clip's `capturedAt` with `capturedAtSource: "manual"` (see
+   * `clipCapturedAtFields` in worker/src/jobs/glasses-walkthrough-forward.ts, which explains why the
+   * earlier "derives it from embedded metadata, so we omit it" reasoning only ever held for the video).
+   * That makes this value load-bearing on a second consumer: it positions the still in TROCK Scope's
+   * timeline, and it is what aligns a standalone narration recording with the footage it was spoken over.
    */
   capturedAtMs: number | null;
 }
@@ -591,11 +634,15 @@ export interface IngestGlassesWalkthroughInput {
   officeSlug: string;
   officeId: string | null;
   /**
-   * Which catalog TROCK Scope should grade this walk against, or null when the client did not say.
+   * Which catalog TROCK Scope should grade this walk against — ALREADY RESOLVED.
    *
-   * Null is carried all the way through rather than defaulted here: the forward job omits the field
-   * entirely, and TROCK Scope applies its own default. Choosing one at this end would put a guess in
-   * a column a reader would take for a statement.
+   * The route settles this before calling in (`resolveGlassesWalkthroughJobTypeForDeal`): the client's
+   * statement if it made one, otherwise the deal's own project type, otherwise the default. So it is a
+   * statement about the walk, not a copy of the request body, and it is what lands in
+   * `glasses_walkthroughs.job_type` verbatim.
+   *
+   * Still nullable because a re-filed walk recovered from a directory scan and a caller in a test can
+   * legitimately have nothing to say; null writes NULL, which is what every historical row holds.
    */
   jobType: string | null;
   /**
@@ -1981,9 +2028,17 @@ export async function ingestGlassesWalkthrough(
     capturedAt: input.capturedAt,
     capturedByUserId: input.userId,
     officeSlug: input.officeSlug,
-    // Absent when the client did not state one. The forward job omits it from its create call in that
-    // case, so TROCK Scope applies the same default it applies for every walk filed to date.
-    jobType: input.jobType,
+    /**
+     * THE WIRE VALUE, which is allowed to be narrower than the row's.
+     *
+     * `glasses_walkthroughs.job_type` records what this walk IS; this records what TROCK Scope can be
+     * asked for today. `scopeForwardableJobType` returns null for a job type that deployment has no
+     * seeded catalog for, and the forward job then omits the field so that side applies its own default
+     * — because SENDING it would be a 422 the forwarder reads as "safe to retry", looping until the
+     * queue dead-letters a walk that would otherwise have landed with a merely-imperfect catalog. The
+     * full argument, and how to widen it, is on `SCOPE_GROUNDABLE_JOB_TYPES`.
+     */
+    jobType: scopeForwardableJobType(input.jobType),
     // The DEAD row's artifacts are inherited too, not just this call's list — the same union the live
     // branch above applies, for the same reason, and leaving it off here was an asymmetry with a real
     // casualty. A recovered manifest is assembled from a directory scan and can legitimately OMIT an
@@ -2070,6 +2125,23 @@ export async function ingestGlassesWalkthrough(
 
   const enqueuedId = jobRows[0]?.id;
   if (enqueuedId != null) {
+    // WHICH CATALOG THIS WALK WAS FILED UNDER, said once, at the moment the decision becomes permanent.
+    //
+    // One line per completed walk — a handful a day, not a stream. It earns that because the decision is
+    // otherwise INVISIBLE at exactly the time anyone asks about it: the input is a deal's project type
+    // three tiers deep, the output lands in a column nobody reads, and the question that gets asked
+    // ("why did this walk grade against the wrong catalog?") arrives days later with no way to
+    // reconstruct what the deal looked like then.
+    //
+    // Both values, always, because their DIFFERENCE is the interesting fact. `filed` is what the walk
+    // is; `sent` is what TROCK Scope was told, and it reads `(omitted)` when that deployment has no
+    // catalog for the type — the one case where a mis-catalogued scope is expected and is not a bug.
+    const forwardedJobType = scopeForwardableJobType(input.jobType);
+    console.log(
+      `[glasses-walkthrough] walk ${input.walkId} on deal ${input.dealId}: job type filed as ` +
+        `${input.jobType ?? "(none)"}, forwarded to TROCK Scope as ${forwardedJobType ?? "(omitted)"}`
+    );
+
     // The dead row this replacement inherited from is now SUPERSEDED, and must stop alerting.
     //
     // The dead-letter sweep selects every dead row whose `alertSent` is unset, without asking whether

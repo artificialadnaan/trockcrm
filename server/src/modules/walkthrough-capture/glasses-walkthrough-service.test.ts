@@ -185,10 +185,11 @@ describe("validateGlassesWalkthroughArtifactUploadUrlInput", () => {
 });
 
 describe("validateGlassesWalkthroughCompleteInput", () => {
-  it("reads null when the client states no job type, rather than guessing one", () => {
-    // Every walk filed to date carries no job type, and null has to survive all the way to the forward
-    // job so it can OMIT the field. Defaulting to `interior_finish_out` here would be indistinguishable,
-    // at the far end, from a walker who actually chose it.
+  it("reads null when the client states no job type, rather than guessing one here", () => {
+    // This validator answers only "did the client say", because a client that says something WRONG and a
+    // client that says NOTHING need different answers — a 400 and a fall-through respectively. The
+    // fall-through is settled one layer out, against the deal
+    // (`resolveGlassesWalkthroughJobTypeForDeal`), which is the layer that has a deal to consult.
     expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput()).jobType).toBeNull();
   });
 

@@ -69,6 +69,11 @@ function networkError(code: string): TypeError {
 const SCOPE_BASE_URL = "https://scope.example.com";
 const CREATE_URL = `${SCOPE_BASE_URL}/api/walkthroughs`;
 
+/** When the walk started — and therefore, because both recorders are started at walk start, what the
+ *  phone stamps on the video and on the narration audio. Named so the clip-timestamp tests below can
+ *  assert the identity rather than restating a literal. */
+const WALK_STARTED_AT = "2026-07-30T15:04:00.000Z";
+
 function makePayload(overrides: Record<string, unknown> = {}) {
   return {
     walkId: "walk-1",
@@ -76,7 +81,7 @@ function makePayload(overrides: Record<string, unknown> = {}) {
     projectId: null,
     title: "North wing walkthrough",
     siteLabel: "Building A",
-    capturedAt: "2026-07-30T15:04:00.000Z",
+    capturedAt: WALK_STARTED_AT,
     capturedByUserId: "user-1",
     officeSlug: "dallas",
     artifacts: [
@@ -88,7 +93,9 @@ function makePayload(overrides: Record<string, unknown> = {}) {
         mimeType: "video/mp4",
         originalFilename: "clip-001.mp4",
         fileSizeBytes: 1024,
-        capturedAtMs: 0,
+        // The walk's start, which is what mobile actually puts on a video artifact — not the 0 this
+        // fixture used to carry, which was a placeholder from before the value was forwarded anywhere.
+        capturedAtMs: Date.parse(WALK_STARTED_AT),
       },
     ],
     ...overrides,
@@ -270,6 +277,166 @@ describe("handleGlassesWalkthroughForward", () => {
     });
 
     expect(JSON.parse(calls[0]!.init.body)).not.toHaveProperty("jobType");
+  });
+
+  // ── WHEN each clip was recorded ────────────────────────────────────────────────────────────────
+  //
+  // TROCK Scope positions a clip on the walk's timeline from `capturedAt`, and falls back to UPLOAD ORDER
+  // when there is none. Upload order is drain order, not walk order (audio and video drain before every
+  // photo — mobile's ORDER_MEDIA/ORDER_PHOTO), so without this every still ever forwarded sits after every
+  // clip regardless of when it was taken, and a standalone narration recording cannot be laid alongside
+  // the footage it was spoken over at all.
+  describe("clip capture timestamps", () => {
+    const beginBodyFor = (calls: Array<{ url: string; init: any }>, index: number) =>
+      JSON.parse(calls.filter((c) => /\/clips$/.test(c.url))[index]!.init.body);
+
+    it("stamps the video with the walk's start, declared as a manual timestamp", async () => {
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await handleGlassesWalkthroughForward(makePayload(), "office-1", {
+        db,
+        fetchImpl: fetchImpl as any,
+        baseUrl: "https://scope.example.com",
+        token: "shared-token",
+        downloadRange: makeDownloadRange(),
+      });
+
+      // BOTH fields, because TROCK Scope requires `capturedAt` whenever the source says manual and
+      // refuses every other source from a client — one without the other is a 400 that fails the forward.
+      expect(beginBodyFor(calls, 0)).toMatchObject({
+        capturedAt: WALK_STARTED_AT,
+        capturedAtSource: "manual",
+      });
+    });
+
+    it("stamps a still with its OWN capture instant, not the walk's", async () => {
+      // The whole point of the field. A walk's stills are taken minutes apart across a building, and the
+      // walk's own start time would collapse all of them onto one moment — sorted, once again, by the
+      // accident of upload order.
+      const stillAt = Date.parse(WALK_STARTED_AT) + 187_000;
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await handleGlassesWalkthroughForward(
+        makePayload({
+          artifacts: [
+            makePayload().artifacts[0],
+            {
+              fileId: "file-2",
+              idempotencyKey: "artifact-2",
+              kind: "photo",
+              r2Key: "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-2.jpg",
+              mimeType: "image/jpeg",
+              originalFilename: "still-001.jpg",
+              fileSizeBytes: 2048,
+              capturedAtMs: stillAt,
+            },
+          ],
+        }),
+        "office-1",
+        {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: "https://scope.example.com",
+          token: "shared-token",
+          downloadRange: makeDownloadRange(),
+        }
+      );
+
+      expect(beginBodyFor(calls, 1)).toMatchObject({
+        capturedAt: new Date(stillAt).toISOString(),
+        capturedAtSource: "manual",
+      });
+      // And it is genuinely a different instant from the video's — an assertion the walk-start default
+      // would satisfy by accident if this only checked the shape.
+      expect(beginBodyFor(calls, 1).capturedAt).not.toBe(beginBodyFor(calls, 0).capturedAt);
+    });
+
+    it("stamps standalone narration audio with the walk's start, so it aligns with the footage", async () => {
+      // Both recorders are started at walk start, which is exactly what lets TROCK Scope lay the audio
+      // beside the video. Sent as its own artifact (PR #1134), narration with no `capturedAt` would sort
+      // after the video by upload order and put every quote in the wrong place.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await handleGlassesWalkthroughForward(
+        makePayload({
+          artifacts: [
+            makePayload().artifacts[0],
+            {
+              fileId: "file-2",
+              idempotencyKey: "artifact-2",
+              kind: "audio",
+              r2Key: "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-2.m4a",
+              mimeType: "audio/mp4",
+              originalFilename: "narration.m4a",
+              fileSizeBytes: 4096,
+              capturedAtMs: Date.parse(WALK_STARTED_AT),
+            },
+          ],
+        }),
+        "office-1",
+        {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: "https://scope.example.com",
+          token: "shared-token",
+          downloadRange: makeDownloadRange(),
+        }
+      );
+
+      expect(beginBodyFor(calls, 1).capturedAt).toBe(beginBodyFor(calls, 0).capturedAt);
+      expect(beginBodyFor(calls, 1).capturedAtSource).toBe("manual");
+    });
+
+    it("sends NEITHER field when the artifact has no capture time", async () => {
+      // A walk recovered from a directory scan reports null rather than inventing the recovery moment.
+      // Absent, TROCK Scope falls back to upload_order — today's behaviour, which is the right one when
+      // we genuinely do not know.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await handleGlassesWalkthroughForward(
+        makePayload({ artifacts: [{ ...makePayload().artifacts[0], capturedAtMs: null }] }),
+        "office-1",
+        {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: "https://scope.example.com",
+          token: "shared-token",
+          downloadRange: makeDownloadRange(),
+        }
+      );
+
+      expect(beginBodyFor(calls, 0)).not.toHaveProperty("capturedAt");
+      expect(beginBodyFor(calls, 0)).not.toHaveProperty("capturedAtSource");
+    });
+
+    it("REGRESSION: an unrepresentable capturedAtMs is dropped, not thrown over", async () => {
+      // `new Date(1e300).toISOString()` throws a RangeError. `payload` is jsonb a human edits by hand
+      // while reconciling a dead letter, so the value reaching this job has not been through the ingest
+      // route's bounds check — and failing a delivery whose bytes are perfectly forwardable, over a
+      // decorative field, is the wrong trade.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await handleGlassesWalkthroughForward(
+        makePayload({ artifacts: [{ ...makePayload().artifacts[0], capturedAtMs: 1e300 }] }),
+        "office-1",
+        {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: "https://scope.example.com",
+          token: "shared-token",
+          downloadRange: makeDownloadRange(),
+        }
+      );
+
+      expect(beginBodyFor(calls, 0)).not.toHaveProperty("capturedAt");
+      // The clip itself still went out, which is the property that matters.
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(true);
+    });
   });
 
   it("reuses a checkpointed scopeWalkthroughId instead of creating a second remote walkthrough", async () => {

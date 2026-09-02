@@ -18,11 +18,21 @@
 -- bounds on a spoken number, what boosts the transcriber's vocabulary, and what the consolidated
 -- roll-up groups on. A walk with no work types produces a list nobody can total.
 --
--- NULLABLE, AND NULL IS A REAL ANSWER. It means "nobody stated one", and the forward job then OMITS the
--- field from its create call rather than inventing a value — so TROCK Scope applies exactly the default
--- it applies today. Every historical row, and every walk filed by a client that does not yet send this,
--- behaves byte-for-byte as it does now. That matters more than usual right now: the capture clients are
--- unchanged by this migration, so on the day it ships nothing about ingest moves at all.
+-- NULLABLE, AND NULL MEANS "FILED BEFORE ANYONE ASKED". Every historical row holds it, and nothing
+-- backfills them: the deal's project type today is not evidence of what it was when the walk happened,
+-- and a walk whose scope has already been reviewed must not silently change catalogs underneath it.
+--
+-- Rows written from here on always carry a value, because the ingest route RESOLVES one rather than
+-- waiting to be told (server/src/modules/walkthrough-capture/glasses-walkthrough-job-type.ts). No capture
+-- client sends `job_type` yet and none is likely to — nobody is going to pick a work-type catalog on a
+-- phone mid-walk — but the deal the walk is filed against is already typed, and that is the answer. A
+-- client that DOES state one wins, which is what keeps this column an override rather than a cache.
+--
+-- WHAT IS STORED AND WHAT IS SENT ARE ALLOWED TO DIFFER, and the column is the wider of the two. This
+-- records what the walk IS; the forward job omits the field when TROCK Scope has no seeded work-type
+-- catalog for that type, because sending one it cannot ground is a 422 the forwarder retries into
+-- forever — losing the walk entirely, where today it merely lands under the wrong catalog. So the column
+-- stays correct for the day that catalog is seeded, and a re-forward needs no backfill.
 --
 -- NO CHECK CONSTRAINT, DELIBERATELY. The authoritative list is `JOB_TYPES` in the trock-scope repo
 -- (shared/src/schema/enums.ts), and TROCK Scope validates it on the way in. The ingest route validates it
@@ -65,4 +75,4 @@ ALTER TABLE office_dallas.glasses_walkthroughs
 -- TENANT_SCHEMA_END
 
 COMMENT ON COLUMN office_dallas.glasses_walkthroughs.job_type IS
-  'Which TROCK Scope work-type catalog this walk should be graded against — interior_finish_out, roofing_envelope, commercial_ti or service_repair. NULL means nobody stated one, and the forward job then omits it so TROCK Scope applies its own default. The authoritative list is JOB_TYPES in the trock-scope repo; there is deliberately no CHECK here. Migration 0243.';
+  'Which TROCK Scope work-type catalog this walk should be graded against — interior_finish_out, roofing_envelope, commercial_ti or service_repair. Resolved at ingest from the client''s statement if it made one, else from the deal''s project type. NULL only on rows filed before this column existed. What is SENT to TROCK Scope can be narrower: the forward omits a type that deployment has no seeded catalog for. The authoritative list is JOB_TYPES in the trock-scope repo; there is deliberately no CHECK here. Migration 0243.';

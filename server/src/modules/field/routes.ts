@@ -103,6 +103,7 @@ import {
 import {
   ingestGlassesWalkthrough,
   requestGlassesWalkthroughArtifactUploadUrl,
+  resolveGlassesWalkthroughJobTypeForDeal,
   validateGlassesWalkthroughArtifactUploadUrlInput,
   validateGlassesWalkthroughCompleteInput,
 } from "../walkthrough-capture/glasses-walkthrough-service.js";
@@ -853,13 +854,27 @@ fieldRoutes.post("/projects/:dealId/glasses-walkthroughs", requireFieldContracto
       { dealId },
       async (officeDb, office) => {
         await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
-        const input = validateGlassesWalkthroughCompleteInput({
+        const stated = validateGlassesWalkthroughCompleteInput({
           ...(req.body as Record<string, unknown> | undefined),
           dealId,
           userId: req.fieldUser!.id,
           officeSlug: office.slug,
           officeId: office.id,
         });
+        // WHICH WORK-TYPE CATALOG TROCK SCOPE SHOULD GRADE THIS WALK AGAINST, settled here rather than
+        // inside the ingest — because it is a fact about the DEAL, and this is the layer that has one.
+        // No capture client sends `jobType` yet, so in practice this is where every walk's answer comes
+        // from; see ./../walkthrough-capture/glasses-walkthrough-job-type.ts for the mapping and for why
+        // getting it wrong has cost 86% of extracted line items their work type.
+        //
+        // AFTER the access assert, deliberately: it reads the deal, and a caller who may not reach this
+        // deal must be refused before anything about it is read, not merely before the walk is filed.
+        const input = {
+          ...stated,
+          // `as never` for the same reason the ingest call below uses it: the field router's tenant db
+          // handle is structurally the same connection, typed differently.
+          jobType: await resolveGlassesWalkthroughJobTypeForDeal(officeDb as never, dealId, stated.jobType),
+        };
         return ingestGlassesWalkthrough(officeDb as never, input, {
           artifactStore: createGlassesWalkthroughArtifactStore(),
         });

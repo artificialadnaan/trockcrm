@@ -1,10 +1,12 @@
 import { AlertTriangle, ExternalLink, Glasses, Loader2, MapPin, PlayCircle } from "lucide-react";
+import { GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS } from "@trock-crm/shared/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   useDealGlassesWalkthroughs,
   type GlassesWalkthrough,
+  type GlassesWalkthroughPipelineHealth,
   type GlassesWalkthroughScopeItem,
 } from "@/hooks/use-glasses-walkthroughs";
 import { buildTrockScopeReviewUrl } from "@/lib/trock-scope";
@@ -201,6 +203,80 @@ const STATE_BADGE: Record<GlassesWalkthrough["state"], { label: string; classNam
   failed: { label: "Extraction failed", className: "border-red-200 bg-red-100 text-red-800" },
 };
 
+/**
+ * The shortfall as a sentence, or null when there is nothing worth saying.
+ *
+ * THE THRESHOLD IS THE SERVER'S, not a second opinion. `GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS` is the
+ * line the ingest already logs a warning at, so reusing it means the panel and ops agree about which
+ * walks are bad — a client-side copy would eventually disagree, and the argument would be about which
+ * number was right rather than about the walk.
+ *
+ * It is not zero, and the gap is where the real defects hide: the census counts seconds the phone
+ * actually wrote while the walk clock runs to the moment somebody taps stop, so a second or two of
+ * shortfall is an encoder tail. Warning on that would put an amber line on every healthy walk, which is
+ * the fastest way to teach an estimator to ignore amber lines. The two walks that motivated the counter
+ * were short by 30 s and 3.8 min.
+ */
+export function describeNarrationShortfall(shortfallMs: number | null): string | null {
+  // `null` is "no census, so we do not know", which is NOT "nothing was lost" — the two must never
+  // collapse, and a `!shortfallMs` check would merge them and also swallow a genuine 0.
+  if (shortfallMs === null || !Number.isFinite(shortfallMs)) return null;
+  if (shortfallMs <= GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS) return null;
+  return `Narration ${Math.round(shortfallMs / 1000)} s short — audio stopped during the walk.`;
+}
+
+/**
+ * The chip for TROCK Scope's OWN account of a walk, as distinct from the CRM's.
+ *
+ * THREE TIERS, and the middle one is the point. `failed` and `held` are the states an estimator has to
+ * act on and they carry the warning style; `processing` says work is genuinely under way over there, in a
+ * neutral style that reads as motion rather than as a problem; `settled` and `empty` are quiet, because
+ * the state badge beside them has already said the same thing in words the estimator cares about more.
+ *
+ * QUIET IS NOT ABSENT, deliberately. A rendered chip is how anyone can tell the field ARRIVED — during a
+ * rollout where most responses carry nothing, "no chip" would be indistinguishable from "TROCK Scope says
+ * everything is fine", and the first person to ask "is the health field live yet?" would have no way to
+ * find out from the screen.
+ */
+const PIPELINE_CHIP: Record<string, { className: string; tone: "warning" | "neutral" | "quiet" }> = {
+  processing: { className: "border-blue-200 bg-blue-50 text-blue-800", tone: "neutral" },
+  settled: { className: "border-gray-200 bg-gray-100 text-gray-600", tone: "quiet" },
+  empty: { className: "border-gray-200 bg-gray-100 text-gray-600", tone: "quiet" },
+  failed: { className: "border-red-200 bg-red-100 text-red-800", tone: "warning" },
+  held: { className: "border-red-200 bg-red-100 text-red-800", tone: "warning" },
+  // Terminal, and the scope on screen is real — but it was extracted from media that has since changed.
+  // Warning rather than quiet: an estimator pricing from a stale list has no way to know it is stale.
+  stale: { className: "border-amber-200 bg-amber-100 text-amber-800", tone: "warning" },
+};
+
+/** The fallback for a pipeline state this build predates. Neutral and NAMED: TROCK Scope owns this
+ *  vocabulary and adds to it without asking, and showing the unrecognised word is strictly more useful
+ *  than hiding it — the reader can at least quote it. Mirrors UNKNOWN_STATE_BADGE's reasoning. */
+const UNKNOWN_PIPELINE_CHIP = { className: "border-gray-200 bg-gray-100 text-gray-700", tone: "quiet" as const };
+
+/**
+ * TROCK Scope's health chip, plus — for the states worth acting on — the stage and reason behind it.
+ *
+ * The stage rides in the chip because it is short and identifies WHERE it stopped; the reason is a
+ * sentence TROCK Scope wrote and gets its own line rather than being truncated into a label. Both are
+ * optional on the wire and each is omitted on its own.
+ */
+function PipelineHealthChip({ pipeline }: { pipeline: GlassesWalkthroughPipelineHealth }) {
+  const chip = PIPELINE_CHIP[pipeline.state] ?? UNKNOWN_PIPELINE_CHIP;
+  const label = pipeline.stage ? `${pipeline.state} · ${pipeline.stage}` : pipeline.state;
+  return (
+    <Badge
+      variant="outline"
+      className={chip.className}
+      // The reason is on the badge too, so it is reachable on a state whose tone does not earn its own
+      // line — and so the full text survives when a long reason is wrapped or clipped below.
+      title={pipeline.reason ?? `TROCK Scope reports this walk as ${pipeline.state}.`}
+    >
+      {label}
+    </Badge>
+  );
+}
+
 /** One extracted line item. Every field except the description is optional on the wire, and each one that is
  *  absent is rendered as absent rather than as a placeholder value — see formatWalkQuantity. */
 function ScopeItemRow({ item, reviewUrl }: { item: GlassesWalkthroughScopeItem; reviewUrl: string | null }) {
@@ -385,6 +461,12 @@ export function AiWalkCard({
             <Badge variant="outline" className={badge.className}>
               {badge.label}
             </Badge>
+            {/* BESIDE the state badge, never instead of it. The badge is what the CRM can vouch for;
+                this is TROCK Scope's own account, and it can say things the CRM cannot infer at all —
+                that the walk was HELD on purpose, or that the scope on screen is STALE against media
+                that changed under it. Absent whenever that service did not say, which is every response
+                until it ships the field. */}
+            {walkthrough.pipeline ? <PipelineHealthChip pipeline={walkthrough.pipeline} /> : null}
           </div>
         </div>
         {/* Absent when TROCK Scope's origin is not configured for this build, or when this walk has no remote
@@ -407,6 +489,27 @@ export function AiWalkCard({
       </div>
 
       <div className="mt-3">
+        {/* WHY TROCK SCOPE STOPPED, in its own words — but only for the states an estimator can act on.
+            A reason on a `settled` walk is bookkeeping; a reason on a `failed` or `held` one is the whole
+            message, and truncating it into the chip's label would lose the half that says what to do. */}
+        {walkthrough.pipeline?.reason &&
+        (PIPELINE_CHIP[walkthrough.pipeline.state]?.tone ?? UNKNOWN_PIPELINE_CHIP.tone) === "warning" ? (
+          <p className="mb-2 text-sm text-red-700">{walkthrough.pipeline.reason}</p>
+        ) : null}
+
+        {/* HOW MUCH OF THE WALK NOBODY NARRATED. Rendered for EVERY state, above the state-specific
+            content, because it is a fact about the recording rather than about the extraction: a walk
+            whose scope read failed still lost the same minutes of audio, and a walk that came back
+            `ready` with a short list needs this to explain why the list is short. Nothing here is
+            recoverable by retrying — the audio was never captured — so it is a statement, not an error
+            with a control. */}
+        {describeNarrationShortfall(walkthrough.narrationShortfallMs) ? (
+          <p className="mb-2 flex items-start gap-2 text-sm text-amber-700">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{describeNarrationShortfall(walkthrough.narrationShortfallMs)}</span>
+          </p>
+        ) : null}
+
         {walkthrough.state === "processing" ? (
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">
