@@ -66,6 +66,9 @@ function walkRow(overrides: Record<string, unknown> = {}) {
     scopeWalkthroughId: SCOPE_ID,
     capturedAt: new Date("2026-08-02T22:21:47.702Z"),
     capturedByUserId: USER,
+    // Explicit, as the real read returns it: `loadDealGlassesWalkthroughRows` normalises the jsonb column to
+    // null, and a fixture that omitted it would let `undefined` fall out of the JSON body unnoticed.
+    captureCensus: null,
     ...overrides,
   };
 }
@@ -135,6 +138,10 @@ describe("GET /api/deals/:id/glasses-walkthroughs", () => {
           scopeWalkthroughId: SCOPE_ID,
           capturedAt: "2026-08-02T22:21:47.702Z",
           capturedByUserId: USER,
+          // The capture census and the number derived from it, both null for a walk filed without one —
+          // "we do not know", which the contract keeps distinct from zero narration lost.
+          captureCensus: null,
+          narrationShortfallMs: null,
           state: "ready",
           scope: {
             status: "ready",

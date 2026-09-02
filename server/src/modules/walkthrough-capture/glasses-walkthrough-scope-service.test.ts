@@ -29,7 +29,26 @@ function row(overrides: Partial<GlassesWalkthroughRow> = {}): GlassesWalkthrough
     capturedAt: new Date("2026-08-02T22:21:47.702Z"),
     capturedByUserId: USER,
     capturedByName: "Dana Reyes",
+    captureCensus: null,
     ...overrides,
+  };
+}
+
+/** The census of a walk that went badly: 30 min on the clock, 26.2 min of glasses audio, 25 min standalone. */
+function census(): NonNullable<GlassesWalkthroughRow["captureCensus"]> {
+  return {
+    walkMs: 1_800_000,
+    video: { framesReceived: 54_000, framesAppended: 1_800, framesDropped: 52_200, secondsSinceLastFrameArrived: 1_740.5 },
+    audio: {
+      buffersReceived: 90_000,
+      buffersAppended: 78_600,
+      buffersDropped: 11_400,
+      longestDropRun: 11_400,
+      secondsAppended: 1_572,
+      engineRestarts: 2,
+      standaloneSecondsRecorded: 1_500,
+      events: [{ atMs: 60_000, kind: "video-stalled" }],
+    },
   };
 }
 
@@ -77,6 +96,9 @@ describe("resolveGlassesWalkthroughScope — the four states", () => {
       // happens BEFORE the commit; nothing out here re-reads a user, so a TROCK Scope outage cannot cost
       // the heading its capturer.
       capturedByName: "Dana Reyes",
+      // No census on this row, so both are null — "we do not know", which is not the same as zero lost.
+      captureCensus: null,
+      narrationShortfallMs: null,
       state: "ready",
       scope: {
         status: "ready",
@@ -700,5 +722,61 @@ describe("resolveGlassesWalkthroughScope — no TROCK Scope credential on this p
     ).toEqual([]);
     expect(fetchScopeItems).not.toHaveBeenCalled();
     expect(isConfigured).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveGlassesWalkthroughScope — the capture census", () => {
+  it("carries the stored census through whole and derives the narration shortfall from it", async () => {
+    // 1,800,000 ms walk, 1,572 s of glasses audio, 1,500 s standalone: 228,000 ms with no narration behind
+    // it. The census itself is passed on untouched — the counters ARE the diagnosis for whoever reads them.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row({ captureCensus: census() })], {
+      scopeReader: reader(),
+      warn,
+    });
+
+    expect(entry!.captureCensus).toEqual(census());
+    expect(entry!.narrationShortfallMs).toBe(228_000);
+  });
+
+  it("reports null — not zero — for a walk with no census", async () => {
+    // "We do not know" and "nothing was lost" are different claims, and a future warning must keep them
+    // apart: an older app build that never counted is not a walk whose audio covered it.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row({ captureCensus: null })], { scopeReader: reader(), warn });
+
+    expect(entry!.captureCensus).toBeNull();
+    expect(entry!.narrationShortfallMs).toBeNull();
+  });
+
+  it("settles the shortfall from our own row even when TROCK Scope cannot be read", async () => {
+    // The census is a database fact; nothing in the network phase may cost the panel it. A walk whose scope
+    // read fails still says how much narration it lost — which is the more useful of the two facts when
+    // the extraction is the thing that is failing.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row({ captureCensus: census() })], {
+      scopeReader: reader({
+        fetchScopeItems: async () => {
+          throw new Error("connect ECONNREFUSED");
+        },
+      }),
+      warn,
+    });
+
+    expect(entry!.state).toBe("unavailable");
+    expect(entry!.narrationShortfallMs).toBe(228_000);
+  });
+
+  it("derives it for a PROCESSING walk too, which never reaches TROCK Scope at all", async () => {
+    // The minutes after a walk lands are when an estimator is watching the panel, and a walk that is short
+    // of narration is worth knowing about before its scope exists — while the crew is still on site.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope(
+      [row({ scopeWalkthroughId: null, captureCensus: census() })],
+      { scopeReader: reader(), warn }
+    );
+
+    expect(entry!.state).toBe("processing");
+    expect(entry!.narrationShortfallMs).toBe(228_000);
   });
 });
