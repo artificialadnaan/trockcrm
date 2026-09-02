@@ -1165,6 +1165,13 @@ describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () 
       await pg.exec("DELETE FROM files");
       await pg.exec("DELETE FROM job_queue");
       await pg.exec("DELETE FROM photo_audit_log");
+      // THE WALK ROW TOO, and leaving it out made this measure two different things. Both calls below
+      // run inside ONE test, so only the first saw the suite's `beforeEach` truncation: the second found
+      // the walk already recorded, took `recordGlassesWalkthrough`'s re-file branch — which reads the
+      // stored job type back — and issued one statement more than the first for a reason that has
+      // nothing to do with how many stills it carried. Cleared here, both measurements describe a FIRST
+      // completion, which is the only comparison this guard is about.
+      await pg.exec("DELETE FROM glasses_walkthroughs");
       const issued: string[] = [];
       const original = pg.query.bind(pg);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1182,9 +1189,11 @@ describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () 
       return issued.length;
     };
 
-    // Six statements either way, today: the `files` insert, the re-select, the audit insert, the event
-    // insert, the forward-state lookup and the forward enqueue. Nonzero on both sides is itself part of
-    // the assertion — a counter that silently stopped intercepting would otherwise report 0 === 0.
+    // The same statements either way: the `files` insert, the re-select, the audit insert, the event
+    // insert, the walk-row upsert, the forward-state lookup and the forward enqueue. The exact number is
+    // deliberately not asserted — counting rather than naming a figure is what keeps this true as the
+    // write phase gains or loses steps. Nonzero on both sides is itself part of the assertion: a counter
+    // that silently stopped intercepting would otherwise report 0 === 0.
     const wide = await statementsFor(40);
     const narrow = await statementsFor(2);
     expect(narrow).toBeGreaterThan(0);
