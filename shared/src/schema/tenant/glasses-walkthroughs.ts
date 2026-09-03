@@ -44,6 +44,25 @@ export const glassesWalkthroughs = pgTable(
      */
     capturedByUserId: uuid("captured_by_user_id"),
     /**
+     * Which TROCK Scope work-type catalog this walk should be graded against.
+     *
+     * RESOLVED AT INGEST, never merely received: the client's statement if it made one, otherwise the
+     * DEAL's own project type. No capture client sends a job type and none is likely to — nobody picks a
+     * work-type catalog on a phone mid-walk — so in practice this column is the deal's answer, mapped in
+     * server/src/modules/walkthrough-capture/glasses-walkthrough-job-type.ts.
+     *
+     * NULL means "filed before anyone asked": every historical row, and nothing backfills them, because
+     * the deal's type today is not evidence of what it was on the day of the walk.
+     *
+     * WIDER THAN WHAT IS SENT, deliberately. This says what the walk IS; the forward job withholds a job
+     * type TROCK Scope has no seeded catalog for, since sending one it cannot ground is a 422 that costs
+     * the walk entirely. So this stays correct for the day that catalog exists.
+     *
+     * The authoritative vocabulary is `JOB_TYPES` in the trock-scope repo, validated at the ingest route
+     * and again by TROCK Scope. Migration 0243 owns the DDL and explains why there is no CHECK here.
+     */
+    jobType: varchar("job_type", { length: 40 }),
+    /**
      * What the phone's recorder ACTUALLY wrote during this walk — frames and audio buffers received,
      * appended and dropped, seconds of narration landed, audio engine restarts — as counted by the phone
      * itself and sent on the completion call. NULL when the client did not send one: every walk before

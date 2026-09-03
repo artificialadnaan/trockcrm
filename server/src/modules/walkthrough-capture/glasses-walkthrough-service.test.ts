@@ -185,6 +185,48 @@ describe("validateGlassesWalkthroughArtifactUploadUrlInput", () => {
 });
 
 describe("validateGlassesWalkthroughCompleteInput", () => {
+  it("reads null when the client states no job type, rather than guessing one here", () => {
+    // This validator answers only "did the client say", because a client that says something WRONG and a
+    // client that says NOTHING need different answers — a 400 and a fall-through respectively. The
+    // fall-through is settled one layer out, against the deal
+    // (`resolveGlassesWalkthroughJobTypeForDeal`), which is the layer that has a deal to consult.
+    expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput()).jobType).toBeNull();
+  });
+
+  it.each(["interior_finish_out", "roofing_envelope", "commercial_ti", "service_repair"])(
+    "accepts %s",
+    (jobType) => {
+      expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType })).jobType).toBe(
+        jobType
+      );
+    }
+  );
+
+  it("refuses a job type TROCK Scope does not have", () => {
+    // A 400 to a caller who can still fix it, instead of a 422 discovered three hops later inside a
+    // retrying background job — where the walk is filed, the bytes are in R2, and the only symptom is a
+    // deal panel stuck on "processing".
+    expect(() =>
+      validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: "exterior" }))
+    ).toThrow(AppError);
+  });
+
+  it("names the types it will accept, so the caller can correct it without reading our source", () => {
+    expect(() =>
+      validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: "exterior" }))
+    ).toThrow(/interior_finish_out/);
+  });
+
+  it("treats an empty string as absent rather than as a bad value", () => {
+    expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: "" })).jobType).toBeNull();
+  });
+
+  it("refuses a non-string job type instead of stringifying it", () => {
+    expect(() =>
+      validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: 7 }))
+    ).toThrow(AppError);
+  });
+
   it("accepts a well-formed single-artifact payload", () => {
     const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput());
     expect(result.walkId).toBe(WALK);

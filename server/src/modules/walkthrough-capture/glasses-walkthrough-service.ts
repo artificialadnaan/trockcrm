@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import { deals, files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
   GLASSES_WALK_NARRATION_SHORTFALL_WARN_MS,
@@ -40,6 +40,14 @@ import {
   type GlassesWalkCaptureCensus,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  GLASSES_WALKTHROUGH_JOB_TYPES,
+  MAX_GLASSES_WALKTHROUGH_JOB_TYPE_CHARS,
+  isGlassesWalkthroughJobType,
+  resolveGlassesWalkthroughJobType,
+  scopeForwardableJobType,
+  type GlassesWalkthroughJobType,
+} from "./glasses-walkthrough-job-type.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -178,6 +186,72 @@ const MAX_TITLE_CHARS = 300;
 const MAX_SITE_LABEL_CHARS = 300;
 const MAX_FILENAME_CHARS = 500; // files.original_filename / files.display_name are varchar(500)
 const MAX_WALK_ID_CHARS = 100;
+
+/**
+ * A job type the CLIENT stated, or null when it said nothing — which is every walk filed to date, and
+ * will stay so until a capture app grows a picker.
+ *
+ * Validated against TROCK Scope's vocabulary here so a bad value is a 400 to the caller who can still
+ * fix it, rather than a 422 discovered three hops later inside a retrying background job — where the
+ * walk is already filed, the bytes are already in R2, and the only symptom is a deal panel stuck on
+ * "processing" with the reason buried in a dead letter. The list, and why there is deliberately no CHECK
+ * behind it, live in ./glasses-walkthrough-job-type.ts.
+ *
+ * Null here is NOT the value that reaches the column: the route resolves it against the deal (see
+ * `resolveGlassesWalkthroughJobTypeForDeal`). This function answers only "did the client say", because
+ * a client that says something wrong and a client that says nothing need different answers.
+ */
+function assertOptionalJobType(value: unknown, field: string): string | null {
+  const jobType = assertOptionalString(value, field, MAX_GLASSES_WALKTHROUGH_JOB_TYPE_CHARS);
+  if (jobType === null) return null;
+  if (!isGlassesWalkthroughJobType(jobType)) {
+    throw new AppError(
+      400,
+      `${field} must be one of: ${GLASSES_WALKTHROUGH_JOB_TYPES.join(", ")}.`
+    );
+  }
+  return jobType;
+}
+
+/**
+ * The job type this walk is filed under: what the client stated, or — for every walk today — what the
+ * DEAL says it is.
+ *
+ * ONE ROUND TRIP, on a route that runs once per completed walk. Not on the artifact presign (which runs
+ * once per file) and not on anything polled, so the cost is a single indexed primary-key read per site
+ * visit. It reads the three signals in `resolveProjectTypeCode`'s canonical order, including the scalar
+ * subquery for the configured digit — without that tier, roughly half of active deals carry no project
+ * type TEXT at all and would fall through to `workflow_route`, which has never meant what it looks like.
+ *
+ * A DEAL THAT IS NOT THERE resolves to the default, exactly as a deal with no type does. It cannot
+ * happen from the route — `assertGlassesWalkthroughDealAccess` has already 404'd — and treating it as an
+ * error would put a walk's delivery at the mercy of a read that has nothing to do with it.
+ */
+export async function resolveGlassesWalkthroughJobTypeForDeal(
+  tenantDb: TenantDb,
+  dealId: string,
+  statedJobType: string | null
+): Promise<GlassesWalkthroughJobType> {
+  if (statedJobType !== null && isGlassesWalkthroughJobType(statedJobType)) return statedJobType;
+
+  const [deal] = await tenantDb
+    .select({
+      projectType: deals.projectType,
+      // The same scalar subquery the deal card and the RFP reads use. `project_type_config` is a PUBLIC
+      // table reached from a tenant-schema one, which is why this is raw SQL rather than a join.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
+      workflowRoute: deals.workflowRoute,
+    })
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+
+  return resolveGlassesWalkthroughJobType({
+    projectType: deal?.projectType ?? null,
+    projectTypeCode: deal?.projectTypeCode ?? null,
+    workflowRoute: deal?.workflowRoute ?? null,
+  });
+}
 
 const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -538,11 +612,13 @@ export interface GlassesWalkthroughArtifactInput {
    * and upload.ts), NOT an offset from the walk's start. The name reads like an offset; it is not one.
    * Do not add this to another absolute timestamp (e.g. the walk's own `capturedAt`) — see the `takenAt`
    * assignment below, where doing exactly that once shipped a bug that filed every photo decades in the
-   * future. Used directly to stamp `files.takenAt`. Otherwise informational only for the TROCK Scope
-   * forward — TROCK Scope derives the real clip timeline from the media's own embedded metadata
-   * (exif/container), not from a client claim, so it is not sent on to TROCK Scope's API (see
-   * worker/src/jobs/glasses-walkthrough-forward.ts's beginClip). Kept in the job payload for the
-   * project-folder record and future use.
+   * future. Used directly to stamp `files.takenAt`.
+   *
+   * ALSO SENT ON TO TROCK SCOPE, as the clip's `capturedAt` with `capturedAtSource: "manual"` (see
+   * `clipCapturedAtFields` in worker/src/jobs/glasses-walkthrough-forward.ts, which explains why the
+   * earlier "derives it from embedded metadata, so we omit it" reasoning only ever held for the video).
+   * That makes this value load-bearing on a second consumer: it positions the still in TROCK Scope's
+   * timeline, and it is what aligns a standalone narration recording with the footage it was spoken over.
    */
   capturedAtMs: number | null;
 }
@@ -557,6 +633,18 @@ export interface IngestGlassesWalkthroughInput {
   userId: string;
   officeSlug: string;
   officeId: string | null;
+  /**
+   * Which catalog TROCK Scope should grade this walk against — ALREADY RESOLVED.
+   *
+   * The route settles this before calling in (`resolveGlassesWalkthroughJobTypeForDeal`): the client's
+   * statement if it made one, otherwise the deal's own project type, otherwise the default. So it is a
+   * statement about the walk, not a copy of the request body, and it is what lands in
+   * `glasses_walkthroughs.job_type` verbatim.
+   *
+   * Still nullable because a re-filed walk recovered from a directory scan and a caller in a test can
+   * legitimately have nothing to say; null writes NULL, which is what every historical row holds.
+   */
+  jobType: string | null;
   /**
    * What the phone's recorder actually wrote during the walk, as the phone counted it, or null when the
    * client did not send one (every app build before the census shipped). Validated and bounded by
@@ -670,6 +758,7 @@ export function validateGlassesWalkthroughCompleteInput(raw: Record<string, unkn
     userId: assertNonEmptyString(raw.userId, "userId", 100),
     officeSlug: assertNonEmptyString(raw.officeSlug, "officeSlug", 100),
     officeId: assertOptionalString(raw.officeId, "officeId", 100),
+    jobType: assertOptionalJobType(raw.jobType, "jobType"),
     captureCensus: captureCensus.value,
     artifacts,
   };
@@ -1568,7 +1657,7 @@ async function recordCreatedGlassesWalkthroughStills(
 async function recordGlassesWalkthrough(
   tenantDb: TenantDb,
   input: IngestGlassesWalkthroughInput
-): Promise<{ censusLanded: boolean }> {
+): Promise<{ censusLanded: boolean; jobType: string | null }> {
   const written = await tenantDb
     .insert(glassesWalkthroughs)
     .values({
@@ -1579,6 +1668,7 @@ async function recordGlassesWalkthrough(
       // a bare `Date.parse` check was not enough.
       capturedAt: new Date(input.capturedAt),
       capturedByUserId: input.userId,
+      jobType: input.jobType,
       captureCensus: input.captureCensus,
     })
     .onConflictDoUpdate({
@@ -1591,8 +1681,52 @@ async function recordGlassesWalkthrough(
     })
     // RETURNING yields a row for the insert and for the fill, and nothing when `setWhere` declined — which
     // is the whole signal: a row came back AND this call carried a census means the census landed now.
-    .returning({ id: glassesWalkthroughs.id });
-  return { censusLanded: written.length > 0 && input.captureCensus !== null };
+    //
+    // `jobType` rides along because the ROW's answer is the one the forward must carry, and this
+    // statement is where the row's answer is decided — see below.
+    .returning({ id: glassesWalkthroughs.id, jobType: glassesWalkthroughs.jobType });
+
+  const censusLanded = written.length > 0 && input.captureCensus !== null;
+  if (written[0]) return { censusLanded, jobType: written[0].jobType };
+
+  /**
+   * THE ROW ALREADY EXISTED AND THIS CALL HAD NOTHING TO ADD, so nothing came back — and this is exactly
+   * the path where the job type must be read rather than assumed.
+   *
+   * A re-completion rebuilds the forward payload from scratch (a mobile retry after a lost response, a
+   * walk re-filed from a directory scan, a replacement for a dead forward). `job_type` on the row belongs
+   * to the FIRST completion and this statement does not touch it, so taking the payload's job type from
+   * `input` instead would let the two disagree the moment the deal's project type is corrected while the
+   * bytes are still draining: the read model would show the catalog the walk was filed under and TROCK
+   * Scope would grade it under a different one, with nothing anywhere recording the disagreement.
+   *
+   * A read, not a write. The first completion's answer wins for the same reason every other fact on this
+   * row belongs to it — the census is the single deliberate exception, and it is one because a census can
+   * only ever ARRIVE later, never change.
+   *
+   * One statement, and only on this branch: an insert and a census fill both answered above, so the
+   * ordinary first completion pays nothing for it.
+   */
+  const [existing] = await tenantDb
+    .select({ jobType: glassesWalkthroughs.jobType })
+    .from(glassesWalkthroughs)
+    .where(
+      and(eq(glassesWalkthroughs.dealId, input.dealId), eq(glassesWalkthroughs.walkId, input.walkId))
+    )
+    .limit(1);
+  // "THE ROW SAYS NULL" AND "THERE IS NO ROW" ARE DIFFERENT ANSWERS, and `?? input.jobType` merged them.
+  //
+  // Every walk filed before migration 0243 legitimately holds NULL, and that is not an absence waiting to
+  // be filled — it is what the migration deliberately declines to backfill, because the deal's project
+  // type TODAY is not evidence of what it was on the day of the walk. Reading that NULL as "nobody has
+  // answered yet" would let a replacement forward grade a historical walk under the deal's current
+  // catalog, quietly re-categorising a scope somebody may already have reviewed, while the row it is
+  // filed under still says NULL.
+  //
+  // So the row's answer is taken whatever it is. The `input` fallback is only for the row vanishing
+  // between these two statements inside one transaction, which cannot happen.
+  if (existing) return { censusLanded, jobType: existing.jobType };
+  return { censusLanded, jobType: input.jobType };
 }
 
 /**
@@ -1614,7 +1748,28 @@ async function stampScopeWalkthroughId(
 ): Promise<void> {
   await tenantDb
     .update(glassesWalkthroughs)
-    .set({ scopeWalkthroughId, updatedAt: new Date() })
+    /**
+     * THE JOB TYPE IS CLEARED ALONGSIDE, because a walkthrough this row did not know about is one this
+     * row did not decide the catalog for.
+     *
+     * This statement only ever runs when an id is INHERITED from an older forward, and only on a row
+     * that did not already carry one. The case that matters is a walk predating migration 0214: it has
+     * no read-model row at all, so re-completing it INSERTS one — with a job type freshly resolved from
+     * the deal, for a remote walkthrough that was created long ago under whatever default applied then.
+     * The column would then claim a catalog TROCK Scope is not using and never will: a repeat create
+     * under the same `externalRef` returns the existing walkthrough untouched, and a forward holding the
+     * checkpoint skips the create entirely.
+     *
+     * NULL is the honest value there — the same "nobody has answered" every pre-0243 row holds, and the
+     * same reason migration 0243 declines to backfill them: the deal's project type today is not
+     * evidence of what it was on the day of the walk.
+     *
+     * It can also fire when the WORKER's own stamp lagged — the forward checkpointed but had not yet
+     * filled this column — in which case a correct value is replaced by "unknown". Accepted knowingly:
+     * that walkthrough already exists, so no later forward sends a job type for it at all, and losing a
+     * true-but-unused value costs less than keeping an untrue one that reads as a statement.
+     */
+    .set({ scopeWalkthroughId, jobType: null, updatedAt: new Date() })
     .where(
       and(
         eq(glassesWalkthroughs.dealId, input.dealId),
@@ -1822,7 +1977,13 @@ export async function ingestGlassesWalkthrough(
   // written past that return the row would exist only for walks whose FIRST completion reached this line —
   // so a walk whose first attempt died after its `files` write would be filed, forwarded, scoped, and
   // invisible on the deal page forever. Cheap to keep here: the insert is a no-op on every retry.
-  const { censusLanded } = await recordGlassesWalkthrough(tenantDb, input);
+  // `recordedJobType` is the ROW's answer, which is the first completion's — not necessarily this
+  // request's. See `recordGlassesWalkthrough` for why a replacement forward must carry the row's.
+  //
+  // `let`, because inheriting a TROCK Scope walkthrough this row never knew about retracts it — see the
+  // `stampScopeWalkthroughId` call below, which clears the same value in the database.
+  const { censusLanded, jobType: rowJobType } = await recordGlassesWalkthrough(tenantDb, input);
+  let recordedJobType = rowJobType;
 
   // SAY SO THE MOMENT A BAD WALK LANDS. The two walks that motivated the census were short by 30 s and
   // 3.8 min of narration, and nobody knew until an estimator opened the deal. This line is for ops: it
@@ -1909,6 +2070,11 @@ export async function ingestGlassesWalkthrough(
     // Validating above is what makes the catch unnecessary: the only failure this write can now raise
     // is a genuine database failure, and that one SHOULD abort the completion.
     await stampScopeWalkthroughId(tenantDb, input, knownJobState.scopeWalkthroughId);
+    // Kept in step with the column that statement just cleared, so the payload and the log line cannot
+    // claim a catalog the row no longer does. It makes no difference on the wire — a forward that
+    // inherits a checkpoint skips the create entirely, and never sends a job type at all — which is
+    // exactly why the two must not be allowed to drift unnoticed here.
+    recordedJobType = null;
   }
 
   if (knownJobState?.isLive) {
@@ -1938,6 +2104,17 @@ export async function ingestGlassesWalkthrough(
     capturedAt: input.capturedAt,
     capturedByUserId: input.userId,
     officeSlug: input.officeSlug,
+    /**
+     * THE WIRE VALUE, which is allowed to be narrower than the row's.
+     *
+     * `glasses_walkthroughs.job_type` records what this walk IS; this records what TROCK Scope can be
+     * asked for today. `scopeForwardableJobType` returns null for a job type that deployment has no
+     * seeded catalog for, and the forward job then omits the field so that side applies its own default
+     * — because SENDING it would be a 422 the forwarder reads as "safe to retry", looping until the
+     * queue dead-letters a walk that would otherwise have landed with a merely-imperfect catalog. The
+     * full argument, and how to widen it, is on `SCOPE_GROUNDABLE_JOB_TYPES`.
+     */
+    jobType: scopeForwardableJobType(recordedJobType),
     // The DEAD row's artifacts are inherited too, not just this call's list — the same union the live
     // branch above applies, for the same reason, and leaving it off here was an asymmetry with a real
     // casualty. A recovered manifest is assembled from a directory scan and can legitimately OMIT an
@@ -2024,6 +2201,32 @@ export async function ingestGlassesWalkthrough(
 
   const enqueuedId = jobRows[0]?.id;
   if (enqueuedId != null) {
+    // WHICH CATALOG THIS WALK WAS FILED UNDER, said once, at the moment the decision becomes permanent.
+    //
+    // One line per completed walk — a handful a day, not a stream. It earns that because the decision is
+    // otherwise INVISIBLE at exactly the time anyone asks about it: the input is a deal's project type
+    // three tiers deep, the output lands in a column nobody reads, and the question that gets asked
+    // ("why did this walk grade against the wrong catalog?") arrives days later with no way to
+    // reconstruct what the deal looked like then.
+    //
+    // Both values, always, because their DIFFERENCE is the interesting fact. `filed` is what the walk
+    // is; `sent` is what TROCK Scope was told, and it reads `(omitted)` when that deployment has no
+    // catalog for the type — the one case where a mis-catalogued scope is expected and is not a bug.
+    //
+    // EVERY VALUE QUOTED THROUGH `JSON.stringify`, the same rule the inherited-id warning below follows.
+    // `walkId` is a client-supplied string that is length-bounded and nothing else — no character class is
+    // enforced on it — so interpolated raw, a newline inside it writes a second line into the log that
+    // looks exactly like one of ours. `recordedJobType` comes off a `varchar(40)` column that carries no
+    // CHECK by design, so it is a hand-editable string too. The other two are provably from a closed set;
+    // they are quoted anyway, because a log line where only some values are escaped is one whose next
+    // editor has to work out which category a new value falls into.
+    const forwardedJobType = scopeForwardableJobType(recordedJobType);
+    console.log(
+      `[glasses-walkthrough] walk ${JSON.stringify(input.walkId)} on deal ${JSON.stringify(input.dealId)}: ` +
+        `job type filed as ${JSON.stringify(recordedJobType ?? "(none)")}, forwarded to TROCK Scope as ` +
+        `${JSON.stringify(forwardedJobType ?? "(omitted)")}`
+    );
+
     // The dead row this replacement inherited from is now SUPERSEDED, and must stop alerting.
     //
     // The dead-letter sweep selects every dead row whose `alertSent` is unset, without asking whether

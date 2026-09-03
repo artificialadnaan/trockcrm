@@ -75,6 +75,51 @@ export const GLASSES_WALKTHROUGH_FORWARD_JOB = "glasses_walkthrough_forward";
 const MAX_PARTS_PER_SIGN_REQUEST = 100;
 
 /**
+ * The ECMAScript maximum time value (±8.64e15 ms). Beyond it `new Date(...)` is an Invalid Date and
+ * `.toISOString()` THROWS rather than returning a bad string.
+ *
+ * A local copy of the server's `MAX_GLASSES_WALKTHROUGH_CAPTURED_AT_MS` (glasses-walkthrough-service.ts),
+ * not an import: `worker/` does not depend on `server/`, and this is a fact about the language rather than
+ * a policy the two could drift on. The server bounds what it accepts from a client; this bounds what the
+ * QUEUE hands us, which is a different door — `payload` is jsonb, and a human editing it while reconciling
+ * a dead letter is the caller the server's validator never sees.
+ */
+const MAX_REPRESENTABLE_TIME_MS = 8_640_000_000_000_000;
+
+/**
+ * The job types TROCK Scope can actually GROUND today — the only ones this job may put on a create.
+ *
+ * A SECOND GATE BEHIND THE SERVER'S, on a different door. The ingest already withholds a job type this
+ * deployment cannot ground (`SCOPE_GROUNDABLE_JOB_TYPES`, glasses-walkthrough-job-type.ts), but what
+ * arrives here is `job_queue.payload` — jsonb, and jsonb that a human edits by hand while reconciling a
+ * dead letter. That is the caller the server's gate never sees, and this file's own dead-letter
+ * instructions invite exactly that edit.
+ *
+ * WHY A BAD VALUE HERE IS UNRECOVERABLE RATHER THAN MERELY WRONG. TROCK Scope answers 422
+ * `job_type_unavailable` for a job type with no seeded work-type catalog, and 400 for one outside its
+ * enum. `createScopeWalkthrough` reads any 4xx as "refused before it created anything" — correctly, it
+ * is — retracts its pre-create marker, and retries. The answer cannot change without a deploy on that
+ * side, so the job repeats the identical refusal until the queue dead-letters it and the walk reaches
+ * TROCK Scope not at all. Omitting the field instead costs the walk nothing but TROCK Scope's own
+ * default, which is what every walk before this feature got.
+ *
+ * A LOCAL COPY, like `MAX_REPRESENTABLE_TIME_MS` above and for the same reason: `worker/` does not depend
+ * on `server/`. The duplication is the safe kind — both lists are subsets of the same vocabulary, and the
+ * two disagreeing can only ever cause an OMISSION, never a refusal.
+ */
+const SCOPE_FORWARDABLE_JOB_TYPES: ReadonlySet<string> = new Set([
+  "interior_finish_out",
+  "roofing_envelope",
+]);
+
+/** The `jobType` field for the create call, or nothing at all — see the set above for why anything
+ *  unrecognised is dropped rather than passed along to be refused. */
+function forwardableJobTypeFields(jobType: unknown): Record<string, string> {
+  if (typeof jobType !== "string" || !SCOPE_FORWARDABLE_JOB_TYPES.has(jobType)) return {};
+  return { jobType };
+}
+
+/**
  * Wall-clock ceilings on every outbound request. `fetch` has NO default timeout, and this job runs on a
  * dedicated poller with a reentrancy guard and a concurrency of 1 (queue.ts,
  * pollGlassesWalkthroughForwardJobs) — so one TROCK Scope (or R2) socket that is accepted and then goes
@@ -144,6 +189,14 @@ interface JobPayload {
   capturedAt: string;
   capturedByUserId: string;
   officeSlug: string;
+  /**
+   * Which work-type catalog TROCK Scope should grade this walk against, when the client stated one.
+   *
+   * Optional on the wire as well as in the type: payloads enqueued before 0243 do not carry it, and
+   * those rows are still in the queue. Absent ⇒ the create call omits the field ⇒ TROCK Scope applies
+   * its own default, which is what every walk to date has had.
+   */
+  jobType?: string | null;
   artifacts: JobArtifact[];
   /** The checkpoint: set once TROCK Scope's walkthrough has actually been created, so a retry of this
    *  same job row reuses it instead of creating a second one. */
@@ -384,6 +437,16 @@ async function createScopeWalkthrough(
       dealUuid: payload.dealId,
       officeSlug: payload.officeSlug,
       capturedBy: payload.capturedByUserId,
+      /**
+       * OMITTED rather than defaulted when there is nothing groundable to send.
+       *
+       * Three cases collapse into the same silence, and all three are right: a queue row enqueued before
+       * 0243 that carries no job type at all; a walk filed under a type this deployment of TROCK Scope
+       * has no catalog for; and a hand-repaired payload carrying something that is not a job type. In
+       * each, leaving the field out lets that side apply its own default — the behaviour every walk had
+       * before this feature — rather than putting a value on the wire that would be refused.
+       */
+      ...forwardableJobTypeFields(payload.jobType),
       // The dedupe key TROCK Scope actually deduplicates on — not a hint. A repeat create under this ref
       // returns the walkthrough it already has, `dealUuid` and all, so this field decides which remote
       // walkthrough this delivery's clips land in. `dealUuid` above does NOT: it is stored, never matched.
@@ -444,16 +507,77 @@ interface BeginClipResult {
   partCount: number;
 }
 
-async function beginClip(deps: ScopeDeps, walkthroughId: string, artifact: JobArtifact): Promise<BeginClipResult> {
+/**
+ * WHEN this artifact was recorded, in the two fields TROCK Scope accepts it in — or NOTHING, when we do
+ * not know.
+ *
+ * A client-declared `"manual"` timestamp is the only kind TROCK Scope takes from us (upload-service.ts:
+ * `exif` and `container` are written by its own worker from file metadata, and it refuses either from a
+ * caller), and `capturedAt` is REQUIRED once the source says manual. So the two fields go together or
+ * neither goes: sending the source alone is a 400 that fails the whole forward.
+ *
+ * A STILL AND A RECORDING ARE DIFFERENT CLAIMS, which is what the `kind` branch below is for.
+ *
+ * A still's `capturedAtMs` is the instant it was taken, and that is true however the walk reached us —
+ * on a live walk the phone stamps it at capture, and on one recovered from a directory scan it is the
+ * photo file's own last-modified time, which for a file written once IS when the photo was taken. So a
+ * still always states its own moment. That is the fix the 597 already-forwarded stills needed: with no
+ * timestamp they were ordered by UPLOAD order, which is drain order — media before photos — and never
+ * walk order, so no still could be attached to the moment it documents.
+ *
+ * A VIDEO OR AUDIO CLIP'S TIMESTAMP IS A CLAIM ABOUT WHERE THE RECORDING STARTED, and `capturedAtMs` is
+ * only that when the phone had a walk clock to read it from. On a live walk it does: mobile stamps both
+ * the media artifacts and the walk itself from the same `startedAt`, so the two agree exactly, and that
+ * is the fact this function tests. On a RECOVERED walk it does not — `startedAt` is null, mobile
+ * deliberately refuses to fabricate one, and the video's `capturedAtMs` falls back to the file's
+ * last-modified time (roughly when recording ENDED) or to the recovery moment. Declaring either as a
+ * start would put the footage after every still it contains, which is a worse timeline than no timeline.
+ *
+ * So: equal to the walk's own start ⇒ the phone knew, and we say so; anything else ⇒ we do not have a
+ * start time and say nothing. The check degrades in the safe direction — a future mobile build that
+ * stamps the two differently silently returns to `upload_order`, today's behaviour, rather than shipping
+ * a confident wrong instant.
+ *
+ * WHY IT MATTERS FOR AUDIO ESPECIALLY: TROCK Scope lays a narration clip alongside the footage by START
+ * TIME. The standalone recording the app is about to start sending has no other way to be aligned, and
+ * without this every quote in it lands against the wrong moment of the walk.
+ *
+ * `capturedAtSource: "manual"` is the only source TROCK Scope accepts from a client (upload-service.ts:
+ * `exif` and `container` are written by its own worker from file metadata), and `capturedAt` is REQUIRED
+ * once the source says manual — so the two fields go together or neither goes. Sending the source alone
+ * is a 400 that fails the whole forward.
+ *
+ * The range guard is not ceremony. `payload` is jsonb that a human edits by hand when reconciling a dead
+ * letter, and `new Date(1e300).toISOString()` THROWS a RangeError — which here would fail a delivery whose
+ * bytes are otherwise perfectly forwardable, over a field that is decoration. Out of range is treated as
+ * "not stated". `>= 0` rather than truthiness for the same class of reason: 0 is a real (if absurd)
+ * instant and `!capturedAtMs` would silently drop it.
+ */
+function clipCapturedAtFields(artifact: JobArtifact, walkCapturedAt: string): Record<string, string> {
+  const ms = artifact.capturedAtMs;
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 || ms > MAX_REPRESENTABLE_TIME_MS) {
+    return {};
+  }
+  if (artifact.kind !== "photo") {
+    // `Date.parse` of the walk's own ISO timestamp, which the ingest route validated — but parsed
+    // defensively anyway, because this value comes off a jsonb payload rather than off that route.
+    const walkStartedAtMs = Date.parse(walkCapturedAt);
+    if (!Number.isFinite(walkStartedAtMs) || walkStartedAtMs !== ms) return {};
+  }
+  return { capturedAt: new Date(ms).toISOString(), capturedAtSource: "manual" };
+}
+
+async function beginClip(
+  deps: ScopeDeps,
+  walkthroughId: string,
+  artifact: JobArtifact,
+  walkCapturedAt: string
+): Promise<BeginClipResult> {
   const { status, json } = await scopeRequest(deps, "POST", `/api/walkthroughs/${walkthroughId}/clips`, {
     originalFilename: artifact.originalFilename,
     mimeType: artifact.mimeType,
     sizeBytes: artifact.fileSizeBytes,
-    // capturedAt/capturedAtSource deliberately omitted: TROCK Scope only accepts a client-declared
-    // "manual" wall-clock timestamp, and this artifact's capturedAtMs (an absolute epoch-ms timestamp —
-    // see the type doc on GlassesWalkthroughArtifactInput.capturedAtMs in glasses-walkthrough-service.ts)
-    // is not threaded on to TROCK Scope's API. Left at the default ("upload_order"); TROCK Scope's own
-    // worker later derives the real per-clip timeline from the media's embedded exif/container metadata.
+    ...clipCapturedAtFields(artifact, walkCapturedAt),
   });
   if (status !== 201) {
     throw new Error(`TROCK Scope begin-clip failed for artifact ${artifact.idempotencyKey}: ${status} ${JSON.stringify(json)}`);
@@ -629,9 +753,13 @@ async function uploadClip(
   deps: ScopeDeps,
   walkthroughId: string,
   artifact: JobArtifact,
+  /** The walk's own start, which decides whether a media artifact's timestamp is a startable claim —
+   *  see `clipCapturedAtFields`. Threaded rather than read off a closure so this function stays callable
+   *  for one artifact in isolation. */
+  walkCapturedAt: string,
   downloadRange: (r2Key: string, start: number, end: number, timeoutMs: number) => Promise<Buffer>
 ): Promise<void> {
-  const begin = await beginClip(deps, walkthroughId, artifact);
+  const begin = await beginClip(deps, walkthroughId, artifact, walkCapturedAt);
   const partNumbers = Array.from({ length: begin.partCount }, (_, index) => index + 1);
   const signedParts = await signParts(deps, walkthroughId, begin.clipId, partNumbers);
 
@@ -1154,7 +1282,7 @@ export async function handleGlassesWalkthroughForward(
   await stampGlassesWalkthroughScopeId(writeJobQueue, p, scopeWalkthroughId);
 
   for (const artifact of p.artifacts) {
-    await uploadClip(scopeDeps, scopeWalkthroughId, artifact, downloadRange);
+    await uploadClip(scopeDeps, scopeWalkthroughId, artifact, p.capturedAt, downloadRange);
   }
 
   // The delivery has stopped. THIS is the only moment at which the row can safely be taken out of the

@@ -116,6 +116,9 @@ function baseInput(overrides: Partial<IngestGlassesWalkthroughInput> = {}): Inge
     userId: USER,
     officeSlug: "dallas",
     officeId: null,
+    // Null by default: the client stating no job type is the shape every walk filed to date has, so
+    // that is what the unmodified fixture must exercise.
+    jobType: null,
     captureCensus: null,
     artifacts: [
       {
@@ -691,6 +694,101 @@ const domainEvents = () =>
 // project folder, and the `job_queue` row says a forward is scheduled — neither answers "which glasses
 // walks does this deal have, and which TROCK Scope walkthrough did each become".
 describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () => {
+  it("stores the resolved job type, and puts it on the forward job's payload", async () => {
+    // Two writes, one fact. The read-model column is what a reader of the CRM sees; the payload copy is
+    // what actually reaches TROCK Scope. They are written in different statements, so a change that
+    // updates one and not the other looks correct on the deal page and grades against the wrong catalog.
+    //
+    // The value arrives already resolved — the route settles it against the deal before calling in (see
+    // `resolveGlassesWalkthroughJobTypeForDeal`), which is why this suite can pass one in directly.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBe("roofing_envelope");
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
+  });
+
+  it("STORES a job type TROCK Scope cannot ground, but withholds it from the forward", async () => {
+    // The one place the row and the wire deliberately disagree, and the reason is severe: TROCK Scope
+    // answers 422 `job_type_unavailable` for a job type with no seeded work-type catalog, and the
+    // forwarder reads any 4xx as "safe to retry" — so the walk would loop into the same refusal until the
+    // queue dead-letters it and NOTHING reaches that service. Withheld, the walk lands under TROCK
+    // Scope's default, exactly as it does today.
+    //
+    // The column still records the truth, so the day `service_repair` gets a catalog the walks already on
+    // file are correctly labelled and a re-forward needs no backfill.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "service_repair" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBe("service_repair");
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
+  it("REGRESSION: a REPLACEMENT forward carries the job type on the ROW, not the retry's own", async () => {
+    // The row's job type belongs to the first completion and nothing rewrites it. A re-completion,
+    // however, rebuilds the forward payload from scratch — so taking that payload's job type from the
+    // retry's input let the two disagree the moment the deal's project type was corrected while the bytes
+    // were still draining: the deal page would show the catalog the walk was filed under while TROCK
+    // Scope graded it under a different one, with nothing anywhere recording the disagreement.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
+
+    // The same walk, re-filed after somebody retyped the deal. The route resolves a different answer.
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "interior_finish_out" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.jobType).toBe("roofing_envelope");
+
+    const replacement = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect((replacement[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
+  });
+
+  it("REGRESSION: a replacement forward keeps a PRE-0243 walk's NULL rather than inferring one", async () => {
+    // "The row says NULL" and "there is no row" are different answers. Every walk filed before the column
+    // existed holds NULL, and migration 0243 deliberately declines to backfill it — the deal's project
+    // type today is not evidence of what it was on the day of the walk. Read as "nobody has answered
+    // yet", that NULL would let a replacement forward re-grade a historical walk under the deal's current
+    // catalog, quietly re-categorising a scope somebody may already have reviewed, while the row it is
+    // filed under still says NULL.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBeNull();
+
+    const replacement = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect((replacement[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
+  it("leaves the job type NULL when there is nothing to record", async () => {
+    // The shape every historical row has. NULL reaches the forward job, which omits the field and lets
+    // TROCK Scope apply its own default — so a re-filed legacy walk behaves exactly as it did.
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBeNull();
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
   it("writes ONE row carrying the deal, the walk, the capture time and the capturing user", async () => {
     await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
 
@@ -1067,6 +1165,13 @@ describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () 
       await pg.exec("DELETE FROM files");
       await pg.exec("DELETE FROM job_queue");
       await pg.exec("DELETE FROM photo_audit_log");
+      // THE WALK ROW TOO, and leaving it out made this measure two different things. Both calls below
+      // run inside ONE test, so only the first saw the suite's `beforeEach` truncation: the second found
+      // the walk already recorded, took `recordGlassesWalkthrough`'s re-file branch — which reads the
+      // stored job type back — and issued one statement more than the first for a reason that has
+      // nothing to do with how many stills it carried. Cleared here, both measurements describe a FIRST
+      // completion, which is the only comparison this guard is about.
+      await pg.exec("DELETE FROM glasses_walkthroughs");
       const issued: string[] = [];
       const original = pg.query.bind(pg);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1084,9 +1189,11 @@ describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () 
       return issued.length;
     };
 
-    // Six statements either way, today: the `files` insert, the re-select, the audit insert, the event
-    // insert, the forward-state lookup and the forward enqueue. Nonzero on both sides is itself part of
-    // the assertion — a counter that silently stopped intercepting would otherwise report 0 === 0.
+    // The same statements either way: the `files` insert, the re-select, the audit insert, the event
+    // insert, the walk-row upsert, the forward-state lookup and the forward enqueue. The exact number is
+    // deliberately not asserted — counting rather than naming a figure is what keeps this true as the
+    // write phase gains or loses steps. Nonzero on both sides is itself part of the assertion: a counter
+    // that silently stopped intercepting would otherwise report 0 === 0.
     const wide = await statementsFor(40);
     const narrow = await statementsFor(2);
     expect(narrow).toBeGreaterThan(0);
@@ -2010,5 +2117,34 @@ describe("recording an inherited TROCK Scope id", () => {
 
     const [row] = await tenantDb.select().from(glassesWalkthroughs);
     expect(row!.scopeWalkthroughId).toBe(scopeId);
+  });
+
+  it("RETRACTS the job type it just inferred, because that walkthrough's catalog was not ours to pick", async () => {
+    // Same pre-0214 shape as above, and the same reasoning one column over. Re-completing the walk
+    // INSERTS the read-model row for the first time, with a job type freshly resolved from the deal —
+    // for a remote walkthrough created long ago under whatever default applied then. Left in place, the
+    // column would claim a catalog TROCK Scope is not using and never will: a repeat create under the
+    // same externalRef returns the existing walkthrough untouched, and a forward holding the checkpoint
+    // skips the create entirely. NULL is the honest value, and it is the one every pre-0243 row holds.
+    const scopeId = "b91a5bfd-eca9-4dbd-bde4-06528658b2b7";
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "completed",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', ${JSON.stringify(scopeId)}::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+    await tenantDb.delete(glassesWalkthroughs);
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const [row] = await tenantDb.select().from(glassesWalkthroughs);
+    expect(row!.scopeWalkthroughId).toBe(scopeId);
+    expect(row!.jobType).toBeNull();
   });
 });
