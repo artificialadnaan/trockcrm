@@ -7,7 +7,7 @@
  * problems and look identical otherwise.
  */
 import { NativeEventEmitter, NativeModules, Platform } from "react-native";
-import type { HfpStreamCheck, PhoneCameraCheck } from "./step0-verdicts";
+import type { HfpStreamCheck, PhoneCameraCheck, RouteSnapshot } from "./step0-verdicts";
 
 const native = NativeModules.WearablesBridge as WearablesNativeModule | undefined;
 
@@ -114,7 +114,34 @@ export type StreamEnduranceMeasurement = {
   totalFrames: number;
   /** How far into the run the LAST frame landed, or -1 if none ever did. */
   secondsToLastFrame: number;
-  audioSessionUsed: false;
+  /**
+   * Whether ANY rung held the shared `AVAudioSession` at the end of the window — the one thing that
+   * would void this measurement, since its whole premise is that no audio session was in force.
+   *
+   * Was a hard-coded `false` on the native side, which asserted the premise instead of testing it:
+   * it said only that the method contains no activation call, and the dev screen disables its
+   * buttons per rung, so a second rung activating HFP is one tap away for the whole 60 seconds.
+   * `boolean`, not `false`, precisely so it can come back true.
+   */
+  audioSessionUsed: boolean;
+  /**
+   * The raw readings behind `audioSessionUsed`, so a surprising verdict can be checked rather than
+   * taken on trust. The owner counts are the bridge's own accounting; the category and route are
+   * what catch an owner it never counted (`WalkthroughRecorder`, expo-audio).
+   *
+   * THREE readings, not one, because `audioSessionUsed` spans the window rather than sampling it.
+   * The two owner counts are LEVELS at each edge; `audioActivationsDuringWindow` is the difference
+   * of a monotonic edge counter, and it is the only one that can see a share taken and given back
+   * in between — rung 8 records for ten seconds inside this rung's sixty, and an end-of-window level
+   * read is back to zero by then.
+   *
+   * Optional: a dev client built before these were measured reports every other field and not these.
+   */
+  audioOwnersAtStart?: number;
+  audioOwnersAtEnd?: number;
+  audioActivationsDuringWindow?: number;
+  audioCategoryAtEnd?: string;
+  audioRouteAtEnd?: RouteSnapshot;
 };
 
 /**

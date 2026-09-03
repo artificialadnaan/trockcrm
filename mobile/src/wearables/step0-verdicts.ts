@@ -102,6 +102,90 @@ export function describeHfpStreamCheck(check: HfpStreamCheck): Verdict {
   };
 }
 
+/**
+ * The fields of rung 11's payload that its verdict actually turns on. Structural rather than an
+ * import of `StreamEnduranceMeasurement`, so judgement keeps living in this module and the
+ * dependency keeps pointing this way — native.ts imports the check shapes from here, not the
+ * reverse.
+ */
+export type StreamEnduranceCheck = {
+  secondsObserved: number;
+  totalFrames: number;
+  /** How far into the run the LAST frame landed, or -1 if none ever did. */
+  secondsToLastFrame: number;
+  /**
+   * Whether any rung held the shared `AVAudioSession` at any point in the window. Optional so a
+   * payload from a native build that hard-coded it reads as "not observed" rather than as a
+   * measurement — the old build sent a literal `false` that could not fail.
+   */
+  audioSessionUsed?: boolean;
+  /**
+   * The component readings the native side derived `audioSessionUsed` from.
+   *
+   * Checked here as well, rather than trusting the summary boolean, because the native half of this
+   * is compiled by NOTHING — not by CI and not locally, since the SDK arrives at prebuild. A wrong
+   * `audioSessionUsed` therefore ships unnoticed, and it already has once: it was first a hard-coded
+   * `false`, then a single end-of-window owner LEVEL, which reads zero for a rung-8 recording that
+   * started and finished inside this window. Re-deriving from the parts is the only check that runs
+   * anywhere. Absent on any build that did not report them.
+   */
+  audioOwnersAtStart?: number;
+  audioOwnersAtEnd?: number;
+  audioActivationsDuringWindow?: number;
+};
+
+/** Any reading that says a share was held at either edge of the window, or taken inside it. */
+function audioContaminated(check: StreamEnduranceCheck): boolean {
+  return (
+    check.audioSessionUsed === true
+    || (check.audioOwnersAtStart ?? 0) > 0
+    || (check.audioOwnersAtEnd ?? 0) > 0
+    || (check.audioActivationsDuringWindow ?? 0) > 0
+  );
+}
+
+/**
+ * Rung 11: does glasses video sustain with NO audio session anywhere?
+ *
+ * Returns the sentence the dev screen displays rather than a `Verdict`, because that is the shape
+ * the screen already renders for this rung; it lives here for the same reason the other two do,
+ * which is that the judgement is the part worth unit-testing.
+ */
+export function describeStreamEndurance(check: StreamEnduranceCheck): string {
+  // FIRST, because an audio session in force does not shade the two readings below — it voids
+  // them, and they point in opposite directions. This rung's whole premise is that nothing held
+  // the audio session, and the dev screen disables its buttons PER RUNG, so a second rung
+  // activating HFP is one tap away for the entire 60-second window. "SUSTAINED — HFP is the
+  // difference" read off a run that had HFP up is not a weaker version of the answer, it is the
+  // opposite one.
+  //
+  // `=== true` rather than truthiness, and `?? 0` on the counts: absent means a native build that
+  // never measured this, and an unmeasured field must not manufacture an inconclusive any more than
+  // it should manufacture a pass. A reported ZERO is a measurement and is trusted as one.
+  if (audioContaminated(check)) {
+    return (
+      `INCONCLUSIVE — an audio session was in force during the window, so this was not the `
+      + `no-audio measurement it claims to be. Another rung took the audio session while this ran; `
+      + `whichever way the frames went, HFP cannot be ruled in or out from it. Re-run it alone.`
+    );
+  }
+  if (check.totalFrames === 0) {
+    return "NO FRAMES AT ALL — the stream never delivered; this says nothing about endurance";
+  }
+  // A walk needs minutes; anything under ~30s is not a walkthrough camera.
+  if (check.secondsToLastFrame >= check.secondsObserved - 3) {
+    return (
+      `SUSTAINED for the full ${check.secondsObserved}s — HFP is the difference, so glasses `
+      + `audio and video cannot run together. Capture becomes audio + stills.`
+    );
+  }
+  return (
+    `STOPPED at ${check.secondsToLastFrame.toFixed(1)}s of ${check.secondsObserved}s — video `
+    + `dies WITHOUT audio too, so HFP is not the cause and glasses video is not `
+    + `viable for a walkthrough at all.`
+  );
+}
+
 export type PhoneCameraCheck = {
   before: RouteSnapshot;
   /** Route sampled ~2s into the preview, before the shutter fires. */
@@ -116,6 +200,11 @@ export type PhoneCameraCheck = {
   capturePhotoSucceeded: boolean;
   capturePhotoTimedOut: boolean;
   capturePhotoError: string | null;
+  /** Whether the run disabled `AVCaptureSession.automaticallyConfiguresApplicationAudioSession`,
+   *  which defaults to YES and lets AVFoundation pick its own microphone to match the camera.
+   *  Optional so a payload from an older native build reads as INCONCLUSIVE rather than being
+   *  silently trusted — the same rule `capturePhotoSucceeded` follows, for the same reason. */
+  capturePreventedAudioSessionReconfiguration?: boolean;
 };
 
 export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
@@ -154,6 +243,33 @@ export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
         `The camera opened but ${reason} — the shutter never completed, so this run cannot say ` +
         `whether taking a still disturbs the HFP route. Opening the camera is not the claim ` +
         `that matters; the shutter is. Retry.`,
+    };
+  }
+
+  // The shutter fired — but a route reading only names a CAUSE if the camera was the only thing
+  // allowed to move the route.
+  //
+  // `AVCaptureSession.automaticallyConfiguresApplicationAudioSession` defaults to YES, and Apple's
+  // header is explicit that it then "picks an appropriate microphone and polar pattern to match
+  // the video camera being used". Picking a microphone IS a route change. A run that left it on
+  // cannot separate "the camera hardware contended for the mic" from "AVFoundation reconfigured
+  // the session because we let it", and those two have opposite consequences for the design: the
+  // first says phone stills are unusable during a walk, the second says set one property.
+  //
+  // Checked after the shutter gate and before every route conclusion, so it governs the clean
+  // readings too. A held route under the old default is arguably stronger evidence — iOS was free
+  // to reconfigure and didn't — but "arguably stronger" is a judgement call that the PASS text
+  // would then have to carry, and this rung's verdict is read as a decision. Re-running against a
+  // build that sets the flag is cheap; deciding the product on an unattributable reading is not.
+  if (check.capturePreventedAudioSessionReconfiguration !== true) {
+    return {
+      outcome: "inconclusive",
+      summary:
+        `The shutter fired, but this build did not disable ` +
+        `automaticallyConfiguresApplicationAudioSession, so AVFoundation was free to re-pick the ` +
+        `microphone itself. Any route change here could be that rather than the camera, and an ` +
+        `unchanged route was measured under a different configuration than the one the feature ` +
+        `would ship. Rebuild and re-run before reading anything into these numbers.`,
     };
   }
 
@@ -280,6 +396,8 @@ export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
     summary:
       `The shutter did not disturb the HFP route (${duringCapture.portName}, ` +
       `${duringCapture.sampleRate} Hz), and it held afterward too (${after.portName}, ` +
-      `${after.sampleRate} Hz). Phone stills during a glasses walk are safe.`,
+      `${after.sampleRate} Hz). Phone stills during a glasses walk are safe — PROVIDED the ` +
+      `capture session sets automaticallyConfiguresApplicationAudioSession = false, which is ` +
+      `the configuration this was measured under and is not the AVCaptureSession default.`,
   };
 }

@@ -32,6 +32,7 @@ import {
 import {
   describeHfpStreamCheck,
   describePhoneCameraCheck,
+  describeStreamEndurance,
 } from "../../src/wearables/step0-verdicts";
 
 type RungState = "idle" | "running" | "ok" | "fail";
@@ -169,17 +170,10 @@ function Diagnostic() {
       run: async () => {
         const m = await Wearables.measureStreamWithoutAudio(60);
         // Frames stopping is the whole question, so say so plainly rather than making someone
-        // read an array. A walk needs minutes; anything under ~30s is not a walkthrough camera.
-        const verdict =
-          m.totalFrames === 0
-            ? "NO FRAMES AT ALL — the stream never delivered; this says nothing about endurance"
-            : m.secondsToLastFrame >= m.secondsObserved - 3
-              ? `SUSTAINED for the full ${m.secondsObserved}s — HFP is the difference, so glasses `
-                + `audio and video cannot run together. Capture becomes audio + stills.`
-              : `STOPPED at ${m.secondsToLastFrame.toFixed(1)}s of ${m.secondsObserved}s — video `
-                + `dies WITHOUT audio too, so HFP is not the cause and glasses video is not `
-                + `viable for a walkthrough at all.`;
-        return { verdict, ...m };
+        // read an array. The judgement itself lives in step0-verdicts alongside rungs 9 and 10,
+        // which is where it can be unit-tested — it now has to weigh whether the run was a
+        // no-audio measurement at all, and that is not a line of screen code.
+        return { verdict: describeStreamEndurance(m), ...m };
       },
       measurement: true,
     },
