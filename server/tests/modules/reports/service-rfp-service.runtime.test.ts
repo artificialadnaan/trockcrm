@@ -44,6 +44,17 @@ describe("service RFP reporting", () => {
     expect(mondayOf(chicagoDate("2026-09-07T05:00:00Z"))).toBe("2026-09-07");
     expect(mondayOf(chicagoDate("2026-03-09T05:00:00Z"))).toBe("2026-03-09");
   });
+  it("retains an email-filtered eligible seller with no submissions", async () => {
+    await pg.exec(`UPDATE users SET email = 'Zero@Example.com' WHERE id = '${ZERO}'`);
+    const report = await getServiceRfpReport(drizzle(pg) as never, {
+      dateFrom: "2026-09-07", dateTo: "2026-09-13", ownerIds: [], ownerNames: [], ownerEmails: ["zero@example.com"],
+    }, OFFICE);
+    expect(report.total).toBe(0);
+    expect(report.deals).toEqual([]);
+    expect(report.reps).toEqual([
+      { repId: ZERO, repName: "Zero Seller", total: 0, weekly: { "2026-09-07": 0 } },
+    ]);
+  });
   it("atomically captures first submission and preserves it across retries and reassignment", async () => {
     const db = drizzle(pg) as never;
     await recordServiceRfpSubmission(db, OFFICE, DEAL, "first-event", 1);

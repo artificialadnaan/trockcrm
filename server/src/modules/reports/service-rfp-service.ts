@@ -112,6 +112,19 @@ export async function getServiceRfpReport(db: NodePgDatabase<typeof schema>, fil
     dealId: row.dealId, dealName: row.dealName, isActive: row.isActive, repId: row.repId, repName: row.repName,
     submittedAt: row.submittedAt ? new Date(row.submittedAt).toISOString() : null, basis: row.basis, week: null,
   }));
-  const roster = (await getRepRosterOptions(db, officeId)).filter((rep) => rep.group === "sales" && matchesOwner(rep.id, rep.displayName));
+  const salesRoster = (await getRepRosterOptions(db, officeId)).filter((rep) => rep.group === "sales");
+  // The canonical roster deliberately exposes no email. Resolve email filters only within its
+  // already office-scoped IDs so eligible zero-contribution sellers match just like deal owners.
+  const emailOwnerIds = new Set<string>();
+  if (filters.ownerEmails.length && salesRoster.length) {
+    const emailResult = await db.execute(sql`
+      SELECT id FROM public.users
+      WHERE id IN (${sql.join(salesRoster.map((rep) => sql`${rep.id}::uuid`), sql`, `)})
+        AND lower(email) IN (${sql.join(filters.ownerEmails.map((email) => sql`${email}`), sql`, `)})
+    `);
+    const emailRows = (Array.isArray(emailResult) ? emailResult : emailResult.rows) as Array<{ id: string }>;
+    emailRows.forEach((row) => emailOwnerIds.add(row.id));
+  }
+  const roster = salesRoster.filter((rep) => matchesOwner(rep.id, rep.displayName) || emailOwnerIds.has(rep.id));
   return summarizeServiceRfps(rows, roster, filters.dateFrom, filters.dateTo);
 }
