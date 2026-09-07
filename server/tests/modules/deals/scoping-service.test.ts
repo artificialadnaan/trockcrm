@@ -92,6 +92,7 @@ interface FakeDealRow {
   propertyState: string | null;
   propertyZip: string | null;
   description: string | null;
+  scopeTitle?: string | null;
   projectTypeId: string | null;
   assignedRepId: string;
   sourceLeadId?: string | null;
@@ -492,6 +493,32 @@ describe("Scoping Service", () => {
     pipelineMocks.getActiveProjectTypes.mockResolvedValue([
       { id: "project-type-1", name: "Roofing", slug: "roofing", code: "3" },
     ]);
+  });
+
+  it.each([
+    ["service", "Repair flashing", null, true],
+    ["service", null, "Repair flashing detail", true],
+    ["service", " ", " ", false],
+    ["normal", "Repair flashing", null, false],
+  ] as const)("scope readiness accepts either service scope field: %s %s %s", async (route, title, description, ready) => {
+    const tenantDb = createFakeTenantDb();
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: route, scopeTitle: title, description, propertyAddress: "123 Main St", projectTypeId: "project-type-1" });
+    const result = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(!result.errors.sections.scopeSummary?.length).toBe(ready);
+    expect(tenantDb.state.deals[0]?.description).toBe(description);
+  });
+
+  it("a saved blank intake summary cannot override a nonblank service scope title", async () => {
+    const tenantDb = createFakeTenantDb();
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: "service", scopeTitle: "Repair flashing", description: null, propertyAddress: "123 Main St", projectTypeId: "project-type-1" });
+    tenantDb.state.dealScopingIntake.push({
+      id: "intake-1", dealId: "deal-1", officeId: "office-1", workflowRouteSnapshot: "service", status: "draft",
+      projectTypeId: "project-type-1", sectionData: { scopeSummary: { summary: " " } }, completionState: {}, readinessErrors: {},
+      firstReadyAt: null, activatedAt: null, lastAutosavedAt: new Date(), createdBy: "user-1", lastEditedBy: "user-1", createdAt: new Date(), updatedAt: new Date(),
+    });
+    const result = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(result.errors.sections.scopeSummary).toBeUndefined();
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
   });
 
   it("filters fake tenant db rows through composite and/or where predicates", async () => {

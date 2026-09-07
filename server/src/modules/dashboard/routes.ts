@@ -77,7 +77,9 @@ router.get("/rep-roster", async (req, res, next) => {
       throw new AppError(403, "Requested office is not accessible");
     }
 
-    const users = await getRepRosterOptions(req.tenantDb!, officeId);
+    const users = req.query.assignableOnly === "1"
+      ? await getRepRosterOptions(req.tenantDb!, officeId, { assignableOnly: true })
+      : await getRepRosterOptions(req.tenantDb!, officeId);
     await req.commitTransaction!();
     res.json({ users });
   } catch (err) {

@@ -25,7 +25,8 @@ const mocks = vi.hoisted(() => ({
   // When true the PropertySelector mock does NOT auto-emit the record for a value it was handed — the test
   // fires it later via the "Resolve property" button, standing in for the async /properties/:id lookup.
   deferPropertyResolution: { value: false },
-  useTaskAssignees: vi.fn(),
+  useRepRoster: vi.fn(),
+  useSalesReps: vi.fn(),
   navigate: vi.fn(),
 }));
 
@@ -53,9 +54,10 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
   useRegions: mocks.useRegions,
 }));
 
-vi.mock("@/hooks/use-task-assignees", () => ({
-  useTaskAssignees: mocks.useTaskAssignees,
+vi.mock("@/hooks/use-rep-roster", () => ({
+  useRepRoster: mocks.useRepRoster,
 }));
+vi.mock("@/hooks/use-sales-reps", () => ({ useSalesReps: mocks.useSalesReps }));
 
 vi.mock("@/components/companies/company-selector", () => ({
   CompanySelector: ({
@@ -159,6 +161,7 @@ function setupCommonMocks() {
   mocks.useAuth.mockReturnValue({
     user: {
       id: "rep-1",
+      displayName: "Sales Rep",
       role: "rep",
       officeId: "office-dallas",
       activeOfficeId: "office-dallas",
@@ -187,11 +190,13 @@ function setupCommonMocks() {
   mocks.selectedProperty.value = { id: "property-1", state: "" };
   mocks.companySelectorEchoesOnMount.value = false;
   mocks.deferPropertyResolution.value = false;
-  mocks.useTaskAssignees.mockReturnValue({
-    assignees: [{ id: "rep-1", displayName: "Sales Rep" }],
+  mocks.useRepRoster.mockImplementation(({ officeId }: { officeId: string }) => ({
+    reps: [{ id: "rep-1", displayName: "Sales Rep", group: "sales" }],
+    loadedOfficeId: officeId,
     loading: false,
     error: null,
-  });
+  }));
+  mocks.useSalesReps.mockReturnValue({ salesReps: [{ id: "source-1", displayName: "Source Person" }], loading: false });
   mocks.createServiceOpportunity.mockResolvedValue({
     deal: {
       id: "deal-service",
@@ -254,6 +259,43 @@ describe("ServiceOpportunityForm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setupCommonMocks();
+  });
+
+  it("renders the selected seller name, including while roster options reload", async () => {
+    mocks.useRepRoster.mockReturnValue({ reps: [], loading: true, loadedOfficeId: undefined });
+    const { container, root } = await renderForm();
+    roots.push(root); containers.push(container);
+    expect(container.querySelector("#service-assigned-rep")?.textContent).toContain("Sales Rep");
+    expect(container.querySelector("#service-assigned-rep")?.textContent).not.toContain("rep-1");
+  });
+
+  it("offers only sales-roster members and displays the selected source label", async () => {
+    mocks.useAuth.mockReturnValue({ user: { id: "admin-1", displayName: "Administrator", role: "admin", officeId: "office-dallas" } });
+    mocks.useRepRoster.mockReturnValue({ reps: [
+      { id: "rep-1", displayName: "Sales Rep", group: "sales" },
+      { id: "estimator-1", displayName: "Estimator Only", group: "estimator" },
+    ], loading: false, loadedOfficeId: "office-dallas" });
+    const { container, root } = await renderForm();
+    roots.push(root); containers.push(container);
+    await act(async () => { (container.querySelector("#service-assigned-rep") as HTMLButtonElement).click(); });
+    expect(document.body.textContent).toContain("Sales Rep");
+    expect(document.body.textContent).not.toContain("Estimator Only");
+    const selectOption = async (label: string) => {
+      const option = Array.from(document.querySelectorAll('[role="option"]')).find((item) => item.textContent?.includes(label)) as HTMLElement;
+      await act(async () => { option.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })); });
+      await act(async () => { option.click(); });
+    };
+    await selectOption("Sales Rep");
+    expect(container.querySelector("#service-assigned-rep")?.textContent).toContain("Sales Rep");
+    await act(async () => { (container.querySelector("#service-sales-source") as HTMLButtonElement).click(); });
+    await selectOption("Source Person");
+    expect(container.querySelector("#service-sales-source")?.textContent).toContain("Source Person");
+    expect(container.querySelector("#service-sales-source")?.textContent).not.toContain("source-1");
+    mocks.useRepRoster.mockReturnValue({ reps: [], loading: true, loadedOfficeId: undefined });
+    mocks.useSalesReps.mockReturnValue({ salesReps: [], loading: true });
+    await act(async () => { root.render(<MemoryRouter><ServiceOpportunityForm /></MemoryRouter>); });
+    expect(container.querySelector("#service-assigned-rep")?.textContent).toContain("Sales Rep");
+    expect(container.querySelector("#service-sales-source")?.textContent).toContain("Source Person");
   });
 
   afterEach(() => {

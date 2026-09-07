@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import type { ServiceRfpReport } from "@trock-crm/shared/types";
 import { useOfficeScopeId } from "./use-office-scope";
 import { api } from "@/lib/api";
 import type {
@@ -1016,6 +1017,10 @@ export function usePipelineVelocityReport(options: SalesReportQueryOptions = {})
     options,
     "Failed to load pipeline velocity"
   );
+}
+
+export function useServiceRfpReport(options: SalesReportQueryOptions = {}) {
+  return useSalesReport<ServiceRfpReport>("/reports/service-rfps", options, "Failed to load service RFP contributions");
 }
 
 export function useClosedWonRevenueReport(options: SalesReportQueryOptions = {}) {

@@ -47,6 +47,7 @@ async function setup() {
       id uuid PRIMARY KEY, email text, display_name text, first_name text, last_name text
     );
     CREATE TABLE companies (id uuid PRIMARY KEY, name text);
+    CREATE TABLE properties (id uuid PRIMARY KEY, name text);
     CREATE TABLE contacts (id uuid PRIMARY KEY, first_name text, last_name text, email text, phone text);
     CREATE TABLE leads (id uuid PRIMARY KEY, bid_due_date timestamptz);
     -- deals: only the columns loadRfpPayloadDeal's SELECT d.* reads (plus JOIN keys).

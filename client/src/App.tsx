@@ -52,6 +52,7 @@ import { ForecastAccuracyPage } from "@/pages/reports/forecast-accuracy-page";
 import { LeadConversionPage } from "@/pages/reports/lead-conversion-page";
 import { MarketMixPage } from "@/pages/reports/market-mix-page";
 import { PipelineVelocityPage } from "@/pages/reports/pipeline-velocity-page";
+import { ServiceRfpPage } from "@/pages/reports/service-rfp-page";
 import { RepActivityPage } from "@/pages/reports/rep-activity-page";
 import { DailyActivityLogPage } from "@/pages/reports/daily-activity-log-page";
 import { CanvassingActivityPage } from "@/pages/reports/canvassing-activity-page";
@@ -326,6 +327,7 @@ export function App() {
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/reports/sales/pipeline-velocity" element={<PipelineVelocityPage />} />
+              <Route path="/reports/sales/service-rfps" element={<ServiceRfpPage />} />
               <Route path="/reports/sales/closed-won-revenue" element={<ClosedWonRevenuePage />} />
               <Route path="/reports/sales/lead-conversion" element={<LeadConversionPage />} />
               <Route

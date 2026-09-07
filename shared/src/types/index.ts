@@ -1,4 +1,5 @@
 export * from "./activity-range.js";
+export * from "./service-rfp-report.js";
 export * from "./auth.js";
 export * from "./daily-summary-labels.js";
 export * from "./enums.js";

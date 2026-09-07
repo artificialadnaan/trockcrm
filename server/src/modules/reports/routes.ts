@@ -1,4 +1,5 @@
 import { Router, type Request } from "express";
+import { getServiceRfpReport } from "./service-rfp-service.js";
 import {
   ESTIMATOR_PIPELINE_BUCKETS,
   ESTIMATOR_PIPELINE_COHORTS,
@@ -286,6 +287,16 @@ router.get("/pipeline-velocity", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+router.get("/service-rfps", requireAnyRole, async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!officeId) throw new AppError(400, "Office context is required");
+    const data = await getServiceRfpReport(req.tenantDb!, parseSalesReportRequest(req), officeId);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) { next(err); }
 });
 
 router.get("/closed-won-revenue", async (req, res, next) => {

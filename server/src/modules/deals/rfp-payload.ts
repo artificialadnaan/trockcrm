@@ -1,4 +1,5 @@
 import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
+import { rfpProjectName } from "./rfp-project-name.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 
 type WorkflowRoute = "normal" | "service";
@@ -33,6 +34,8 @@ export interface RfpPayloadSourceDeal {
    */
   companyId?: string | null;
   propertyId?: string | null;
+  propertyName?: string | null;
+  scopeTitle?: string | null;
   companyName?: string | null;
   contactName?: string | null;
   clientEmail?: string | null;
@@ -70,6 +73,8 @@ export interface NormalizedRfpRequestBody {
      *  SACRIFICIAL_DEAL_FIELDS: they are identity, not display, so the size cap must never drop them. */
     companyId: string | null;
     propertyId: string | null;
+    propertyName?: string | null;
+    scopeTitle?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -320,6 +325,8 @@ const DESCRIPTION_TRUNCATED_SUFFIX = " […] (truncated for delivery — open th
  * SyncHub's contract, so dropping one can never turn a 413 into a 422.
  */
 const SACRIFICIAL_DEAL_FIELDS = [
+  "propertyName",
+  "scopeTitle",
   "estimator",
   "clientPhone",
   "clientEmail",
@@ -539,7 +546,7 @@ export function buildNormalizedRfpRequestBody(input: {
     sourceDealId: deal.id,
     sourceEventId,
     deal: {
-      name: cleanString(deal.name) ?? "Untitled Deal",
+      name: rfpProjectName(deal.propertyName, deal.name),
       // Ship the FORMATTED project number (canonical `project_number`, else the
       // bid-board `deal_number`) — NEVER the raw HubSpot id (resolveDealDisplayNumber
       // guards HS ids out, returning null → we fall back to the deal UUID only when
@@ -561,12 +568,15 @@ export function buildNormalizedRfpRequestBody(input: {
       ownerEmail: cleanString(deal.ownerEmail),
       companyId: cleanString(deal.companyId),
       propertyId: cleanString(deal.propertyId),
+      propertyName: cleanString(deal.propertyName),
+      scopeTitle: cleanString(deal.scopeTitle),
       companyName: cleanString(deal.companyName),
       contactName: cleanString(deal.contactName),
       clientEmail: cleanString(deal.clientEmail),
       clientPhone: cleanString(deal.clientPhone),
       address: buildAddress(deal),
-      description: cleanString(deal.description),
+      description: cleanString(deal.description)
+        ?? (resolveProjectTypeCode({ projectType: deal.projectType, projectTypes: deal.projectTypeCode, workflowRoute: deal.workflowRoute ?? "normal" }) === "4" ? cleanString(deal.scopeTitle) : null),
       // Pre-rendered by loadRfpPayloadDeal; cleanString so a blank/whitespace-only render lands as null
       // (SyncHub then posts no note) rather than as an empty string.
       crmActivityLog: cleanString(deal.crmActivityLog),

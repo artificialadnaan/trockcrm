@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 
@@ -78,6 +79,7 @@ async function setup() {
       id uuid PRIMARY KEY, email text, display_name text, first_name text, last_name text
     );
     CREATE TABLE companies (id uuid PRIMARY KEY, name text);
+    CREATE TABLE properties (id uuid PRIMARY KEY, name text);
     CREATE TABLE contacts (id uuid PRIMARY KEY, first_name text, last_name text, email text, phone text);
     CREATE TABLE leads (id uuid PRIMARY KEY, bid_due_date timestamptz);
     CREATE TABLE deals (
@@ -89,7 +91,7 @@ async function setup() {
       description text, bid_due_date timestamptz, bid_board_due_date date, created_at timestamptz DEFAULT now(),
       rfp_approval_request_event_id uuid, rfp_approval_request_id integer,
       assigned_rep_id uuid, hubspot_owner_email text, created_by_user_id uuid,
-      company_id uuid, primary_contact_id uuid, source_lead_id uuid
+      company_id uuid, property_id uuid, primary_contact_id uuid, source_lead_id uuid
     );
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, lead_id uuid, is_active boolean NOT NULL DEFAULT true,
@@ -502,6 +504,25 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     const jobs = (await pg.query(`SELECT job_type, payload FROM public.job_queue`)).rows as any[];
     expect(jobs[0].job_type).toBe("rfp_request_delivery");
     expect(activityLogFor(jobs[0])).toContain("Owner confirmed scope");
+  });
+
+  it("captures service contribution in the same outbox transaction and carries title-only scope", async () => {
+    pg = await setup();
+    const office = "00000000-0000-0000-0000-000000000088";
+    const property = "00000000-0000-0000-0000-000000000099";
+    await pg.exec(`CREATE TABLE offices (id uuid PRIMARY KEY); INSERT INTO offices VALUES ('${office}');
+      ALTER TABLE deals ADD COLUMN scope_title text;
+      INSERT INTO properties VALUES ('${property}', 'Park Villas');
+      UPDATE deals SET project_type = 'service', workflow_route = 'service', property_id = '${property}', scope_title = 'Repair flashing', description = NULL WHERE id = '${DEAL}';`);
+    await pg.exec(readFileSync(new URL("../../../../migrations/0245_service_rfp_submissions.sql", import.meta.url), "utf8"));
+    await pg.exec("BEGIN");
+    await insertOpportunityRfpRequestJob({ tenantDb: drizzle(pg) as never, deal: { id: DEAL } as never, officeId: office, eventId: "service-first" });
+    await pg.exec("COMMIT");
+    const jobs = (await pg.query<{ payload: { body: { deal: { name: string; description: string } } } }>("SELECT payload FROM job_queue")).rows;
+    expect(jobs[0]!.payload.body.deal.name).toContain("Park Villas - ");
+    expect(jobs[0]!.payload.body.deal.description).toBe("Repair flashing");
+    const captures = (await pg.query<{ assigned_rep_id: string; evidence_basis: string }>("SELECT assigned_rep_id, evidence_basis FROM service_rfp_submissions")).rows;
+    expect(captures).toEqual([{ assigned_rep_id: REP, evidence_basis: "first_submission" }]);
   });
 
   it("works inside a transaction, where the SAVEPOINT guard is live", async () => {

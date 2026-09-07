@@ -60,6 +60,7 @@ export function ReportShell({
   onRefresh,
   exportFilename,
   exportSheets = [],
+  filterBarProps,
   children,
 }: {
   eyebrow: string;
@@ -72,6 +73,7 @@ export function ReportShell({
   onRefresh: () => void;
   exportFilename?: string;
   exportSheets?: ExcelSheet[];
+  filterBarProps?: React.ComponentProps<typeof ReportFilterBar>;
   children: React.ReactNode;
 }) {
   return (
@@ -95,7 +97,7 @@ export function ReportShell({
           ) : null}
         </div>
       </div>
-      <ReportFilterBar />
+      <ReportFilterBar {...filterBarProps} />
       {error ? (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
           {error}

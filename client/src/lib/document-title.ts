@@ -74,6 +74,7 @@ export const ROUTE_TITLES: Record<string, string> = {
   // first version of this map: twenty-odd distinct report tabs, all named the same, which is the exact
   // problem this change exists to fix.
   "/reports": "Reports",
+  "/reports/sales/service-rfps": "Service RFPs by Sales Rep",
   "/reports/at-risk": "At-Risk Deals",
   "/reports/region": "Region Report",
   "/reports/rep-pack": "Rep Pack",

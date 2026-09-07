@@ -838,12 +838,13 @@ async function buildTriggerRfpConflict(
   );
 }
 
-function buildScopeIncompleteError(readiness: Awaited<ReturnType<typeof evaluateDealScopingReadiness>>) {
+function buildScopeIncompleteError(readiness: Awaited<ReturnType<typeof evaluateDealScopingReadiness>>, service = false) {
   const missingSections = Object.keys(readiness.errors.sections ?? {});
   return new AppError(
     400,
     [
       "Complete Opportunity Scope before triggering RFP review.",
+      service && missingSections.includes("scopeSummary") ? "Provide either a Scope Title or Description for this service job." : null,
       missingSections.length > 0 ? `Missing sections: ${missingSections.join(", ")}` : null,
     ].filter(Boolean).join(" "),
     "RFP_SCOPE_INCOMPLETE"
@@ -1431,7 +1432,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 
     const readiness = await evaluateDealScopingReadiness(req.tenantDb!, deal.id);
     if (hasBlockingScopingReadinessErrors(readiness)) {
-      throw buildScopeIncompleteError(readiness);
+      throw buildScopeIncompleteError(readiness, deal.workflowRoute === "service");
     }
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
@@ -1543,7 +1544,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 
     const reservedReadiness = await evaluateDealScopingReadiness(req.tenantDb!, reservedDeal.id);
     if (hasBlockingScopingReadinessErrors(reservedReadiness)) {
-      throw buildScopeIncompleteError(reservedReadiness);
+      throw buildScopeIncompleteError(reservedReadiness, reservedDeal.workflowRoute === "service");
     }
 
     const { jobId } = await insertOpportunityRfpRequestJob({

@@ -473,9 +473,10 @@ function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
     };
   }
 
-  if (deal.description) {
+  const scopeSummary = deal.description?.trim() || (deal.workflowRoute === "service" ? deal.scopeTitle?.trim() : null);
+  if (scopeSummary) {
     sectionData.scopeSummary = {
-      summary: deal.description,
+      summary: scopeSummary,
     };
   }
 
@@ -513,9 +514,11 @@ function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView): D
     };
   }
 
-  if (resolved.description) {
+  const scopeSummary = resolved.description?.trim()
+    || (resolved.workflowRoute === "service" ? resolvedDeal.deal.scopeTitle?.trim() : null);
+  if (scopeSummary) {
     sectionData.scopeSummary = {
-      summary: resolved.description,
+      summary: scopeSummary,
     };
   }
 
@@ -604,10 +607,20 @@ function buildBaseSectionData(
   existingIntake: DealScopingIntakeRow | null,
   resolvedDeal: ResolvedDealView
 ): DealScopingSectionData {
-  return mergeSectionData(
+  const merged = mergeSectionData(
     buildSeedSectionDataFromResolvedDeal(resolvedDeal),
     stripLineageOwnedScopingFields(toSectionData(existingIntake?.sectionData), resolvedDeal)
   );
+  return withServiceScopeFallback(merged, resolvedDeal.resolved.workflowRoute,
+    resolvedDeal.resolved.description, resolvedDeal.deal.scopeTitle);
+}
+
+function withServiceScopeFallback(sectionData: DealScopingSectionData, route: WorkflowRoute,
+  description: string | null | undefined, scopeTitle: string | null | undefined): DealScopingSectionData {
+  const summary = toSectionData(sectionData.scopeSummary);
+  if (route !== "service" || normalizeText(summary.summary)) return sectionData;
+  const fallback = description?.trim() || scopeTitle?.trim();
+  return fallback ? { ...sectionData, scopeSummary: { ...summary, summary: fallback } } : sectionData;
 }
 
 async function getDealOrThrow(tenantDb: TenantDb, dealId: string) {
@@ -1343,7 +1356,7 @@ export async function upsertDealScopingIntake(
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute: nextRoute,
     projectTypeId,
-    sectionData: nextSectionData,
+    sectionData: withServiceScopeFallback(nextSectionData, nextRoute, null, deal.scopeTitle),
     attachments,
   });
   const payload = createIntakePayload({
