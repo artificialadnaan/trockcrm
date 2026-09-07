@@ -646,7 +646,7 @@ export function ServiceOpportunityForm({
               aria-describedby="scopeTitle-help"
             />
             <p id="scopeTitle-help" className="text-xs text-muted-foreground">
-              A few words naming the overall scope. Accounting uses this as the project title.{" "}
+              A short scope label used in the service RFP and documents.{" "}
               <span className={formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH ? "text-red-600" : undefined}>
                 {formData.scopeTitle.length}/{DEAL_SCOPE_TITLE_MAX_LENGTH}
               </span>
