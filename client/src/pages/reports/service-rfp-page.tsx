@@ -18,7 +18,7 @@ export function ServiceRfpPage() {
     <ReportShell eyebrow="Sales Reports" title="Service RFPs by Sales Rep"
       description="Service opportunities supplied to estimating, counted once per deal at the first recorded RFP submission."
       loading={loading} error={error} hasData={Boolean(data)} emptyText="No service opportunities found."
-      filterBarProps={{ showOffice: false, dateTimezone: "America/Chicago", ownerLabel: "Attributed sales rep" }}
+      filterBarProps={{ showOffice: false, dateTimezone: "America/Chicago", ownerLabel: "Attributed sales rep", ownerPickerPurpose: "service-rfp-report" }}
       onRefresh={() => void refetch()} exportFilename="service-rfp-contributions"
       exportSheets={sheetsFromReport("Service RFPs", data ? { ...data, reps: data.reps.map(({ weekly, ...rep }) => ({ ...rep, ...weekly })) } : null)}>
       {data && <div className="space-y-6">

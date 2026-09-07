@@ -105,4 +105,16 @@ describe("service RFP reporting", () => {
     await pg.exec(`INSERT INTO user_office_access VALUES ('${foreign}', '${OFFICE}')`);
     expect((await getRepRosterOptions(db, OFFICE, { assignableOnly: true })).some((rep) => rep.id === foreign)).toBe(true);
   });
+  it("the assignable sales roster excludes inactive, non-producing and test users", async () => {
+    const inactive = "00000000-0000-0000-0000-000000000021";
+    const nonseller = "00000000-0000-0000-0000-000000000022";
+    const testUser = "00000000-0000-0000-0000-000000000023";
+    await pg.exec(`INSERT INTO users (id, display_name, office_id, is_active, generates_sales, is_test_data) VALUES
+      ('${inactive}', 'Inactive Seller', '${OFFICE}', false, true, false),
+      ('${nonseller}', 'Not Producing Sales', '${OFFICE}', true, false, false),
+      ('${testUser}', 'Test Seller', '${OFFICE}', true, true, true)`);
+    const roster = await getRepRosterOptions(drizzle(pg) as never, OFFICE, { assignableOnly: true });
+    expect(roster.some((rep) => rep.id === ZERO && rep.group === "sales")).toBe(true);
+    expect(roster.some((rep) => [inactive, nonseller, testUser].includes(rep.id))).toBe(false);
+  });
 });

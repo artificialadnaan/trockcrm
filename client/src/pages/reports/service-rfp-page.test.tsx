@@ -12,7 +12,7 @@ vi.mock("@/hooks/use-reports", () => ({ useServiceRfpReport: () => ({
   }, loading: false, error: null, refetch: vi.fn(),
 }) }));
 vi.mock("@/components/reports/report-filter-bar", () => ({
-  useReportFilters: () => ({ query: {} }), ReportFilterBar: () => <div>Filters</div>,
+  useReportFilters: () => ({ query: {} }), ReportFilterBar: ({ ownerPickerPurpose }: { ownerPickerPurpose?: string }) => <div data-owner-picker={ownerPickerPurpose}>Filters</div>,
 }));
 vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { role: "admin" } }) }));
 
@@ -22,6 +22,7 @@ describe("service RFP contribution report", () => {
   it("renders weekly contributions with scoped evidence links and historical disclosure", () => {
     const html = renderToStaticMarkup(<MemoryRouter initialEntries={["/reports/sales/service-rfps?officeId=office-1"]}><ServiceRfpPage /></MemoryRouter>);
     expect(html).toContain("Service RFPs by Sales Rep");
+    expect(html).toContain('data-owner-picker="service-rfp-report"');
     expect(html).toContain("Seller Name");
     expect(html).toContain("2026-09-07");
     expect(html).toContain("/deals/deal-1?officeId=office-1");

@@ -1,6 +1,6 @@
 import { and, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
+import { dealScopingIntake, dealTeamMembers, deals, files, projectTypeConfig, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   isScopeLockedAttachmentKey,
@@ -18,6 +18,7 @@ import { lockCurrentDealDescription, recordDescriptionHistoryChange } from "./de
 import { inferDealBidBoardOwnership, type PlanDealWorkflowBackfillInput } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
+import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -483,7 +484,7 @@ function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
   return sectionData;
 }
 
-function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView): DealScopingSectionData {
+function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView, isService: boolean): DealScopingSectionData {
   const sectionData: DealScopingSectionData = {};
   const { resolved } = resolvedDeal;
 
@@ -515,7 +516,7 @@ function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView): D
   }
 
   const scopeSummary = resolved.description?.trim()
-    || (resolved.workflowRoute === "service" ? resolvedDeal.deal.scopeTitle?.trim() : null);
+    || (isService ? resolvedDeal.deal.scopeTitle?.trim() : null);
   if (scopeSummary) {
     sectionData.scopeSummary = {
       summary: scopeSummary,
@@ -603,22 +604,36 @@ function resolveScopingWorkspaceRoute(resolvedDeal: ResolvedDealView): WorkflowR
   return resolvedDeal.resolved.workflowRoute;
 }
 
+async function isServiceScopingDeal(tenantDb: TenantDb, resolvedDeal: ResolvedDealView,
+  projectTypeId = resolvedDeal.resolved.projectTypeId): Promise<boolean> {
+  if (!resolvedDeal.deal.scopeTitle?.trim()) return false; // No title fallback to classify.
+  // Match RFP's text-type > configured FK code > legacy route precedence, including inactive types
+  // retained by existing deals. A service type with an old normal route still permits title-only scope.
+  const [configuredType] = projectTypeId
+    ? await tenantDb.select({ code: projectTypeConfig.code }).from(projectTypeConfig)
+      .where(eq(projectTypeConfig.id, projectTypeId)).limit(1)
+    : [];
+  return resolveProjectTypeCode({ projectType: resolvedDeal.deal.projectType,
+    projectTypes: configuredType?.code, workflowRoute: resolvedDeal.resolved.workflowRoute }) === "4";
+}
+
 function buildBaseSectionData(
   existingIntake: DealScopingIntakeRow | null,
-  resolvedDeal: ResolvedDealView
+  resolvedDeal: ResolvedDealView,
+  isService: boolean,
 ): DealScopingSectionData {
   const merged = mergeSectionData(
-    buildSeedSectionDataFromResolvedDeal(resolvedDeal),
+    buildSeedSectionDataFromResolvedDeal(resolvedDeal, isService),
     stripLineageOwnedScopingFields(toSectionData(existingIntake?.sectionData), resolvedDeal)
   );
-  return withServiceScopeFallback(merged, resolvedDeal.resolved.workflowRoute,
+  return withServiceScopeFallback(merged, isService,
     resolvedDeal.resolved.description, resolvedDeal.deal.scopeTitle);
 }
 
-function withServiceScopeFallback(sectionData: DealScopingSectionData, route: WorkflowRoute,
+function withServiceScopeFallback(sectionData: DealScopingSectionData, isService: boolean,
   description: string | null | undefined, scopeTitle: string | null | undefined): DealScopingSectionData {
   const summary = toSectionData(sectionData.scopeSummary);
-  if (route !== "service" || normalizeText(summary.summary)) return sectionData;
+  if (!isService || normalizeText(summary.summary)) return sectionData;
   const fallback = description?.trim() || scopeTitle?.trim();
   return fallback ? { ...sectionData, scopeSummary: { ...summary, summary: fallback } } : sectionData;
 }
@@ -788,7 +803,8 @@ async function buildReadOnlyScopingIntakeSnapshot(input: {
 }): Promise<DealScopingServiceResult> {
   const user = await getUserOrThrow(input.tenantDb, input.userId);
   const attachments = await listScopingAttachmentFiles(input.tenantDb, input.resolvedDeal.deal.id);
-  const sectionData = buildSeedSectionDataFromResolvedDeal(input.resolvedDeal);
+  const sectionData = buildSeedSectionDataFromResolvedDeal(input.resolvedDeal,
+    await isServiceScopingDeal(input.tenantDb, input.resolvedDeal));
   const projectTypeId = input.resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(input.resolvedDeal.resolved.workflowRoute);
   const readiness = buildScopingReadiness({
@@ -861,7 +877,7 @@ export async function getOrCreateDealScopingIntake(
   }
   await assertDealScopingWriteAllowedForDeal(deal, { role: "system" });
   const initialPatch: DealScopingPatch = {
-    sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
+    sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal, await isServiceScopingDeal(tenantDb, resolvedDeal)),
   };
   if (resolvedDeal.resolved.projectTypeId != null) {
     initialPatch.projectTypeId = resolvedDeal.resolved.projectTypeId;
@@ -1175,7 +1191,7 @@ export async function evaluateDealScopingReadiness(
     }
     attachments = await listScopingAttachmentFiles(tenantDb, dealId);
   }
-  const sectionData = buildBaseSectionData(existingIntake, resolvedDeal);
+  const sectionData = buildBaseSectionData(existingIntake, resolvedDeal, await isServiceScopingDeal(tenantDb, resolvedDeal));
   const projectTypeId = existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(resolvedDeal.resolved.workflowRoute);
   const readiness = buildScopingReadiness({
@@ -1268,7 +1284,7 @@ export async function upsertDealScopingIntake(
   const editor = await getUserOrThrow(tenantDb, userId);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
   const deal = resolvedDeal.deal;
-  const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal);
+  const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal, await isServiceScopingDeal(tenantDb, resolvedDeal));
   const sectionPatch = stripLineageOwnedScopingFields(
     extractSectionPatch(sanitizedPatch),
     resolvedDeal
@@ -1356,7 +1372,7 @@ export async function upsertDealScopingIntake(
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute: nextRoute,
     projectTypeId,
-    sectionData: withServiceScopeFallback(nextSectionData, nextRoute, null, deal.scopeTitle),
+    sectionData: withServiceScopeFallback(nextSectionData, await isServiceScopingDeal(tenantDb, resolvedDeal, projectTypeId), null, deal.scopeTitle),
     attachments,
   });
   const payload = createIntakePayload({

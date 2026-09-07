@@ -19,6 +19,9 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEAL_SCOPE_TITLE_MAX_LENGTH } from "@trock-crm/shared/types";
+vi.mock("../../../src/modules/dashboard/service.js", () => ({
+  getRepRosterOptions: vi.fn(async () => [{ id: "22222222-2222-4222-8222-222222222222", displayName: "Seller", group: "sales" }]),
+}));
 
 const dealsServiceMocks = vi.hoisted(() => ({
   createDeal: vi.fn(),

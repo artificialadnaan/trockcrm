@@ -234,6 +234,7 @@ import {
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
 import { allRfpVotersHaveOfficeAccess, authorizeAndCastRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
+import { getRepRosterOptions } from "../dashboard/service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -2449,6 +2450,13 @@ router.post("/service-opportunity", async (req, res, next) => {
       repId = req.user!.id;
     } else {
       repId = assignedRepId || req.user!.id;
+    }
+
+    const assignmentOfficeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!assignmentOfficeId) throw new AppError(400, "Select an office before creating a service opportunity");
+    const eligibleSalesReps = await getRepRosterOptions(req.tenantDb!, assignmentOfficeId, { assignableOnly: true });
+    if (!eligibleSalesReps.some((rep) => rep.group === "sales" && rep.id === repId)) {
+      throw new AppError(400, "Assigned sales rep must be an active sales-generating user with access to this office", "SERVICE_SALES_REP_INELIGIBLE");
     }
 
     const officeCodeResolution = resolveDealCreateOfficeCode({
