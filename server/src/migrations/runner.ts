@@ -3,6 +3,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import pg from "pg";
 import dotenv from "dotenv";
+import { SERVICE_RFP_SUBMISSIONS_MIGRATION, runServiceRfpSubmissionsMigration } from "./service-rfp-history-index.js";
 import {
   AUDIT_LOG_PERFORMANCE_MIGRATION,
   runAuditLogPerformanceIndexMigration,
@@ -279,6 +280,11 @@ async function runMigrations(): Promise<void> {
       }
 
       console.log(`Running ${file}...`);
+      if (file === SERVICE_RFP_SUBMISSIONS_MIGRATION) {
+        const completed = await runServiceRfpSubmissionsMigration(client, readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
+        if (completed) console.log(`Completed ${file}`);
+        continue;
+      }
       if (file === AUDIT_LOG_PERFORMANCE_MIGRATION) {
         await runAuditLogPerformanceIndexMigration(client);
       } else if (file === PROJECT_NUMBER_FIRST_SET_MIGRATION) {

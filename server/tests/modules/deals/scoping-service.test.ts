@@ -163,7 +163,7 @@ interface FakeTenantState {
   dealHistory: Array<Record<string, unknown>>;
 }
 
-function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
+function createFakeTenantDb(initialState?: Partial<FakeTenantState>, options: { snapshotReads?: boolean } = {}) {
   const state: FakeTenantState = {
     projectTypeConfig: [],
     deals: [
@@ -313,7 +313,9 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     select() {
       return {
         from(table: unknown) {
-          const rows = getRows(table);
+          const sourceRows = getRows(table);
+          // Real database reads are snapshots, not live references that mutate when UPDATE writes.
+          const rows = options.snapshotReads ? sourceRows.map((row) => ({ ...row })) : sourceRows;
           return {
             where(condition?: unknown) {
               const filteredRows = applySimpleWhere(rows as Array<Record<string, unknown>>, condition);
@@ -545,6 +547,34 @@ describe("Scoping Service", () => {
     expect(saved.intake.sectionData.scopeSummary).toBeUndefined();
     expect(saved.readiness.errors.sections.scopeSummary).toBeUndefined();
     expect(tenantDb.state.dealHistory).toEqual([]);
+  });
+  it("description-only service readiness survives a saved blank summary without requiring a title", async () => {
+    const tenantDb = createFakeTenantDb();
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: "service", scopeTitle: null, description: "Repair flashing detail" });
+    const opened = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+    opened.intake.sectionData = { ...opened.intake.sectionData, scopeSummary: { summary: " " } };
+    tenantDb.state.dealScopingIntake[0]!.sectionData = opened.intake.sectionData;
+    const result = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(result.errors.sections.scopeSummary).toBeUndefined();
+    expect(tenantDb.state.deals[0]?.description).toBe("Repair flashing detail");
+    expect(tenantDb.state.deals[0]?.scopeTitle).toBeNull();
+  });
+  it.each([
+    ["roofing", "service", "4", true],
+    ["service", "roofing", "3", false],
+  ] as const)("classifies scope readiness using the changed type: %s to %s", async (oldType, nextType, code, ready) => {
+    pipelineMocks.getActiveProjectTypes.mockResolvedValue([{ id: "next-type", name: nextType, slug: nextType, code }]);
+    pipelineMocks.getStageById.mockResolvedValue({ id: "stage-opportunity", slug: "opportunity", workflowFamily: "standard_deal" });
+    const tenantDb = createFakeTenantDb({ projectTypeConfig: [{ id: "next-type", code }] }, { snapshotReads: true });
+    Object.assign(tenantDb.state.deals[0]!, { projectType: oldType, projectTypeId: "old-type", dealNumber: "DFW-3-12326-aa",
+      workflowRoute: "normal", scopeTitle: "Repair flashing", description: null });
+    const changed = await upsertDealScopingIntake(tenantDb as never, "deal-1", { projectTypeId: "next-type" }, "user-1");
+    expect(tenantDb.state.deals[0]?.projectType).toBe(nextType);
+    expect(!changed.readiness.errors.sections.scopeSummary?.length).toBe(ready);
+    const fresh = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(fresh.errors.sections.scopeSummary).toEqual(changed.readiness.errors.sections.scopeSummary);
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
+    expect(changed.intake.sectionData.scopeSummary).toBeUndefined();
   });
 
   it.each([

@@ -75,6 +75,7 @@ export function summarizeServiceRfps(
 
 export async function getServiceRfpReport(db: NodePgDatabase<typeof schema>, filters: SalesReportFilters, officeId: string) {
   assertServiceRfpRange(filters.dateFrom, filters.dateTo);
+  const ownerEmails = filters.ownerEmails.map((email) => email.trim().toLowerCase()).filter(Boolean);
   const officeFilter = buildOfficeExistsMatcher(filters.officeSlug);
   const result = await db.execute(sql`
     WITH retained_rfps AS (
@@ -105,8 +106,8 @@ export async function getServiceRfpReport(db: NodePgDatabase<typeof schema>, fil
   `);
   const matchesOwner = (id: string | null, name: string, email?: string | null) => {
     if (filters.ownerIds.length) return filters.ownerIds.includes(id ?? "__unassigned__");
-    if (!filters.ownerIds.length && !filters.ownerNames.length && !filters.ownerEmails.length) return true;
-    return filters.ownerNames.includes(name) || filters.ownerEmails.includes((email ?? "").toLowerCase());
+    if (!filters.ownerIds.length && !filters.ownerNames.length && !ownerEmails.length) return true;
+    return filters.ownerNames.includes(name) || ownerEmails.includes((email ?? "").toLowerCase());
   };
   const raw = (Array.isArray(result) ? result : result.rows) as Array<ServiceRfpReportDeal & { repEmail?: string | null }>;
   const rows = raw.filter((row) => matchesOwner(row.repId, row.repName, row.repEmail)).map((row) => ({
@@ -117,11 +118,11 @@ export async function getServiceRfpReport(db: NodePgDatabase<typeof schema>, fil
   // The canonical roster deliberately exposes no email. Resolve email filters only within its
   // already office-scoped IDs so eligible zero-contribution sellers match just like deal owners.
   const emailOwnerIds = new Set<string>();
-  if (!filters.ownerIds.length && filters.ownerEmails.length && salesRoster.length) {
+  if (!filters.ownerIds.length && ownerEmails.length && salesRoster.length) {
     const emailResult = await db.execute(sql`
       SELECT id FROM public.users
       WHERE id IN (${sql.join(salesRoster.map((rep) => sql`${rep.id}::uuid`), sql`, `)})
-        AND lower(email) IN (${sql.join(filters.ownerEmails.map((email) => sql`${email}`), sql`, `)})
+        AND lower(email) IN (${sql.join(ownerEmails.map((email) => sql`${email}`), sql`, `)})
     `);
     const emailRows = (Array.isArray(emailResult) ? emailResult : emailResult.rows) as Array<{ id: string }>;
     emailRows.forEach((row) => emailOwnerIds.add(row.id));

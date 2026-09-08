@@ -605,7 +605,6 @@ function resolveScopingWorkspaceRoute(resolvedDeal: ResolvedDealView): WorkflowR
 
 async function isServiceScopingDeal(tenantDb: TenantDb, resolvedDeal: ResolvedDealView,
   projectTypeId = resolvedDeal.resolved.projectTypeId): Promise<boolean> {
-  if (!resolvedDeal.deal.scopeTitle?.trim()) return false; // No title fallback to classify.
   // Match RFP's text-type > configured FK code > legacy route precedence, including inactive types
   // retained by existing deals. A service type with an old normal route still permits title-only scope.
   const [configuredType] = projectTypeId
@@ -1369,7 +1368,8 @@ export async function upsertDealScopingIntake(
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute: nextRoute,
     projectTypeId,
-    sectionData: withServiceScopeFallback(nextSectionData, await isServiceScopingDeal(tenantDb, resolvedDeal, projectTypeId), null, deal.scopeTitle),
+    sectionData: withServiceScopeFallback(nextSectionData, await isServiceScopingDeal(tenantDb,
+      { ...resolvedDeal, deal: { ...deal, ...dealUpdates } }, projectTypeId), null, deal.scopeTitle),
     attachments,
   });
   const payload = createIntakePayload({

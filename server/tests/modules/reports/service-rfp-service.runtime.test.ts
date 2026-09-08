@@ -73,7 +73,7 @@ describe("service RFP reporting", () => {
   it("retains an email-filtered eligible seller with no submissions", async () => {
     await pg.exec(`UPDATE users SET email = 'Zero@Example.com' WHERE id = '${ZERO}'`);
     const report = await getServiceRfpReport(drizzle(pg) as never, {
-      dateFrom: "2026-09-07", dateTo: "2026-09-13", ownerIds: [], ownerNames: [], ownerEmails: ["zero@example.com"],
+      dateFrom: "2026-09-07", dateTo: "2026-09-13", ownerIds: [], ownerNames: [], ownerEmails: [" Zero@Example.COM "],
     }, OFFICE);
     expect(report.total).toBe(0);
     expect(report.deals).toEqual([]);
