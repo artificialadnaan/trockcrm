@@ -104,8 +104,9 @@ export async function getServiceRfpReport(db: NodePgDatabase<typeof schema>, fil
     ORDER BY COALESCE(s.submitted_at, h.submitted_at) DESC NULLS LAST, d.id
   `);
   const matchesOwner = (id: string | null, name: string, email?: string | null) => {
+    if (filters.ownerIds.length) return filters.ownerIds.includes(id ?? "__unassigned__");
     if (!filters.ownerIds.length && !filters.ownerNames.length && !filters.ownerEmails.length) return true;
-    return filters.ownerIds.includes(id ?? "__unassigned__") || filters.ownerNames.includes(name) || filters.ownerEmails.includes((email ?? "").toLowerCase());
+    return filters.ownerNames.includes(name) || filters.ownerEmails.includes((email ?? "").toLowerCase());
   };
   const raw = (Array.isArray(result) ? result : result.rows) as Array<ServiceRfpReportDeal & { repEmail?: string | null }>;
   const rows = raw.filter((row) => matchesOwner(row.repId, row.repName, row.repEmail)).map((row) => ({
@@ -116,7 +117,7 @@ export async function getServiceRfpReport(db: NodePgDatabase<typeof schema>, fil
   // The canonical roster deliberately exposes no email. Resolve email filters only within its
   // already office-scoped IDs so eligible zero-contribution sellers match just like deal owners.
   const emailOwnerIds = new Set<string>();
-  if (filters.ownerEmails.length && salesRoster.length) {
+  if (!filters.ownerIds.length && filters.ownerEmails.length && salesRoster.length) {
     const emailResult = await db.execute(sql`
       SELECT id FROM public.users
       WHERE id IN (${sql.join(salesRoster.map((rep) => sql`${rep.id}::uuid`), sql`, `)})

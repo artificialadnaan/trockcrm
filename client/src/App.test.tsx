@@ -7,6 +7,9 @@ function normalize(source: string) {
 
 describe("App route guards", () => {
   const source = normalize(appSource);
+  it("gates service RFP reports with the server's report viewer roles", () => {
+    expect(source).toContain('path="/reports/sales/service-rfps" element={( <RequireRole allowedRoles={REPORT_VIEWER_ROLES}> <ServiceRfpPage />');
+  });
 
   it("wraps shared director routes with admin and director access", () => {
     expect(source).toContain('path="/director" element={( <RequireRole allowedRoles={["admin", "director"]}> <DirectorDashboardPage />');

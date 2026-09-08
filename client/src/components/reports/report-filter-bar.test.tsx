@@ -130,6 +130,16 @@ function apiCallsMatching(predicate: (path: string, init: any) => boolean) {
 }
 
 describe("ReportFilterBar", () => {
+  it("does not load or offer owners when the report is self-scoped", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<MemoryRouter><ReportFilterBar showOffice={false} showOwner={false} ownerPickerPurpose="service-rfp-report" /></MemoryRouter>);
+    });
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(apiMock).not.toHaveBeenCalled();
+  });
   it.each(["", "?officeId=office-dallas"])("uses only canonical sales choices for service RFP reports: %s", async (scope) => {
     apiMock.mockImplementation(async (path) => ({ users: path === "/dashboard/rep-roster" ? [
       { id: "seller-1", displayName: "Generating Seller", group: "sales" },

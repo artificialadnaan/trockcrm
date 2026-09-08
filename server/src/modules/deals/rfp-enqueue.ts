@@ -590,7 +590,11 @@ export async function enqueueRfpBidBoardCreate(input: {
       maxAttempts: 8,
     })
     .returning({ id: jobQueue.id });
-  return { jobId: Number(jobRows[0]?.id) };
+  const jobId = Number(jobRows[0]?.id);
+  if (body.deal.projectType === "4") {
+    await recordServiceRfpSubmission(input.tenantDb, input.officeId, input.deal.id, body.sourceEventId, jobId);
+  }
+  return { jobId };
 }
 
 /**

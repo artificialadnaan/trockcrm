@@ -327,7 +327,14 @@ export function App() {
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/reports/sales/pipeline-velocity" element={<PipelineVelocityPage />} />
-              <Route path="/reports/sales/service-rfps" element={<ServiceRfpPage />} />
+              <Route
+                path="/reports/sales/service-rfps"
+                element={(
+                  <RequireRole allowedRoles={REPORT_VIEWER_ROLES}>
+                    <ServiceRfpPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/reports/sales/closed-won-revenue" element={<ClosedWonRevenuePage />} />
               <Route path="/reports/sales/lead-conversion" element={<LeadConversionPage />} />
               <Route

@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { recordServiceRfpSubmission } from "../../../src/modules/deals/service-rfp-submission.js";
+import { recordServiceRfpSubmission, serviceRfpJobSql } from "../../../src/modules/deals/service-rfp-submission.js";
 import { getRepRosterOptions } from "../../../src/modules/dashboard/service.js";
 import { chicagoDate, getServiceRfpReport, mondayOf, summarizeServiceRfps } from "../../../src/modules/reports/service-rfp-service.js";
 
@@ -39,6 +40,31 @@ beforeAll(async () => {
 afterAll(async () => { await pg?.close(); });
 
 describe("service RFP reporting", () => {
+  it("uses the service history index for mixed-job office scans and per-deal lookups", async () => {
+    await pg.exec("BEGIN; SET LOCAL enable_seqscan = off");
+    try {
+      for (const dealFilter of [sql`TRUE`, sql`q.payload->>'dealId' = ${DEAL}`]) {
+        const result = await drizzle(pg).execute(sql`EXPLAIN SELECT q.payload->>'dealId', MIN(q.created_at)
+          FROM public.job_queue q WHERE q.office_id = ${OFFICE}::uuid
+            AND q.job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
+            AND ${serviceRfpJobSql("q")} AND ${dealFilter} GROUP BY q.payload->>'dealId'`);
+        expect(JSON.stringify(result.rows)).toContain("job_queue_service_rfp_history_idx");
+      }
+    } finally { await pg.exec("ROLLBACK"); }
+  });
+  it("explicit IDs take precedence over same-name and email fallback matches", async () => {
+    await pg.exec("BEGIN");
+    try {
+      await pg.exec(`UPDATE users SET display_name = 'Original Seller' WHERE id = '${ZERO}';
+        UPDATE deals SET assigned_rep_id = '${ZERO}' WHERE id IN ('${HIST}', '${MISSING}');`);
+      const report = await getServiceRfpReport(drizzle(pg) as never, {
+        dateFrom: "2026-08-31", dateTo: "2026-09-13", ownerIds: [SELLER], ownerNames: ["Original Seller"], ownerEmails: ["zero@example.com"],
+      }, OFFICE);
+      expect(report.deals.map((row) => row.dealId)).toEqual([DEAL]);
+      expect(report.missingEvidence).toEqual([]);
+      expect(report.reps.map((row) => row.repId)).toEqual([SELLER]);
+    } finally { await pg.exec("ROLLBACK"); }
+  });
   it("uses Monday in Chicago including the Sunday/Monday boundary and DST", () => {
     expect(mondayOf(chicagoDate("2026-09-07T04:59:59Z"))).toBe("2026-08-31");
     expect(mondayOf(chicagoDate("2026-09-07T05:00:00Z"))).toBe("2026-09-07");

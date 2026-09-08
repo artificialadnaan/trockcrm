@@ -524,6 +524,25 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     const captures = (await pg.query<{ assigned_rep_id: string; evidence_basis: string }>("SELECT assigned_rep_id, evidence_basis FROM service_rfp_submissions")).rows;
     expect(captures).toEqual([{ assigned_rep_id: REP, evidence_basis: "first_submission" }]);
   });
+  it("captures newly service-classified approved-vote jobs atomically and preserves the first owner", async () => {
+    pg = await setup();
+    const office = "00000000-0000-0000-0000-000000000088";
+    await pg.exec(`CREATE TABLE offices (id uuid PRIMARY KEY); INSERT INTO offices VALUES ('${office}');
+      UPDATE deals SET project_type = 'service', workflow_route = 'normal' WHERE id = '${DEAL}';`);
+    await pg.exec(readFileSync(new URL("../../../../migrations/0245_service_rfp_submissions.sql", import.meta.url), "utf8"));
+    await pg.exec("BEGIN");
+    await enqueueRfpBidBoardCreate({ tenantDb: drizzle(pg) as never, deal: { id: DEAL }, officeId: office });
+    await pg.exec("ROLLBACK");
+    expect((await pg.query("SELECT * FROM service_rfp_submissions")).rows).toEqual([]);
+    expect((await pg.query("SELECT * FROM job_queue")).rows).toEqual([]);
+    await pg.exec("BEGIN");
+    await enqueueRfpBidBoardCreate({ tenantDb: drizzle(pg) as never, deal: { id: DEAL }, officeId: office });
+    await pg.exec("COMMIT");
+    await pg.exec(`UPDATE deals SET assigned_rep_id = '${ESTIMATOR}' WHERE id = '${DEAL}'`);
+    await enqueueRfpBidBoardCreate({ tenantDb: drizzle(pg) as never, deal: { id: DEAL }, officeId: office });
+    const captures = (await pg.query("SELECT assigned_rep_id, source_event_id, evidence_basis FROM service_rfp_submissions")).rows;
+    expect(captures).toEqual([{ assigned_rep_id: REP, source_event_id: `crm:rfp-vote:approved:${EVENT}`, evidence_basis: "first_submission" }]);
+  });
 
   it("works inside a transaction, where the SAVEPOINT guard is live", async () => {
     // The prod callers all run inside an explicit tenant transaction (req.commitTransaction), so the

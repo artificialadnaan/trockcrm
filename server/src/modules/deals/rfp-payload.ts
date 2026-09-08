@@ -546,6 +546,8 @@ export function buildNormalizedRfpRequestBody(input: {
     sourceDealId: deal.id,
     sourceEventId,
     deal: {
+      // S01 intentionally applies to every new CRM opportunity handoff, not only service types:
+      // preserve the property's identity AND the opportunity context in the downstream project name.
       name: rfpProjectName(deal.propertyName, deal.name),
       // Ship the FORMATTED project number (canonical `project_number`, else the
       // bid-board `deal_number`) — NEVER the raw HubSpot id (resolveDealDisplayNumber

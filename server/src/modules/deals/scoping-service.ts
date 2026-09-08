@@ -484,7 +484,7 @@ function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
   return sectionData;
 }
 
-function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView, isService: boolean): DealScopingSectionData {
+function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView): DealScopingSectionData {
   const sectionData: DealScopingSectionData = {};
   const { resolved } = resolvedDeal;
 
@@ -515,8 +515,7 @@ function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView, is
     };
   }
 
-  const scopeSummary = resolved.description?.trim()
-    || (isService ? resolvedDeal.deal.scopeTitle?.trim() : null);
+  const scopeSummary = resolved.description?.trim();
   if (scopeSummary) {
     sectionData.scopeSummary = {
       summary: scopeSummary,
@@ -620,14 +619,11 @@ async function isServiceScopingDeal(tenantDb: TenantDb, resolvedDeal: ResolvedDe
 function buildBaseSectionData(
   existingIntake: DealScopingIntakeRow | null,
   resolvedDeal: ResolvedDealView,
-  isService: boolean,
 ): DealScopingSectionData {
-  const merged = mergeSectionData(
-    buildSeedSectionDataFromResolvedDeal(resolvedDeal, isService),
+  return mergeSectionData(
+    buildSeedSectionDataFromResolvedDeal(resolvedDeal),
     stripLineageOwnedScopingFields(toSectionData(existingIntake?.sectionData), resolvedDeal)
   );
-  return withServiceScopeFallback(merged, isService,
-    resolvedDeal.resolved.description, resolvedDeal.deal.scopeTitle);
 }
 
 function withServiceScopeFallback(sectionData: DealScopingSectionData, isService: boolean,
@@ -803,15 +799,15 @@ async function buildReadOnlyScopingIntakeSnapshot(input: {
 }): Promise<DealScopingServiceResult> {
   const user = await getUserOrThrow(input.tenantDb, input.userId);
   const attachments = await listScopingAttachmentFiles(input.tenantDb, input.resolvedDeal.deal.id);
-  const sectionData = buildSeedSectionDataFromResolvedDeal(input.resolvedDeal,
-    await isServiceScopingDeal(input.tenantDb, input.resolvedDeal));
+  const sectionData = buildSeedSectionDataFromResolvedDeal(input.resolvedDeal);
   const projectTypeId = input.resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(input.resolvedDeal.resolved.workflowRoute);
   const readiness = buildScopingReadiness({
     currentStatus: "draft",
     workflowRoute,
     projectTypeId,
-    sectionData,
+    sectionData: withServiceScopeFallback(sectionData, await isServiceScopingDeal(input.tenantDb, input.resolvedDeal),
+      input.resolvedDeal.resolved.description, input.resolvedDeal.deal.scopeTitle),
     attachments,
   });
   const timestamp =
@@ -877,7 +873,7 @@ export async function getOrCreateDealScopingIntake(
   }
   await assertDealScopingWriteAllowedForDeal(deal, { role: "system" });
   const initialPatch: DealScopingPatch = {
-    sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal, await isServiceScopingDeal(tenantDb, resolvedDeal)),
+    sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
   };
   if (resolvedDeal.resolved.projectTypeId != null) {
     initialPatch.projectTypeId = resolvedDeal.resolved.projectTypeId;
@@ -1191,14 +1187,15 @@ export async function evaluateDealScopingReadiness(
     }
     attachments = await listScopingAttachmentFiles(tenantDb, dealId);
   }
-  const sectionData = buildBaseSectionData(existingIntake, resolvedDeal, await isServiceScopingDeal(tenantDb, resolvedDeal));
+  const sectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const projectTypeId = existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(resolvedDeal.resolved.workflowRoute);
   const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute,
     projectTypeId,
-    sectionData,
+    sectionData: withServiceScopeFallback(sectionData, await isServiceScopingDeal(tenantDb, resolvedDeal),
+      resolvedDeal.resolved.description, deal.scopeTitle),
     attachments,
   });
 
@@ -1284,7 +1281,7 @@ export async function upsertDealScopingIntake(
   const editor = await getUserOrThrow(tenantDb, userId);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
   const deal = resolvedDeal.deal;
-  const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal, await isServiceScopingDeal(tenantDb, resolvedDeal));
+  const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const sectionPatch = stripLineageOwnedScopingFields(
     extractSectionPatch(sanitizedPatch),
     resolvedDeal

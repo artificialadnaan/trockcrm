@@ -4,11 +4,15 @@ import { useServiceRfpReport } from "@/hooks/use-reports";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
 import { useDealHref } from "@/hooks/use-office-scope";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/lib/auth";
 import { DataTable, KpiCard, KpiStrip, Panel, ReportShell, sheetsFromReport, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./sales-report-ui";
 
 export function ServiceRfpPage() {
   const { query } = useReportFilters({ dateTimezone: "America/Chicago" });
-  const { data, loading, error, refetch } = useServiceRfpReport(query);
+  const { user } = useAuth();
+  const selfScoped = user?.role === "rep";
+  const { data, loading, error, refetch } = useServiceRfpReport(selfScoped
+    ? { ...query, ownerIds: [user.id], ownerNames: [], ownerEmails: [] } : query);
   const dealHref = useDealHref();
   const [showMissing, setShowMissing] = useState(false);
   const [page, setPage] = useState(0);
@@ -18,11 +22,12 @@ export function ServiceRfpPage() {
     <ReportShell eyebrow="Sales Reports" title="Service RFPs by Sales Rep"
       description="Service opportunities supplied to estimating, counted once per deal at the first recorded RFP submission."
       loading={loading} error={error} hasData={Boolean(data)} emptyText="No service opportunities found."
-      filterBarProps={{ showOffice: false, dateTimezone: "America/Chicago", ownerLabel: "Attributed sales rep", ownerPickerPurpose: "service-rfp-report" }}
+      filterBarProps={{ showOffice: false, showOwner: !selfScoped, dateTimezone: "America/Chicago", ownerLabel: "Attributed sales rep", ownerPickerPurpose: "service-rfp-report" }}
       onRefresh={() => void refetch()} exportFilename="service-rfp-contributions"
       exportSheets={sheetsFromReport("Service RFPs", data ? { ...data, reps: data.reps.map(({ weekly, ...rep }) => ({ ...rep, ...weekly })) } : null)}>
       {data && <div className="space-y-6">
         <p role="note" className="text-sm text-muted-foreground">
+          {selfScoped && <>This report is limited to your assigned submissions. </>}
           Totals cover {data.dateFrom} through {data.dateTo}. Weeks start Monday in America/Chicago; first and last weeks may be partial.
           New submissions retain the assigned salesperson at submission, independent of later reassignment or retries.
           Historical rows use the earliest retained RFP evidence and current owner (or owner when captured); earlier submissions and original attribution may be unavailable.

@@ -532,6 +532,20 @@ describe("Scoping Service", () => {
     const result = await upsertDealScopingIntake(tenantDb as never, "deal-1", { sectionData: { scopeSummary: { summary: " " } } }, "user-1");
     expect(result.readiness.errors.sections.scopeSummary).toBeUndefined();
   });
+  it("opening and autosaving a title-only workspace never copies the derived title into description", async () => {
+    const tenantDb = createFakeTenantDb();
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: "service", scopeTitle: "First scope title", description: null });
+    const opened = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
+    expect(opened.intake.sectionData.scopeSummary).toBeUndefined();
+    expect(opened.readiness.errors.sections.scopeSummary).toBeUndefined();
+    tenantDb.state.deals[0]!.scopeTitle = "Revised scope title";
+    const saved = await upsertDealScopingIntake(tenantDb as never, "deal-1", { sectionData: { opportunity: { preBidMeetingCompleted: true } } }, "user-1");
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
+    expect(saved.intake.sectionData.scopeSummary).toBeUndefined();
+    expect(saved.readiness.errors.sections.scopeSummary).toBeUndefined();
+    expect(tenantDb.state.dealHistory).toEqual([]);
+  });
 
   it.each([
     ["Service", "3", "normal", true],
