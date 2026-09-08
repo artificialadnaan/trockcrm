@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dealsServiceMocks = vi.hoisted(() => ({
   createDeal: vi.fn(),
 }));
+const rosterMocks = vi.hoisted(() => ({ getRepRosterOptions: vi.fn() }));
+vi.mock("../../../src/modules/dashboard/service.js", () => rosterMocks);
 const pipelineServiceMocks = vi.hoisted(() => ({
   getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(),
@@ -73,13 +75,13 @@ function createTenantDb(selectRows: unknown[][] = [
   };
 }
 
-function createApp(officeSlug: string | null = "dallas", tenantDb = createTenantDb()) {
+function createApp(officeSlug: string | null = "dallas", tenantDb = createTenantDb(), role = "admin") {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).user = {
       id: "admin-1",
-      role: "admin",
+      role,
       displayName: "Admin",
       email: "admin@example.com",
       officeId: "office-dallas",
@@ -175,6 +177,10 @@ function validBody(overrides: Record<string, unknown> = {}) {
 describe("POST /api/deals create context", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    rosterMocks.getRepRosterOptions.mockResolvedValue([
+      { id: "rep-1", displayName: "Seller", group: "sales" },
+      { id: "admin-1", displayName: "Admin Seller", group: "sales" },
+    ]);
     accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
       id: "deal-1",
       assignedRepId: "rep-1",
@@ -323,6 +329,29 @@ describe("POST /api/deals create context", () => {
         }),
       })
     );
+  });
+
+  it.each(["admin", "rep"])("rejects an ineligible service assignee before creation for %s, including forced self", async (role) => {
+    rosterMocks.getRepRosterOptions.mockResolvedValue([
+      { id: role === "rep" ? "rep-1" : "admin-1", displayName: "Other Eligible Seller", group: "sales" },
+      { id: role === "rep" ? "admin-1" : "rep-1", displayName: "Estimator Only", group: "estimator" },
+    ]);
+    const res = await request(createApp("dallas", createTenantDb(), role))
+      .post("/api/deals/service-opportunity")
+      .send(validBody({ primaryContactId: "contact-1", projectTypeId: "type-service" }));
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("SERVICE_SALES_REP_INELIGIBLE");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+    expect(rosterMocks.getRepRosterOptions).toHaveBeenCalledWith(expect.anything(), "office-dallas", { assignableOnly: true });
+  });
+
+  it("rejects a stale or direct API assignee absent from the active sales roster", async () => {
+    rosterMocks.getRepRosterOptions.mockResolvedValue([]);
+    const res = await request(createApp())
+      .post("/api/deals/service-opportunity")
+      .send(validBody({ primaryContactId: "contact-1", projectTypeId: "type-service" }));
+    expect(res.status).toBe(400);
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
   });
 
   it("rejects a Service opportunity with no point of contact", async () => {

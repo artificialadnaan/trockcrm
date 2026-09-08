@@ -1,4 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("../../../src/modules/dashboard/service.js", () => ({
+  getRepRosterOptions: vi.fn(async () => [
+    { id: "rep-1", displayName: "Seller", group: "sales" },
+    { id: "admin-1", displayName: "Admin Seller", group: "sales" },
+    { id: "director-1", displayName: "Director Seller", group: "sales" },
+  ]),
+}));
 
 const dealsServiceMocks = vi.hoisted(() => ({
   createDeal: vi.fn(),

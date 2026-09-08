@@ -32,6 +32,8 @@ export interface RepRosterOption {
  * `loadedOfficeId === the office they asked for`.
  */
 export interface UseRepRosterOptions extends OfficeRequestOptions {
+  /** New assignments require current office membership; historical ownership alone is insufficient. */
+  assignableOnly?: boolean;
   /**
    * When false, no request is issued and `reps` stays empty.
    *
@@ -78,7 +80,7 @@ export function useRepRoster(options: UseRepRosterOptions = {}) {
     setReps([]);
     try {
       const data = await api<{ users: RepRosterOption[] }>(
-        "/dashboard/rep-roster",
+        options.assignableOnly ? "/dashboard/rep-roster?assignableOnly=1" : "/dashboard/rep-roster",
         getOfficeRequestOptions(options.officeId)
       );
       if (requestId !== requestRef.current) return;
@@ -104,7 +106,7 @@ export function useRepRoster(options: UseRepRosterOptions = {}) {
         setLoadedOfficeId(requestOfficeId);
       }
     }
-  }, [effectiveOfficeId, options.officeId, enabled]);
+  }, [effectiveOfficeId, options.officeId, enabled, options.assignableOnly]);
 
   useEffect(() => {
     load();

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useSalesReps } from "@/hooks/use-sales-reps";
+import { useRepRoster } from "@/hooks/use-rep-roster";
 
 const DATE_RANGE_OPTIONS = [
   { value: "30", label: "Last 30 days" },
@@ -199,13 +200,16 @@ export function useReportFilters(options: { defaultRange?: DefaultRange; dateTim
 export function ReportFilterBar({
   defaultRange = "90",
   showOffice = true,
+  showOwner = true,
   ownerPickerPurpose,
   ownerLabel = "Owner",
   dateTimezone,
 }: {
   defaultRange?: DefaultRange;
   showOffice?: boolean;
-  ownerPickerPurpose?: "canvassing-report";
+  /** Hide the person selector when the consuming report is forced to the current user's attribution. */
+  showOwner?: boolean;
+  ownerPickerPurpose?: "canvassing-report" | "service-rfp-report";
   /**
    * What the person picker is filtering ON. Most reports filter by current OWNER; Canvassing Activity
    * filters by who CREATED the record, and those diverge as accounts are reassigned — so labelling that
@@ -238,7 +242,17 @@ export function ReportFilterBar({
   // canonicalize a legacy `?office=dallas` URL into its UUID, leaking
   // unrelated reps into the owner picker.
   const salesRepsEnabled = !showOffice ? true : offices.length > 0 || draft.office === "all";
-  const { salesReps } = useSalesReps(canonicalOfficeId, { enabled: salesRepsEnabled, purpose: ownerPickerPurpose });
+  const serviceRfpPicker = ownerPickerPurpose === "service-rfp-report";
+  const { salesReps: genericSalesReps } = useSalesReps(canonicalOfficeId, {
+    enabled: showOwner && salesRepsEnabled && !serviceRfpPicker,
+    purpose: ownerPickerPurpose === "canvassing-report" ? ownerPickerPurpose : undefined,
+  });
+  const serviceRoster = useRepRoster({ officeId: canonicalOfficeId, enabled: showOwner && serviceRfpPicker });
+  const salesReps = useMemo<ReportOwnerOption[]>(() => serviceRfpPicker
+    ? serviceRoster.loadedOfficeId === (canonicalOfficeId ?? null) && !serviceRoster.loading && !serviceRoster.error
+      ? serviceRoster.reps.filter((rep) => rep.group === "sales") : []
+    : genericSalesReps,
+  [serviceRfpPicker, canonicalOfficeId, serviceRoster.loadedOfficeId, serviceRoster.loading, serviceRoster.error, serviceRoster.reps, genericSalesReps]);
 
   useEffect(() => {
     setDraft(hydrateOwnerSelection(filters, salesReps));
@@ -418,7 +432,7 @@ export function ReportFilterBar({
           </select>
         </label>
         ) : null}
-        <div className="space-y-2">
+        {showOwner && <div className="space-y-2">
           <p className="text-sm font-semibold text-slate-700">{ownerLabel}</p>
           <div className="flex max-h-28 flex-wrap gap-2 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-2">
             {salesReps.length === 0 ? (
@@ -434,7 +448,7 @@ export function ReportFilterBar({
               </label>
             ))}
           </div>
-        </div>
+        </div>}
       </div>
     </section>
   );

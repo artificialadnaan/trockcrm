@@ -7,6 +7,14 @@ import {
 } from "../../../src/modules/deals/rfp-payload.js";
 
 describe("RFP normalized payload builder", () => {
+  it.each(["service", "roofing"])("preserves property and opportunity context for every CRM RFP type: %s", (projectType) => {
+    const payload = buildNormalizedRfpRequestBody({
+      deal: { id: "deal-1", dealNumber: "TR-1", name: "North wing repair", propertyName: "Park Villas", projectType },
+      sourceEventId: "project-name-contract",
+    });
+    expect(payload.deal.name).toBe("Park Villas - North wing repair");
+    expect(payload.deal.projectType).toBe(projectType === "service" ? "4" : "3");
+  });
   it("maps CRM deal fields to the SyncHub RFP request contract", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-1",

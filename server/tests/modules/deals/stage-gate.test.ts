@@ -193,6 +193,7 @@ type FakeDealTeamMemberRow = {
 };
 
 type FakeTenantState = {
+  projectTypeConfig: Array<{ id: string; code: string }>;
   deals: FakeDealRow[];
   leads: FakeLeadRow[];
   properties: FakePropertyRow[];
@@ -209,6 +210,7 @@ type FakeTenantState = {
 function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
   const now = new Date("2026-04-15T15:00:00.000Z");
   const state: FakeTenantState = {
+    projectTypeConfig: [{ id: "pt-1", code: "3" }],
     deals: [
       {
         id: "deal-1",
@@ -271,6 +273,7 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
   function getRows(table: unknown) {
     const tableName = String((table as Record<PropertyKey, unknown> | undefined)?.[Symbol.for("drizzle:Name")] ?? "");
     if (tableName === "deals") return state.deals;
+    if (tableName === "project_type_config") return state.projectTypeConfig;
     if (tableName === "leads") return state.leads;
     if (tableName === "properties") return state.properties;
     if (tableName === "lead_question_answers") return state.leadQuestionAnswers;
@@ -1215,6 +1218,7 @@ describe("Scoping Attachment Hardening", () => {
   it("keeps service attachment metadata optional for readiness", async () => {
     const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
     const tenantDb = createHardeningTenantDb({
+      projectTypeConfig: [{ id: "pt-1", code: "4" }],
       deals: [
         {
           id: "deal-1",

@@ -1028,7 +1028,8 @@ export interface RepRosterOption {
 
 export async function getRepRosterOptions(
   tenantDb: TenantDb,
-  officeId?: string
+  officeId?: string,
+  options: { assignableOnly?: boolean } = {}
 ): Promise<RepRosterOption[]> {
   const officeMembership = officeId ? activeOfficeRepMembershipSql(officeId) : sql`TRUE`;
   const result = await tenantDb.execute(sql`
@@ -1059,6 +1060,9 @@ export async function getRepRosterOptions(
         -- Matches the rep-card and funnel rosters: flagged smoke-test / duplicate accounts stay out.
         AND COALESCE(u.is_test_data, false) = false
         AND ${dashboardRosterMembershipSql(officeId)}
+        -- Historical owners remain useful filters, but cannot receive NEW assignments after their
+        -- office access is revoked. Preserve the canonical sales flag and intersect assignment access.
+        AND ${options.assignableOnly ? officeMembership : sql`TRUE`}
 
       UNION ALL
 

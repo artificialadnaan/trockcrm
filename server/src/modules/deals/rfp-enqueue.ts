@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { recordServiceRfpSubmission } from "./service-rfp-submission.js";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, files, jobQueue, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { PROJECT_TYPE_OPTIONS, resolveDealDisplayNumber, type RfpVoteInvitationDealSummary } from "@trock-crm/shared/types";
+import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import {
   generateDownloadUrl,
@@ -181,6 +183,7 @@ async function loadRfpPayloadDeal(
 ) {
   const result = await tenantDb.execute(sql`
     SELECT d.*,
+           p.name AS "propertyName",
            c.name AS "companyName",
            concat_ws(' ', pc.first_name, pc.last_name) AS "contactName",
            pc.email AS "clientEmail",
@@ -193,6 +196,7 @@ async function loadRfpPayloadDeal(
            ptc.code AS "projectTypeCode"
       FROM deals d
       LEFT JOIN companies c ON c.id = d.company_id
+      LEFT JOIN properties p ON p.id = d.property_id
       LEFT JOIN contacts pc ON pc.id = d.primary_contact_id
       LEFT JOIN leads l ON l.id = d.source_lead_id
       LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
@@ -257,6 +261,8 @@ async function loadRfpPayloadDeal(
   return {
     id: row.id as string,
     name: (row.name as string | null) ?? "",
+    propertyName: (row.propertyName as string | null) ?? null,
+    scopeTitle: (row.scope_title as string | null) ?? null,
     dealNumber: (row.deal_number as string | null) ?? "",
     projectNumber: (row.project_number as string | null) ?? null,
     projectType: (row.project_type as string | null) ?? null,
@@ -412,7 +418,11 @@ export async function insertOpportunityRfpRequestJob(
     })
     .returning({ id: jobQueue.id });
 
-  return { jobId: Number(jobRows[0]?.id) };
+  const jobId = Number(jobRows[0]?.id);
+  if (resolveProjectTypeCode({ projectType: rfpPayloadDeal.projectType, projectTypes: rfpPayloadDeal.projectTypeCode, workflowRoute: rfpPayloadDeal.workflowRoute ?? "normal" }) === "4") {
+    await recordServiceRfpSubmission(input.tenantDb, input.officeId, input.deal.id, input.eventId, jobId);
+  }
+  return { jobId };
 }
 
 /**
@@ -580,7 +590,11 @@ export async function enqueueRfpBidBoardCreate(input: {
       maxAttempts: 8,
     })
     .returning({ id: jobQueue.id });
-  return { jobId: Number(jobRows[0]?.id) };
+  const jobId = Number(jobRows[0]?.id);
+  if (body.deal.projectType === "4") {
+    await recordServiceRfpSubmission(input.tenantDb, input.officeId, input.deal.id, body.sourceEventId, jobId);
+  }
+  return { jobId };
 }
 
 /**
