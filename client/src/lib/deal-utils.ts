@@ -83,28 +83,35 @@ export function formatCurrencyCompact(value: string | number | null | undefined)
 }
 
 /**
- * Calculate current contract value: awarded_amount + Procore change_order_total + CRM change orders.
+ * Calculate current contract value: the deal's contract base + Procore change_order_total + CRM
+ * change orders.
+ *
+ * The BASE is `resolveBestEstimate` — the same awarded-first chain every other value surface uses
+ * (the detail header, the board card, the server's deal-value-sql). It is deliberately NOT
+ * `awardedAmount` alone: a Bid-Board-owned deal carries its contract in `bid_board_total_sales` and
+ * may have no awarded amount at all (nothing seeds one outside a Won *transition*), so an
+ * awarded-only base silently priced such a contract at $0 and rendered its change orders AS the
+ * contract value — a deductive CO on The Onyx (DFW-1-15426-ab) showed a -$61,829 contract under a
+ * header reading $439,121. Sharing the chain is what keeps the two from ever disagreeing again.
+ * A CO child is handled by the chain itself (its own awardedAmount verbatim, negative included).
  *
  * `change_order_total` is the Procore-synced approved-CO rollup; `crmChangeOrderTotal` is the deal
  * detail's `dealChangeOrderTotal`, i.e. the server's sumDealChangeOrders — the CRM change-order value
  * counted EXACTLY ONCE (CO child deals + any not-yet-migrated legacy deal_change_orders rows, no
  * overlap). So this CCV agrees with the deal detail's CO list/total by construction (same source) and
- * the parent's awarded base never contains CO value. Both rollups are added so CCV reflects every CO.
+ * the parent's base never contains CO value. Both rollups are added so CCV reflects every CO.
  */
 export function currentContractValue(
-  deal: {
-    awardedAmount?: string | null;
-    changeOrderTotal?: string | null;
-  },
+  deal: Parameters<typeof resolveBestEstimate>[0] & { changeOrderTotal?: string | null },
   crmChangeOrderTotal?: string | number | null
 ): number {
-  const awarded = parseFloat(deal.awardedAmount ?? "0") || 0;
+  const base = resolveBestEstimate(deal).value;
   const coTotal = parseFloat(deal.changeOrderTotal ?? "0") || 0;
   const crmTotal =
     typeof crmChangeOrderTotal === "number"
       ? crmChangeOrderTotal
       : parseFloat((crmChangeOrderTotal ?? "0") as string) || 0;
-  return awarded + coTotal + (Number.isFinite(crmTotal) ? crmTotal : 0);
+  return base + coTotal + (Number.isFinite(crmTotal) ? crmTotal : 0);
 }
 
 /**
