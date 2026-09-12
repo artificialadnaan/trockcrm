@@ -98,3 +98,54 @@ describe("currentContractValue — the contract base", () => {
     expect(value).toBe(110000);
   });
 });
+
+describe("currentContractValue — only a deal that holds a contract gets the fallback", () => {
+  // resolveBestEstimate deliberately preserves an estimate on an open deal and the BID on a Lost deal
+  // (Loss Analysis sums lost-deal value), and DealEstimatesCard renders on every deal's overview. So
+  // the fallback is gated to Won: outside it the base stays awarded-only, or an un-awarded deal would
+  // be asserting a contract value it never had.
+
+  it("does not turn a Lost deal's preserved bid into a contract value", () => {
+    const value = currentContractValue(
+      { awardedAmount: null, bidEstimate: "425102.86", stageSlug: "lost", changeOrderTotal: null },
+      null
+    );
+
+    expect(value).toBe(0);
+  });
+
+  it("does not turn an open deal's DD estimate into a contract value", () => {
+    const value = currentContractValue(
+      { awardedAmount: null, ddEstimate: "400000", stageSlug: "opportunity", changeOrderTotal: null },
+      null
+    );
+
+    expect(value).toBe(0);
+  });
+
+  it("still applies the fallback when the Won stage is carried on the bid-board slug", () => {
+    // A Bid-Board-owned deal can read "opportunity" in the CRM while its bid-board stage is won --
+    // resolveDealValueKind checks both, and the contract base must follow the same rule.
+    const value = currentContractValue(
+      {
+        awardedAmount: null,
+        bidBoardTotalSales: "250000",
+        stageSlug: "opportunity",
+        bidBoardStageSlug: "won",
+        changeOrderTotal: null,
+      },
+      null
+    );
+
+    expect(value).toBe(250000);
+  });
+
+  it("keeps an awarded amount as the base on a non-Won deal (unchanged behaviour)", () => {
+    const value = currentContractValue(
+      { awardedAmount: "75000", bidEstimate: "90000", stageSlug: "proposal", changeOrderTotal: null },
+      null
+    );
+
+    expect(value).toBe(75000);
+  });
+});

@@ -105,3 +105,29 @@ describe("DealEstimatesCard — Current Contract Value on a deal with no awarded
     expect(textOf(html, "current-contract-value")).toBe("-$61,829");
   });
 });
+
+describe("DealEstimatesCard — deals that hold no contract", () => {
+  // The card renders on EVERY deal's overview, so the contract-value fallback must not reach a deal
+  // that was never awarded. A Lost deal keeps its preserved bid for Loss Analysis; showing that bid as
+  // a live "Current Contract Value" (in green) would read as money the company is owed.
+
+  it("shows no contract value on a Lost deal carrying a preserved bid", () => {
+    const lost = makeOnyx({ stageSlug: "lost", bidBoardTotalSales: null, changeOrderTotal: null });
+
+    const html = renderToStaticMarkup(<DealEstimatesCard deal={lost} changeOrders={[]} />);
+
+    expect(textOf(html, "current-contract-value")).toBe("$0");
+  });
+
+  it("shows no contract value on an open deal carrying estimates", () => {
+    const open = makeOnyx({
+      stageSlug: "opportunity",
+      bidBoardTotalSales: null,
+      changeOrderTotal: null,
+    });
+
+    const html = renderToStaticMarkup(<DealEstimatesCard deal={open} changeOrders={[]} />);
+
+    expect(textOf(html, "current-contract-value")).toBe("$0");
+  });
+});

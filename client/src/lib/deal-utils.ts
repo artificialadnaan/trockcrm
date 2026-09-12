@@ -86,14 +86,23 @@ export function formatCurrencyCompact(value: string | number | null | undefined)
  * Calculate current contract value: the deal's contract base + Procore change_order_total + CRM
  * change orders.
  *
- * The BASE is `resolveBestEstimate` — the same awarded-first chain every other value surface uses
- * (the detail header, the board card, the server's deal-value-sql). It is deliberately NOT
- * `awardedAmount` alone: a Bid-Board-owned deal carries its contract in `bid_board_total_sales` and
- * may have no awarded amount at all (nothing seeds one outside a Won *transition*), so an
+ * On a WON deal the BASE is `resolveBestEstimate` — the same awarded-first chain every other value
+ * surface uses (the detail header, the board card, the server's deal-value-sql). It is deliberately
+ * NOT `awardedAmount` alone: a Bid-Board-owned deal carries its contract in `bid_board_total_sales`
+ * and may have no awarded amount at all (nothing seeds one outside a Won *transition*), so an
  * awarded-only base silently priced such a contract at $0 and rendered its change orders AS the
  * contract value — a deductive CO on The Onyx (DFW-1-15426-ab) showed a -$61,829 contract under a
  * header reading $439,121. Sharing the chain is what keeps the two from ever disagreeing again.
- * A CO child is handled by the chain itself (its own awardedAmount verbatim, negative included).
+ * A CO child is handled by the chain itself (its own awardedAmount verbatim, negative included) and
+ * is Won by construction, so either branch prices it the same.
+ *
+ * The Won gate matters: `resolveBestEstimate` deliberately PRESERVES an estimate on an open deal and
+ * the bid on a LOST one (Loss Analysis sums lost-deal value), and DealEstimatesCard renders on every
+ * deal's overview — so running the chain unconditionally would assert a "Current Contract Value" for
+ * deals that were never awarded (a lost $425k bid reading as a live contract, in green). Outside Won
+ * the base stays awarded-only, exactly as before. `resolveDealValueKind` is the shared Won predicate,
+ * so a Bid-Board deal that is won on its bid-board slug while the CRM stage still reads "opportunity"
+ * is covered too.
  *
  * `change_order_total` is the Procore-synced approved-CO rollup; `crmChangeOrderTotal` is the deal
  * detail's `dealChangeOrderTotal`, i.e. the server's sumDealChangeOrders — the CRM change-order value
@@ -105,7 +114,10 @@ export function currentContractValue(
   deal: Parameters<typeof resolveBestEstimate>[0] & { changeOrderTotal?: string | null },
   crmChangeOrderTotal?: string | number | null
 ): number {
-  const base = resolveBestEstimate(deal).value;
+  const base =
+    resolveDealValueKind(deal) === "won"
+      ? resolveBestEstimate(deal).value
+      : parseFloat(deal.awardedAmount ?? "0") || 0;
   const coTotal = parseFloat(deal.changeOrderTotal ?? "0") || 0;
   const crmTotal =
     typeof crmChangeOrderTotal === "number"
