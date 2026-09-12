@@ -42,7 +42,12 @@ jest.mock("../../capture/upload-background-task", () => ({
 jest.mock("../../capture/upload-queue", () => ({
   drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} })),
   getQueuedCount: jest.fn(async () => 0),
+  getQueuedUploads: jest.fn(async () => []),
   getSchedulableCount: jest.fn(async () => 0),
+  subscribeToQueueChanges: jest.fn(() => () => undefined),
+}));
+jest.mock("../../scorecards/draft-store", () => ({
+  listScorecardDraftOwners: jest.fn(async () => []),
 }));
 
 const mockScanRecoverableWalksAtStartup = jest.fn(async (..._args: unknown[]) => undefined);
@@ -65,6 +70,7 @@ let mockAuth: {
 };
 jest.mock("../../auth/AuthContext", () => ({ useAuth: () => mockAuth }));
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react-native";
 // eslint-disable-next-line import/first
 import { apiFetch } from "../../api/client";
@@ -120,7 +126,13 @@ afterEach(() => {
 /** Render and let the effects' async manifest reads settle. (`render` does its own act(); wrapping
  *  it in another one leaves the renderer unmounted.) */
 async function renderShell(): Promise<ReturnType<typeof render>> {
-  const view = render(<AppLayout />);
+  // The shell now reads a QueryClient (photo-drain gallery invalidation), as it does under the real
+  // root layout's provider. Unrelated to the walk queue, but required for the tree to render.
+  const view = render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <AppLayout />
+    </QueryClientProvider>,
+  );
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
