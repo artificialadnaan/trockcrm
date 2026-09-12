@@ -70,7 +70,10 @@ beforeAll(async () => {
     CREATE TABLE contact_deal_associations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, deal_id uuid, is_primary boolean DEFAULT false);
     CREATE TABLE activities (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, occurred_at timestamptz);
     CREATE TABLE emails (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, sent_at timestamptz);
-    CREATE TABLE tasks (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, updated_at timestamptz);
+    -- status is read by buildContactLastTouchAtSql (a dismissed task is not a touch), so this
+    -- trimmed fixture needs it to match the real table.
+    CREATE TABLE tasks (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid,
+      status text NOT NULL DEFAULT 'pending', updated_at timestamptz);
   `);
   await pg.exec(`INSERT INTO public.users (id, display_name, email, is_active) VALUES ('${USER}', 'Sam Super', 'sam.super@trock.com', true);`);
   tdb = drizzle(pg);
