@@ -347,6 +347,8 @@ export async function confirmFieldPhotoUpload(
     addressSource?: "exif" | "live_gps";
     takenAt?: string;
     auditContext?: UploadAuditContext;
+    /** Device-reported count of captures still queued behind this one — telemetry only. */
+    queueDepth?: number | null;
   }
 ) {
   const normalizedTarget = normalizeCaptureTargetIds(input);
@@ -409,6 +411,7 @@ export async function confirmFieldPhotoUpload(
       officeId: input.officeId,
       addressSource: input.addressSource,
       auditContext: input.auditContext,
+      queueDepth: input.queueDepth ?? null,
     });
   }
 

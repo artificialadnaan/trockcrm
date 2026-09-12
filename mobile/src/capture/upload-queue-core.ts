@@ -3,8 +3,25 @@
 // index read/write, keep-awake, draining) lives in ./upload-queue and composes these.
 import type { CaptureUploadInput } from "./upload";
 
-// 5 (up from 3): a touch more throughput for big batches while staying gentle on the API rate limiter.
-export const UPLOAD_CONCURRENCY = 5;
+/**
+ * How many photo uploads are in flight at once. 8, up from 5 (itself up from 3).
+ *
+ * The old rationale here was "stay gentle on the API rate limiter", which does not apply: the PUT goes
+ * straight to R2 on a presigned URL and never touches our API at all, and `/api/field` is mounted in
+ * server/src/app.ts with NO limiter (apiLimiter is only on tenantRouter and /api/address). Only the
+ * presign and the confirm hit the API, two short calls per photo. So the real ceiling is the API's
+ * Postgres pool, not a request cap — which is why this moves to 8 rather than to 20.
+ *
+ * WHY MORE IN FLIGHT ACTUALLY HELPS, which is not obvious. expo-file-system's uploadAsync defaults to
+ * `FileSystemSessionType.BACKGROUND`, so a PUT already in flight KEEPS GOING after iOS suspends the app.
+ * What stops is the JS that launches the next one. So when a phone goes into a pocket mid-drain, exactly
+ * UPLOAD_CONCURRENCY uploads finish and the rest wait for the next foreground — which is the burst
+ * pattern the production data shows (110 photos in one hour, then 5, then 60). The dial therefore sets
+ * how much work survives a suspension, not just how fast a foreground drain runs.
+ *
+ * Each slot streams from disk on the native side, so the cost of a slot is a socket, not a decoded image.
+ */
+export const UPLOAD_CONCURRENCY = 8;
 
 // Cap on concurrent enqueue-time compressions ACROSS all enqueueUploads calls. Per-photo captures fire
 // enqueueUploads without awaiting, so a fast burst could otherwise launch unbounded 12MP ImageManipulator

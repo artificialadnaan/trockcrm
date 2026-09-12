@@ -612,7 +612,13 @@ export async function drainUploadQueue(
         const promise = uploadCapture(
           selectUploadFetcher(item, fetcher, opts.targetFetcher),
           item,
-          { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) },
+          {
+            shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId),
+            // Outstanding work at the moment this photo is confirmed: everything still planned for this
+            // drain, minus what has already succeeded. Telemetry only — it is what makes a growing
+            // backlog visible server-side instead of needing a field complaint to discover.
+            queueDepth: Math.max(0, plannedIds.length - succeeded),
+          },
         );
         activeUploadPromises.set(item.clientUploadId, promise);
         void promise.finally(() => {

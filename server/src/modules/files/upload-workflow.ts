@@ -36,9 +36,22 @@ export async function recordUploadedFileSideEffects(
     officeId: string;
     addressSource?: string | null;
     auditContext?: UploadAuditContext;
+    /**
+     * How many captures were still waiting on the uploading device when this one was confirmed.
+     *
+     * Recorded because the absence of this number is what made a real incident invisible. A crew's
+     * device queue is local to the phone: the server sees photos arrive and has no idea whether one
+     * arrived alone or with 300 behind it. A superintendent's backlog therefore grew for three days in
+     * silence and was only found by reconstructing capture-vs-arrival dates AFTER he filed a report.
+     * With this, a 260-deep queue is one query against photo_audit_log.metadata, not a forensics job.
+     *
+     * Reported by the client, so it is a hint and not a fact — clamped, never trusted for any decision,
+     * and only ever read as telemetry.
+     */
+    queueDepth?: number | null;
   }
 ): Promise<void> {
-  const { file, userId, officeId, addressSource, auditContext } = input;
+  const { file, userId, officeId, addressSource, auditContext, queueDepth } = input;
 
   if (file.category === "photo") {
     await logPhotoEvent(tenantDb, {
@@ -52,6 +65,9 @@ export async function recordUploadedFileSideEffects(
         hasGpsCoordinates: Boolean(file.latitude && file.longitude),
         category: file.photoCategory ?? null,
         sizeBytes: file.fileSizeBytes ?? null,
+        // Omitted entirely rather than written as null when the client did not report one, so a query
+        // can tell "this build does not send it" apart from "this device's queue was empty".
+        ...(typeof queueDepth === "number" ? { deviceQueueDepth: queueDepth } : {}),
       },
     });
   }
