@@ -129,15 +129,16 @@ async function setupSchema(pg: PGlite) {
       email_id uuid, subject text, body text, occurred_at timestamptz
     );
 
-    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, display_order int);
+    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, display_order int,
+      is_terminal boolean NOT NULL DEFAULT false);
     CREATE TABLE public.user_graph_tokens (id uuid, user_id uuid, status varchar(20));
     CREATE TABLE public.job_queue (
       id bigserial PRIMARY KEY, job_type varchar(100), payload jsonb,
       office_id uuid, status varchar(20), run_after timestamptz
     );
 
-    INSERT INTO public.pipeline_stage_config (id, slug, display_order)
-      VALUES (gen_random_uuid(), 'estimate_in_progress', 2);
+    INSERT INTO public.pipeline_stage_config (id, slug, display_order, is_terminal)
+      VALUES (gen_random_uuid(), 'estimate_in_progress', 2, false);
     INSERT INTO public.user_graph_tokens (id, user_id, status)
       VALUES ('${MAILBOX_ID}', '${USER_ID}', 'active');
   `);

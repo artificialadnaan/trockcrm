@@ -245,6 +245,116 @@ export async function dismissResolvedFirstOutreachTasks(
   return dismissedTasks.rowCount ?? dismissedTasks.rows.length;
 }
 
+/**
+ * Origin rules whose tasks exist ONLY to move an OPEN deal forward, and are therefore debris the moment
+ * the deal reaches a terminal stage (Won / Lost).
+ *
+ * This is an explicit ALLOWLIST rather than `origin_rule IS NOT NULL`, because two other populations sit
+ * on terminal deals legitimately and must NOT be swept:
+ *  - Post-close workflow rules — `deal_won_*_handoff`, `deal_won_cross_sell`,
+ *    `deal_lost_competitor_intel`, `scoping_estimating_review_handoff`. Those tasks exist BECAUSE the deal
+ *    closed; dismissing them would delete the hand-off the close is supposed to trigger.
+ *  - MANUAL tasks (`origin_rule IS NULL`) — a person's stated intent. `stage-change.ts` already dismisses
+ *    everything open at the moment of the transition, so a manual task on a closed deal was filed
+ *    deliberately, after the fact ("Client Data and Follow up data needed" on a Lost deal is real work).
+ */
+export const TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES = [
+  "daily_close_date_follow_up",
+  "daily_cadence_overdue_follow_up",
+  "inbound_email_reply_needed",
+  "ai_disconnect_admin_task",
+  "cold_lead_warming",
+] as const;
+
+/**
+ * Dismiss every OPEN forward-motion task whose deal has reached a terminal stage (Won / Lost).
+ *
+ * `stage-change.ts` ALREADY dismisses open tasks when a deal transitions to a terminal stage — and that
+ * dismissal is precisely what made this leak self-sustaining. The generators below dedupe on "no OPEN task
+ * of this kind exists", so closing a deal CLEARED the guard and the next 6 AM run re-minted the task onto
+ * the now-closed deal. Prod on 2026-09-12: DFW-4-22226-ag went Won on 2026-08-10 and was handed a fresh
+ * "Follow up: … closes 2026-09-10" task on 2026-09-03, 24 days later; office-wide, 3,395 open tasks sat on
+ * Won/Lost deals across 14 reps.
+ *
+ * The create side is now filtered on `psc.is_terminal = false` (here, in ai-disconnect-admin-tasks.ts and
+ * in email-sync.ts), so this pass and those predicates are exact complements on ONE axis — the deal's
+ * stage — which is what makes a dismissal stay dismissed instead of re-minting next run. It also drains the
+ * historical backlog on the first run after deploy.
+ *
+ * `suppressed_until` is left NULL deliberately: a deal CAN come back (return-to-opportunity), and when it
+ * does these tasks should be free to re-mint. The 0-day rules (close-date, cadence) therefore resume
+ * immediately, while `inbound_email_reply_needed` rides its own 30-day rule window — the same contract the
+ * sibling dismissers use.
+ */
+export async function dismissResolvedTerminalDealTasks(
+  client: Queryable,
+  schemaName: string,
+  officeId: string,
+  resolvedAt: Date = new Date()
+): Promise<number> {
+  assertSafeSchemaName(schemaName);
+  const activeTaskStatusesSql = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"]
+    .map((status) => `'${status}'`)
+    .join(", ");
+
+  // ONE round-trip, via a data-modifying CTE, rather than the UPDATE-then-loop the sibling dismissers use.
+  // That shape costs a round-trip per dismissed task, and this pass has a first-run backlog of ~3,400 rows
+  // in a single office — 3,400 sequential round-trips inside one transaction, holding this office's
+  // advisory lock the whole time. Measured against the prod proxy it did not finish inside 10 minutes. The
+  // siblings drain tens of rows and get away with it; this one cannot.
+  //
+  // DISTINCT ON (origin_rule, dedupe_key) is required, not tidiness: ON CONFLICT DO UPDATE raises
+  // "cannot affect row a second time" if the source rows carry a duplicate business key, which two open
+  // tasks sharing a dedupe key would produce — and that error would roll back the dismissal too.
+  const result = await client.query<{ dismissed_count: string | number }>(
+    `WITH dismissed AS (
+       UPDATE ${schemaName}.tasks AS t
+       SET status = 'dismissed',
+           completed_at = $1,
+           is_overdue = false,
+           waiting_on = NULL,
+           blocked_by = NULL,
+           updated_at = NOW()
+       WHERE t.origin_rule = ANY($2::text[])
+         AND t.status IN (${activeTaskStatusesSql})
+         AND EXISTS (
+           SELECT 1
+           FROM ${schemaName}.deals d
+           JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+           WHERE d.id = t.deal_id
+             AND psc.is_terminal = true
+         )
+       RETURNING id, origin_rule, dedupe_key, entity_snapshot
+     ),
+     auditable AS (
+       SELECT DISTINCT ON (origin_rule, dedupe_key) id, origin_rule, dedupe_key, entity_snapshot
+       FROM dismissed
+       WHERE dedupe_key IS NOT NULL
+       ORDER BY origin_rule, dedupe_key, id
+     ),
+     audited AS (
+       INSERT INTO ${schemaName}.task_resolution_state
+         (office_id, task_id, origin_rule, dedupe_key, resolution_status, resolution_reason, resolved_at, suppressed_until, entity_snapshot)
+       SELECT $3, a.id, a.origin_rule, a.dedupe_key, 'dismissed', $4, $1, NULL, a.entity_snapshot
+       FROM auditable a
+       ON CONFLICT (origin_rule, dedupe_key) DO UPDATE
+       SET office_id = EXCLUDED.office_id,
+           task_id = EXCLUDED.task_id,
+           resolution_status = EXCLUDED.resolution_status,
+           resolution_reason = EXCLUDED.resolution_reason,
+           resolved_at = EXCLUDED.resolved_at,
+           suppressed_until = EXCLUDED.suppressed_until,
+           entity_snapshot = EXCLUDED.entity_snapshot,
+           updated_at = NOW()
+       RETURNING 1
+     )
+     SELECT (SELECT COUNT(*) FROM dismissed) AS dismissed_count`,
+    [resolvedAt, [...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES], officeId, "deal_reached_terminal_stage"]
+  );
+
+  return Number(result.rows[0]?.dismissed_count ?? 0);
+}
+
 export async function runDailyTaskGeneration(): Promise<void> {
   console.log("[Worker:daily-tasks] Starting daily task generation...");
 
@@ -254,13 +364,17 @@ export async function runDailyTaskGeneration(): Promise<void> {
 
     let totalTasksCreated = 0;
     let totalOverdueMarked = 0;
+    let totalOverdueCleared = 0;
     let totalFirstOutreachDismissed = 0;
+    let totalTerminalDealDismissed = 0;
 
     for (const office of offices.rows) {
       try {
         let officeTasksCreated = 0;
         let officeOverdueMarked = 0;
+        let officeOverdueCleared = 0;
         let officeFirstOutreachDismissed = 0;
+        let officeTerminalDealDismissed = 0;
 
         await client.query("BEGIN");
         await client.query(`SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`, [office.id]);
@@ -275,6 +389,31 @@ export async function runDailyTaskGeneration(): Promise<void> {
         const schemaName = `office_${office.slug}`;
         const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
         const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
+
+        // Lifecycle, FIRST: drain forward-motion tasks whose deal has already closed. This runs BEFORE the
+        // overdue marking and its notification INSERT below, because the order decides whether the run that
+        // finally cleans a task up ALSO emails the rep about it one last time.
+        // Folded into the running total only AFTER COMMIT, like the other per-office counters.
+        officeTerminalDealDismissed = await dismissResolvedTerminalDealTasks(client, schemaName, office.id);
+
+        // `is_overdue` is a STORED flag, and the marking step below only ever sets it TRUE. Nothing ever
+        // reset it, so moving a due date forward (snooze, re-plan) left the task flagged overdue for good:
+        // on prod a task due 2026-12-01 was still emailing its assignee a daily "Task … is overdue (due
+        // 2026-12-01)", and still sorting to the top of the list as `urgent`. Clear it first, then re-derive
+        // it, so the flag is a function of TODAY's due date rather than a high-water mark.
+        //
+        // Undated work is included: a task with no due date has no date to be past, so it cannot be overdue.
+        // This only ever clears — it cannot invent an overdue task — and the marking step immediately below
+        // re-sets the flag for everything genuinely past due.
+        const overdueClearedResult = await client.query(
+          `UPDATE ${schemaName}.tasks
+           SET is_overdue = false,
+               updated_at = NOW()
+           WHERE is_overdue = true
+             AND status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
+             AND (due_date IS NULL OR due_date >= CURRENT_DATE)`
+        );
+        officeOverdueCleared += overdueClearedResult.rowCount ?? 0;
 
         const overdueResult = await client.query(
           `UPDATE ${schemaName}.tasks
@@ -310,7 +449,15 @@ export async function runDailyTaskGeneration(): Promise<void> {
           `SELECT d.id AS deal_id, d.name AS deal_name, d.deal_number,
                   d.assigned_rep_id, d.expected_close_date
            FROM ${schemaName}.deals d
+           JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
            WHERE d.is_active = true
+             -- A Won or Lost deal has no close left to follow up ON. Without this the rule minted a fresh
+             -- "Follow up: <number> closes <date>" onto closed work, and did it REPEATEDLY: stage-change.ts
+             -- dismisses open tasks at the terminal transition, which cleared the NOT EXISTS guard below, so
+             -- every dismissal handed the next 6 AM run permission to re-mint. Complements
+             -- dismissResolvedTerminalDealTasks on the same axis (the deal's stage), so a drained task stays
+             -- drained. is_terminal = false matches the stale-deal and cold-lead rules.
+             AND psc.is_terminal = false
              AND d.expected_close_date IS NOT NULL
              AND d.expected_close_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'
              AND NOT EXISTS (
@@ -443,6 +590,10 @@ export async function runDailyTaskGeneration(): Promise<void> {
            JOIN ${schemaName}.deals d ON d.id = cda.deal_id AND d.is_active = true
            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
            WHERE c.is_active = true
+             -- Terminal stages carry a touchpoint cadence too (prod: Won and Lost are both 14 days), and
+             -- last_contacted_at only ages, so without this filter EVERY closed deal re-mints a contact
+             -- follow-up forever. 417 of the 3,395 stuck tasks came from here.
+             AND psc.is_terminal = false
              AND psc.touchpoint_cadence_days IS NOT NULL
              AND (
                c.last_contacted_at IS NULL
@@ -534,8 +685,10 @@ export async function runDailyTaskGeneration(): Promise<void> {
 
         await client.query("COMMIT");
         totalOverdueMarked += officeOverdueMarked;
+        totalOverdueCleared += officeOverdueCleared;
         totalTasksCreated += officeTasksCreated;
         totalFirstOutreachDismissed += officeFirstOutreachDismissed;
+        totalTerminalDealDismissed += officeTerminalDealDismissed;
       } catch (officeErr) {
         await client.query("ROLLBACK").catch(() => {});
         console.error(`[Worker:daily-tasks] Office ${office.id} failed:`, officeErr);
@@ -543,8 +696,10 @@ export async function runDailyTaskGeneration(): Promise<void> {
     }
 
     console.log(
-      `[Worker:daily-tasks] Complete. Marked ${totalOverdueMarked} overdue, created ${totalTasksCreated} new tasks, ` +
-        `dismissed ${totalFirstOutreachDismissed} resolved/expired first-outreach tasks`
+      `[Worker:daily-tasks] Complete. Marked ${totalOverdueMarked} overdue, cleared ${totalOverdueCleared} ` +
+        `no-longer-overdue, created ${totalTasksCreated} new tasks, ` +
+        `dismissed ${totalFirstOutreachDismissed} resolved/expired first-outreach tasks, ` +
+        `dismissed ${totalTerminalDealDismissed} tasks on closed deals`
     );
   } catch (err) {
     console.error("[Worker:daily-tasks] Failed:", err);

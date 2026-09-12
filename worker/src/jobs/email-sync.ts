@@ -800,11 +800,24 @@ export async function processMailMessage(
 
   // For a deal-assigned email, the activity's parent link columns + the parent-company stat target come
   // FROM THE DEAL (company/property/lead), exactly like CRM sendEmail's resolveOutboundAssociation.
-  let dealParents: { company_id: string | null; property_id: string | null; source_lead_id: string | null } | null =
-    null;
+  let dealParents: {
+    company_id: string | null;
+    property_id: string | null;
+    source_lead_id: string | null;
+    is_terminal: boolean;
+  } | null = null;
   if (association.dealId) {
+    // LEFT JOIN, deliberately: an inner join would drop the whole row for a deal whose stage_id is null or
+    // unmatched, and this row feeds the activity's company/property/lead link columns below. Losing those to
+    // add a flag would be a silent regression, so an unresolvable stage COALESCEs to "not closed" — the
+    // behaviour this call site had before the flag existed.
     const dp = await client.query(
-      `SELECT company_id, property_id, source_lead_id FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
+      `SELECT d.company_id, d.property_id, d.source_lead_id,
+              COALESCE(psc.is_terminal, false) AS is_terminal
+         FROM ${schemaName}.deals d
+         LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE d.id = $1
+        LIMIT 1`,
       [association.dealId]
     );
     dealParents = dp.rows[0] ?? null;
@@ -906,8 +919,15 @@ export async function processMailMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (!isOutbound && association.dealId) {
+  } else if (!isOutbound && association.dealId && !dealParents?.is_terminal) {
     // Reply-task evaluation ("a client replied → maybe a follow-up task") is an INBOUND concern only.
+    //
+    // ...and only while the deal is still OPEN. Note what is and is not gated here: the email is still
+    // stored, still associated with the deal, still written as an activity, and still counted in the deal's
+    // email stats above — a message about a closed job belongs on that job's timeline. It is only the
+    // "reply needed" TASK that is suppressed, because there is no longer a deal to advance by replying.
+    // This was the single largest source of the leak: 1,977 of the 3,395 tasks stuck on Won/Lost deals were
+    // inbound_email_reply_needed, 56 of them minted in the last 7 days alone.
     await evaluateInboundEmailTasks(
       client,
       schemaName,
