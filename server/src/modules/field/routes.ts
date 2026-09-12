@@ -1372,6 +1372,11 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
     const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
     const perPageRaw = parseInt(req.query.perPage as string, 10);
     const perPage = Number.isFinite(perPageRaw) ? perPageRaw : undefined;
+    // `withTotal=0` opts OUT of the count(*), which is the expensive half of a deep page and is identical
+    // on every page of a walk. Opt-IN semantics (absent param ⇒ counted) is what keeps the already-shipped
+    // T-Rock Cam builds correct: their photo-viewer re-scanner reads totalPages off every page and would
+    // stop walking if one came back null, and `mobile/` has no OTA to fix them with.
+    const withTotal = !(req.query.withTotal === "0" || req.query.withTotal === "false");
     const { value, office } = await withResolvedOffice(
       "deal",
       dealId,
@@ -1382,7 +1387,7 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
           from: req.query.from as string | undefined,
           to: req.query.to as string | undefined,
           includeDeleted: false,
-        }, { page, perPage }),
+        }, { page, perPage, withTotal }),
       "Project not found",
     );
     res.json({ ...value, ...officeTag(office) });

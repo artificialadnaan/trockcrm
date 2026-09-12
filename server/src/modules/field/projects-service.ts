@@ -573,7 +573,7 @@ export async function listFieldProjectPhotos(
   access: FieldAccessContext,
   dealId: string,
   filters: DealPhotoTimelineFilters = {},
-  input: { page?: number; perPage?: number } = {},
+  input: { page?: number; perPage?: number; withTotal?: boolean } = {},
 ) {
   await assertActiveFieldProject(tenantDb, access, dealId);
   // Finite-guard before clamping: Math.max/min don't coerce NaN, so a non-numeric query param must fall
@@ -582,7 +582,16 @@ export async function listFieldProjectPhotos(
   const perPage = Number.isFinite(input.perPage)
     ? Math.min(FIELD_PHOTOS_MAX_PER_PAGE, Math.max(1, input.perPage as number))
     : FIELD_PHOTOS_DEFAULT_PER_PAGE;
-  const result = await getDealPhotoTimeline(tenantDb, dealId, page, perPage, filters);
+  // The count(*) is the same number on every page of one walk, and a client paging a whole gallery needs
+  // it once — on a 7,708-photo deal the gallery walks 39 pages and threw 38 identical counts away. But
+  // this is OPT-IN per request rather than "skip it whenever page > 1", and that is deliberate: the
+  // T-Rock Cam photo viewer's URL re-scanner (mobile/src/lib/photo-url-scan.ts) reads totalPages off
+  // EVERY page and stops when `page >= totalPages`, so a null total on page 2 would end its walk at page
+  // 2 and it would never reach a photo deeper in the deal. `mobile/` has no OTA, so the builds already in
+  // the field cannot be fixed by this deploy — they simply never send the flag and keep their counts.
+  const result = await getDealPhotoTimeline(tenantDb, dealId, page, perPage, filters, {
+    withTotal: input.withTotal ?? true,
+  });
   // thumbnailUrl/fullUrl are already resolved in-batch by getDealPhotoTimeline — no per-photo work here.
   const photos = result.photos.map((photo) => safePhoto(photo, photo.thumbnailUrl, photo.fullUrl));
   return { photos, pagination: result.pagination };

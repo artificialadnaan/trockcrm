@@ -2096,7 +2096,13 @@ export async function getDealPhotoTimeline(
   dealId: string,
   page: number = 1,
   limit: number = 50,
-  filters: DealPhotoTimelineFilters = {}
+  filters: DealPhotoTimelineFilters = {},
+  // `withTotal: false` skips the count(*) and reports total/totalPages as null. The count is the same
+  // number on every page of one walk, so a client that pages through a whole gallery only ever needs it
+  // once — and it is the most expensive part of a deep page (it has to match every row, where the page
+  // query stops at `limit`). Defaults to true: no existing caller changes behaviour, and the numbered-page
+  // web timeline keeps its total because it renders "page X of Y".
+  options: { withTotal?: boolean } = {},
 ): Promise<{
   photos: Array<
     // clientUploadId is the upload queue's idempotency key — kept OUT of this (API-exposed) row so it can't
@@ -2113,12 +2119,18 @@ export async function getDealPhotoTimeline(
       fullUrl: string | null;
     }
   >;
-  pagination: { page: number; limit: number; total: number; totalPages: number };
+  // total/totalPages are null exactly when the caller passed `withTotal: false` — see `options`.
+  pagination: { page: number; limit: number; total: number | null; totalPages: number | null };
 }> {
   const offset = (page - 1) * limit;
+  const withTotal = options.withTotal ?? true;
   const conditions = await buildDealPhotoTimelineConditions(tenantDb, dealId, filters);
 
-  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions);
+  // req.tenantDb is a single transaction-bound client, so this must stay sequential with the page query
+  // below rather than becoming a Promise.all (see the note at the /deal/:dealId/photos route).
+  const countResult = withTotal
+    ? await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions)
+    : null;
   const photoRows = await tenantDb
     .select({
       id: files.id,
@@ -2182,7 +2194,7 @@ export async function getDealPhotoTimeline(
     .limit(limit)
     .offset(offset);
 
-  const total = Number(countResult[0]?.count ?? 0);
+  const total = countResult === null ? null : Number(countResult[0]?.count ?? 0);
 
   // Resolve each photo's thumbnail + full-res URL HERE (in one batch) rather than letting the client
   // fetch a signed URL per photo — that N+1 is what trips the rate limiter on a 400-photo deal. Presigns
@@ -2193,7 +2205,7 @@ export async function getDealPhotoTimeline(
 
   return {
     photos,
-    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    pagination: { page, limit, total, totalPages: total === null ? null : Math.ceil(total / limit) },
   };
 }
 

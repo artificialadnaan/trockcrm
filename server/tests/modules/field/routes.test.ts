@@ -268,7 +268,40 @@ describe("field routes", () => {
       from: "2026-05-01",
       to: "2026-05-05",
       includeDeleted: false,
-    }, { page: 1, perPage: undefined });
+    }, { page: 1, perPage: undefined, withTotal: true });
+  });
+
+  // The count(*) opt-out is OPT-IN on purpose. T-Rock Cam builds already in the field read totalPages off
+  // EVERY page of their photo-viewer URL re-scan and stop walking when `page >= totalPages`, so a null
+  // total would truncate that walk — and `mobile/` has no OTA to fix them with. A request that does not
+  // ask to skip the count must therefore still be counted, on every page.
+  it("counts by default on every page, and skips the count only when withTotal is explicitly opted out", async () => {
+    for (const query of [{}, { page: "7" }, { withTotal: "1" }, { withTotal: "yes" }] as const) {
+      projectMocks.listFieldProjectPhotos.mockClear();
+      await invokeRoute("get", "/projects/:dealId/photos", { params: { dealId: "deal-1" }, query });
+      expect(projectMocks.listFieldProjectPhotos).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "deal-1",
+        expect.anything(),
+        expect.objectContaining({ withTotal: true }),
+      );
+    }
+
+    for (const withTotal of ["0", "false"]) {
+      projectMocks.listFieldProjectPhotos.mockClear();
+      await invokeRoute("get", "/projects/:dealId/photos", {
+        params: { dealId: "deal-1" },
+        query: { page: "2", withTotal },
+      });
+      expect(projectMocks.listFieldProjectPhotos).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "deal-1",
+        expect.anything(),
+        expect.objectContaining({ page: 2, withTotal: false }),
+      );
+    }
   });
 
   it("fetches enough rows per office to cover deep pages (cross-office pagination beyond the first window)", async () => {

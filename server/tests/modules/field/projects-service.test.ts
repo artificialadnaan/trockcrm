@@ -244,9 +244,12 @@ describe("field projects service", () => {
     const result = await listFieldProjectPhotos(db, { userId: "field-1", userRole: "field_contractor" }, "deal-1", { categories: ["damage"] });
 
     // Default field window: page 1, perPage 200 (the surface's prior single-load cap; no regression).
+    // withTotal defaults to TRUE when the caller says nothing — the count is only skipped on explicit
+    // opt-out, so a client that has never heard of the flag (every T-Rock Cam build in the field) keeps
+    // getting the totalPages its page walk depends on.
     expect(fileServiceMocks.getDealPhotoTimeline).toHaveBeenCalledWith(db, "deal-1", 1, 200, {
       categories: ["damage"],
-    });
+    }, { withTotal: true });
     expect(result.photos[0]).toEqual(expect.objectContaining({
       id: "photo-1",
       imageUrl: "https://signed.example/thumb.jpg", // thumbnail for the grid
