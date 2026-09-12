@@ -77,7 +77,28 @@ const CATALOG_ITEM = U("c4444");
  *  branch) — counted rather than pinned by line number, so unrelated edits above those lines do not
  *  fail the suite. */
 const WORKER_QUANTITY_COERCION = "Number(extraction.quantity ?? 1)";
-const WORKER_QUANTITY_COERCION_SITES = 3;
+// REPAIRED. Was 3 — see the test below, which was written to notice exactly this.
+const WORKER_QUANTITY_COERCION_SITES = 0;
+// What replaced it, pinned as the PREDICATES rather than as the write they lead to. Asserting only
+// `status: "needs_quantity"` would still pass if the test deciding WHEN to reach it were deleted —
+// the write is the consequence, and a lock on a consequence is not a lock on the behaviour.
+const WORKER_QUANTITY_GUARDS = [
+  // 1. The row is skipped for having no quantity, before any matching work.
+  "extraction.quantity === null",
+  // 2. The flag is written, which is what keeps the row visible instead of dropped.
+  'status: "needs_quantity"',
+  // 3. The claim re-checks BOTH facts in the WHERE, so a row that gained a quantity between the
+  //    select and the write is not stamped and stranded by a concurrent run — and it pins the STATUS
+  //    it observed, so a reviewer who approved or rejected the row in that window is not overwritten.
+  // Names the COLUMN, not just the operator: a bare "is null" matches any nullable predicate that
+  // happens to be in the file and would keep passing after the quantity re-check was removed.
+  // Nonpositive and NaN as well as null — the guard and the claim have to agree about what unpriceable
+  // means. Named WITH the column, because a bare "is null or" matches any nullable predicate that
+  // happens to be in the file and would keep passing after the quantity re-check was removed.
+  "estimateExtractions.quantity} is null or",
+  "= 'NaN'::numeric",
+  "= ${extraction.status}",
+];
 
 const WORKER_ESTIMATE_GENERATION_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -218,13 +239,23 @@ describe("DEFECT 1 — a walkthrough row with no spoken quantity is priced as on
     expect(Number(row.quantity)).toBe(50);
   });
 
-  it("still applies that coercion at all three call sites in the worker", () => {
-    // A SOURCE LOCK, not a behavior test — and the only assertion in this file that can notice the
-    // defect being repaired. Our own rows no longer reach the coercion, but every other producer of
-    // `estimate_extractions` still does, so the hazard is unrepaired and the ingress guard above is
-    // load-bearing. The day this count changes, re-read the guard in walkthrough-ingress-service.ts:
-    // if the worker now skips, flags, or zeroes quantity-less rows instead of silently pricing them at
-    // 1, refusing them at ingress may no longer be the right call. Decide deliberately.
+  it("NO LONGER applies that coercion anywhere in the worker — the defect is repaired", () => {
+    // A SOURCE LOCK, not a behavior test, and it did its job: it was written to notice this exact
+    // repair, and it failed the moment the repair landed. Read its previous instruction literally —
+    // "if the worker now skips, flags, or zeroes quantity-less rows instead of silently pricing them
+    // at 1, refusing them at ingress may no longer be the right call. Decide deliberately."
+    //
+    // DECIDED, and recorded here so the next reader inherits the reasoning rather than the puzzle:
+    // the worker now SKIPS such a row before matching and marks it `needs_quantity`, so a null
+    // quantity is no longer priced as one unit by anybody. That removes the reason the ingress refuses
+    // null quantities — and lifting that refusal is the intended next step, so that a walk whose
+    // quantities were never spoken can still reach an estimator as rows plainly marked as needing a
+    // number.
+    //
+    // It is deliberately NOT lifted in the same change as the repair. The refusal is the only thing
+    // standing between an unpriceable row and the old behaviour; removing it first, or together,
+    // would mean any window where both are half-applied prices guesses silently. The guard above
+    // stays until this assertion has shipped.
     if (!existsSync(WORKER_ESTIMATE_GENERATION_PATH)) {
       throw new Error(
         `CHARACTERIZATION TEST CANNOT RUN: expected the worker's estimate-generation job at ` +
@@ -236,9 +267,25 @@ describe("DEFECT 1 — a walkthrough row with no spoken quantity is priced as on
     }
 
     const source = readFileSync(WORKER_ESTIMATE_GENERATION_PATH, "utf8");
-    const occurrences = source.split(WORKER_QUANTITY_COERCION).length - 1;
+    // COMMENTS STRIPPED BEFORE COUNTING, because the fix's own comment quotes the removed expression
+    // verbatim to say what it replaced — and a source lock that counts prose cannot tell an explanation
+    // of a defect from the defect. Naive substring counting made the repair look incomplete.
+    const code = source
+      .split("\n")
+      .filter((line) => {
+        const trimmed = line.trim();
+        return !trimmed.startsWith("//") && !trimmed.startsWith("*") && !trimmed.startsWith("/*");
+      })
+      .join("\n");
+    const occurrences = code.split(WORKER_QUANTITY_COERCION).length - 1;
 
     expect(occurrences).toBe(WORKER_QUANTITY_COERCION_SITES);
+    // ABSENCE IS NOT ENOUGH. Deleting the coercion without putting anything in its place would also
+    // satisfy the count above while leaving `Number(null)` = 0 to price the row at zero — a different
+    // wrong answer wearing the same clothes. Each guard has to be positively present.
+    for (const guard of WORKER_QUANTITY_GUARDS) {
+      expect(code).toContain(guard);
+    }
   });
 });
 

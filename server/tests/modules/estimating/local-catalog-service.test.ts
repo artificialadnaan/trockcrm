@@ -94,6 +94,57 @@ describe("local-catalog-service", () => {
     expect(result.localCatalogItem.id).toBe(result.recommendation.promotedLocalCatalogItemId);
   });
 
+  it("reports NO default quantity for an already-promoted row that has none, rather than inventing one", async () => {
+    // THE UNGUARDED EARLY RETURN. `promoteManualRowToLocalCatalog` refuses a fresh promotion without a
+    // quantity (`candidateQuantity` -> 400), but the already-promoted and reused-identity paths return
+    // BEFORE that check and built their synthetic catalog item straight from
+    // `resolveManualPromotionValues`, whose `?? "1"` handed back a `defaultQuantity` of one unit that
+    // nobody entered. A catalog entry's default seeds every future line drawn from it, so the invented
+    // number does not stay in one place — it propagates. Null is the true answer.
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-promoted-1",
+                dealId: "deal-1",
+                sourceType: "manual",
+                manualOrigin: "manual_estimator_added",
+                manualIdentityKey: "manual-key-1",
+                manualLabel: "Custom flashing",
+                manualQuantity: null,
+                manualUnit: "ea",
+                manualUnitPrice: "75.00",
+                manualNotes: null,
+                selectedSourceType: "manual",
+                selectedOptionId: null,
+                catalogBacking: "estimate_only",
+                promotedLocalCatalogItemId: "0f8b9a2e-1c34-4a56-8b7c-9d0e1f2a3b4c",
+                overrideQuantity: null,
+                overrideUnit: null,
+                overrideUnitPrice: null,
+                overrideNotes: null,
+              },
+            ]),
+          })),
+        })),
+      })),
+    } as any;
+
+    const result = await promoteManualRowToLocalCatalog({
+      tenantDb,
+      dealId: "deal-1",
+      recommendationId: "rec-promoted-1",
+      userId: "user-1",
+      input: {},
+    });
+
+    expect(result.localCatalogItem.defaultQuantity).toBeNull();
+    // The rest of the item is unaffected — this is about the one field that was fabricated.
+    expect(result.localCatalogItem.defaultUnitPrice).toBe("75.00");
+  });
+
   it("rejects generated manual rows from local-catalog promotion", async () => {
     const tenantDb = {
       select: vi.fn(() => ({

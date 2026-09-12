@@ -721,6 +721,8 @@ export async function buildEstimatingWorkbenchState(
     isActiveParseArtifact(row, activeParseRunIdByDocumentId)
   );
   const extractionById = new Map(activeExtractionRows.map((row) => [row.id, row]));
+  // Recommendation -> match -> extraction, so promotability can ask about the live quantity.
+  const matchById = new Map(matchRows.map((row) => [row.id, row]));
   const activeExtractionIds = new Set(activeExtractionRows.map((row) => row.id));
   const activeMatchRows = matchRows.filter((row) => activeExtractionIds.has(row.extractionId));
   const activeMatchIds = new Set(activeMatchRows.map((row) => row.id));
@@ -765,7 +767,107 @@ export async function buildEstimatingWorkbenchState(
   const derivedPricingRows = deriveEstimatePricingWorkbenchRows(
     pricingRowsWithOptions as EstimatePricingRecommendationRow[]
   );
-  const promotablePricingRows = derivedPricingRows.filter((row) => row.promotable);
+  /**
+   * The SAME rule the promote query enforces, applied to what the workbench calls promotable.
+   *
+   * `loadApprovedRecommendationsForRun` refuses a recommendation whose extraction no longer carries a
+   * priceable quantity. Without mirroring that here, the workbench went on reporting the row as ready
+   * and `canPromote` stayed true — so the button was live, the estimator pressed it, and promotion
+   * silently dropped the row and answered `recommendation_unavailable`. A readiness signal that
+   * disagrees with the thing it gates is worse than no signal.
+   *
+   * Manual rows are judged on THEIR OWN quantity rather than on the extraction, for the same reason
+   * they are there: their extraction match is an active-artifact anchor, not a quantity source. Not
+   * exempt, though — "it promotes its own manualQuantity" holds only when it HAS one, and
+   * `hasManualPromotionValues` above only asks whether the string is non-empty, so "0" and "-5" walked
+   * through it and promoted as themselves.
+   */
+  const hasPriceableExtraction = (row: (typeof derivedPricingRows)[number]): boolean => {
+    if (row.sourceType === "manual") {
+      // AN OVERRIDE STILL WINS, exactly as the promote query's disjunction has it: a manual row whose
+      // `selectedSourceType` is `override` promotes `overrideQuantity`, so it is judged by the override
+      // branch below rather than refused here for lacking a manual number.
+      if (
+        row.selectedSourceType === "override" &&
+        row.overrideQuantity !== undefined &&
+        row.overrideQuantity !== null
+      ) {
+        const overrideQuantity = Number(row.overrideQuantity);
+        return Number.isFinite(overrideQuantity) && overrideQuantity > 0;
+      }
+      // The same coalesce the promote query applies, and the same reason: whichever of the two columns
+      // is present is the number `resolvePromotionLineValues` will reach for.
+      const manualQuantity = row.manualQuantity ?? row.recommendedQuantity;
+      // An ABSENT column is not a claim — the same rule the extraction branch below follows, so a future
+      // narrowing of the select cannot silently mark every manual row unpromotable.
+      if (manualQuantity === undefined) return true;
+      if (manualQuantity === null) return false;
+      const quantity = Number(manualQuantity);
+      return Number.isFinite(quantity) && quantity > 0;
+    }
+    // AN OVERRIDE WITH ITS OWN QUANTITY, mirroring the promote query's exemption exactly.
+    // `resolvePromotionLineValues` promotes `overrideQuantity` for these rows, so the anchor
+    // extraction's quantity is not what reaches the estimate — and an override's `sourceType` is
+    // ordinarily `'extracted'`, so it does not reach the manual exemption above. Held to the same
+    // standard as everything else here (NaN included), so exempting the row from the extraction's
+    // check does not exempt it from having a priceable number at all.
+    // ONLY when the override actually carries a quantity. `resolvePromotionLineValues` does
+    // `quantity = row.overrideQuantity ?? quantity`, so an override with NO quantity of its own is a
+    // PRICE-ONLY override — `updateEstimatePricingRecommendationReviewState` sets `overrideUnitPrice`
+    // and `overrideNotes` without ever setting `overrideQuantity`, which makes that the ordinary case,
+    // not an edge one. Such a row falls through to the extraction check below, because the extraction's
+    // quantity is exactly what promotion will fall back to.
+    //
+    // Written as a fall-through rather than an early return for that reason: returning false here
+    // rejected every ordinary price-only override, and returning true would have waved through a row
+    // with no live quantity anywhere. It also matches the promote query, which is a DISJUNCTION — an
+    // override branch OR the extraction branch — so the two surfaces answer alike by construction.
+    if (
+      row.selectedSourceType === "override" &&
+      row.overrideQuantity !== undefined &&
+      row.overrideQuantity !== null
+    ) {
+      const overrideQuantity = Number(row.overrideQuantity);
+      return Number.isFinite(overrideQuantity) && overrideQuantity > 0;
+    }
+    const matchRow = row.extractionMatchId ? matchById.get(row.extractionMatchId) : null;
+    const extraction = matchRow?.extractionId ? extractionById.get(matchRow.extractionId) : null;
+    // No extraction in hand is not a claim that the quantity is gone — the promote query does its own
+    // join and will decide. Withholding readiness on a lookup miss would invent a failure.
+    if (!extraction) return true;
+    // An ABSENT column is not a claim either. The extraction read is a full `select()`, so `quantity` is
+    // always present in production — but treating an undefined field as unpriceable would mean a future
+    // narrowing of that select silently marked every row unpromotable, which is a far worse failure than
+    // the mismatch this function exists to fix. Null IS a claim, and is refused.
+    if (extraction.quantity === undefined) return true;
+    const quantity = Number(extraction.quantity);
+    if (extraction.quantity === null || !Number.isFinite(quantity) || quantity <= 0) return false;
+    // AND IT MUST BE THE NUMBER THE RECOMMENDATION WAS PRICED FROM — the promote query's equality,
+    // mirrored. Positivity alone is what the repair path defeats: migration 0215 parks a
+    // fabricated-as-one-unit row at `needs_quantity`, an estimator supplies the real number, and every
+    // test above now passes while `resolvePromotionLineValues` still promotes the stored
+    // `recommendedQuantity`. Promotion refuses that row; without this, readiness said yes to it — so
+    // the rows the migration exists to repair were exactly the rows offering a button that fails.
+    //
+    // Compared as NUMBERS, not strings: `numeric(14, 3)` round-trips as text, and Postgres numeric
+    // equality makes `5` and `5.000` the same value. A string comparison would hide a genuinely ready
+    // row, which is the worse direction of the same disagreement.
+    if (row.recommendedQuantity === undefined) return true;
+    if (row.recommendedQuantity === null) return false;
+    const recommendedQuantity = Number(row.recommendedQuantity);
+    return Number.isFinite(recommendedQuantity) && recommendedQuantity === quantity;
+  };
+
+  // THE ROW'S OWN FLAG IS THE ONE DECISION, so the count in the header and the flag each row carries
+  // cannot disagree. This used to filter into a separate collection while the response still returned
+  // `derivedPricingRows` untouched — so `readyToPromote` and `canPromote` were correct while every row
+  // kept `promotable: true`, and any consumer reading the per-row flag still offered a row that
+  // promotion rejects as `recommendation_unavailable`. Gating here and deriving the count from the
+  // result makes that divergence unrepresentable rather than merely fixed.
+  const gatedPricingRows = derivedPricingRows.map((row) =>
+    row.promotable && !hasPriceableExtraction(row) ? { ...row, promotable: false } : row
+  );
+  const promotablePricingRows = gatedPricingRows.filter((row) => row.promotable);
 
   const documentsSummary = {
     total: documents.length,
@@ -779,6 +881,17 @@ export async function buildEstimatingWorkbenchState(
     approved: activeExtractionRows.filter((row) => row.status === "approved").length,
     rejected: activeExtractionRows.filter((row) => row.status === "rejected").length,
     unmatched: activeExtractionRows.filter((row) => row.status === "unmatched").length,
+    // A HUMAN-ACTION-REQUIRED BUCKET. The generation job now parks a quantity-less row at
+    // `needs_quantity` instead of pricing it as one unit, and that is the one state on this summary
+    // that names work only a person can clear — so it has to be visible.
+    //
+    // NOT A PARTITION, and an earlier version of this comment claimed it was: it said the bucket was
+    // needed so the counts "reconcile with `total`". They never did and still do not. `processed` is
+    // the terminal state of every successfully priced row and has no bucket here at all, and neither
+    // does `overridden`; summing these five has always come out under `total` on any deal that has been
+    // priced. `total` is the row count, the rest are named states of interest, and a consumer that
+    // subtracts them to infer a remainder is reading a guarantee this object does not make.
+    needsQuantity: activeExtractionRows.filter((row) => row.status === "needs_quantity").length,
   };
 
   const matchesSummary = {
@@ -826,7 +939,7 @@ export async function buildEstimatingWorkbenchState(
     documents,
     extractionRows: activeExtractionRows,
     matchRows: activeMatchRows,
-    pricingRows: derivedPricingRows,
+    pricingRows: gatedPricingRows,
     reviewEvents,
     summary: {
       documents: documentsSummary,
