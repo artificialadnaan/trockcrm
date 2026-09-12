@@ -32,6 +32,24 @@ jest.mock("expo-router", () => {
 jest.mock("../../api/client", () => ({ apiFetch: jest.fn(async () => ({})) }));
 jest.mock("../upload-client", () => ({ walkthroughUploadClient: { id: "walk-upload-client" } }));
 
+// The shell also drains the PHOTO queue now. Both modules are stubbed here because this file is about
+// the WALK queue's triggers: upload-background-task reaches expo-task-manager's native module (absent
+// under jest), and an unstubbed photo drain would add calls this file's assertions do not describe.
+// The photo side has its own coverage in ../../capture/__tests__/app-shell-photo-drain.test.tsx.
+jest.mock("../../capture/upload-background-task", () => ({
+  registerUploadBackgroundTask: jest.fn(async () => undefined),
+}));
+jest.mock("../../capture/upload-queue", () => ({
+  drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} })),
+  getQueuedCount: jest.fn(async () => 0),
+  getQueuedUploads: jest.fn(async () => []),
+  getSchedulableCount: jest.fn(async () => 0),
+  subscribeToQueueChanges: jest.fn(() => () => undefined),
+}));
+jest.mock("../../scorecards/draft-store", () => ({
+  listScorecardDraftOwners: jest.fn(async () => []),
+}));
+
 const mockScanRecoverableWalksAtStartup = jest.fn(async (..._args: unknown[]) => undefined);
 const mockForgetRecoverableWalksAtStartup = jest.fn();
 const mockGetSchedulableWalkCount = jest.fn(async (..._args: unknown[]): Promise<number> => 0);
@@ -52,6 +70,7 @@ let mockAuth: {
 };
 jest.mock("../../auth/AuthContext", () => ({ useAuth: () => mockAuth }));
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react-native";
 // eslint-disable-next-line import/first
 import { apiFetch } from "../../api/client";
@@ -107,7 +126,13 @@ afterEach(() => {
 /** Render and let the effects' async manifest reads settle. (`render` does its own act(); wrapping
  *  it in another one leaves the renderer unmounted.) */
 async function renderShell(): Promise<ReturnType<typeof render>> {
-  const view = render(<AppLayout />);
+  // The shell now reads a QueryClient (photo-drain gallery invalidation), as it does under the real
+  // root layout's provider. Unrelated to the walk queue, but required for the tree to render.
+  const view = render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <AppLayout />
+    </QueryClientProvider>,
+  );
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();

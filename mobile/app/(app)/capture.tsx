@@ -457,6 +457,18 @@ export default function CaptureScreen() {
             const summary = await drainUploadQueue(ownerKey, queueFetcher);
             succeeded += summary.succeeded;
             remaining = summary.remaining;
+            if (summary.alreadyDraining) {
+              // Another drain (the authenticated shell's mount/foreground resume, or the background
+              // task) holds the lock and is shipping this same queue right now. That is not a stall, so
+              // it must not arm the offline backoff below.
+              //
+              // Safe to simply stop because drainUploadQueue COALESCES: this request was recorded, and
+              // the incumbent drain runs a follow-up pass that re-plans the queue, so a photo captured
+              // just now is included even though the incumbent's original plan predates it. Without that
+              // coalescing this break would strand the newest capture until some later trigger fired —
+              // which is the exact failure this whole change exists to remove.
+              break;
+            }
             if (summary.succeeded > 0) {
               drainBackoffUntilRef.current = 0; // made progress — clear any backoff
             } else if (summary.remaining > 0) {

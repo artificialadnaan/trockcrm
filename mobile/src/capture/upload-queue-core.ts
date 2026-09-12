@@ -3,8 +3,25 @@
 // index read/write, keep-awake, draining) lives in ./upload-queue and composes these.
 import type { CaptureUploadInput } from "./upload";
 
-// 5 (up from 3): a touch more throughput for big batches while staying gentle on the API rate limiter.
-export const UPLOAD_CONCURRENCY = 5;
+/**
+ * How many photo uploads are in flight at once. 8, up from 5 (itself up from 3).
+ *
+ * The old rationale here was "stay gentle on the API rate limiter", which does not apply: the PUT goes
+ * straight to R2 on a presigned URL and never touches our API at all, and `/api/field` is mounted in
+ * server/src/app.ts with NO limiter (apiLimiter is only on tenantRouter and /api/address). Only the
+ * presign and the confirm hit the API, two short calls per photo. So the real ceiling is the API's
+ * Postgres pool, not a request cap — which is why this moves to 8 rather than to 20.
+ *
+ * WHY MORE IN FLIGHT ACTUALLY HELPS, which is not obvious. expo-file-system's uploadAsync defaults to
+ * `FileSystemSessionType.BACKGROUND`, so a PUT already in flight KEEPS GOING after iOS suspends the app.
+ * What stops is the JS that launches the next one. So when a phone goes into a pocket mid-drain, exactly
+ * UPLOAD_CONCURRENCY uploads finish and the rest wait for the next foreground — which is the burst
+ * pattern the production data shows (110 photos in one hour, then 5, then 60). The dial therefore sets
+ * how much work survives a suspension, not just how fast a foreground drain runs.
+ *
+ * Each slot streams from disk on the native side, so the cost of a slot is a socket, not a decoded image.
+ */
+export const UPLOAD_CONCURRENCY = 8;
 
 // Cap on concurrent enqueue-time compressions ACROSS all enqueueUploads calls. Per-photo captures fire
 // enqueueUploads without awaiting, so a fast burst could otherwise launch unbounded 12MP ImageManipulator
@@ -82,6 +99,88 @@ export function isTerminal(item: QueuedUpload): boolean {
  */
 export function isDrainable(item: QueuedUpload): boolean {
   return !isTerminal(item) && item.staging !== true;
+}
+
+/**
+ * One in every BACKLOG_SHARE positions in the drain plan is given to the OLDEST outstanding item rather
+ * than the newest. 4 ⇒ the newest work gets 75% of throughput and the backlog is guaranteed 25%.
+ */
+export const DRAIN_BACKLOG_SHARE = 4;
+
+/**
+ * The order a drain ships queued photos in: NEWEST FIRST, with a reserved share for the oldest.
+ *
+ * WHY NOT FIFO, WHICH IS WHAT THIS REPLACED. Measured on production for one superintendent's phone over
+ * four days (photos are stamped with the day they were CAPTURED, and separately with the day they
+ * actually ARRIVED on the server):
+ *
+ *   captured Sep 8 -> 408 arrived Sep 8
+ *   captured Sep 9 -> 102 arrived Sep 9, 248 arrived Sep 10, 20 arrived Sep 11
+ *   captured Sep 10 -> 0 arrived Sep 10, all 267 arrived Sep 11
+ *
+ * On Sep 10 that phone uploaded 248 photos and every one of them was Sep 9's. It was online, the app was
+ * open, and it spent the entire day delivering YESTERDAY. A strict FIFO queue that cannot clear a day's
+ * captures within that day converts a one-time backlog into a permanent one-day lag: today's photos are
+ * always behind yesterday's, so the crew never sees today's work, which is the only work a daily site
+ * report needs. The queue was healthy the whole time — it was serving the wrong end.
+ *
+ * Newest-first inverts that: the photos someone is standing there waiting to see go first. A pure LIFO
+ * would be wrong in the other direction, though — during a long heavy stretch the oldest captures could
+ * sit indefinitely while each new day jumps the line, and those are photos the crew already believes are
+ * uploaded. So every DRAIN_BACKLOG_SHARE-th slot is handed to the oldest item instead, which bounds how
+ * long anything can wait while still giving the majority of throughput to what just happened.
+ *
+ * Pure and total: returns a permutation of `items` (same length, same members, no duplicates), so the
+ * caller's chunking/attempt accounting is unaffected by the ordering choice.
+ *
+ * `enqueuedAt` is the key rather than the photo's own `takenAt` because the question this answers is
+ * "what did this phone most recently take on?", not "when was the shutter pressed" — a camera-roll import
+ * of last month's photos is new WORK even though its capture dates are old, and takenAt is nullable
+ * anyway. Ties break on clientUploadId so the plan is deterministic for a given queue.
+ */
+export function planDrainOrder(
+  items: QueuedUpload[],
+  options: { backlogShare?: number } = {},
+): QueuedUpload[] {
+  const backlogShare = options.backlogShare ?? DRAIN_BACKLOG_SHARE;
+  // A share < 2 would mean "every slot goes to the oldest", i.e. plain FIFO; treat it as such rather
+  // than dividing by something that makes the interleave meaningless.
+  if (items.length < 2) return [...items];
+
+  const byNewest = [...items].sort((a, b) => {
+    if (b.enqueuedAt !== a.enqueuedAt) return b.enqueuedAt - a.enqueuedAt;
+    return a.clientUploadId.localeCompare(b.clientUploadId);
+  });
+
+  if (backlogShare < 2) return byNewest.reverse();
+
+  // Two pointers over ONE sorted array: `newest` walks forward from the head, `oldest` walks backward
+  // from the tail, and each slot advances EXACTLY ONE of them. That is what makes this a permutation, and
+  // it is worth stating as an invariant rather than defending with a bounds check:
+  //
+  //   newest + (length - 1 - oldest) === plan.length     holds after every iteration
+  //
+  // i.e. the number of items consumed from each end always sums to the number emitted. So the pointers
+  // cannot cross before the plan is full — they meet exactly as it fills. An `oldest >= newest` guard
+  // here would be unreachable for every backlogShare >= 2, and an unreachable guard is worse than none:
+  // it implies a hazard that does not exist and hides that the real safety comes from the invariant.
+  // (Confirmed by experiment, not by reading: removing such a guard changed no test across sizes 0..267
+  // and shares 2..6, which is precisely why it is not here.) The exhaustive permutation sweep in
+  // __tests__/plan-drain-order.test.ts is what actually holds the invariant down.
+  const plan: QueuedUpload[] = [];
+  let newest = 0;
+  let oldest = byNewest.length - 1;
+  while (plan.length < byNewest.length) {
+    // Position is 1-based for the modulo so the FIRST slot is always newest-first work, not backlog.
+    if ((plan.length + 1) % backlogShare === 0) {
+      plan.push(byNewest[oldest]);
+      oldest -= 1;
+    } else {
+      plan.push(byNewest[newest]);
+      newest += 1;
+    }
+  }
+  return plan;
 }
 
 /**

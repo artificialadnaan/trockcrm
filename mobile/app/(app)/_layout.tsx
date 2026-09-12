@@ -2,10 +2,23 @@ import React from "react";
 import { Redirect, Tabs, useGlobalSearchParams, usePathname } from "expo-router";
 import { ActivityIndicator, AppState, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../../src/auth/AuthContext";
 import { buildLoginReturnTo } from "../../src/navigation/return-to";
 import { theme } from "../../src/theme/theme";
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
+import { usePhotoQueueSession } from "../../src/capture/use-photo-queue-session";
+import {
+  drainUploadQueue,
+  getQueuedCount,
+  getQueuedUploads,
+  getSchedulableCount,
+  subscribeToQueueChanges,
+} from "../../src/capture/upload-queue";
+import { drainBackgroundOwnerQueues } from "../../src/capture/upload-background-core";
+import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
+import { listScorecardDraftOwners } from "../../src/scorecards/draft-store";
+import { qk } from "../../src/query/keys";
 import {
   drainWalkQueue,
   forgetRecoverableWalksAtStartup,
@@ -23,12 +36,19 @@ function TabIcon({ name, color }: { name: IoniconName; color: string }) {
 
 /** Authenticated tab shell (Projects / Capture / Profile) — replaces FieldLayout. */
 export default function AppLayout() {
-  const { ready, token } = useAuth();
+  const { ready, token, user } = useAuth();
 
   // Office resolution and the retired-session 401 guard both live in the shared hook, so this
   // shell, walk.tsx, profile.tsx and the background drain task cannot drift apart on either. See
   // use-queue-session.ts for why each of those rules exists.
   const { ownerKey, queueFetcher } = useWalkQueueSession();
+
+  // The PHOTO queue's own identity + fetcher. Separate hook, and specifically NOT capture.tsx's
+  // fetcher: that one carries onUnauthorized -> signOut, which is safe on a screen the user chose to
+  // open and catastrophic here. See use-photo-queue-session.ts rule 2.
+  const { ownerKey: photoOwnerKey, resolvedOfficeId, queueFetcher: photoQueueFetcher } = usePhotoQueueSession();
+  const [queuedPhotos, setQueuedPhotos] = React.useState(0);
+  const queryClient = useQueryClient();
 
   // Scan once for walk recordings that were interrupted before they could be queued — an app kill
   // mid-recording, or after native finalised but before the enqueue effect ran, leaves files under
@@ -100,6 +120,113 @@ export default function AppLayout() {
     };
   }, [token, ownerKey, queueFetcher]);
 
+  /**
+   * The same resume, for the PHOTO queue. It is the walk effect above applied to the other queue, and
+   * the reason it did not already exist is the whole of the reported bug.
+   *
+   * Photo captures drained from exactly two places: the Capture screen, and the opportunistic iOS
+   * background window (which upload-background-task.ts's own header calls a long-tail safety net, not a
+   * mechanism). Every other screen — including the project gallery a superintendent stares at while
+   * asking where yesterday's photos went — could not move the queue at all. Measured on production: of
+   * 267 photos captured on Sep 10, ZERO reached the server that day; they arrived the next morning.
+   *
+   * Registering the background task here too (it was only registered from Capture and the Reports hub)
+   * means a crew that photographs from a project screen and never opens the Capture tab still gets the
+   * OS-granted windows. Both calls are idempotent and fully guarded.
+   *
+   * Ordering note: this runs alongside the walk drain above, not after it. The two queues are
+   * independent, each drain self-serialises on its own module lock, and neither should wait on the other
+   * — a multi-GB walk video must not hold up a day of photos, which is exactly the starvation this
+   * feature exists to remove.
+   */
+  React.useEffect(() => {
+    // uploadOwnerKey returns "" without a signed-in user, so a non-empty key already implies one — but
+    // name it explicitly rather than asserting, since listScorecardDraftOwners keys its registry on it
+    // and a wrong/absent id would enumerate someone else's namespaces or none at all.
+    const userId = user?.id;
+    if (!token || !photoOwnerKey || !userId) return;
+    let active = true;
+    void registerUploadBackgroundTask();
+
+    const refreshBadge = async () => {
+      const queued = await getQueuedCount(photoOwnerKey).catch(() => 0);
+      if (active) setQueuedPhotos(queued);
+    };
+
+    /**
+     * Every namespace this device might hold photos under, not just the active office.
+     *
+     * Scorecard drafts deliberately persist their evidence under the OWNING office's key so an edit
+     * survives an office switch or the submitter being re-homed. Draining only the active key would leave
+     * that evidence dependent on an opportunistic OS window — the same "queued, durable, and nothing is
+     * scheduled to send it" state this effect exists to end, just one namespace over. The background task
+     * already enumerates exactly this way; the foreground had no reason to be narrower.
+     */
+    const ownersToDrain = async () => {
+      const fallback = { ownerKey: photoOwnerKey, officeId: resolvedOfficeId };
+      try {
+        return await listScorecardDraftOwners(userId, photoOwnerKey);
+      } catch {
+        return [fallback];
+      }
+    };
+
+    const drainIfQueued = async () => {
+      await refreshBadge();
+      const owners = await ownersToDrain();
+      if (!active) return;
+      // Galleries to refresh = the deals that actually have photos waiting, read BEFORE the drain (the
+      // rows are gone from the index afterwards). Mirrors what the Capture screen does with its own
+      // drain: without it a mounted project gallery keeps rendering its cached, missing-photo list even
+      // though the server now has the photos — useProjectPhotos does not poll, and React Query's
+      // window-focus refetch is a no-op in React Native. That gallery is the screen the whole report
+      // was filed about.
+      const dealIds = new Set<string>();
+      for (const owner of owners) {
+        for (const item of await getQueuedUploads(owner.ownerKey).catch(() => [])) {
+          const dealId = item.target?.dealId;
+          if (dealId) dealIds.add(dealId);
+        }
+      }
+
+      let shipped = 0;
+      // Sequential, one namespace at a time (drainBackgroundOwnerQueues' own contract), so a corrupt or
+      // failing office cannot starve the ones after it and the drains never race each other.
+      await drainBackgroundOwnerQueues(owners, {
+        getSchedulableCount,
+        drainOwner: async (owner) => {
+          const summary = await drainUploadQueue(owner.ownerKey, photoQueueFetcher);
+          shipped += summary.succeeded;
+        },
+      }).catch(() => undefined);
+
+      if (!active) return;
+      if (shipped > 0) {
+        for (const dealId of dealIds) {
+          void queryClient.invalidateQueries({ queryKey: qk.projectPhotos(userId, dealId) });
+        }
+      }
+      await refreshBadge();
+    };
+    const run = () => void drainIfQueued().catch(() => undefined);
+
+    run();
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active") run();
+    });
+    // The badge has to track the QUEUE, not just this effect's own drains. A photo enqueued while the app
+    // stays open fires neither mount nor foreground, so without this the count sat stale — and a badge
+    // reading 0 while 40 photos wait answers "did they send?" wrongly, which is worse than no badge.
+    const unsubscribe = subscribeToQueueChanges(() => void refreshBadge());
+    return () => {
+      // Only stops NEW drains after unmount; one already in flight is deliberately left to finish, since
+      // abandoning an upload on a navigation change is the failure this effect exists to prevent.
+      active = false;
+      sub.remove();
+      unsubscribe();
+    };
+  }, [token, photoOwnerKey, photoQueueFetcher, resolvedOfficeId, user, queryClient]);
+
   // Capture where the user was headed (e.g. the corrective-action deep link) so a required login can return
   // them there. This is the single chokepoint for BOTH a cold-start deep link (app not running → OS opens
   // the link → this layout mounts with no token) and a warm one (session expired mid-session). usePathname
@@ -133,9 +260,19 @@ export default function AppLayout() {
         name="projects"
         options={{ title: "Projects", tabBarIcon: ({ color }) => <TabIcon name="folder-outline" color={color} /> }}
       />
+      {/* The badge is the answer to "did my photos upload?", which until now the app could only be asked
+          on the Capture screen — the one place a crew is NOT standing when they go looking for yesterday's
+          photos in a project gallery. A queued count that is visible from every tab is the difference
+          between "still sending, 40 to go" and a silence the user can only read as data loss, which is how
+          this was reported. Undefined rather than 0 so the badge disappears when the queue is empty. */}
       <Tabs.Screen
         name="capture"
-        options={{ title: "Capture", tabBarIcon: ({ color }) => <TabIcon name="camera-outline" color={color} /> }}
+        options={{
+          title: "Capture",
+          tabBarIcon: ({ color }) => <TabIcon name="camera-outline" color={color} />,
+          tabBarBadge: queuedPhotos > 0 ? queuedPhotos : undefined,
+          tabBarBadgeStyle: { backgroundColor: theme.color.brandRed, fontFamily: theme.font.medium },
+        }}
       />
       {/* Renamed from "Scorecard" when the weekly client report joined the two scorecards under one
           roof. The tab now points at a hub; the scorecard screens themselves are unchanged and stay

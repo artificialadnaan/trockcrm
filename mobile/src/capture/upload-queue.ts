@@ -1,5 +1,6 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import { ApiError } from "../api/client";
 import type { Fetcher } from "../api/endpoints";
 import { runConcurrentUploads, uploadCapture, UploadCancelledError, type CaptureUploadInput } from "./upload";
 import { compressForEnqueue } from "./compress";
@@ -16,6 +17,7 @@ import {
   isSchedulable,
   isTerminal,
   partitionResults,
+  planDrainOrder,
   removeIds,
   sanitizeOwnerKey,
   selectOrphanFiles,
@@ -24,7 +26,7 @@ import {
 } from "./upload-queue-core";
 import { isDurableStoreUri, reconstructDurablePhotoUri } from "./doc-dir-uri";
 
-export { MAX_UPLOAD_ATTEMPTS, UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, removeIds, sanitizeOwnerKey, uploadOwnerKey, type QueuedUpload } from "./upload-queue-core";
+export { DRAIN_BACKLOG_SHARE, MAX_UPLOAD_ATTEMPTS, UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, planDrainOrder, removeIds, sanitizeOwnerKey, uploadOwnerKey, type QueuedUpload } from "./upload-queue-core";
 
 /**
  * Durable, resumable upload queue for field photo captures.
@@ -63,6 +65,29 @@ export type DrainSummary = {
    * confirmed in THIS drain — a photo confirmed by an earlier drain has already left the queue.
    */
   confirmedFileIds: Record<string, string>;
+  /**
+   * True when this call did NOTHING because a drain was already running, so `succeeded: 0` means "not my
+   * turn", not "nothing could be sent".
+   *
+   * Callers infer failure from a zero-progress summary — capture.tsx backs off for 30s on
+   * `succeeded === 0 && remaining > 0`, which is correct for offline/stuck and wrong here. Before the
+   * authenticated shell also drained this queue, the only concurrent caller was the background task, so
+   * the two could barely overlap and the ambiguity never showed. Now a foreground resume can easily be
+   * mid-drain when the user takes their next shot, and a silent 30s backoff on the Capture screen is
+   * exactly the kind of "uploads mysteriously stalled" this whole change is meant to end.
+   */
+  alreadyDraining?: true;
+  /**
+   * True when the drain stopped because a request came back 401 rather than because the work ran out.
+   *
+   * Load-bearing for not LOSING photos. The shell's fetcher deliberately has no sign-out authority, so a
+   * dead/expired token surfaces to the drain as an ordinary request failure — and with a drain now firing
+   * on every foreground, five foregrounds under a stale token would spend all five of every queued
+   * photo's attempts, make them terminal, and drop them out of isDrainable for good, leaving the UI only
+   * a Dismiss button for photos that were never actually unsendable. So an auth failure pauses the queue
+   * instead: the item's attempt count is untouched and the next drain retries it.
+   */
+  authPaused?: true;
 };
 
 // Serialize every index READ-MODIFY-WRITE for this process. enqueue / removeQueuedUploads / drain-commit
@@ -163,6 +188,43 @@ async function writeQueue(ownerKey: string, items: QueuedUpload[]): Promise<void
     await FileSystem.deleteAsync(file, { idempotent: true });
   }
   await FileSystem.moveAsync({ from: tmp, to: file });
+  notifyQueueChanged(ownerKey);
+}
+
+/**
+ * Listeners notified after EVERY index write for an owner — enqueue, drain commit, cancellation, attempt
+ * bump, reconciliation.
+ *
+ * Exists because a pending-count shown anywhere other than the Capture screen is otherwise wrong most of
+ * the time. The authenticated shell's badge could only refresh on mount, on foreground, and after a drain
+ * it started itself; a photo enqueued while the app stayed open matched none of those, so the count sat at
+ * a stale value — and a badge that says 0 while 40 photos wait is worse than no badge, because it answers
+ * the exact question ("did they send?") wrongly.
+ *
+ * Deliberately at the writeQueue seam rather than at each call site: every mutation goes through here, so
+ * a new one cannot forget to fire it.
+ */
+type QueueChangeListener = (ownerKey: string) => void;
+const queueChangeListeners = new Set<QueueChangeListener>();
+
+function notifyQueueChanged(ownerKey: string): void {
+  for (const listener of queueChangeListeners) {
+    // One bad listener must not abort a write's notification to the others, and must never surface as a
+    // queue failure — this is a UI-refresh signal, not part of the durability contract.
+    try {
+      listener(ownerKey);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** Subscribe to queue mutations. Returns an unsubscribe fn (safe to call twice). */
+export function subscribeToQueueChanges(listener: QueueChangeListener): () => void {
+  queueChangeListeners.add(listener);
+  return () => {
+    queueChangeListeners.delete(listener);
+  };
 }
 
 async function deleteQueuedFiles(items: QueuedUpload[]): Promise<void> {
@@ -520,6 +582,27 @@ async function reconcileOwnerStorage(ownerKey: string): Promise<void> {
 // A drain must never run twice at once (foreground + background, or a double tap): a second caller would
 // re-upload in-flight items. Module-local guard — both entry points share this process.
 let draining = false;
+/** Which owner the in-flight drain belongs to. Null whenever `draining` is false. A follow-up pass only
+ *  ever serves the ACTIVE owner, because every pass re-reads THAT owner's index and nothing else. */
+let activeDrainOwnerKey: string | null = null;
+/** Set when a drain was requested for the ACTIVE owner while that drain was already running. */
+let drainRequested = false;
+
+/**
+ * Bound on follow-up passes within one call, so a device capturing faster than it uploads cannot hold a
+ * drain (and its keep-awake) open forever. Nothing is lost at the cap: the queue is durable, so whatever
+ * is still outstanding is picked up by the next trigger. Mirrors the walk queue's MAX_DRAIN_PASSES.
+ */
+export const MAX_DRAIN_PASSES = 4;
+
+/**
+ * True for a rejection that means "this request was not authorised", as opposed to "this photo could not
+ * be sent". The distinction decides whether an item's retry budget is spent — see the authDeferred branch
+ * in the chunk loop for why spending it on a 401 loses photos outright.
+ */
+function isAuthFailure(reason: unknown): boolean {
+  return reason instanceof ApiError && reason.status === 401;
+}
 
 /**
  * Upload everything currently queued for `ownerKey`, with bounded concurrency and the screen kept awake.
@@ -535,38 +618,103 @@ export async function drainUploadQueue(
     targetFetcher?: Fetcher;
   } = {},
 ): Promise<DrainSummary> {
-  if (draining) return { succeeded: 0, failed: 0, remaining: await getQueuedCount(ownerKey), confirmedFileIds: {} };
+  if (draining) {
+    // Record the request instead of dropping it. The running drain fixed its plan when it entered the
+    // pass, so a photo enqueued a moment ago is invisible to it — and this early return means nothing
+    // else was scheduling one either. Before the authenticated shell also drained this queue the two
+    // callers could barely overlap; now a foreground resume can easily be mid-drain when the user takes
+    // their next shot, and that shot would sit queued until some later trigger happened to fire.
+    //
+    // Only the ACTIVE owner can be coalesced, because a follow-up pass re-reads that owner's index and
+    // nothing else. A request for a DIFFERENT owner still gets the honest early return; the shell drains
+    // each namespace sequentially (see its resume effect), so those do not race each other.
+    if (ownerKey === activeDrainOwnerKey) drainRequested = true;
+    return {
+      succeeded: 0,
+      failed: 0,
+      remaining: await getQueuedCount(ownerKey),
+      confirmedFileIds: {},
+      alreadyDraining: true,
+    };
+  }
   draining = true;
+  activeDrainOwnerKey = ownerKey;
   let keptAwake = false;
   const confirmedFileIds: Record<string, string> = {};
+  let succeeded = 0;
+  let failed = 0;
+  let authPaused = false;
   try {
     // Self-heal interrupted enqueues (stuck staging rows + orphaned staging files) before planning, so a kill
     // mid-enqueue neither strands a photo nor leaks disk. Best-effort — never blocks the drain.
     await reconcileOwnerStorage(ownerKey).catch(() => undefined);
+
+    // Passes, not one shot: a photo captured WHILE this drain runs is invisible to the plan below, so a
+    // request that arrived mid-drain (recorded as drainRequested by the early return above) is served by
+    // re-planning here rather than being left for some later trigger.
+    for (let pass = 1; pass <= MAX_DRAIN_PASSES; pass += 1) {
+      // Cleared BEFORE the pass, never after: a request landing WHILE this pass runs must survive to the
+      // loop check at the bottom, and one that landed during the previous pass has just been served by
+      // this pass re-reading the index.
+      drainRequested = false;
+      const passResult = await runDrainPass();
+      if (passResult === "empty" || authPaused || !drainRequested) break;
+    }
+
+    const remaining = await getQueuedCount(ownerKey);
+    const summary: DrainSummary = {
+      succeeded,
+      failed,
+      remaining,
+      confirmedFileIds,
+      ...(authPaused ? { authPaused: true as const } : {}),
+    };
+    opts.onProgress?.(summary);
+    return summary;
+  } finally {
+    // Keep-awake released, and only then the lock — strict nesting, so no second drain can start while
+    // this one is still winding down.
+    if (keptAwake) await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
+    activeDrainOwnerKey = null;
+    draining = false;
+  }
+
+  /** One plan-and-upload pass over whatever is drainable right now. "empty" = nothing to do. */
+  async function runDrainPass(): Promise<"empty" | "ran"> {
     // Plan the drainable id order UNDER THE LOCK so the snapshot is consistent with any cancellation that
     // has already completed (terminal/failed items are left for the UI to surface + discard, never re-PUT).
+    // planDrainOrder puts the most recently queued work first (with a reserved share for the backlog) —
+    // see its header for the production data on why strict queue order left a crew permanently a day
+    // behind. It only reorders; the set of ids planned is unchanged.
     const planned = await withQueueLock(async () => {
       const queue = await readQueue(ownerKey);
-      return { ids: queue.filter(isDrainable).map((item) => item.clientUploadId), total: queue.length };
+      return {
+        ids: planDrainOrder(queue.filter(isDrainable)).map((item) => item.clientUploadId),
+        total: queue.length,
+      };
     });
     const plannedIds = planned.ids;
-    // Nothing drainable, but report the ACTUAL queue size as `remaining` — terminal/failed items still sit
-    // in the queue (surfaced/dismissed via the UI), so hardcoding 0 would hide them from the caller.
-    if (plannedIds.length === 0) return { succeeded: 0, failed: 0, remaining: planned.total, confirmedFileIds };
+    // Nothing drainable this pass. The caller's `remaining` still reports the ACTUAL queue size (computed
+    // after the loop) — terminal/failed items sit in the queue for the UI to surface or dismiss, so
+    // reporting 0 would hide them.
+    if (plannedIds.length === 0) return "empty";
 
-    try {
-      await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
-      keptAwake = true;
-    } catch {
-      // Keep-awake is best-effort; draining continues without it.
+    // Lazily, and at most once across all passes: a pass with nothing to do never takes the lock, and a
+    // multi-pass drain holds it continuously rather than dropping it between passes.
+    if (!keptAwake) {
+      try {
+        await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+        keptAwake = true;
+      } catch {
+        // Keep-awake is best-effort; draining continues without it.
+      }
     }
 
     // Drain in persisted chunks: after each chunk, remove its successes from the index and bump the
     // attempt counter on failures. So an interrupt (app suspended / short iOS window) re-uploads at MOST
     // one chunk's worth next time, and a permanently-failing item climbs toward the terminal cap instead
-    // of retrying forever.
-    let succeeded = 0;
-    let failed = 0;
+    // of retrying forever. `succeeded`/`failed` accumulate across PASSES, so a caller is never told
+    // "1 photo uploaded" by a call that shipped twelve.
     for (let i = 0; i < plannedIds.length; i += DRAIN_CHUNK) {
       const chunkIds = plannedIds.slice(i, i + DRAIN_CHUNK);
       // Re-select the items STILL queued + drainable right now, under the lock: a removeQueuedUploads that
@@ -585,7 +733,13 @@ export async function drainUploadQueue(
         const promise = uploadCapture(
           selectUploadFetcher(item, fetcher, opts.targetFetcher),
           item,
-          { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) },
+          {
+            shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId),
+            // Outstanding work at the moment this photo is confirmed: everything still planned for this
+            // drain, minus what has already succeeded. Telemetry only — it is what makes a growing
+            // backlog visible server-side instead of needing a field complaint to discover.
+            queueDepth: Math.max(0, plannedIds.length - succeeded),
+          },
         );
         activeUploadPromises.set(item.clientUploadId, promise);
         void promise.finally(() => {
@@ -598,11 +752,21 @@ export async function drainUploadQueue(
       // A cancelled upload (photo removed mid-flight → confirm skipped) is neither a success nor a failure:
       // it was intentionally dropped + already removed from the index, so exclude it from
       // partitionResults/recordFailedAttempts rather than counting it as failed or bumping its attempts.
+      //
+      // An AUTH failure is excluded for a different reason: it is not this photo's fault. Counting a 401
+      // as a failed attempt spends the item's retry budget on a token problem, and with a drain now
+      // firing on every foreground, five foregrounds under a stale token would drive every queued photo
+      // to terminal — permanently undrainable, offered only a Dismiss button, for photos that were
+      // always perfectly sendable. So those items keep their attempts and the drain pauses instead.
       const liveChunk: QueuedUpload[] = [];
       const liveResults: PromiseSettledResult<unknown>[] = [];
       chunk.forEach((item, i) => {
         const r = results[i];
         if (r && r.status === "rejected" && r.reason instanceof UploadCancelledError) return;
+        if (r && r.status === "rejected" && isAuthFailure(r.reason)) {
+          authPaused = true;
+          return;
+        }
         liveChunk.push(item);
         liveResults.push(r);
       });
@@ -621,14 +785,10 @@ export async function drainUploadQueue(
       await recordFailedAttempts(ownerKey, failedIds);
       succeeded += succeededIds.length;
       failed += failedIds.length;
+      // Stop the moment a 401 is seen: every remaining chunk would fail the same way, and each one would
+      // be another opportunity to mis-spend a retry budget.
+      if (authPaused) break;
     }
-
-    const remaining = await getQueuedCount(ownerKey);
-    const summary = { succeeded, failed, remaining, confirmedFileIds };
-    opts.onProgress?.(summary);
-    return summary;
-  } finally {
-    if (keptAwake) await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
-    draining = false;
+    return "ran";
   }
 }
