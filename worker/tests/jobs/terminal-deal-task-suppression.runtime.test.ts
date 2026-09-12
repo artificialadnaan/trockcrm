@@ -107,12 +107,22 @@ async function setup(pg: PGlite) {
       description text,
       due_date date,
       is_overdue boolean NOT NULL DEFAULT false,
-      waiting_on uuid,
-      blocked_by uuid,
+      -- jsonb, matching prod (office_dallas.tasks) -- NOT uuid. A fixture that narrows a column's type
+      -- is a fixture that cannot reproduce what production stores in it.
+      waiting_on jsonb,
+      blocked_by jsonb,
       completed_at timestamptz,
       entity_snapshot jsonb,
       updated_at timestamptz NOT NULL DEFAULT now()
     );
+    -- Production's guard against two OPEN tasks sharing a business key (migrations/0013:52-58, verified
+    -- present on prod as tasks_active_origin_rule_dedupe_key_uidx). Declared here because omitting it let
+    -- this suite assert a state production cannot hold -- see the duplicate-key case below.
+    CREATE UNIQUE INDEX tasks_active_origin_rule_dedupe_key_uidx
+      ON ${SCHEMA}.tasks (origin_rule, dedupe_key)
+      WHERE origin_rule IS NOT NULL
+        AND dedupe_key IS NOT NULL
+        AND status IN ('scheduled', 'pending', 'in_progress', 'waiting_on', 'blocked');
     CREATE TABLE ${SCHEMA}.task_resolution_state (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       office_id uuid,
@@ -272,8 +282,8 @@ describe("dismissResolvedTerminalDealTasks", () => {
     for (const [id, rule, dedupe, status, deal] of ALL) {
       await db.query(
         `INSERT INTO ${SCHEMA}.tasks (id, title, origin_rule, dedupe_key, status, deal_id, is_overdue, waiting_on, blocked_by)
-         VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)`,
-        [id, `t-${id.slice(-4)}`, rule, dedupe, status, deal, U("9999")]
+         VALUES ($1, $2, $3, $4, $5, $6, true, $7::jsonb, $7::jsonb)`,
+        [id, `t-${id.slice(-4)}`, rule, dedupe, status, deal, JSON.stringify({ userId: U("9999") })]
       );
     }
   });
@@ -298,6 +308,27 @@ describe("dismissResolvedTerminalDealTasks", () => {
       [U("a004")]
     );
     expect(rows[0]).toEqual({ is_overdue: false, waiting_on: null, blocked_by: null });
+  });
+
+  // "Completed this week" counts status IN ('completed','dismissed') AND completed_at >= NOW() - 7 days.
+  // Stamping completed_at here would report thousands of completions nobody made, and leave that card
+  // disagreeing with its own sibling (which counts 'completed' only) for a week. stage-change.ts -- the
+  // human-equivalent dismissal -- leaves it null too. The timestamp lives in task_resolution_state.
+  it("does NOT stamp completed_at, so the drain cannot read as a week of completions", async () => {
+    const resolvedAt = new Date("2026-09-12T11:00:00Z");
+    await dismissResolvedTerminalDealTasks(db as any, SCHEMA, OFFICE_ID, resolvedAt);
+
+    const { rows } = await db.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM ${SCHEMA}.tasks
+       WHERE status = 'dismissed' AND completed_at IS NOT NULL`
+    );
+    expect(rows[0].n).toBe(0);
+
+    // ...and the moment is still recorded, on the audit row rather than the task.
+    const { rows: audit } = await db.query<{ resolved_at: string }>(
+      `SELECT resolved_at FROM ${SCHEMA}.task_resolution_state LIMIT 1`
+    );
+    expect(new Date(audit[0].resolved_at).toISOString()).toBe(resolvedAt.toISOString());
   });
 
   it("audits each dismissal with suppressed_until NULL, so a reopened deal can mint again", async () => {
@@ -340,10 +371,17 @@ describe("dismissResolvedTerminalDealTasks", () => {
     expect(audit).toHaveLength(0);
   });
 
-  // The pass audits through ON CONFLICT DO UPDATE, which raises "cannot affect row a second time" when the
-  // source carries a duplicate business key — and inside the job's per-office transaction that error would
-  // roll the dismissal back, so the pass would report a count and change nothing.
+  // DEFENSE-IN-DEPTH, and labelled as such. The pass audits through ON CONFLICT DO UPDATE, which raises
+  // "cannot affect row a second time" on a duplicate business key — and inside a transaction that error
+  // would roll the dismissal back, so the pass would report a count and change nothing.
+  //
+  // Production cannot currently produce that input: tasks_active_origin_rule_dedupe_key_uidx (declared in
+  // the fixture above) forbids two OPEN tasks sharing (origin_rule, dedupe_key). So this case has to DROP
+  // that index to reach the branch, and it is honest about what that means — it proves the CTE survives the
+  // input if the index is ever dropped or made non-partial, and it proves nothing about today's prod.
+  // Without dropping it the insert below fails on the index, which is the real guarantee.
   it("dismisses BOTH of two open tasks sharing one dedupe key, and audits the pair once", async () => {
+    await db.exec(`DROP INDEX ${SCHEMA}.tasks_active_origin_rule_dedupe_key_uidx`);
     await db.query(
       `INSERT INTO ${SCHEMA}.tasks (id, title, origin_rule, dedupe_key, status, deal_id) VALUES
          ($1, 'dup a', 'daily_close_date_follow_up', 'shared-key', 'pending', $3),

@@ -1878,6 +1878,18 @@ export async function getFollowUpCompliance(
       AND t.created_at >= ${from}::timestamptz
       AND t.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
       AND t.status IN ('completed', 'dismissed')
+      -- Exclude follow-ups the SYSTEM retired as debris, not the rep. The denominator counts every
+      -- completed-or-dismissed follow-up while the numerator counts only completions, so a dismissal is
+      -- scored as a miss. The terminal-deal drain dismisses ~513 follow-ups that were minted onto deals
+      -- ALREADY Won or Lost — tasks that were never actionable — and the default window is the whole
+      -- calendar year, so without this every rep's compliance would be rewritten downward retroactively
+      -- and the "below 80%" strategic alert would fire for almost all of them. The rep who reported the
+      -- phantom follow-ups would have watched his own number get worse the morning after the fix.
+      AND NOT EXISTS (
+        SELECT 1 FROM task_resolution_state trs
+        WHERE trs.task_id = t.id
+          AND trs.resolution_reason = 'deal_reached_terminal_stage'
+      )
   `);
 
   const rows = (result as any).rows ?? result;

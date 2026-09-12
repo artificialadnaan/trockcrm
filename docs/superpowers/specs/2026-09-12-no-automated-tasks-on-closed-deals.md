@@ -112,3 +112,41 @@ and a deleted predicate cannot hide.
 **12 mutations, all caught** — see the PR body for the table. One (`LEFT JOIN` → `JOIN` on the deal-parent
 lookup) *survived* the first pass and exposed a genuine coverage hole: a stubbed query cannot tell the two
 apart. Closed by executing the captured lookup against a stageless deal.
+
+## Round 2 — pre-PR adversarial review
+
+Two review passes found **three real defects outside the files originally touched**, each of which would
+have shipped:
+
+1. **`reports/service.ts` `getFollowUpCompliance`** scores `dismissed` in the denominator and only
+   `completed` in the numerator, over a window defaulting to the whole calendar year — so the drain would
+   have rewritten every rep's follow-up compliance downward, retroactively, and fired the "below 80%"
+   alert for nearly all of them. The rep who filed the ticket would have watched his own number get worse.
+   Fixed by excluding tasks whose `task_resolution_state.resolution_reason` is
+   `deal_reached_terminal_stage`; a control test proves a human dismissal is still counted.
+   *(The review misattributed this to `completed_at`; the denominator is status-based. Verified before
+   acting.)*
+2. **`contacts/service.ts` `buildContactLastTouchAtSql`** folds `MAX(tasks.updated_at)` into a contact's
+   Last touch, and `set_tasks_updated_at` is a BEFORE UPDATE **row** trigger — so the drain would have made
+   ~2,400 contacts read as "touched just now" and emptied the Untouched 30d+ card. Migration 0233 names
+   this hazard verbatim. Fixed on the read side: a dismissed task is not a touch.
+3. **`ai-disconnect-digest.ts`** had no terminal filter on the CTE feeding its counts, and
+   `open_task_count = 0` is one of its disconnect predicates — so the drain would have manufactured a
+   "follow-through gap" per drained deal, emailed every director a spike, and disagreed with the page it
+   links to. Gated to match its sibling.
+
+Also changed: the drain now commits in **its own short transaction** (row locks were otherwise held across
+the whole generator loop — a blocking and deadlock hazard against `stage-change.ts`); it no longer stamps
+`completed_at` (which would have reported ~3,268 phantom completions); the test fixture was corrected
+against prod (`waiting_on`/`blocked_by` are **jsonb**, and `tasks_active_origin_rule_dedupe_key_uidx`
+exists — so the `DISTINCT ON` guard is defense-in-depth and its test had been asserting a state prod
+forbids); and the script now takes the job's advisory lock, uses `FOR UPDATE` on the capture, and flushes
+a fuller snapshot per office.
+
+**Not fixed, deliberately, both recorded as follow-ups:** the one-way `priority='urgent'` escalation (the
+original band is not recoverable from the row, and it drives a login-modal interrupt via
+`REPEATING_TASK_PRIORITIES` — a third strand of the same complaint); and `procore_bid_board_drift` on Won
+deals, which this PR leaves unreported because un-gating it without a `reason_code`-aware drain would
+restore the re-mint loop for that reason.
+
+**16 mutations, all caught.**

@@ -60,7 +60,7 @@ beforeEach(async () => {
       sync_status text, updated_at timestamptz
     );
     CREATE TABLE ${SCHEMA}.deals (
-      id uuid PRIMARY KEY, deal_number text, name text, stage_id uuid,
+      id uuid PRIMARY KEY, deal_number text, name text, stage_id uuid, proposal_status text,
       is_active boolean NOT NULL DEFAULT true, procore_project_id text,
       stage_entered_at timestamptz, last_activity_at timestamptz, updated_at timestamptz DEFAULT now()
     );
@@ -105,5 +105,61 @@ describe("the AI-disconnect admin-task generator", () => {
     const { rows } = await db.query<{ deal_number: string }>(sql);
     expect(rows.map((r) => r.deal_number)).toContain("DFW-4-OPEN");
     expect(rows.filter((r) => r.deal_number.startsWith("DFW-4-OLD"))).toHaveLength(0);
+  });
+});
+
+/**
+ * The DIGEST is a separate job from the admin-task generator above, reads the same disconnect predicates,
+ * and had no terminal filter on the CTE that feeds its counts (only on its at-risk query). That made it the
+ * sharpest edge of this whole change: one of its disconnect predicates is `open_task_count = 0`, so the act
+ * of draining debris tasks off closed deals would have turned every drained deal into a fresh
+ * "follow-through gap" — the cleanup manufacturing the very disconnect it reports, and emailing every
+ * director a number the page it links to (which IS gated) does not agree with.
+ */
+describe("the AI-disconnect digest", () => {
+  async function captureDigestBaseSql(): Promise<string> {
+    const captured: string[] = [];
+    queryMock.mockReset();
+    queryMock.mockImplementation(async (sql: string) => {
+      captured.push(sql);
+      if (sql.includes("FROM public.offices")) return { rows: [{ id: U("0f1"), slug: "beta", name: "Beta" }] };
+      if (sql.includes("FROM information_schema.schemata")) return { rows: [{ schema_name: SCHEMA }] };
+      if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+      if (sql.includes("FROM public.users")) return { rows: [{ id: U("ad1") }] };
+      return { rows: [], rowCount: 0 };
+    });
+    const { runAiDisconnectDigest } = await import("../../src/jobs/ai-disconnect-digest.js");
+    await runAiDisconnectDigest();
+    const hits = captured.filter((s) => s.includes("open_task_count") && s.includes("FROM"));
+    expect(hits.length).toBeGreaterThan(0);
+    return hits[0];
+  }
+
+  // EXECUTED, not read. The fixture holds one open deal and three closed ones, and every one of them has
+  // zero open tasks -- i.e. all four satisfy the `open_task_count = 0` disconnect predicate. So the counts
+  // this query returns are exactly the discriminator: 1 if closed deals are excluded, 4 if they are not.
+  it("counts only the open deal, though all four look like follow-through gaps", async () => {
+    const sql = (await captureDigestBaseSql()).replace(/\$\{schemaName\}/g, SCHEMA);
+    const { rows } = await db.query<{ total_disconnects: number; follow_through_gaps: number }>(sql);
+    expect(rows[0].total_disconnects).toBe(1);
+    expect(rows[0].follow_through_gaps).toBe(1);
+  });
+
+  it("and the drain cannot inflate it: emptying a closed deal's tasks changes nothing", async () => {
+    const sql = (await captureDigestBaseSql()).replace(/\$\{schemaName\}/g, SCHEMA);
+    // Give the Won deal an open task, as the backlog did, then retire it exactly as the drain does.
+    await db.query(
+      `INSERT INTO ${SCHEMA}.tasks (id, deal_id, origin_rule, dedupe_key, status)
+       VALUES ($1, $2, 'inbound_email_reply_needed', 'k1', 'pending')`,
+      [U("f001"), U("d002")]
+    );
+    const before = await db.query<{ total_disconnects: number }>(sql);
+    await db.query(`UPDATE ${SCHEMA}.tasks SET status = 'dismissed' WHERE id = $1`, [U("f001")]);
+    const after = await db.query<{ total_disconnects: number }>(sql);
+
+    // Without the gate the drain would have moved this from 1 to 2 -- the cleanup manufacturing a
+    // disconnect, and emailing every director about it.
+    expect(before.rows[0].total_disconnects).toBe(1);
+    expect(after.rows[0].total_disconnects).toBe(1);
   });
 });

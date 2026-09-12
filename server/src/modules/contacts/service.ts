@@ -167,7 +167,17 @@ export function buildContactLastTouchAtSql(): SQL<Date | null> {
     COALESCE(${contactLastContactedAtSql}, '-infinity'::timestamptz),
     COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
     COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contactIdSql}), '-infinity'::timestamptz)
+    -- A DISMISSED task is not a touch. set_tasks_updated_at is a BEFORE UPDATE row trigger, so ANY
+    -- write to a task bumps updated_at — including a bulk system dismissal. The terminal-deal drain
+    -- retires ~2,400 tasks that carry a contact_id, which would otherwise have made every one of those
+    -- contacts read as "touched just now", emptying the Untouched 30d+ card and sorting them to the top
+    -- of last_touch_at. Excluded here, in the ONE shared builder, so the card, the ?card=untouched drill
+    -- and the sort all keep agreeing.
+    COALESCE((
+      SELECT MAX(t.updated_at) FROM tasks t
+      WHERE t.contact_id = ${contactIdSql}
+        AND t.status IS DISTINCT FROM 'dismissed'
+    ), '-infinity'::timestamptz)
   ), '-infinity'::timestamptz)`;
 }
 

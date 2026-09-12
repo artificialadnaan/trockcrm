@@ -310,7 +310,13 @@ export async function dismissResolvedTerminalDealTasks(
     `WITH dismissed AS (
        UPDATE ${schemaName}.tasks AS t
        SET status = 'dismissed',
-           completed_at = $1,
+           -- NOT completed_at. The "Completed this week" count is
+           -- status IN ('completed','dismissed') AND completed_at >= NOW() - 7 days, so stamping it here
+           -- would report ~3,268 completions nobody made and leave that card disagreeing with its own
+           -- sibling (which counts 'completed' only) for a week, while burying every real completion in
+           -- the Completed tab. Five of the eight dismissal writers in this codebase — stage-change.ts
+           -- included, i.e. the human-equivalent path — leave it null for exactly this reason. The
+           -- timestamp is not lost: task_resolution_state.resolved_at records when this pass ran.
            is_overdue = false,
            waiting_on = NULL,
            blocked_by = NULL,
@@ -376,25 +382,51 @@ export async function runDailyTaskGeneration(): Promise<void> {
         let officeFirstOutreachDismissed = 0;
         let officeTerminalDealDismissed = 0;
 
-        await client.query("BEGIN");
-        await client.query(`SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`, [office.id]);
-
         const slugRegex = /^[a-z][a-z0-9_]*$/;
         if (!slugRegex.test(office.slug)) {
           console.error(`[Worker:daily-tasks] Invalid office slug: "${office.slug}" -- skipping`);
-          await client.query("ROLLBACK");
           continue;
         }
 
         const schemaName = `office_${office.slug}`;
+
+        // Drain forward-motion tasks whose deal has already closed, in a transaction OF ITS OWN, committed
+        // before generation begins. Two reasons it is not folded into the generation transaction below:
+        //
+        // 1. LOCK DURATION. The first run after deploy dismisses ~3,268 rows in one office. Inside the
+        //    generation transaction those row locks would be held across the whole generator loop — many
+        //    further round-trips — so a rep marking one of those deals Won would block until COMMIT and,
+        //    past the app's 30-45s timeout, simply fail. stage-change.ts takes its own bulk
+        //    `UPDATE tasks ... WHERE deal_id = X` on the same rows, and the two scan in different orders
+        //    (deal_id index vs. an origin_rule-driven scan), which is a genuine deadlock cycle.
+        // 2. COST. `audit_tasks` is a FOR EACH ROW trigger that runs a dynamic EXECUTE per column
+        //    (~36 on tasks), so the drain costs ~118k dynamic executions on its first run regardless of
+        //    how few statements it takes. Migrations 0233 and 0239 disable that trigger around bulk task
+        //    updates for exactly this reason; a cron job cannot, so the least it can do is not hold the
+        //    generation transaction open while paying it.
+        //
+        // Committing separately is also the safer failure mode: the drain is idempotent and independently
+        // correct, so a later generation failure no longer un-does the cleanup.
+        //
+        // It still runs FIRST, before the overdue marking and its notification INSERT, because that order
+        // decides whether the run that finally cleans a task up ALSO emails the rep about it one last time.
+        try {
+          await client.query("BEGIN");
+          await client.query(`SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`, [office.id]);
+          officeTerminalDealDismissed = await dismissResolvedTerminalDealTasks(client, schemaName, office.id);
+          await client.query("COMMIT");
+          totalTerminalDealDismissed += officeTerminalDealDismissed;
+        } catch (drainErr) {
+          await client.query("ROLLBACK").catch(() => {});
+          officeTerminalDealDismissed = 0;
+          console.error(`[Worker:daily-tasks] Office ${office.id} terminal-deal drain failed:`, drainErr);
+        }
+
+        await client.query("BEGIN");
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`, [office.id]);
+
         const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
         const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
-
-        // Lifecycle, FIRST: drain forward-motion tasks whose deal has already closed. This runs BEFORE the
-        // overdue marking and its notification INSERT below, because the order decides whether the run that
-        // finally cleans a task up ALSO emails the rep about it one last time.
-        // Folded into the running total only AFTER COMMIT, like the other per-office counters.
-        officeTerminalDealDismissed = await dismissResolvedTerminalDealTasks(client, schemaName, office.id);
 
         // `is_overdue` is a STORED flag, and the marking step below only ever sets it TRUE. Nothing ever
         // reset it, so moving a due date forward (snooze, re-plan) left the task flagged overdue for good:
@@ -688,7 +720,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
         totalOverdueCleared += officeOverdueCleared;
         totalTasksCreated += officeTasksCreated;
         totalFirstOutreachDismissed += officeFirstOutreachDismissed;
-        totalTerminalDealDismissed += officeTerminalDealDismissed;
+        // NOTE: totalTerminalDealDismissed is folded in at its own COMMIT above, not here.
       } catch (officeErr) {
         await client.query("ROLLBACK").catch(() => {});
         console.error(`[Worker:daily-tasks] Office ${office.id} failed:`, officeErr);

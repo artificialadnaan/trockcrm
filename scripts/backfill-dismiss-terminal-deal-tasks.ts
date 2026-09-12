@@ -32,9 +32,12 @@ import pg from "pg";
  *  - dry-run by default: pass --commit to write.
  *  - transactional: one BEGIN/COMMIT per office; a failing office ROLLS BACK and is skipped, not fatal.
  *  - idempotent: a second run finds nothing (the rows it closed are no longer open).
- *  - auditable/reversible: a committed run writes an owner-only JSON snapshot of every dismissed task id
- *    per office. Revert = set status/completed_at back for those ids and delete the matching
- *    task_resolution_state rows.
+ *  - auditable/reversible: a committed run writes an owner-only JSON snapshot per office, capturing each
+ *    task's id AND its prior status / waiting_on / blocked_by / is_overdue / updated_at. Those last four
+ *    matter: the UPDATE nulls waiting_on and blocked_by and clears is_overdue, so an id-only snapshot could
+ *    not restore a task a person had parked in 'blocked' with a payload. The snapshot is written after EACH
+ *    office commits, not once at the end, so a crash mid-run cannot leave a committed office unrecorded.
+ *    The audit_tasks trigger also records every changed column in audit_log, as a second copy.
  *
  * Usage — run from the repo root:
  *   CRM_DATABASE_URL="$DATABASE_PUBLIC_URL" node --import tsx scripts/backfill-dismiss-terminal-deal-tasks.ts
@@ -100,6 +103,29 @@ async function census(
   return rows;
 }
 
+/** Prior-state rows, keyed by schema. Rewritten after every office commit. */
+type SnapshotRow = {
+  id: string;
+  status: string;
+  waiting_on: unknown;
+  blocked_by: unknown;
+  is_overdue: boolean;
+  updated_at: string;
+};
+
+const SNAPSHOT_PATH = path.join(
+  os.tmpdir(),
+  `terminal-deal-task-drain-${new Date().toISOString().replace(/[:.]/g, "-")}.json`
+);
+
+function writeSnapshot(snapshot: Record<string, SnapshotRow[]>): void {
+  fs.writeFileSync(
+    SNAPSHOT_PATH,
+    JSON.stringify({ dismissedAt: new Date().toISOString(), snapshot }, null, 2),
+    { mode: 0o600 }
+  );
+}
+
 export async function main(argv = process.argv): Promise<void> {
   const { mode } = parseBackfillArgs(argv);
 
@@ -123,7 +149,7 @@ export async function main(argv = process.argv): Promise<void> {
     let totalDismissed = 0;
     let totalCandidates = 0;
     const skipped: string[] = [];
-    const snapshot: Record<string, string[]> = {};
+    const snapshot: Record<string, SnapshotRow[]> = {};
 
     for (const office of offices) {
       const schemaName = `office_${office.slug}`;
@@ -144,6 +170,11 @@ export async function main(argv = process.argv): Promise<void> {
 
       try {
         await client.query("BEGIN");
+        // The SAME advisory lock the 6am job takes per office, so this cannot interleave with a run of
+        // dismissResolvedTerminalDealTasks already in progress there.
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`, [
+          office.id,
+        ]);
 
         const breakdown = await census(client, schemaName, TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES);
         const candidates = breakdown.reduce((sum, row) => sum + row.open_tasks, 0);
@@ -159,14 +190,26 @@ export async function main(argv = process.argv): Promise<void> {
 
         // Capture the ids BEFORE the write, so a committed run has a reversibility snapshot and a dry-run
         // can still name what it would have touched.
-        const { rows: targets } = await client.query<{ id: string }>(
-          `SELECT t.id
+        // FOR UPDATE OF t: READ COMMITTED gives this statement and the dismisser's UPDATE separate
+        // snapshots, so without the lock a task someone completes between the two makes the counts diverge
+        // and trips the guard below — reported as schema drift when it is really just business-hours
+        // traffic. Locking the captured rows makes the capture authoritative for the write that follows.
+        const { rows: targets } = await client.query<{
+          id: string;
+          status: string;
+          waiting_on: unknown;
+          blocked_by: unknown;
+          is_overdue: boolean;
+          updated_at: string;
+        }>(
+          `SELECT t.id, t.status, t.waiting_on, t.blocked_by, t.is_overdue, t.updated_at
              FROM ${schemaName}.tasks t
              JOIN ${schemaName}.deals d ON d.id = t.deal_id
              JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
             WHERE t.origin_rule = ANY($1::text[])
               AND t.status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
-              AND psc.is_terminal = true`,
+              AND psc.is_terminal = true
+            FOR UPDATE OF t`,
           [[...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES]]
         );
 
@@ -183,7 +226,11 @@ export async function main(argv = process.argv): Promise<void> {
 
         if (mode === "commit") {
           await client.query("COMMIT");
-          snapshot[schemaName] = targets.map((row) => row.id);
+          snapshot[schemaName] = targets;
+          // Flushed HERE, per office, not once at the end: a crash or a dropped response on the prod public
+          // proxy after this commit would otherwise lose this office's snapshot while its rows stay
+          // dismissed.
+          writeSnapshot(snapshot);
           totalDismissed += dismissed;
           console.log(`    -> dismissed ${dismissed}`);
         } else {
@@ -207,14 +254,7 @@ export async function main(argv = process.argv): Promise<void> {
     }
 
     if (mode === "commit" && Object.keys(snapshot).length > 0) {
-      const file = path.join(
-        os.tmpdir(),
-        `terminal-deal-task-drain-${new Date().toISOString().replace(/[:.]/g, "-")}.json`
-      );
-      fs.writeFileSync(file, JSON.stringify({ dismissedAt: new Date().toISOString(), snapshot }, null, 2), {
-        mode: 0o600,
-      });
-      console.log(`${LABEL} reversibility snapshot: ${file}`);
+      console.log(`${LABEL} reversibility snapshot: ${SNAPSHOT_PATH}`);
       console.log(`${LABEL} copy it to .audit/backfills/ — the OS temp dir is cleared on reboot.`);
     }
     if (mode !== "commit") {

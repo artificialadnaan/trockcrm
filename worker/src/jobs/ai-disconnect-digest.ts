@@ -230,6 +230,15 @@ export async function runAiDisconnectDigest(): Promise<void> {
               JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
               LEFT JOIN latest_procore_sync lps ON lps.deal_id = d.id
               WHERE d.is_active = TRUE
+                -- Matches the page this digest links to (/admin/sales-process-disconnects, gated in
+                -- ai-copilot/service.ts) and the at-risk query 50 lines up, which was already gated. Without
+                -- it the emailed count and the page disagree by the number of closed deals.
+                --
+                -- It is also load-bearing for the terminal-deal task drain: open_task_count = 0 is one of
+                -- the disconnect predicates, so emptying the debris tasks off closed deals would otherwise
+                -- have made every drained deal APPEAR as a fresh "follow-through gap" in this digest, and
+                -- turned whichever rep closed the most deals into the reported hotspot.
+                AND psc.is_terminal = FALSE
             )
             SELECT
               (
