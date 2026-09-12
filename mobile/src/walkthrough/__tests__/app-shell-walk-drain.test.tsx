@@ -32,6 +32,19 @@ jest.mock("expo-router", () => {
 jest.mock("../../api/client", () => ({ apiFetch: jest.fn(async () => ({})) }));
 jest.mock("../upload-client", () => ({ walkthroughUploadClient: { id: "walk-upload-client" } }));
 
+// The shell also drains the PHOTO queue now. Both modules are stubbed here because this file is about
+// the WALK queue's triggers: upload-background-task reaches expo-task-manager's native module (absent
+// under jest), and an unstubbed photo drain would add calls this file's assertions do not describe.
+// The photo side has its own coverage in ../../capture/__tests__/app-shell-photo-drain.test.tsx.
+jest.mock("../../capture/upload-background-task", () => ({
+  registerUploadBackgroundTask: jest.fn(async () => undefined),
+}));
+jest.mock("../../capture/upload-queue", () => ({
+  drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} })),
+  getQueuedCount: jest.fn(async () => 0),
+  getSchedulableCount: jest.fn(async () => 0),
+}));
+
 const mockScanRecoverableWalksAtStartup = jest.fn(async (..._args: unknown[]) => undefined);
 const mockForgetRecoverableWalksAtStartup = jest.fn();
 const mockGetSchedulableWalkCount = jest.fn(async (..._args: unknown[]): Promise<number> => 0);

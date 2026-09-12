@@ -457,6 +457,13 @@ export default function CaptureScreen() {
             const summary = await drainUploadQueue(ownerKey, queueFetcher);
             succeeded += summary.succeeded;
             remaining = summary.remaining;
+            if (summary.alreadyDraining) {
+              // Another drain (the authenticated shell's mount/foreground resume, or the background
+              // task) holds the lock and is shipping this same queue right now. That is not a stall, so
+              // it must not arm the offline backoff below — the work is in flight, and this screen's
+              // counter refresh at the end of this function picks up its progress.
+              break;
+            }
             if (summary.succeeded > 0) {
               drainBackoffUntilRef.current = 0; // made progress — clear any backoff
             } else if (summary.remaining > 0) {

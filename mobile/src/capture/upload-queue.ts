@@ -16,6 +16,7 @@ import {
   isSchedulable,
   isTerminal,
   partitionResults,
+  planDrainOrder,
   removeIds,
   sanitizeOwnerKey,
   selectOrphanFiles,
@@ -24,7 +25,7 @@ import {
 } from "./upload-queue-core";
 import { isDurableStoreUri, reconstructDurablePhotoUri } from "./doc-dir-uri";
 
-export { MAX_UPLOAD_ATTEMPTS, UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, removeIds, sanitizeOwnerKey, uploadOwnerKey, type QueuedUpload } from "./upload-queue-core";
+export { DRAIN_BACKLOG_SHARE, MAX_UPLOAD_ATTEMPTS, UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, planDrainOrder, removeIds, sanitizeOwnerKey, uploadOwnerKey, type QueuedUpload } from "./upload-queue-core";
 
 /**
  * Durable, resumable upload queue for field photo captures.
@@ -63,6 +64,18 @@ export type DrainSummary = {
    * confirmed in THIS drain — a photo confirmed by an earlier drain has already left the queue.
    */
   confirmedFileIds: Record<string, string>;
+  /**
+   * True when this call did NOTHING because a drain was already running, so `succeeded: 0` means "not my
+   * turn", not "nothing could be sent".
+   *
+   * Callers infer failure from a zero-progress summary — capture.tsx backs off for 30s on
+   * `succeeded === 0 && remaining > 0`, which is correct for offline/stuck and wrong here. Before the
+   * authenticated shell also drained this queue, the only concurrent caller was the background task, so
+   * the two could barely overlap and the ambiguity never showed. Now a foreground resume can easily be
+   * mid-drain when the user takes their next shot, and a silent 30s backoff on the Capture screen is
+   * exactly the kind of "uploads mysteriously stalled" this whole change is meant to end.
+   */
+  alreadyDraining?: true;
 };
 
 // Serialize every index READ-MODIFY-WRITE for this process. enqueue / removeQueuedUploads / drain-commit
@@ -535,7 +548,15 @@ export async function drainUploadQueue(
     targetFetcher?: Fetcher;
   } = {},
 ): Promise<DrainSummary> {
-  if (draining) return { succeeded: 0, failed: 0, remaining: await getQueuedCount(ownerKey), confirmedFileIds: {} };
+  if (draining) {
+    return {
+      succeeded: 0,
+      failed: 0,
+      remaining: await getQueuedCount(ownerKey),
+      confirmedFileIds: {},
+      alreadyDraining: true,
+    };
+  }
   draining = true;
   let keptAwake = false;
   const confirmedFileIds: Record<string, string> = {};
@@ -545,9 +566,15 @@ export async function drainUploadQueue(
     await reconcileOwnerStorage(ownerKey).catch(() => undefined);
     // Plan the drainable id order UNDER THE LOCK so the snapshot is consistent with any cancellation that
     // has already completed (terminal/failed items are left for the UI to surface + discard, never re-PUT).
+    // planDrainOrder puts the most recently queued work first (with a reserved share for the backlog) —
+    // see its header for the production data on why strict queue order left a crew permanently a day
+    // behind. It only reorders; the set of ids planned is unchanged.
     const planned = await withQueueLock(async () => {
       const queue = await readQueue(ownerKey);
-      return { ids: queue.filter(isDrainable).map((item) => item.clientUploadId), total: queue.length };
+      return {
+        ids: planDrainOrder(queue.filter(isDrainable)).map((item) => item.clientUploadId),
+        total: queue.length,
+      };
     });
     const plannedIds = planned.ids;
     // Nothing drainable, but report the ACTUAL queue size as `remaining` — terminal/failed items still sit
