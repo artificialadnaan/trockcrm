@@ -137,6 +137,10 @@ function makeWalk(state: WalkState, overrides: Partial<Walk> = {}): Walk {
     durationMs: state === "complete" ? 4000 : null,
     videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
     audioUri: null,
+    audioAlive: true,
+    audioLevel: 0,
+    audioStall: null,
+    captureCensus: null,
     videoCoverage: null,
     audioCoverage: null,
     stills: [],
@@ -788,5 +792,64 @@ describe("WalkScreen recording-size notices", () => {
     mockResult = resultFor(makeWalk("complete"));
     const complete = render(<WalkScreen />);
     expect(complete.queryByText(/largest size/i)).toBeNull();
+  });
+});
+
+// ── The microphone, live: the meter beside the timer and the banner under it ──────────────────────
+//
+// Two walks on 2026-09-02 lost 3.8 minutes of narration to a microphone that went quiet mid-walk,
+// and the estimator learned of it from the completion screen after leaving the site. The meter and
+// the banner are what say so in seconds, while there is still an elevation to re-walk.
+describe("WalkScreen narration banner", () => {
+  it("shows the meter and no banner while the microphone is delivering", () => {
+    mockResult = resultFor(makeWalk("recording", { audioAlive: true, audioLevel: 0.1 }));
+    const { queryByText, getByLabelText } = render(<WalkScreen />);
+
+    expect(getByLabelText("Microphone level")).toBeTruthy();
+    expect(queryByText(/Narration stopped/)).toBeNull();
+    expect(queryByText(/Narration failed/)).toBeNull();
+  });
+
+  it("says the mic is being restarted while native is still trying", () => {
+    mockResult = resultFor(
+      makeWalk("recording", {
+        audioAlive: false,
+        audioStall: { attempt: 1, restarted: true, sinceMs: 2100 },
+      }),
+    );
+    const { getByText } = render(<WalkScreen />);
+
+    expect(getByText("Narration stopped — restarting mic")).toBeTruthy();
+    // Still recording: every control the walk had is still on screen.
+    expect(getByText("CAPTURE")).toBeTruthy();
+    expect(getByText("End walk")).toBeTruthy();
+  });
+
+  it("tells the estimator to start a new walk once native has given up", () => {
+    mockResult = resultFor(
+      makeWalk("recording", {
+        audioAlive: false,
+        audioStall: { attempt: 3, restarted: false, sinceMs: 9000 },
+      }),
+    );
+    const { getByText, queryByText } = render(<WalkScreen />);
+
+    expect(getByText("Narration failed — end this walk and start a new one")).toBeTruthy();
+    expect(queryByText(/restarting mic/)).toBeNull();
+  });
+
+  // The banner belongs to a LIVE microphone. A finished walk has its own notice (the coverage
+  // summary), and a stall that never cleared must not follow the walk onto the completion screen.
+  it("draws neither on the completion screen", () => {
+    mockResult = resultFor(
+      makeWalk("complete", {
+        audioAlive: false,
+        audioStall: { attempt: 3, restarted: false, sinceMs: 9000 },
+      }),
+    );
+    const { queryByText, queryByLabelText } = render(<WalkScreen />);
+
+    expect(queryByText(/Narration/)).toBeNull();
+    expect(queryByLabelText("Microphone level")).toBeNull();
   });
 });

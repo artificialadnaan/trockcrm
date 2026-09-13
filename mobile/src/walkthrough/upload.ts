@@ -29,7 +29,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { Fetcher } from "../api/endpoints";
 import { ApiError } from "../api/client";
 import { rebaseDocumentDirectoryUri } from "../capture/doc-dir-uri";
-import type { Walk } from "./session";
+import type { Walk, WalkCaptureCensus } from "./session";
 import {
   MIN_FINALIZED_MP4_BYTES,
   MP4_BOX_HEADER_BYTES,
@@ -201,6 +201,13 @@ export type WalkCompletionRequest = {
   /** ISO-8601 — converted from QueuedWalk.startedAt (epoch ms). */
   capturedAt: string;
   artifacts: WalkCompletionArtifact[];
+  /**
+   * What the recorder saw — session.ts's `WalkCaptureCensus`, pinned field for field with the
+   * server. OMITTED, never null, when the queued walk carries none (see QueuedWalk.captureCensus);
+   * the server's validator reads the fields it names and ignores the rest, so a build ahead of the
+   * server loses nothing by sending it.
+   */
+  captureCensus?: WalkCaptureCensus;
 };
 
 export type WalkCompletionResponse = {
@@ -432,6 +439,14 @@ export type RecoveredWalk = {
    * container after the scan ran.
    */
   videoUri: string | null;
+  /**
+   * The walk's narration.m4a — the phone microphone native records independently of the video
+   * writer — under exactly the video's rule: non-null only when the container on disk is one the
+   * recorder actually closed (the same moov check, the same reason). Nothing on the card names it;
+   * it rides along so a recovered walk files the narration the office scopes from, not just the
+   * picture.
+   */
+  audioUri: string | null;
   /** In capture order. */
   stillUris: string[];
   /**
@@ -568,20 +583,25 @@ async function scanForOrphanedWalkDirs(
     } catch {
       continue; // not actually a directory, or unreadable — skip rather than abort the whole scan
     }
-    const { videoFileName, stillFileNames } = classifyWalkDirFileNames(fileNames);
-    if (!videoFileName && stillFileNames.length === 0) continue; // e.g. an empty dir from a walk
-    // that failed before native ever produced anything — nothing to recover, not a leak.
+    const { videoFileName, audioFileName, stillFileNames } = classifyWalkDirFileNames(fileNames);
+    if (!videoFileName && !audioFileName && stillFileNames.length === 0) continue; // e.g. an empty
+    // dir from a walk that failed before native ever produced anything — nothing to recover, not a leak.
     const dir = walkDirUri(walkId);
     const videoOnDisk = videoFileName ? `${dir}${videoFileName}` : null;
+    const audioOnDisk = audioFileName ? `${dir}${audioFileName}` : null;
     const stillUris = stillFileNames.map((name) => `${dir}${name}`);
     // The file being THERE is not the file being a recording — see upload-core.ts's note above
     // readMp4BoxHeader. A kill during recording leaves a walk.mp4 with no moov atom, and offering it
     // as a video hands the office something that will not open, filed as a successful site visit.
     const videoUri = videoOnDisk !== null && (await isFinalizedMp4(videoOnDisk)) ? videoOnDisk : null;
-    // Only the video was unusable, so there is nothing left to file. Same rule as a directory that
+    // The narration is the same container (an .m4a IS an MP4) closed by the same kind of step —
+    // AVAudioRecorder.stop() writes its moov the way finishWriting does — so it is asked the same
+    // question, and a kill mid-walk leaves it just as unplayable.
+    const audioUri = audioOnDisk !== null && (await isFinalizedMp4(audioOnDisk)) ? audioOnDisk : null;
+    // Only unusable media, so there is nothing left to file. Same rule as a directory that
     // classifies to nothing: a row here could only lead the estimator through a project picker to an
     // empty upload. The bytes stay on disk untouched — this function never deletes.
-    if (videoUri === null && stillUris.length === 0) continue;
+    if (videoUri === null && audioUri === null && stillUris.length === 0) continue;
     // One extra stat per artifact, paid only for directories that ARE orphans (normally none), so a
     // caller can tell the estimator when this walk happened. It is deliberately NOT reused as the
     // artifacts' capturedAt: enqueueRecoveredWalk re-stats at enqueue time, which is both fresher
@@ -590,13 +610,14 @@ async function scanForOrphanedWalkDirs(
     // A REJECTED video still contributes its timestamp. Declining to upload the file is not a reason
     // to forget when it was written, and for a killed recording that last write IS the moment capture
     // stopped — the single strongest clue the estimator has to which job this was.
-    const times = (await Promise.all([videoOnDisk, ...stillUris].map(fileTimestampMsOrNull))).filter(
-      (t): t is number => t !== null,
-    );
+    const times = (
+      await Promise.all([videoOnDisk, audioOnDisk, ...stillUris].map(fileTimestampMsOrNull))
+    ).filter((t): t is number => t !== null);
     const span = times.length > 1 ? Math.max(...times) - Math.min(...times) : 0;
     recovered.push({
       walkId,
       videoUri,
+      audioUri,
       stillUris,
       unfinishedVideo: videoOnDisk !== null && videoUri === null,
       recordedAtMs: times.length > 0 ? Math.max(...times) : null,
@@ -960,15 +981,16 @@ export async function enqueueRecoveredWalk(
     // for this. Profile renders this text, and the estimator is the one person who can end the walk.
     throw new Error("That walk is still recording — end it before filing it.");
   }
-  const [videoAt, stills] = await Promise.all([
+  const [videoAt, audioAt, stills] = await Promise.all([
     recovered.videoUri ? fileTimestampMs(recovered.videoUri, now) : Promise.resolve(undefined),
+    recovered.audioUri ? fileTimestampMs(recovered.audioUri, now) : Promise.resolve(undefined),
     Promise.all(recovered.stillUris.map(async (uri) => ({ uri, at: await fileTimestampMs(uri, now) }))),
   ]);
   const queued = toRecoveredQueuedWalk(
     recovered.walkId,
     dealId,
     projectId,
-    { videoUri: recovered.videoUri, videoAt, stills },
+    { videoUri: recovered.videoUri, videoAt, audioUri: recovered.audioUri, audioAt, stills },
     meta,
     now,
   );
@@ -1120,6 +1142,8 @@ async function callCompletion(
       fileSizeBytes: a.sizeBytes ?? 0,
       capturedAtMs: a.at,
     })),
+    // Absent stays absent — see WalkCompletionRequest.captureCensus.
+    ...(walk.captureCensus ? { captureCensus: walk.captureCensus } : {}),
   });
 }
 

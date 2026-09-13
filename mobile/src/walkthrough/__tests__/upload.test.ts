@@ -917,6 +917,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       {
         walkId: "walk-orphan",
         videoUri: `${orphanDir}walk.mp4`,
+        audioUri: null,
         stillUris: [`${orphanDir}still-001.jpg`, `${orphanDir}still-002.jpg`],
         unfinishedVideo: false,
         // Unknown here, and reported as unknown: this mock stores no mtimes for these files.
@@ -1300,6 +1301,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       const stale: RecoveredWalk = {
         walkId: "walk-in-progress-2",
         videoUri: null, // the video is not finalized yet — it is still being written
+        audioUri: null,
         stillUris: [still],
         unfinishedVideo: true,
         recordedAtMs: null,
@@ -1732,5 +1734,148 @@ describe("an artifact larger than the server's per-artifact ceiling", () => {
     const [, , completion] = (client.completeWalk as jest.Mock).mock.calls[0]!;
     expect(completion.title).toBe(META.title);
     expect(completion.artifacts).toHaveLength(2);
+  });
+});
+
+// ── narration.m4a: the standalone phone-microphone file rides with the walk ───────────────────────
+//
+// Native records the narration a second time, to its own file, with an AVAudioRecorder that shares
+// nothing with the video writer — because an engine iOS stopped mid-walk on 2026-09-02 took 3.8
+// minutes of narration with it, and the narration is what the scope is written from. The queue's
+// half of that: the file is PUT as audio/mp4, filed as an audio artifact, and survives an app kill
+// the same way walk.mp4 does.
+describe("narration.m4a", () => {
+  const NARRATION_URI = `${DOC}walkthroughs/walk-1/narration.m4a`;
+
+  function completedWalkWithNarration(): Walk {
+    const started = reduceWalk(reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }), {
+      type: "started",
+      at: 1000,
+      videoUri: VIDEO_URI,
+    });
+    const ended = reduceWalk(started, { type: "ended", at: 5000 });
+    return reduceWalk(ended, { type: "finalized", audioUri: NARRATION_URI });
+  }
+
+  it("is PUT as audio/mp4 and filed as an audio artifact beside the video", async () => {
+    seedFiles([VIDEO_URI, NARRATION_URI]);
+    await enqueueWalk(OWNER, "walk-1", completedWalkWithNarration(), META, 1000);
+    const client = stubClient();
+
+    const summary = await drainWalkQueue(OWNER, fetcher, client);
+
+    const presigns = (client.requestUploadUrl as jest.Mock).mock.calls.map(([, , req]) => req);
+    expect(presigns.find((req) => req.kind === "audio")).toEqual(
+      expect.objectContaining({ kind: "audio", mimeType: "audio/mp4" }),
+    );
+    // The bytes themselves went up under the same type the server was told to expect.
+    const narrationPut = uploadAsyncMock.mock.calls.find(([, uri]) => uri === NARRATION_URI);
+    expect(narrationPut?.[2]?.headers).toEqual({ "Content-Type": "audio/mp4" });
+    const [, , completion] = (client.completeWalk as jest.Mock).mock.calls[0]!;
+    expect(completion.artifacts.find((a: { kind: string }) => a.kind === "audio")).toEqual(
+      expect.objectContaining({ kind: "audio", mimeType: "audio/mp4", originalFilename: "narration.m4a" }),
+    );
+    expect(summary.completed).toBe(1);
+  });
+
+  describe("recovery", () => {
+    const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
+
+    function seedNarration(bytes: string): void {
+      fs.__store.set(`${orphanDir}narration.m4a`, bytes);
+      fs.__sizes.set(`${orphanDir}narration.m4a`, bytes.length);
+    }
+
+    it("offers a narration the recorder closed, beside the video", async () => {
+      seedVideoFile(`${orphanDir}walk.mp4`);
+      seedNarration(FINALIZED_MP4);
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+
+      expect(recovered!.audioUri).toBe(`${orphanDir}narration.m4a`);
+      expect(recovered!.videoUri).toBe(`${orphanDir}walk.mp4`);
+    });
+
+    // An .m4a IS an MP4 container, closed by the same kind of step (AVAudioRecorder.stop() writes
+    // its moov the way finishWriting does), so a kill mid-walk leaves it just as unplayable — and
+    // offering it would hand the office a narration nothing can transcribe, filed as a site visit.
+    it("refuses a narration an app kill left without its index, exactly as it refuses the video", async () => {
+      seedVideoFile(`${orphanDir}walk.mp4`, UNFINALIZED_MP4);
+      seedNarration(UNFINALIZED_MP4);
+      fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+
+      expect(recovered!.audioUri).toBeNull();
+      expect(recovered!.videoUri).toBeNull();
+      expect(recovered!.stillUris).toEqual([`${orphanDir}still-001.jpg`]);
+    });
+
+    it("is enough on its own to offer the walk, and files as an audio artifact", async () => {
+      seedWalkOwner("walk-orphan");
+      seedNarration(FINALIZED_MP4);
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+      expect(recovered).toBeDefined();
+      expect(recovered!.audioUri).toBe(`${orphanDir}narration.m4a`);
+
+      const queued = await enqueueRecoveredWalk(OWNER, recovered!, "deal-99", null, META, 5000);
+      expect(queued!.artifacts.map((a) => a.kind)).toEqual(["audio"]);
+      expect(queued!.artifacts[0]!.uri).toBe(`${orphanDir}narration.m4a`);
+    });
+  });
+});
+
+// ── captureCensus: what the recorder saw, filed with the walk ─────────────────────────────────────
+describe("captureCensus on the completion call", () => {
+  const CENSUS = {
+    walkMs: 4000,
+    video: { framesReceived: 120, framesAppended: 120, framesDropped: 0, secondsSinceLastFrameArrived: 0.03 },
+    audio: {
+      buffersReceived: 190,
+      buffersAppended: 190,
+      buffersDropped: 0,
+      longestDropRun: 0,
+      secondsAppended: 4.05,
+      engineRestarts: 1,
+      standaloneSecondsRecorded: 4.1,
+      events: [{ atMs: 2000, kind: "engineRestarted:watchdog" }],
+    },
+  };
+
+  it("is sent as a top-level field of the completion request, straight from the manifest", async () => {
+    seedFiles([VIDEO_URI]);
+    const started = reduceWalk(reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }), {
+      type: "started",
+      at: 1000,
+      videoUri: VIDEO_URI,
+    });
+    const walk = reduceWalk(reduceWalk(started, { type: "ended", at: 5000 }), {
+      type: "finalized",
+      audioUri: null,
+      captureCensus: { video: CENSUS.video, audio: CENSUS.audio },
+    });
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+    // Survives the manifest round trip: the completion call runs off the persisted entry, possibly
+    // in a later process, never off the reducer state that produced it.
+    expect((await getQueuedWalks(OWNER))[0]!.captureCensus).toEqual(CENSUS);
+    const client = stubClient();
+
+    await drainWalkQueue(OWNER, fetcher, client);
+
+    const [, , completion] = (client.completeWalk as jest.Mock).mock.calls[0]!;
+    expect(completion.captureCensus).toEqual(CENSUS);
+    expect(completion.title).toBe(META.title);
+  });
+
+  it("is omitted — not sent as null — for a walk that has none", async () => {
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
+    const client = stubClient();
+
+    await drainWalkQueue(OWNER, fetcher, client);
+
+    const [, , completion] = (client.completeWalk as jest.Mock).mock.calls[0]!;
+    expect("captureCensus" in completion).toBe(false);
   });
 });

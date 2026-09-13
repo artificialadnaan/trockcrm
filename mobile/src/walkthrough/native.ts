@@ -47,6 +47,13 @@ export type StillEvent = {
  */
 export type WalkEnded = {
   videoUri: string;
+  /**
+   * `narration.m4a` — the phone microphone recorded by an `AVAudioRecorder` that shares nothing
+   * with the video writer or its engine, so it holds the narration through the engine stops that
+   * silenced the muxed track (WalkthroughRecorder.swift's `WalkAudioCapture`). Null when native
+   * could not produce one; absent on a dev client older than the file. Never a failed walk.
+   */
+  audioUri?: string | null;
   stills: number;
   /**
    * What the writer actually did. `secondsSinceLastFrameArrived` is the one that matters for video:
@@ -81,8 +88,33 @@ export type WalkEnded = {
     /** Longest unbroken run of refused audio buffers — separates one sustained stall from
      *  scattered hiccups that happen to add up to the same total. */
     longestAudioDropRun?: number;
+    /**
+     * The audio record in the shape the server's `captureCensus` pins — the five writer counters
+     * above under their pinned names, plus what `WalkAudioCapture` saw: how many times it restarted
+     * the engine, how long narration.m4a runs, and the timeline of what iOS announced. Optional for
+     * the same reason the four counters above are: a real intermediate build reports them and not
+     * this, and useWalk.ts files a census only when the whole pinned shape is here.
+     */
+    audio?: {
+      buffersReceived: number;
+      buffersAppended: number;
+      buffersDropped: number;
+      longestDropRun: number;
+      secondsAppended: number;
+      engineRestarts: number;
+      standaloneSecondsRecorded: number;
+      events: Array<{ atMs: number; kind: string }>;
+    };
   };
 };
+
+/** `walkthrough:audioLevel` — the microphone's RMS level, 0–1, about four times a second. Its
+ *  arrival is itself the signal: a level means a buffer landed. */
+export type AudioLevelEvent = { rms: number };
+
+/** `walkthrough:audioStalled` — native's watchdog found no audio for `sinceMs` and made (or gave up
+ *  on) restart number `attempt`. See session.ts's `WalkAudioStall`. */
+export type AudioStalledEvent = { attempt: number; restarted: boolean; sinceMs: number };
 
 type WalkthroughNativeModule = {
   startWalk(walkId: string): Promise<WalkStarted>;
@@ -158,5 +190,22 @@ export function onRecorderError(listener: (error: { message: string }) => void):
   if (!native) return () => {};
   const emitter = new NativeEventEmitter(native as never);
   const sub = emitter.addListener("walkthrough:error", listener);
+  return () => sub.remove();
+}
+
+/** The microphone level while recording — see `AudioLevelEvent`. Silent on a build whose native
+ *  side predates the event, which the reducer reads as "never measured", not as "stopped". */
+export function onAudioLevel(listener: (event: AudioLevelEvent) => void): () => void {
+  if (!native) return () => {};
+  const emitter = new NativeEventEmitter(native as never);
+  const sub = emitter.addListener("walkthrough:audioLevel", listener);
+  return () => sub.remove();
+}
+
+/** The microphone went quiet and native is (or has stopped) restarting it — see `AudioStalledEvent`. */
+export function onAudioStalled(listener: (event: AudioStalledEvent) => void): () => void {
+  if (!native) return () => {};
+  const emitter = new NativeEventEmitter(native as never);
+  const sub = emitter.addListener("walkthrough:audioStalled", listener);
   return () => sub.remove();
 }
