@@ -1,5 +1,12 @@
 # Blocks a merge while the review bot has unresolved findings on the CURRENT head commit.
 #
+# ⚠️ BRANCH PROTECTION SHOULD REQUIRE THE STATUS CONTEXT `review-findings-gate`, NOT this workflow's own
+# check. The clean verdict arrives through issue_comment (a 👍 reaction fires no webhook, so the bot's
+# summary edit is the only observable event), and that run is associated with the default branch rather
+# than the PR head -- so its check cannot replace the failing head-associated one. The script therefore
+# writes a commit status directly against the fetched head SHA, which is last-write-wins per commit and
+# context, and that status is the signal to gate on.
+#
 # The pre-merge build gate answers "does it compile and pass tests". It does not answer "did anyone
 # object" — and on 2026-09-18 that gap let #1144 merge with four known findings, one of which made the
 # feature it shipped inert. Every check was green. Green was not the same as correct.
@@ -29,6 +36,10 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  # The verdict is published as a COMMIT STATUS on the PR head. That is what makes a clean result usable:
+  # it arrives via issue_comment, whose run is associated with the default branch, so a check produced by
+  # that run would land on the wrong commit and could never clear the PR. A status can name the head SHA.
+  statuses: write
 
 jobs:
   review-findings-gate:
@@ -36,8 +47,14 @@ jobs:
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      # TRUSTED CODE ONLY. Without an explicit ref, a pull_request run checks out the PR's own commit --
+      # so a PR could edit scripts/review-findings-gate.ts to return success and hand itself a green gate,
+      # which defeats the entire point once this is required. Pinning the default branch means the
+      # evaluator is always the reviewed, merged version regardless of what the PR contains.
+      - name: Check out the default branch (never the PR's own code)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

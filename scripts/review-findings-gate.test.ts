@@ -167,4 +167,51 @@ describe("isReviewBot", () => {
     expect(isReviewBot("coderabbitai[bot]")).toBe(false);
     expect(isReviewBot("greptile-apps[bot]")).toBe(false);
   });
+
+  // The gate's job is to be the thing that cannot be talked around, so attribution is an EXACT set.
+  // A substring match would trust any account that happens to contain "codex" in its name.
+  it("refuses a login that merely CONTAINS the bot's name", () => {
+    for (const impostor of ["codex", "not-codex", "codex-connector", "chatgpt-codex-connector-2", "my-codex-bot"]) {
+      expect(isReviewBot(impostor), impostor).toBe(false);
+    }
+  });
+});
+
+describe("attribution cannot be spoofed", () => {
+  it("a lookalike account cannot manufacture a clean verdict", () => {
+    // Exactly the shape a clean pass has — a 👍 plus a comment naming the head — from an account whose
+    // login merely contains "codex".
+    const result = decideReviewVerdict(
+      input({
+        reactions: [{ user: "codex-lookalike[bot]", content: "+1" }],
+        comments: [{ user: "codex-lookalike[bot]", body: `**Reviewed commit:** \`${HEAD.slice(0, 10)}\`` }],
+      })
+    );
+    expect(result.verdict).toBe("not-reviewed");
+  });
+});
+
+describe("dismissed reviews", () => {
+  it("a DISMISSED review on the head no longer blocks", () => {
+    const result = decideReviewVerdict(
+      input({
+        reviews: [{ user: BOT, commitId: HEAD, state: "DISMISSED" }],
+        reactions: [{ user: BOT_APP, content: "+1" }],
+        comments: [summaryReviewedCommit(HEAD)],
+      })
+    );
+    expect(result.verdict).toBe("clean");
+  });
+
+  it("CONTROL — a COMMENTED review on the head still blocks", () => {
+    const result = decideReviewVerdict(
+      input({ reviews: [{ user: BOT, commitId: HEAD, state: "COMMENTED" }] })
+    );
+    expect(result.verdict).toBe("findings");
+  });
+
+  it("a review with no state at all is treated as live, not dismissed", () => {
+    // Fail closed on missing data: an absent state must never read as "withdrawn".
+    expect(decideReviewVerdict(input({ reviews: [{ user: BOT, commitId: HEAD }] })).verdict).toBe("findings");
+  });
 });
