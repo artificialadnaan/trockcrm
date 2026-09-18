@@ -246,6 +246,26 @@ function sameAuditValue(from: unknown, to: unknown): boolean {
   return fs === ts;
 }
 
+/**
+ * `bidBoardLastUpdatedAt` is the EXPORT'S OWN clock, and it moves on every run whether or not the deal
+ * did. It is therefore the one field no comparison can ever settle — it really does change — and after
+ * the format fix (#1144) and the precision fix (#1151) it was the sole content of essentially every
+ * surviving mirror audit: measured across one post-deploy cycle, 837 rows carried it and 0 carried
+ * `bidBoardTotalSales`.
+ *
+ * A row saying only "the export's timestamp advanced" is the same claim `readOnlySyncedAt` was making in
+ * stage_metadata_refresh, and it gets the same answer: the sync's run metrics already record that the
+ * sync ran. It stays IN the row as context whenever something real moved — it is only barred from being
+ * the reason a row exists.
+ */
+const BOOKKEEPING_ONLY_FIELDS = new Set(["bidBoardLastUpdatedAt"]);
+
+/** True when the only thing that "changed" is bookkeeping, so the row would assert nothing. */
+function isBookkeepingOnly(changes: Record<string, { from: unknown; to: unknown }>): boolean {
+  const keys = Object.keys(changes);
+  return keys.length > 0 && keys.every((k) => BOOKKEEPING_ONLY_FIELDS.has(k));
+}
+
 /** Drop the pairs that did not move, so an audit row lists edits rather than the whole column set. */
 function onlyRealChanges(
   changes: Record<string, { from: unknown; to: unknown }>
@@ -261,7 +281,14 @@ function onlyRealChanges(
  * Internal seam for the audit-suppression tests. These two are pure and carry the whole judgement about
  * what counts as a change, so they are worth asserting directly rather than through a sync run.
  */
-export const __auditTestables = { sameAuditValue, onlyRealChanges };
+/** An empty map when only bookkeeping moved — logBidBoardActivity then writes nothing. */
+function bookkeepingSuppressed(
+  changes: Record<string, { from: unknown; to: unknown }>
+): Record<string, { from: unknown; to: unknown }> {
+  return isBookkeepingOnly(changes) ? {} : changes;
+}
+
+export const __auditTestables = { sameAuditValue, onlyRealChanges, bookkeepingSuppressed };
 
 
 function textValue(value: unknown): string | null {
@@ -1854,8 +1881,10 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           updateDeal,
           // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
           // claim a mirror move that did not happen.
-          onlyRealChanges(
-            buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled)
+          bookkeepingSuppressed(
+            onlyRealChanges(
+              buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled)
+            )
           ),
           { source: "bid_board_mirror", runId }
         );
