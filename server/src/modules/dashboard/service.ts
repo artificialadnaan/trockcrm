@@ -4308,9 +4308,25 @@ async function readMigrationSummary(_tenantDb: TenantDb, _activeOfficeId: string
 }
 
 async function readAuditSummary(tenantDb: TenantDb, _activeOfficeId: string) {
+  // A 24-HOUR NUMBER MUST BE BOUNDED BY A `where`, NOT BY AN AGGREGATE `filter`.
+  //
+  // This read `count(*) filter (where al.created_at >= ...) from audit_log al` with no `where` on the
+  // outer scan, so Postgres had to walk EVERY audit row to report one day. The cost therefore grew with
+  // total history rather than with the window being reported, and `office_dallas.audit_log` has reached
+  // 22.7M rows / 18 GB (Atlanta: 588), so the admin dashboard 500s in Dallas and nowhere else. Measured
+  // plans: the old shape costs 673,520 and the bounded one 1,707 — the same `audit_time_idx` serves it,
+  // it simply could not be used through a filter.
+  //
+  // Both halves are scalar subqueries so neither drives a scan of the whole table; EXPLAIN ANALYZE on
+  // production: the count 146ms (Index Cond on created_at), the last-actor lookup 0.047ms (Limit 1 over
+  // the same index, joining exactly one user row).
   const result = await tenantDb.execute(sql`
     select
-      count(*) filter (where al.created_at >= now() - interval '24 hours')::int as change_count_24h,
+      (
+        select count(*)::int
+        from audit_log
+        where created_at >= now() - interval '24 hours'
+      ) as change_count_24h,
       coalesce(
         (
           select coalesce(u.display_name, al_latest.changed_by::text)
@@ -4321,7 +4337,6 @@ async function readAuditSummary(tenantDb: TenantDb, _activeOfficeId: string) {
         ),
         'No recent changes'
       ) as last_actor_label
-    from audit_log al
   `);
   const row = (result as any).rows?.[0] ?? {};
   return {
