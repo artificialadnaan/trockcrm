@@ -171,9 +171,40 @@ describe("buildFilterBarCsvRows (export uses the canonical outcome-aware date ax
       "Stage",
       "Days",
       "Value",
+      "Bid Due Date",
       "Date",
     ]);
     expect(cell(rows, "Date")).toBe("2026-05-20"); // displayDate wins over the close date
+  });
+
+  it("exports the authoritative bid due date as a UTC calendar date and preserves an explicit cleared value", () => {
+    const resolved = buildFilterBarCsvRows(
+      [
+        makeDeal({
+          resolvedBidDueDate: "2026-07-03",
+          bidDueDate: "2026-08-01T00:00:00.000Z",
+        }),
+      ],
+      noMaps()
+    );
+    expect(cell(resolved, "Bid Due Date")).toBe("2026-07-03");
+
+    const cleared = buildFilterBarCsvRows(
+      [
+        makeDeal({
+          resolvedBidDueDate: null,
+          bidDueDate: "2026-08-01T00:00:00.000Z",
+        }),
+      ],
+      noMaps()
+    );
+    expect(cell(cleared, "Bid Due Date")).toBe("");
+
+    const legacyFallback = buildFilterBarCsvRows(
+      [makeDeal({ bidDueDate: "2026-07-03T00:00:00.000Z" })],
+      noMaps()
+    );
+    expect(cell(legacyFallback, "Bid Due Date")).toBe("2026-07-03");
   });
 
   it("falls back to the close date when displayDate is absent, and empty when there is no date", () => {

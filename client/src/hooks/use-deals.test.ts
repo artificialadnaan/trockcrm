@@ -186,6 +186,26 @@ function StageWindowDepsProbe() {
   return null;
 }
 
+let hookDealsEstimatorId: string | undefined;
+function DealsEstimatorProbe() {
+  useDeals({ estimatorId: hookDealsEstimatorId, scope: "all" });
+  return null;
+}
+
+let hookStageEstimatorId: string | undefined = "est-1";
+function StageEstimatorProbe() {
+  useDealStagePage({
+    stageId: "stage-estimating",
+    scope: "all",
+    page: 1,
+    pageSize: 25,
+    sort: "newest",
+    search: "",
+    filters: { staleOnly: false, estimatorId: hookStageEstimatorId },
+  });
+  return null;
+}
+
 function StageListFiltersProbe() {
   useDealStagePage({
     stageId: "stage-estimating",
@@ -321,6 +341,313 @@ async function renderStageResultProbe() {
   });
   return root;
 }
+
+/**
+ * A board probe whose `enabled` gate is controlled from the test. /deals holds its first fetch until the
+ * saved Rep/timeframe restore has decided, because that restore rewrites the URL — i.e. the board's own
+ * parameters — and fetching first meant issuing the 1.6-2.5s pipeline query twice per cold load.
+ */
+let hookBoardEnabled = true;
+let hookBoardSearch: string | undefined;
+let latestGatedResult: ReturnType<typeof useDealBoard> | null = null;
+function GatedBoardProbe() {
+  // Positional args: scope, includeDd, terminalDateFilters, previewLimit, wonPeriodRange,
+  // assignedRepId, estimateSentDateRange, estimatorId, options.
+  latestGatedResult = useDealBoard("mine", false, undefined, 50, null, undefined, undefined, undefined, {
+    enabled: hookBoardEnabled,
+    search: hookBoardSearch,
+  });
+  return null;
+}
+
+
+describe("normalizeDealBoardResponse — absent vs empty across the deploy window", () => {
+  /**
+   * The whole point: a client and a server ship in one PR but deploy as two services at different
+   * moments. Every field this PR added has to answer "does an API that predates it produce a WRONG
+   * board, or merely a degraded one?" — and anything that silently reads as a real value gets the
+   * absent-vs-empty treatment, because during the window it is shown to someone as if it were true.
+   */
+  const legacyPayload = () => ({
+    pipelineColumns: [
+      {
+        stage: { id: "stage-1", name: "Opportunity", slug: "opportunity" },
+        count: 45,
+        totalValue: 1000,
+        deals: [],
+      },
+    ],
+    terminalStages: [],
+  });
+
+  it("keeps an ABSENT pendingRfpDeals undefined so the carve-out fallback can fire", () => {
+    const normalized = normalizeDealBoardResponse(legacyPayload() as never);
+    expect(normalized.pendingRfpCards).toBeUndefined();
+  });
+
+  it("keeps an EXPLICITLY EMPTY pendingRfpDeals as an empty array", () => {
+    const normalized = normalizeDealBoardResponse({
+      ...legacyPayload(),
+      pendingRfpDeals: [],
+    } as never);
+    expect(normalized.pendingRfpCards).toEqual([]);
+    expect(normalized.pendingRfpCards).not.toBeUndefined();
+  });
+
+  it("keeps an ABSENT column totalCount undefined instead of substituting the ACTIVE count", () => {
+    const normalized = normalizeDealBoardResponse(legacyPayload() as never);
+    // `count` is the non-on-hold figure while `cards` includes held rows, so quoting it as a row total
+    // is what let a truncated column look complete.
+    expect(normalized.columns[0]!.totalCount).toBeUndefined();
+    expect(normalized.columns[0]!.count).toBe(45);
+  });
+
+  it("nulls an ABSENT or MALFORMED boardSummary so consumers take their card-derived fallback", () => {
+    expect(normalizeDealBoardResponse(legacyPayload() as never).summary).toBeNull();
+    // A summary missing the totalCount this PR added is not usable either — better to fall back wholly
+    // than to read a missing field as zero.
+    expect(
+      normalizeDealBoardResponse({
+        ...legacyPayload(),
+        boardSummary: { atRiskByStageSlug: {}, pendingRfp: { count: 1, totalValue: 2 } },
+      } as never).summary
+    ).toBeNull();
+  });
+
+  it("passes a COMPLETE boardSummary through untouched", () => {
+    const summary = {
+      atRiskByStageSlug: { opportunity: { service: 1, nonService: 2 } },
+      pendingRfp: { count: 3, totalCount: 4, totalValue: 5 },
+    };
+    expect(normalizeDealBoardResponse({ ...legacyPayload(), boardSummary: summary } as never).summary).toEqual(
+      summary
+    );
+  });
+});
+
+describe("useDealBoard — the enabled gate", () => {
+  beforeEach(() => {
+    latestGatedResult = null;
+    hookBoardEnabled = true;
+    vi.mocked(api).mockReset();
+  });
+
+  it("issues NO request while disabled, and keeps reporting loading so the page shows its spinner", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = false;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock).not.toHaveBeenCalled();
+    // NOT settled to false: an empty board rendered as "loaded" is a flash of "no deals".
+    expect(latestGatedResult?.loading).toBe(true);
+    expect(latestGatedResult?.board).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("OPTS IN to the board-aggregates contract on the request URL", async () => {
+    /**
+     * The one line this asserts is `boardAggregates: "true"` in useDealBoard's param builder, and its
+     * absence is completely SILENT — which is why it needs a test rather than a comment.
+     *
+     * Drop it and the server (default OFF) omits `boardSummary`; the page's serverOmitsBoardSummary latch
+     * then sees a summary-less response and reverts the board to 1000-card requests, where every
+     * card-derived fallback is correct again. So every number on the page stays RIGHT, nothing looks
+     * broken, and the entire point of this work — the small card slice and the server-side aggregates —
+     * just stops happening. Nothing else in the client suite references the flag.
+     *
+     * It also lives in use-deals.ts, one of the files that conflicted when main was merged in, i.e.
+     * exactly where a future conflict resolution could drop it without anything going red.
+     */
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+
+    const url = String(apiMock.mock.calls[0]![0]);
+    expect(url).toContain("boardAggregates=true");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("issues exactly ONE request once enabled", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(String(apiMock.mock.calls[0]![0])).toContain("/deals/pipeline?");
+    expect(String(apiMock.mock.calls[0]![0])).toContain("previewLimit=50");
+    expect(String(apiMock.mock.calls[0]![0])).toContain("boardAggregates=true");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * The board's text search is a REQUEST parameter, not a filter over the cards already in hand. Once the
+   * board began fetching a 50-card slice per column (#1074), a client-side filter could only ever search
+   * that slice — the board reported 0/0 for deals sitting in the database.
+   */
+  it("carries the search term into the pipeline request", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = "bellemont victoria";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    const url = String(apiMock.mock.calls[0]![0]);
+    // URLSearchParams encodes the space; decode so the assertion is about the TERM, not the encoding.
+    expect(decodeURIComponent(new URL(url, "https://x.test").searchParams.get("search") ?? "")).toBe(
+      "bellemont victoria"
+    );
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    hookBoardSearch = undefined;
+    vi.unstubAllGlobals();
+  });
+
+  it("reports the term the RESOLVED board was fetched with, so callers can build links from it", async () => {
+    // Callers build drill-down destinations from this. It must describe the response in state, never the
+    // request in flight — otherwise a link opens a cohort different from the numbers being displayed.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = "bellemont victoria";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(latestGatedResult?.appliedSearch).toBe("bellemont victoria");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    hookBoardSearch = undefined;
+    vi.unstubAllGlobals();
+  });
+
+  it("reports an EMPTY applied term for an unsearched board", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = undefined;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(latestGatedResult?.appliedSearch).toBe("");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("omits the search parameter entirely when the box is empty or whitespace", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+    hookBoardSearch = "   ";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    // A `search=` with no value would be a no-op on the server, but sending it makes every unsearched
+    // board load carry a meaningless parameter and muddies the request key.
+    expect(String(apiMock.mock.calls[0]![0])).not.toContain("search=");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    hookBoardSearch = undefined;
+    vi.unstubAllGlobals();
+  });
+});
 
 describe("normalizeDealBoardResponse", () => {
   beforeEach(() => {
@@ -976,6 +1303,82 @@ describe("normalizeDealBoardResponse", () => {
     vi.unstubAllGlobals();
   });
 
+  it("refetches the LIST when estimatorId changes (its dep list is explicit scalars)", async () => {
+    // Codex #1067 round-4 P1. useDeals memoizes fetchDeals on an explicit scalar dep list rather than the
+    // filters object, so a field missing there is not a lint nit: fetchDeals keeps its identity, the
+    // effect never re-runs, and the list holds its previous rows, pagination and value total while the
+    // board above refetches with the new estimator.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ deals: [], pagination: { page: 1, limit: 50, total: 0, totalPages: 0 } });
+    hookDealsEstimatorId = undefined;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(DealsEstimatorProbe));
+      await flushEffects();
+    });
+    const callsBefore = apiMock.mock.calls.length;
+
+    hookDealsEstimatorId = "est-1";
+    await act(async () => {
+      root.render(createElement(DealsEstimatorProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBefore);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain("estimatorId=est-1");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("sends estimatorId on the stage summary request, and refetches when it changes", async () => {
+    // Codex #1067 round-2 P1. The stage LIST was narrowed by the estimator while this summary hook — which
+    // computes the header count and value above it — still asked for every estimator's deals. Two failure
+    // modes, so two assertions: the param must be serialized, and it must be in the effect deps or the
+    // header keeps a stale total when only the estimator changes.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({
+      stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+      summary: { count: 1, totalValue: 15000, averageDaysInStage: 3 },
+      pagination: { page: 1, pageSize: 25, total: 1, totalPages: 1 },
+      rows: [],
+    });
+    hookStageEstimatorId = "est-1";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(StageEstimatorProbe));
+      await flushEffects();
+    });
+
+    expect(String(apiMock.mock.calls[0]?.[0])).toContain("estimatorId=est-1");
+
+    hookStageEstimatorId = "est-2";
+    await act(async () => {
+      root.render(createElement(StageEstimatorProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(1);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain("estimatorId=est-2");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("refetches the stage summary when the Won window changes (deps include the terminal window)", async () => {
     const apiMock = vi.mocked(api);
     apiMock.mockResolvedValue({
@@ -1181,6 +1584,62 @@ describe("useDeals", () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it("refetches when Pending RFP is toggled alongside an unchanged real stage", async () => {
+    // The stage multi-select stores the real stage id separately from the synthetic Pending RFP
+    // flag. Toggling only that checkbox must still make a new request; otherwise the list keeps
+    // showing the previous stage-only population until some unrelated filter changes.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ deals: [], pagination: { page: 1, limit: 50, total: 0, totalPages: 0 } });
+    hookDealFilters = { scope: "all", stageIds: ["stage-estimating"] };
+    const root = await renderDealsHook();
+    const callsBeforePending = apiMock.mock.calls.length;
+
+    hookDealFilters = { scope: "all", stageIds: ["stage-estimating"], pendingRfpOnly: true };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBeforePending);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain(
+      "pendingRfpOnly=true"
+    );
+
+    const callsBeforeClear = apiMock.mock.calls.length;
+    hookDealFilters = { scope: "all", stageIds: ["stage-estimating"] };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBeforeClear);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).not.toContain(
+      "pendingRfpOnly="
+    );
+
+    const callsBeforeSeparateOpportunity = apiMock.mock.calls.length;
+    hookDealFilters = {
+      scope: "all",
+      stageIds: ["stage-estimating"],
+      excludePendingRfpFromOpportunity: true,
+    };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBeforeSeparateOpportunity);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain(
+      "excludePendingRfpFromOpportunity=true"
+    );
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
   });
 
   // Proving-ground guarantee for the unified search rollout: debounce reduces but does not

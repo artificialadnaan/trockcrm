@@ -393,7 +393,7 @@ export function CompanyDetailPage() {
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
-            <Button variant="outline" size="icon" className="size-11 md:size-8">
+            <Button variant="outline" size="icon" className="size-11 md:size-8" aria-label="More actions for this company">
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           }
@@ -491,7 +491,7 @@ export function CompanyDetailPage() {
 
       {/* Add Contact Dialog */}
       <Dialog open={addContactOpen} onOpenChange={setAddContactOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add Contact to {company.name}</DialogTitle>
           </DialogHeader>

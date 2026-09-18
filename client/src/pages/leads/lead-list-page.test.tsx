@@ -9,6 +9,15 @@ const mocks = vi.hoisted(() => ({
   useLeadsMock: vi.fn(),
   useAuthMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
+  // Typed rather than inferred from the empty literal, which would widen to never[] and fail to compile
+  // in any test that supplies a real roster.
+  useRepRosterMock: vi.fn(() => ({
+    reps: [] as Array<{ id: string; displayName: string; group?: "sales" | "estimator" }>,
+    loading: false,
+    error: null as string | null,
+    loadedOfficeId: null as string | null,
+    refetch: vi.fn(),
+  })),
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -47,6 +56,12 @@ vi.mock("@/hooks/use-leads", () => ({
 
 vi.mock("@/hooks/use-task-assignees", () => ({
   useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+// Defaults to an empty roster, which is what the unmocked hook effectively produced here anyway. Mocked
+// so the sales-only assertion below can supply a real one without the hook issuing its own api() call.
+vi.mock("@/hooks/use-rep-roster", () => ({
+  useRepRoster: mocks.useRepRosterMock,
 }));
 
 vi.mock("@/components/ui/select", () => ({
@@ -295,6 +310,28 @@ describe("LeadListPage", () => {
   it("loads summary leads with the active scope when role is director", () => {
     renderPage("/leads?scope=all", "director");
     expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: true, scope: "all" });
+  });
+
+  it("offers sales reps only — a lead has an owner and no estimator at all", () => {
+    // leads.estimator_user_id does not exist, so this control can only ever filter by owner. Offering an
+    // estimator would reproduce the exact bug the Estimators group was added to fix on the deals board: a
+    // name you can pick that always returns nothing.
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [
+        { id: "rep-7", displayName: "Chase Kelly", group: "sales" as const },
+        { id: "est-1", displayName: "Sidney Gibson", group: "estimator" as const },
+      ],
+      loading: false,
+      error: null,
+      loadedOfficeId: null,
+      refetch: vi.fn(),
+    });
+
+    // Admin/director + a non-mine scope is what makes the rep filter visible at all.
+    const html = renderPage("/leads?scope=all", "director");
+
+    expect(html).toContain("Chase Kelly");
+    expect(html).not.toContain("Sidney Gibson");
   });
 
   it("renders selected owner filter names instead of raw selected owner ids", () => {

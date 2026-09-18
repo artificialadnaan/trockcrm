@@ -3,7 +3,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
-import { getOwnerInitialColor, getSlaPolicy, type AtRiskResult } from "@trock-crm/shared/types";
+import {
+  getOwnerInitialColor,
+  getSlaPolicy,
+  PENDING_RFP_ATTENTION_STATUSES,
+  PENDING_RFP_AWAITING_STATUSES,
+  type AtRiskResult,
+} from "@trock-crm/shared/types";
 import { DecoratedKanbanCard } from "./decorated-kanban-card";
 import type { Deal } from "@/hooks/use-deals";
 
@@ -458,5 +464,61 @@ describe("DecoratedKanbanCard", () => {
     );
 
     expect(html).not.toContain('data-on-hold="true"');
+  });
+});
+
+describe("DecoratedKanbanCard — Pending RFP needs-action marking", () => {
+  // Table-driven over the SHARED status lists, never a hand-picked pair. Hand-listing "pending" as the
+  // awaiting case would let an implementation written as `status === "pending" ? … : attention` pass
+  // every assertion while marking every pending_outbox card as needing action — the precise inversion
+  // this feature exists to prevent.
+
+  const ATTENTION_LABELS: Record<string, string> = {
+    send_failed: "Send failed",
+    declined: "Declined",
+    conflict: "Conflict",
+  };
+
+  for (const status of PENDING_RFP_ATTENTION_STATUSES) {
+    it(`marks a ${status} card in the Pending RFP column, with its own label`, () => {
+      const html = renderDeal(makeDeal({ rfpApprovalStatus: status }), "pending_rfp");
+
+      expect(html).toContain('data-testid="pending-rfp-attention-chip"');
+      expect(html).toContain(ATTENTION_LABELS[status]);
+    });
+  }
+
+  for (const status of PENDING_RFP_AWAITING_STATUSES) {
+    it(`leaves a ${status} card unmarked — the parked majority is what makes the marked minority visible`, () => {
+      const html = renderDeal(makeDeal({ rfpApprovalStatus: status }), "pending_rfp");
+
+      expect(html).not.toContain('data-testid="pending-rfp-attention-chip"');
+    });
+  }
+
+  it("leaves a card with no RFP status unmarked", () => {
+    const html = renderDeal(makeDeal({ rfpApprovalStatus: null }), "pending_rfp");
+
+    expect(html).not.toContain('data-testid="pending-rfp-attention-chip"');
+  });
+
+  it("does NOT mark an attention deal outside the Pending RFP column", () => {
+    // The gate. A deal keeps its rfp_approval_status after leaving the bucket, so without the column
+    // check the mark would follow it onto Opportunity and every other board column.
+    const html = renderDeal(makeDeal({ rfpApprovalStatus: "send_failed" }), "opportunity");
+
+    expect(html).not.toContain('data-testid="pending-rfp-attention-chip"');
+  });
+
+  it("states the reason in the accessible name, so colour is not the only carrier", () => {
+    const html = renderDeal(makeDeal({ rfpApprovalStatus: "send_failed" }), "pending_rfp");
+
+    expect(html).toContain("RFP send failed");
+  });
+
+  it("keeps the accessible name unchanged for an unmarked card", () => {
+    const html = renderDeal(makeDeal({ rfpApprovalStatus: "pending" }), "pending_rfp");
+
+    expect(html).not.toContain("RFP ");
   });
 });

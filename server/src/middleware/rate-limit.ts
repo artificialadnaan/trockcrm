@@ -76,3 +76,127 @@ export const correctiveActionPublicLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: { message: "Too many requests, please try again later" } },
 });
+
+// The public weekly-report viewer (/wr/:token), which is unauthenticated and mounted outside apiLimiter.
+// Every request reaches the database, and the photo route additionally buffers an original from R2 and
+// re-encodes it with sharp — the expensive part, and the reason a cap belongs in front of it.
+//
+// Keyed by IP, reusing correctiveActionIpKey for the same reason it exists: keying by IP+token would hand a
+// scanner a fresh bucket per guessed token, since a forged token only has to pass a 43-character shape gate
+// to reach the lookup at all.
+//
+// Sizing: ONE page load is 1 HTML + up to 60 photos + 1 PDF ≈ 62 requests. A client refreshing, or several
+// people behind one corporate NAT reading the same report, must not trip it — 300/min clears roughly four
+// full page loads a minute while a scanning flood still stops.
+const WEEKLY_REPORT_PUBLIC_LIMIT = 300;
+export const weeklyReportPublicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: WEEKLY_REPORT_PUBLIC_LIMIT,
+  keyGenerator: correctiveActionIpKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Too many requests, please try again later",
+});
+
+// The mail provider's delivery webhook (/api/webhooks/resend), which is world-reachable and verifies a
+// signature over the request body. That HMAC is the work an unauthenticated caller can force — cheap per
+// request, not cheap at volume, and reachable by anyone who learns the URL.
+//
+// SIZED SO THE PROVIDER CANNOT TRIP IT. This is not a CRM surface where a 429 costs somebody a refresh:
+// the webhook is configured per provider ACCOUNT, so every system email this company sends — scorecards,
+// RFP mail, project-number notifications, weekly reports — produces events here, and a burst is normal
+// (one send to four recipients emits sent/delivered/opened events within seconds). The provider does retry
+// a non-2xx, so a trip is recoverable rather than lost, but a limiter that fires on ordinary traffic
+// converts real delivery facts into delayed ones for no benefit. 600/min is roughly an order of magnitude
+// above the busiest minute this account has ever had.
+//
+// Keyed by IP, like its siblings: the provider sends from a small stable set, so legitimate traffic shares
+// a bucket that an unrelated flood cannot consume.
+const WEEKLY_REPORT_DELIVERY_WEBHOOK_LIMIT = 600;
+export const weeklyReportDeliveryWebhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: WEEKLY_REPORT_DELIVERY_WEBHOOK_LIMIT,
+  keyGenerator: correctiveActionIpKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: "Too many requests, please try again later" } },
+});
+
+/**
+ * The weekly-report dictation pass, which is the only authenticated route in this app that spends money
+ * per call.
+ *
+ * It reaches Anthropic with `claude-opus-5` on every request, up to MAX_ATTEMPTS times, and every field
+ * account in the company can authenticate against the surface it is mounted on. The per-CALL cost is
+ * already bounded — the transcript is capped at 4k chars and the output at the section ceiling — but
+ * nothing bounded calls per ACTOR, so a stuck retry loop in the app, or one stolen field token, could
+ * spend without limit and the first sign of it would be an invoice.
+ *
+ * KEYED BY USER, NOT IP, unlike every other limiter in this file. Those protect unauthenticated surfaces
+ * where the IP is the only identity available. Here the caller is authenticated before this runs, and IP
+ * is actively the wrong key: a crew on one jobsite shares a cellular NAT, so an IP bucket would let one
+ * superintendent's runaway exhaust the budget of everyone standing next to them. The actor who spends the
+ * money is the account.
+ *
+ * MOUNTED AFTER `requireFieldContractor` so `req.fieldUser` exists. That also means an unauthenticated
+ * flood is refused by auth without consuming anyone's bucket.
+ *
+ * SIZED WELL ABOVE HUMAN USE, because tripping it is invisible and cheap: the phone swallows any 4xx and
+ * falls back to its on-device bullet split (mobile/src/weekly-reports/dictation.ts), so a superintendent
+ * who somehow hit this still gets their words formatted into the same editable box. The recorder stops
+ * itself at 60 seconds, so a person cannot physically produce more than about one transcript a minute per
+ * section; 30 is an order of magnitude above the busiest real session and still stops a loop dead.
+ */
+/**
+ * Per-USER, shared by both dictation limiters so a burst bucket and a daily bucket can never disagree
+ * about whose spend they are counting.
+ *
+ * Falling back to IP rather than to a single shared bucket: a constant key would put every caller whose id
+ * could not be read into one bucket, which is a self-inflicted outage rather than a limit.
+ */
+function weeklyReportDictationKey(req: Request): string {
+  const id = (req as Request & { fieldUser?: { id?: unknown } }).fieldUser?.id;
+  return typeof id === "string" && id ? `user:${id}` : `ip:${correctiveActionIpKey(req)}`;
+}
+
+/**
+ * THE BURST LIMIT ALONE DOES NOT BOUND SPEND, which is the point of the second limiter below.
+ *
+ * A 60-second window replenishes. A loop pacing itself at one call every two seconds never trips 30/min
+ * and still runs 43,200 requests a day — up to twice that in model attempts — so the guard that was
+ * supposed to cap runaway cost would have capped only its SHAPE. A faster loop is no better off in the
+ * end: it simply spends its allowance, sleeps, and resumes when the next window opens.
+ *
+ * So the burst limit stops a hot loop from hammering the provider, and the daily cap is what actually
+ * bounds the bill. Both are keyed per user, for the same reason.
+ *
+ * SIZED AGAINST REAL USE, NOT AGAINST THE BURST NUMBER. A superintendent files one report a week per
+ * project across a handful of sections; even a PM covering several jobsites and re-recording freely is in
+ * the low tens of dictations a day. 200 is far above that and roughly two orders of magnitude below what
+ * an unbounded loop would spend.
+ *
+ * WHAT THIS DOES NOT DO, stated plainly because a limiter is exactly the thing that gets trusted for more
+ * than it does: the store is in-process memory, so the count resets on deploy or restart and is not shared
+ * across instances. That is a real hole and a deliberate trade — a durable quota needs a table and a write
+ * on every dictation, which is a larger change than this follow-up. What it buys is that the runaway and
+ * stolen-token cases this was raised for now stop within a day instead of never.
+ */
+const WEEKLY_REPORT_DICTATION_DAILY_LIMIT = 200;
+export const weeklyReportDictationDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: WEEKLY_REPORT_DICTATION_DAILY_LIMIT,
+  keyGenerator: weeklyReportDictationKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: "Daily dictation limit reached, please try again tomorrow" } },
+});
+
+const WEEKLY_REPORT_DICTATION_LIMIT = 30;
+export const weeklyReportDictationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: WEEKLY_REPORT_DICTATION_LIMIT,
+  keyGenerator: weeklyReportDictationKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: "Too many dictation requests, please try again in a minute" } },
+});

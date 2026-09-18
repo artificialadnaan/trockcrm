@@ -26,10 +26,12 @@ import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  deals,
   estimateDocumentParseRuns,
   estimateExtractions,
   estimateSourceDocuments,
   files,
+  users,
 } from "@trock-crm/shared/schema";
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
@@ -133,17 +135,40 @@ const PAYLOAD: WalkthroughIngressPayload = {
 
 beforeAll(async () => {
   pg = new PGlite();
-  // Only the four tables the ingress chain itself writes: this file never reads the workbench, so the
-  // market/pricing/deal tables that suite needs are not on any read path here.
+  // The four tables the ingress chain writes, plus `deals` — which is on the WRITE path now: R21 has
+  // `ingestWalkthrough` re-read and lock the deal inside its own transaction, so an ingress against a
+  // schema with no `deals` relation fails at that statement rather than at the assertion under test.
+  // This file still never reads the workbench, so the market/pricing tables that suite needs stay out.
   await pg.exec(
     tenantSchemaSql("public", [
       files,
       estimateSourceDocuments,
       estimateDocumentParseRuns,
       estimateExtractions,
+      deals,
+      // Also on the write path: the ingress locks the ACTOR as well as the deal, because
+      // `payload.userId` is stamped on `files.uploaded_by`. `users` is a PUBLIC table, which is why a
+      // capturer from another office resolves here at all.
+      users,
     ])
   );
   tenantDb = drizzle(pg);
+  // Active, because that is what the lock requires. Every payload in this file targets DEAL, and the
+  // defects it characterizes are about ROW CONTENT — a missing deal would turn each of them into the
+  // same 404 and the file would assert nothing it claims to.
+  await tenantDb.insert(deals).values({
+    id: DEAL,
+    dealNumber: "CH-0001",
+    name: "Walkthrough characterization deal",
+    stageId: U("c7777"),
+  });
+  await tenantDb.insert(users).values({
+    id: USER,
+    email: "characterization@example.com",
+    displayName: "Characterization Capturer",
+    role: "rep",
+    officeId: U("c8888"),
+  });
 }, 60_000);
 
 afterAll(async () => {

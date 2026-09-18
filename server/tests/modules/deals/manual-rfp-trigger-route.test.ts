@@ -396,6 +396,45 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(insertRfpJobMock).not.toHaveBeenCalled();
   });
 
+  // A DETACHED deal advanced past Opportunity is the one stage-mismatch worth explaining. This route is
+  // the only path that can create a replacement Bid Board project, every Bid Board ingress skips
+  // detached rows, and the estimating-boundary handoff no longer re-attaches — so "trigger RFP" is
+  // genuinely unavailable until the deal is moved back to Opportunity again. That is recoverable (the
+  // move-back works from any stage), which is why the forward transition is NOT blocked; what it is not
+  // is guessable from a bare "can only be triggered from Opportunity stage". Same status and code — the
+  // fix is that the sentence now names the cause and the way out.
+  it("tells a DETACHED deal outside Opportunity how to recover, not just that the stage is wrong", async () => {
+    const { req } = makeReq({
+      stageSlug: "estimating",
+      deal: { bidBoardDetachedAt: new Date("2026-07-20T15:00:00.000Z") },
+    });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string; message: string };
+    expect(err.statusCode).toBe(400);
+    expect(err.code).toBe("RFP_WRONG_STAGE");
+    expect(err.message).toContain("disconnected from Bid Board sync");
+    expect(err.message).toContain("move it back to Opportunity again");
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+  });
+
+  // The ordinary (never-detached) stage mismatch keeps the short message — the detached advice would be
+  // wrong for it, and a rep who simply picked the wrong deal does not need a Bid Board explanation.
+  it("keeps the plain stage-mismatch message for a deal that was never detached", async () => {
+    const { req } = makeReq({ stageSlug: "estimating" });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { code: string; message: string };
+    expect(err.code).toBe("RFP_WRONG_STAGE");
+    expect(err.message).toBe("RFP review can only be triggered from Opportunity stage.");
+  });
+
   it("rejects incomplete Opportunity scope", async () => {
     const { req } = makeReq({ readinessStatus: "draft" });
     evaluateReadinessMock.mockResolvedValueOnce({

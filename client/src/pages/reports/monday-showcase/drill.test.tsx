@@ -6,6 +6,7 @@ import { VariantExecHero, VariantB3LoadLane } from "./variants";
 import { DrillProvider } from "./drill";
 import { SHOWCASE_VARIANTS, UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, EvidenceRequest, DepartmentMetric } from "./types";
+import { emptyEstimatingReport } from "./test-fixtures";
 
 // The hybrid Exec survivor (consolidation Group 1) reads data.departments (where deltaCountWoW + sparkline
 // live). The contract (assembleMondayShowcase): the THREE non-deferred departments (estimating/sent/won)
@@ -75,6 +76,7 @@ const base: MondayShowcaseData = {
   officeProjection: { bands: [], coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: "" },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  estimatingReport: emptyEstimatingReport(),
   routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 };
@@ -101,15 +103,15 @@ function clickButtonContaining(text: string) {
 }
 
 describe("Monday showcase consolidation", () => {
-  it("registry no longer offers the removed A1 / A2 / B1 variants", () => {
+  it("registry offers the new A1 report after Exec and keeps only A2 / B1 removed", () => {
     const keys = SHOWCASE_VARIANTS.map((v) => v.key);
-    expect(keys).not.toContain("A1");
     expect(keys).not.toContain("A2");
     expect(keys).not.toContain("B1");
     // Survivors of the consolidation stay selectable.
-    expect(keys).toEqual(expect.arrayContaining(["A3", "HERO", "B2", "B3", "B4"]));
+    expect(keys).toEqual(expect.arrayContaining(["A1", "A3", "HERO", "B2", "B3", "B4"]));
     // HERO (the hybrid survivor) must still exist so the page's useState("HERO") default is valid.
     expect(keys).toContain("HERO");
+    expect(keys.indexOf("A1")).toBe(keys.indexOf("HERO") + 1);
   });
 
   it("hybrid Exec survivor renders all FOUR tiles; the 3 non-deferred carry a WoW chip + sparkline, Collected renders deferred", () => {

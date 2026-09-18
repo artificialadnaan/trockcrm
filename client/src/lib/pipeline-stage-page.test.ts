@@ -198,6 +198,22 @@ describe("getStagePageBarRedirectSearch (translate inherited bare filters -> fb_
     expect(getStagePageBarRedirectSearch(parse("scope=team&page=2&fb_search=x"))).toBeNull();
   });
 
+  it("gives the estimator precedence on a direct URL carrying BOTH dimensions (Codex #1067 P2)", () => {
+    // The link builders no longer emit both, but a bookmarked or hand-edited stage URL still can. Left
+    // alone, the owner became the VISIBLE fb_assignedRepId control while estimatorId stayed an invisible
+    // base filter — the two AND, so the page is narrower than the one control on screen explains, and
+    // clearing that control leaves it filtered anyway.
+    const out = parse(getStagePageBarRedirectSearch(parse("scope=all&assignedRepId=rep-1&estimatorId=est-1"))!);
+    expect(out.get("estimatorId")).toBe("est-1");
+    expect(out.get("fb_assignedRepId")).toBeNull();
+    expect(out.get("assignedRepId")).toBeNull();
+  });
+
+  it("still translates the owner when NO estimator is present", () => {
+    const out = parse(getStagePageBarRedirectSearch(parse("scope=all&assignedRepId=rep-1"))!);
+    expect(out.get("fb_assignedRepId")).toBe("rep-1");
+  });
+
   it("translates bar-mappable bare filters to fb_ and strips ALL bare filter params", () => {
     const result = getStagePageBarRedirectSearch(parse("scope=team&assignedRepId=rep-1&regionId=reg-1&updatedAfter=2026-05-01"));
     const out = parse(result!);
@@ -214,5 +230,20 @@ describe("getStagePageBarRedirectSearch (translate inherited bare filters -> fb_
     const out = parse(getStagePageBarRedirectSearch(parse("assignedRepId=rep-1&fb_assignedRepId=rep-9"))!);
     expect(out.get("fb_assignedRepId")).toBe("rep-9");
     expect(out.has("assignedRepId")).toBe(false);
+  });
+});
+
+describe("normalizeStagePageQuery — owner/estimator precedence", () => {
+  it("drops assignedRepId when estimatorId is present (pre-redirect first paint)", () => {
+    // Both bare params are still on the URL for the first paint, before the bar redirect runs. Without
+    // this the summary and list AND the two dimensions for that render.
+    const q = normalizeStagePageQuery({ assignedRepId: "rep-1", estimatorId: "est-1" });
+    expect(q.filters.estimatorId).toBe("est-1");
+    expect(q.filters.assignedRepId).toBeUndefined();
+  });
+
+  it("keeps assignedRepId when no estimator is present", () => {
+    const q = normalizeStagePageQuery({ assignedRepId: "rep-1" });
+    expect(q.filters.assignedRepId).toBe("rep-1");
   });
 });

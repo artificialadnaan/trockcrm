@@ -37,6 +37,7 @@ import { procoreWebhookRoutes } from "./modules/procore/webhook-routes.js";
 import { syncHubRoutes } from "./modules/procore/synchub-routes.js";
 import { syncHubProcoreRelayRoutes } from "./modules/synchub/procore-project-relay-routes.js";
 import { bidBoardSyncRoutes } from "./modules/bid-board-sync/routes.js";
+import { scopeIngestRoutes } from "./modules/estimating/scope-ingest-routes.js";
 import { internalRfpRoutes } from "./modules/internal-rfp/routes.js";
 import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.js";
 import { migrationRouter } from "./modules/migration/routes.js";
@@ -52,6 +53,12 @@ import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
 import { fieldRoutes } from "./modules/field/routes.js";
 import { fieldRespondersRoutes } from "./modules/field/field-responders-routes.js";
+import { weeklyReportRoutes } from "./modules/weekly-reports/routes.js";
+import marketingExpenseRoutes from "./modules/marketing-expense/routes.js";
+import { weeklyReportPublicRoutes } from "./modules/weekly-reports/public-routes.js";
+import { weeklyReportDeliveryWebhookRoutes } from "./modules/weekly-reports/delivery-webhook-routes.js";
+import { CORE_WEEKLY_REPORT_API_BASE_PATH } from "./modules/weekly-reports/core-api-contracts.js";
+import { createCoreWeeklyReportApiRouter } from "./modules/weekly-reports/core-api-routes.js";
 import {
   adminPhotoTokenRoutes,
   publicPhotoViewerRoutes,
@@ -75,6 +82,33 @@ import {
   isValidFieldCsrfHeader,
 } from "./modules/auth/http-config.js";
 import { getSecurityOptions } from "./middleware/security.js";
+
+// SPA routes whose URL IS a credential — the token is either the path segment (/p/<token>) or the
+// query string (/reset-password?token=..., /daily-summary/<date>?token=...). The document those URLs
+// load must not hand the URL to anything it subsequently talks to, so it is served `no-referrer`.
+//
+// This is deliberately per-response and NOT a `<meta name="referrer" content="no-referrer">` in
+// client/index.html: that file is the single shell every route loads, so a meta tag there is a global
+// policy — and a global `no-referrer` is precisely the P0 in security.ts (browsers then send
+// `Origin: null` on same-origin writes and the cookie-auth allowlist 403s every mutation in the CRM).
+// Narrowing it to the documents that actually carry a token keeps the incident from recurring.
+const TOKENIZED_SPA_PATHS = ["/reset-password", "/p", "/daily-summary"];
+
+// /scorecards/:id/corrective-action is tokenized too — AuthGate lets it through unauthenticated
+// precisely because its ?token authorizes the flow — but it CANNOT go in the prefix list above. A
+// "/scorecards" prefix would also match the authenticated scorecard pages, which are write-heavy, and
+// putting no-referrer on those is the #1077 P0 again. Anchored to the exact shape instead.
+const TOKENIZED_SPA_PATTERNS = [/^\/scorecards\/[^/]+\/corrective-action$/];
+
+// Whole-segment matching, not `startsWith`. `/p` as a bare prefix would swallow `/properties` and
+// `/pipeline` — the pages people do most of their WRITING from — and putting `no-referrer` on those
+// documents is the P0 all over again, just wearing a smaller blast radius.
+function isTokenizedSpaPath(pathname: string): boolean {
+  if (TOKENIZED_SPA_PATHS.some((base) => pathname === base || pathname.startsWith(`${base}/`))) {
+    return true;
+  }
+  return TOKENIZED_SPA_PATTERNS.some((pattern) => pattern.test(pathname));
+}
 
 export function createApp() {
   const app = express();
@@ -110,9 +144,26 @@ export function createApp() {
   // Mounted before express.json() so HMAC verification uses the raw body.
   app.use("/api/bid-board-sync", bidBoardSyncRoutes);
 
+  // TROCK Scope's walkthrough-scope ingest — the ONE machine door into estimating. Signed integration
+  // route, mounted here with its siblings and before express.json() so the HMAC covers the raw bytes.
+  // The tenant comes from the signed body's officeSlug rather than from a session, which is why it
+  // cannot live on tenantRouter with the human-facing estimating routes.
+  app.use("/api/integrations/scope", scopeIngestRoutes);
+
   // Internal SyncHub RFP callbacks — signed integration routes. Mounted before
   // express.json() so HMAC verification uses the original raw body bytes.
   app.use("/api/internal", internalRfpRoutes);
+
+  // The mail provider's delivery webhook — what actually happened to a weekly report AFTER the provider
+  // accepted it (delivered, bounced, reported as spam). Public and signature-verified, and mounted here
+  // with the other signed integrations because the signature covers the RAW bytes: once express.json()
+  // has parsed and discarded them there is nothing left to verify against.
+  app.use("/api/webhooks/resend", weeklyReportDeliveryWebhookRoutes);
+
+  // Read-only Core -> CRM weekly-report integration. The router owns a bounded raw parser because both
+  // the exact-body HMAC and the independent Ed25519 Core-workload assertion cover the original bytes.
+  // It remains content-free 404 while dark and fail-closed 503 for incomplete key configuration.
+  app.use(CORE_WEEKLY_REPORT_API_BASE_PATH, createCoreWeeklyReportApiRouter());
 
   app.use(cookieParser());
 
@@ -127,6 +178,12 @@ export function createApp() {
   app.use("/api/public/photo-viewer", publicPhotoViewerRoutes);
   app.use("/api/public/daily-summary", dailySummaryPublicRoutes);
   app.use("/api/public/signature-logo", signatureLogoPublicRoutes);
+
+  // The client-facing weekly report page, served by THIS service so it is same-origin with /api (see
+  // public-share-url.ts). Mounted here with the other public surfaces — before the cookie-auth CSRF gate,
+  // which it does not need (GET only, no cookie auth) — and, critically, before the SPA fallback further
+  // down, which would otherwise answer index.html for every /wr URL.
+  app.use("/wr", weeklyReportPublicRoutes);
 
   app.use((req, res, next) => {
     const csrfCookieOptions = getCsrfCookieOptionsForRequest(process.env, {
@@ -261,6 +318,11 @@ export function createApp() {
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[20], aiCopilotRoutes],
     ["/usage", usageRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[22], fieldRespondersRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[23], weeklyReportRoutes],
+    // The literal-string form, like "/usage" above. Indexing CRM_ONLY_TENANT_ROUTE_MOUNTS by ordinal makes
+    // this list and that one silently position-coupled; spelling the path out here means a future insert
+    // into the policy array cannot re-point this mount at somebody else's router.
+    ["/marketing-expense-requests", marketingExpenseRoutes],
   ] as const;
 
   for (const [mount, routes] of crmOnlyTenantRoutes) {
@@ -294,7 +356,13 @@ export function createApp() {
   if (existsSync(clientDist)) {
     app.use(express.static(clientDist));
     // SPA fallback — serve index.html for non-API routes
-    app.get("/{*path}", (_req, res) => {
+    app.get("/{*path}", (req, res) => {
+      // Overrides helmet's global `strict-origin-when-cross-origin` for the token-bearing routes only.
+      // Every other document keeps the global policy, which is what preserves `Origin` on same-origin
+      // writes; see TOKENIZED_SPA_PATHS above for why this is not a meta tag in the shared shell.
+      if (isTokenizedSpaPath(req.path)) {
+        res.setHeader("Referrer-Policy", "no-referrer");
+      }
       res.sendFile(join(clientDist, "index.html"));
     });
   }

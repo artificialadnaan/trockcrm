@@ -65,6 +65,58 @@ describe("upload workflow side effects", () => {
     expect(db.execute).toHaveBeenCalledTimes(1);
   });
 
+  // Why this number is recorded at all: a device's upload queue is local to the phone, so the server sees
+  // photos arrive with no idea whether one came alone or with 300 behind it. That blind spot is why a
+  // three-day backlog stayed invisible until a superintendent reported missing photos and it had to be
+  // reconstructed from capture-vs-arrival dates. Recorded here, a deep queue is one query.
+  it("records the device's reported queue depth in the photo audit metadata", async () => {
+    const db = { execute: vi.fn(async () => []) };
+
+    await recordUploadedFileSideEffects(db as any, {
+      file: makeFile(),
+      userId: "field-1",
+      officeId: "00000000-0000-0000-0000-000000000001",
+      queueDepth: 266,
+    });
+
+    expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ metadata: expect.objectContaining({ deviceQueueDepth: 266 }) }),
+    );
+  });
+
+  it("omits the key entirely when no depth was reported, so a query can tell 'not sent' from 'queue empty'", async () => {
+    const db = { execute: vi.fn(async () => []) };
+
+    for (const queueDepth of [undefined, null]) {
+      auditMocks.logPhotoEvent.mockClear();
+      await recordUploadedFileSideEffects(db as any, {
+        file: makeFile(),
+        userId: "field-1",
+        officeId: "00000000-0000-0000-0000-000000000001",
+        queueDepth,
+      });
+      const { metadata } = auditMocks.logPhotoEvent.mock.calls[0][1];
+      // Absent, NOT null: a null would read as "this device said its queue was empty", which is a
+      // different fact from "this build does not report depth at all" (every build already in the field).
+      expect("deviceQueueDepth" in metadata).toBe(false);
+    }
+  });
+
+  it("records a reported depth of zero, which is a real answer and not a missing one", async () => {
+    const db = { execute: vi.fn(async () => []) };
+
+    await recordUploadedFileSideEffects(db as any, {
+      file: makeFile(),
+      userId: "field-1",
+      officeId: "00000000-0000-0000-0000-000000000001",
+      queueDepth: 0,
+    });
+
+    const { metadata } = auditMocks.logPhotoEvent.mock.calls[0][1];
+    expect(metadata.deviceQueueDepth).toBe(0);
+  });
+
   it("skips photo audit for non-photo files but still enqueues the job", async () => {
     const db = { execute: vi.fn(async () => []) };
 

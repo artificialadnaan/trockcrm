@@ -29,7 +29,26 @@ function row(overrides: Partial<GlassesWalkthroughRow> = {}): GlassesWalkthrough
     capturedAt: new Date("2026-08-02T22:21:47.702Z"),
     capturedByUserId: USER,
     capturedByName: "Dana Reyes",
+    captureCensus: null,
     ...overrides,
+  };
+}
+
+/** The census of a walk that went badly: 30 min on the clock, 26.2 min of glasses audio, 25 min standalone. */
+function census(): NonNullable<GlassesWalkthroughRow["captureCensus"]> {
+  return {
+    walkMs: 1_800_000,
+    video: { framesReceived: 54_000, framesAppended: 1_800, framesDropped: 52_200, secondsSinceLastFrameArrived: 1_740.5 },
+    audio: {
+      buffersReceived: 90_000,
+      buffersAppended: 78_600,
+      buffersDropped: 11_400,
+      longestDropRun: 11_400,
+      secondsAppended: 1_572,
+      engineRestarts: 2,
+      standaloneSecondsRecorded: 1_500,
+      events: [{ atMs: 60_000, kind: "video-stalled" }],
+    },
   };
 }
 
@@ -62,6 +81,105 @@ function collectWarnings() {
   return { warn: (message: string) => lines.push(message), lines };
 }
 
+describe("resolveGlassesWalkthroughScope — TROCK Scope's pipeline health", () => {
+  // The field is DECORATION on a page estimators keep open all day, and that fixes every rule below: no
+  // shape TROCK Scope can send may cost the panel its line items, and nothing absent may be invented.
+  const withHealth = (pipelineHealth: unknown) =>
+    reader({
+      fetchScopeItems: async () => ({ outcome: "found", items: [scopeItem()], pipeline: "finished", pipelineHealth }),
+    });
+
+  it("carries a well-formed health object onto the entry", async () => {
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: withHealth({
+        state: "held",
+        stage: "grounding",
+        reason: "no active work-type catalog for job type service_repair",
+        since: "2026-09-02T10:00:00.000Z",
+      }),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.pipeline).toEqual({
+      state: "held",
+      stage: "grounding",
+      reason: "no active work-type catalog for job type service_repair",
+      since: "2026-09-02T10:00:00.000Z",
+    });
+  });
+
+  it("reads a state this build has never heard of, rather than refusing it", async () => {
+    // The vocabulary is TROCK Scope's and grows without asking. A build that dropped an unrecognised
+    // state would go silent on exactly the walks a new state was introduced to describe.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: withHealth({ state: "quarantined" }),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.pipeline).toEqual({ state: "quarantined", stage: null, reason: null, since: null });
+  });
+
+  it("degrades each optional field on its own", async () => {
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: withHealth({ state: "failed", stage: "", reason: 42, since: null }),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.pipeline).toEqual({ state: "failed", stage: null, reason: null, since: null });
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["null", null],
+    ["not an object", "held"],
+    ["an object with no state", { stage: "grounding", reason: "why" }],
+    ["an object whose state is blank", { state: "   " }],
+  ])("reports NO health, without failing the panel, when it is %s", async (_label, pipelineHealth) => {
+    // `state` is the whole claim; the rest decorates it. A health object that does not say how the walk is
+    // doing has nothing to render, and rendering the stage alone would be a chip that says nothing.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: withHealth(pipelineHealth),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.pipeline).toBeNull();
+    // The line items are what the estimator came for and they survive every one of these.
+    expect(entry!.scope?.items).toHaveLength(1);
+    expect(entry!.state).toBe("ready");
+  });
+
+  it("is recorded even when the walk resolves to a state OTHER than ready", async () => {
+    // A walk whose scope came back empty and unfinished is reported `processing` — and it is exactly the
+    // walk whose "what is that service actually doing?" is most worth answering.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({
+          outcome: "found",
+          items: [],
+          pipeline: "working",
+          pipelineHealth: { state: "processing", stage: "transcribe" },
+        }),
+      }),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.state).toBe("processing");
+    expect(entry!.pipeline).toEqual({ state: "processing", stage: "transcribe", reason: null, since: null });
+  });
+
+  it("stays null for a walk that was never asked about", async () => {
+    // No remote walkthrough yet, so no request is made at all. Null here means "we did not hear", which
+    // is the only honest answer and is why the chip is absent rather than showing an invented state.
+    const [entry] = await resolveGlassesWalkthroughScope([row({ scopeWalkthroughId: null })], {
+      scopeReader: reader(),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.pipeline).toBeNull();
+    expect(entry!.state).toBe("processing");
+  });
+});
+
 describe("resolveGlassesWalkthroughScope — the four states", () => {
   it('SUCCESS: a walk TROCK Scope answers for is "ready" and carries its items', async () => {
     const { warn } = collectWarnings();
@@ -77,6 +195,12 @@ describe("resolveGlassesWalkthroughScope — the four states", () => {
       // happens BEFORE the commit; nothing out here re-reads a user, so a TROCK Scope outage cannot cost
       // the heading its capturer.
       capturedByName: "Dana Reyes",
+      // No census on this row, so both are null — "we do not know", which is not the same as zero lost.
+      captureCensus: null,
+      narrationShortfallMs: null,
+      // TROCK Scope's health object, null because this fixture's answer carries none — the shape of every
+      // real response until that service ships the field.
+      pipeline: null,
       state: "ready",
       scope: {
         status: "ready",
@@ -700,5 +824,61 @@ describe("resolveGlassesWalkthroughScope — no TROCK Scope credential on this p
     ).toEqual([]);
     expect(fetchScopeItems).not.toHaveBeenCalled();
     expect(isConfigured).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveGlassesWalkthroughScope — the capture census", () => {
+  it("carries the stored census through whole and derives the narration shortfall from it", async () => {
+    // 1,800,000 ms walk, 1,572 s of glasses audio, 1,500 s standalone: 228,000 ms with no narration behind
+    // it. The census itself is passed on untouched — the counters ARE the diagnosis for whoever reads them.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row({ captureCensus: census() })], {
+      scopeReader: reader(),
+      warn,
+    });
+
+    expect(entry!.captureCensus).toEqual(census());
+    expect(entry!.narrationShortfallMs).toBe(228_000);
+  });
+
+  it("reports null — not zero — for a walk with no census", async () => {
+    // "We do not know" and "nothing was lost" are different claims, and a future warning must keep them
+    // apart: an older app build that never counted is not a walk whose audio covered it.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row({ captureCensus: null })], { scopeReader: reader(), warn });
+
+    expect(entry!.captureCensus).toBeNull();
+    expect(entry!.narrationShortfallMs).toBeNull();
+  });
+
+  it("settles the shortfall from our own row even when TROCK Scope cannot be read", async () => {
+    // The census is a database fact; nothing in the network phase may cost the panel it. A walk whose scope
+    // read fails still says how much narration it lost — which is the more useful of the two facts when
+    // the extraction is the thing that is failing.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row({ captureCensus: census() })], {
+      scopeReader: reader({
+        fetchScopeItems: async () => {
+          throw new Error("connect ECONNREFUSED");
+        },
+      }),
+      warn,
+    });
+
+    expect(entry!.state).toBe("unavailable");
+    expect(entry!.narrationShortfallMs).toBe(228_000);
+  });
+
+  it("derives it for a PROCESSING walk too, which never reaches TROCK Scope at all", async () => {
+    // The minutes after a walk lands are when an estimator is watching the panel, and a walk that is short
+    // of narration is worth knowing about before its scope exists — while the crew is still on site.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope(
+      [row({ scopeWalkthroughId: null, captureCensus: census() })],
+      { scopeReader: reader(), warn }
+    );
+
+    expect(entry!.state).toBe("processing");
+    expect(entry!.narrationShortfallMs).toBe(228_000);
   });
 });

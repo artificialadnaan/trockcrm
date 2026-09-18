@@ -59,7 +59,13 @@ import * as schema from "@trock-crm/shared/schema";
 import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { AppError } from "../middleware/error-handler.js";
 import { setDealEstimator } from "../modules/deals/service.js";
-import { resolveEstimatorUserId } from "../modules/bid-board-sync/estimator-map.js";
+import {
+  buildEstimatorDirectory,
+  ESTIMATOR_DIRECTORY_SQL,
+  officeSlugFromSchema,
+  resolveEstimatorUserId,
+  type EstimatorDirectory,
+} from "../modules/bid-board-sync/estimator-map.js";
 
 // Canonical lost/canceled pipeline stages: ["lost","deal_canceled","production_lost","service_lost","closed_lost"].
 // setDealEstimator ALWAYS mints the additive estimator commission (mintEstimatorCommissionForDeal has no stage
@@ -176,14 +182,17 @@ export async function findEstimatorColumnRows(query: QueryFn): Promise<Estimator
  * resolveEstimatorUserId the ingest uses — NFC/lowercase/trim normalized, never fuzzy). Rows that do not
  * resolve are returned separately so they can be counted skipped:unresolved (never handed to the service).
  */
-export function resolveCandidates(rows: EstimatorColumnRow[]): {
+export function resolveCandidates(
+  rows: EstimatorColumnRow[],
+  directory?: EstimatorDirectory | null
+): {
   resolved: ResolvedEstimatorCandidate[];
   unresolved: EstimatorColumnRow[];
 } {
   const resolved: ResolvedEstimatorCandidate[] = [];
   const unresolved: EstimatorColumnRow[] = [];
   for (const row of rows) {
-    const resolvedUserId = resolveEstimatorUserId(row.estimatorText);
+    const resolvedUserId = resolveEstimatorUserId(row.estimatorText, directory);
     if (resolvedUserId) {
       resolved.push({ ...row, resolvedUserId });
     } else {
@@ -313,7 +322,25 @@ export async function backfillTenantEstimatorColumn(
   opts: { schema: string; execute: boolean; actorUserId: string; officeId: string | null }
 ): Promise<EstimatorColumnBackfillSummary> {
   const scannedRows = await findEstimatorColumnRows(query);
-  const { resolved, unresolved } = resolveCandidates(scannedRows);
+  // Same two resolution sources as the ingest, in the same order: curated env map first, then the
+  // `estimates_jobs` roster. Read here rather than passed in so every caller of this function gets it —
+  // a backfill that resolved fewer names than the sync would report rows as skipped:unresolved that the
+  // very next sync then fills, which reads as the backfill having missed them.
+  //
+  // Scoped by the SCHEMA's office rather than opts.officeId, which is nullable: a null there would
+  // silently widen this to every office, and cross-office attribution is the one thing this predicate
+  // exists to stop. The schema name always carries the office.
+  const estimatorUsers = await query(ESTIMATOR_DIRECTORY_SQL, [officeSlugFromSchema(opts.schema)]);
+  // QueryFn hands back loosely-typed rows, so the shape is asserted here rather than assumed. A row
+  // whose id is not a uuid is dropped by buildEstimatorDirectory, so a bad cast degrades to "not in the
+  // directory" instead of a resolution to garbage.
+  const directory = buildEstimatorDirectory(
+    (estimatorUsers.rows ?? []).map((r) => ({
+      id: String(r.id ?? ""),
+      displayName: (r.display_name ?? null) as string | null,
+    }))
+  );
+  const { resolved, unresolved } = resolveCandidates(scannedRows, directory);
 
   const byStatus: Record<string, number> = {};
   const bump = (status: string) => {

@@ -78,7 +78,7 @@ export function PublicPhotoTokenPanel({ dealId }: { dealId: string }) {
         Share
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Public photo link</DialogTitle>
             <DialogDescription>Create a read-only link for customers or Procore project links.</DialogDescription>

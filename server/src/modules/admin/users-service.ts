@@ -17,6 +17,7 @@ import {
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
 import { resolveEffectiveCapxRate, resolveEffectiveServiceSourceRate } from "@trock-crm/shared/lib/commission-structure";
+import { toProperCaseName } from "../../lib/person-name.js";
 import {
   incrementTokenVersion,
   revokeLocalAuthOnDeactivate,
@@ -126,6 +127,9 @@ export async function listUsers(officeId?: string) {
           u.office_id,
           u.reports_to,
           u.is_active,
+          u.generates_sales,
+      u.estimates_jobs,
+          u.estimates_jobs,
           u.created_at
         FROM users u
         WHERE u.office_id = ${officeId}
@@ -146,6 +150,8 @@ export async function listUsers(officeId?: string) {
           officeId: users.officeId,
           reportsTo: users.reportsTo,
           isActive: users.isActive,
+          generatesSales: users.generatesSales,
+          estimatesJobs: users.estimatesJobs,
           createdAt: users.createdAt,
         })
         .from(users)
@@ -162,6 +168,8 @@ export async function listUsers(officeId?: string) {
           officeId: row.office_id,
           reportsTo: row.reports_to,
           isActive: row.is_active,
+          generatesSales: row.generates_sales,
+          estimatesJobs: row.estimates_jobs,
           createdAt: row.created_at,
         }
       : row
@@ -198,6 +206,16 @@ export interface CreateCrmUserInput {
   role: string;
   officeId: string;
   reportsTo?: string | null;
+  /** Does this person carry deals? Drives the director-dashboard rosters (migration 0219), NOT access.
+   *  Omitted => derived from the role, which is the honest default: a 'rep' is being hired to sell, an
+   *  admin/director/construction user is not unless someone says so. Relying on the COLUMN default
+   *  (true) instead would put every newly-created admin straight onto the dashboard — the exact clutter
+   *  this flag exists to remove — so the create path always sends an explicit value. */
+  generatesSales?: boolean;
+  /** Roster flag (migration 0222): may this person be offered under "Estimators" in the deals/leads
+   *  owner filters? Defaults false on create — unlike generatesSales there is no role that implies it,
+   *  and the list it feeds starts empty by design. */
+  estimatesJobs?: boolean;
 }
 
 // Pure, throwing validation — the create-flow's gate of record. The role decision is the gate-proven
@@ -223,6 +241,52 @@ export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input
   }
   if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
   if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
+  // The roster flags get the same boolean check the PATCH path applies. The create route hands req.body
+  // straight to the insert, so without this a non-boolean reaches Postgres: some values coerce (`1`
+  // enrols the person in a roster nobody ticked them into) and others fail as a 500, where the update
+  // path answers a clean 400. Both flags are checked — generatesSales carried the identical gap.
+  if (input.generatesSales !== undefined && typeof input.generatesSales !== "boolean") {
+    throw new AppError(400, "generatesSales must be a boolean");
+  }
+  if (input.estimatesJobs !== undefined && typeof input.estimatesJobs !== "boolean") {
+    throw new AppError(400, "estimatesJobs must be a boolean");
+  }
+}
+
+/**
+ * A field contractor NEVER carries deals. `acceptFieldInvite` states that invariant by inserting them with
+ * generates_sales = false, and the commission roster excludes the role outright.
+ *
+ * Enforced on the SERVER, not merely hidden in the UI: the admin PATCH route hands `req.body` straight
+ * through, so a hand-made request could otherwise enrol a contractor in the rep cards, the funnel, the
+ * performance snapshots, the strategic alerts and the coaching prompts. Evaluated against the role the
+ * request is MOVING TO when it changes both at once, so the two cannot race past each other.
+ *
+ * Pure and exported so the rule is testable without standing up a transaction — the same shape as the
+ * other gates in this module (evaluateUpdateUserGuards, stripsAdminPrivilege).
+ */
+export function assertGeneratesSalesAllowedForRole(
+  generatesSales: boolean,
+  role: string | null | undefined
+): void {
+  if (generatesSales === true && role === "field_contractor") {
+    throw new AppError(400, "Field contractors cannot be marked as generating sales");
+  }
+}
+
+/**
+ * Same role gate for the estimator roster (migration 0222): a field contractor is not a CRM user and can
+ * never be a deal's estimator, so offering them under "Estimators" would be a filter option that always
+ * returns nothing. Kept as its own function rather than a shared boolean-and-message helper because the
+ * two flags are independent and their messages must name the right one.
+ */
+export function assertEstimatesJobsAllowedForRole(
+  estimatesJobs: boolean,
+  role: string | null | undefined
+): void {
+  if (estimatesJobs === true && role === "field_contractor") {
+    throw new AppError(400, "Field contractors cannot be marked as estimating jobs");
+  }
 }
 
 export async function createCrmUser(input: CreateCrmUserInput, actorUserId: string) {
@@ -243,13 +307,19 @@ export async function createCrmUser(input: CreateCrmUserInput, actorUserId: stri
       .insert(users)
       .values({
         email,
-        displayName: input.displayName.trim(),
-        firstName: input.firstName?.trim() || null,
-        lastName: input.lastName?.trim() || null,
+        // Capitalised on the way in, so the roster/pickers cannot end up with "nick reyes" beside
+        // "Adam Shaw" again. Mixed case an admin typed on purpose survives — see toProperCaseName.
+        displayName: toProperCaseName(input.displayName.trim()),
+        firstName: toProperCaseName(input.firstName?.trim()) || null,
+        // `surname` so a particle-led surname agrees with the display name rather than contradicting it.
+        lastName: toProperCaseName(input.lastName?.trim(), { surname: true }) || null,
         role: input.role,
         officeId: input.officeId,
         reportsTo: input.reportsTo?.trim() || null,
         isActive: true,
+        generatesSales: input.generatesSales ?? input.role === "rep",
+        // No role implies estimating, so there is nothing to derive: false unless the admin says so.
+        estimatesJobs: input.estimatesJobs ?? false,
         createdByUserId: actorUserId,
       })
       .returning();
@@ -271,6 +341,13 @@ export async function updateUser(
     officeId: string;
     reportsTo: string | null;
     isActive: boolean;
+    /** Roster flag, not an access change — see CreateCrmUserInput.generatesSales. Unticking removes the
+     *  person from the director-dashboard rosters and nothing else; it cannot hide commission they hold
+     *  (getDirectorRepCommissionRows OR's this with an actually-earned EXISTS). */
+    generatesSales: boolean;
+    /** Roster flag (0222) — see CreateCrmUserInput.estimatesJobs. Independent of generatesSales, but a
+     *  person ticked BOTH is listed under Sales Reps only: one person, one section. */
+    estimatesJobs: boolean;
     notificationPrefs: Record<string, unknown>;
     /** Legacy alias: pre-structure callers set a single rate here. Mapped to capxRateSolo (the
      *  effective rate under the default 'solo' structure) so a stale bundle / old script isn't
@@ -328,11 +405,38 @@ export async function updateUser(
     if (violation) throw new AppError(violation.status, violation.message);
 
     const updates: Record<string, unknown> = {};
-    if (input.displayName !== undefined) updates.displayName = input.displayName;
+    // Normalised on edit too, not just create — otherwise renaming someone reintroduces the casing this
+    // exists to prevent, and the admin screen is where the bad rows were typed in the first place.
+    if (input.displayName !== undefined) updates.displayName = toProperCaseName(input.displayName);
     if (input.role !== undefined) updates.role = input.role;
     if (input.officeId !== undefined) updates.officeId = input.officeId;
     if (input.reportsTo !== undefined) updates.reportsTo = input.reportsTo;
     if (input.isActive !== undefined) updates.isActive = input.isActive;
+    if (input.generatesSales !== undefined) {
+      // The route hands req.body straight through, so this is the only gate. Rejecting a non-boolean
+      // rather than coercing it matters here: `"false"` is truthy in JS, so a coercing path would tick
+      // someone ON while the admin watched themselves tick them off.
+      if (typeof input.generatesSales !== "boolean") {
+        throw new AppError(400, "generatesSales must be a boolean");
+      }
+      assertGeneratesSalesAllowedForRole(input.generatesSales, nextRole ?? existingUser.role);
+      updates.generatesSales = input.generatesSales;
+    }
+    if (input.estimatesJobs !== undefined) {
+      // Same reasoning as generatesSales above: reject a non-boolean rather than coercing, because
+      // `"false"` is truthy and would tick someone ON as the admin watched themselves tick them off.
+      if (typeof input.estimatesJobs !== "boolean") {
+        throw new AppError(400, "estimatesJobs must be a boolean");
+      }
+      assertEstimatesJobsAllowedForRole(input.estimatesJobs, nextRole ?? existingUser.role);
+      updates.estimatesJobs = input.estimatesJobs;
+    }
+    // NO role-change re-validation of the flags here, deliberately. Both asserts above reject exactly one
+    // role — field_contractor — and evaluateUpdateUserGuards has already rejected ANY transition into or
+    // out of that role with a 403 (isFieldContractorTransition), because contractors are created and
+    // managed solely by the field-invite flow. A role-only PATCH therefore cannot strand a true flag on a
+    // contractor through this path, and a re-validation block here would be unreachable. See the test
+    // pinning that 403, which is what makes this omission safe rather than an oversight.
     if (input.notificationPrefs !== undefined) updates.notificationPrefs = input.notificationPrefs;
 
     const hasBaseUserPatch = Object.keys(updates).length > 0;
@@ -587,17 +691,45 @@ export async function listActiveUsersWithOfficeAccess() {
   }));
 }
 
-/** Get all users with their office counts for the admin overview table. */
-export async function getUsersWithStats() {
+/**
+ * Get all users with their office counts for the admin overview table.
+ *
+ * `role` remains the home/base role for global user management. `effectiveRole` separately exposes what a
+ * user can do in the active office so an office-scoped control does not accidentally judge an override by
+ * their home-office role.
+ */
+export async function getUsersWithStats(activeOfficeId?: string) {
+  const effectiveRoleSelect = activeOfficeId
+    ? sql`
+        CASE
+          WHEN u.office_id = ${activeOfficeId} THEN u.role
+          WHEN active_uoa.office_id IS NOT NULL THEN COALESCE(active_uoa.role_override, u.role)
+          ELSE NULL
+        END AS effective_role,
+      `
+    : sql``;
+  const activeOfficeJoin = activeOfficeId
+    ? sql`
+        LEFT JOIN user_office_access active_uoa
+          ON active_uoa.user_id = u.id
+         AND active_uoa.office_id = ${activeOfficeId}
+      `
+    : sql``;
+  const activeOfficeGroupBy = activeOfficeId
+    ? sql`, active_uoa.office_id, active_uoa.role_override`
+    : sql``;
   const result = await db.execute(sql`
     SELECT
       u.id,
       u.email,
       u.display_name,
       u.role,
+      ${effectiveRoleSelect}
       u.office_id,
       u.reports_to,
       u.is_active,
+      u.generates_sales,
+      u.estimates_jobs,
       o.name AS office_name,
       COUNT(uoa.office_id)::int AS extra_office_count,
       cs.commission_rate,
@@ -615,6 +747,7 @@ export async function getUsersWithStats() {
     FROM users u
     LEFT JOIN offices o ON o.id = u.office_id
     LEFT JOIN user_office_access uoa ON uoa.user_id = u.id
+    ${activeOfficeJoin}
     LEFT JOIN user_commission_settings cs ON cs.user_id = u.id
     GROUP BY
       u.id,
@@ -624,6 +757,8 @@ export async function getUsersWithStats() {
       u.office_id,
       u.reports_to,
       u.is_active,
+      u.generates_sales,
+      u.estimates_jobs,
       o.name,
       cs.commission_rate,
       cs.commission_structure,
@@ -637,6 +772,7 @@ export async function getUsersWithStats() {
       cs.new_customer_share_floor,
       cs.new_customer_window_months,
       cs.is_active
+      ${activeOfficeGroupBy}
     ORDER BY u.display_name ASC
   `);
 
@@ -723,10 +859,13 @@ export async function getUsersWithStats() {
     email: r.email,
     displayName: r.display_name,
     role: r.role,
+    ...(activeOfficeId ? { effectiveRole: (r.effective_role ?? null) as UserRole | null } : {}),
     officeId: r.office_id,
     reportsTo: r.reports_to,
     officeName: r.office_name,
     isActive: r.is_active,
+    generatesSales: r.generates_sales,
+    estimatesJobs: r.estimates_jobs,
     extraOfficeCount: Number(r.extra_office_count ?? 0),
     commissionRate: Number(r.commission_rate ?? 0),
     commissionStructure: (r.commission_structure ?? "solo") as "solo" | "mixed",

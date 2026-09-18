@@ -28,6 +28,11 @@ export interface ProjectType {
   id: string;
   name: string;
   slug: string;
+  // The CONFIGURED digit from project_type_config. The server already ships it (GET /pipeline/project-types
+  // returns whole rows) and it is the tier the server DECIDES on when the name is not one of the canonical
+  // values — so a client that classifies by name alone can disagree with the server about what is a Service
+  // deal. Anything making that judgement should feed this to isServiceProjectDeal, not compare names.
+  code: string | null;
   parentId: string | null;
   displayOrder: number;
   isActive: boolean;

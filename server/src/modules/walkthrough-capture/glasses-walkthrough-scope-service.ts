@@ -32,6 +32,7 @@ import { desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { glassesWalkthroughs, users } from "@trock-crm/shared/schema";
+import { glassesWalkNarrationShortfallMs, type GlassesWalkCaptureCensus } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -111,6 +112,59 @@ export interface GlassesWalkthroughScopeEvidence {
   clipUrl: string | null;
 }
 
+/**
+ * TROCK Scope's own account of what its pipeline has DONE with a walkthrough — its health, not its result.
+ *
+ * A SECOND, FINER ANSWER beside `state`, and the two are about different things. `state` is what the CRM
+ * can claim ("we read it", "we could not", "it is gone"); this is what TROCK Scope says about its own
+ * processing. A walk can be `ready` with scope on it and still be `stale` over there because the media
+ * changed under it, and an estimator pricing from that list needs to know.
+ *
+ * NULL IS THE COMMON CASE TODAY, and must stay unremarkable. TROCK Scope is on its own release cadence
+ * and does not send this yet; every build before it simply says nothing, and the panel renders exactly
+ * what it renders now.
+ *
+ * `state` IS DELIBERATELY NOT A UNION. The vocabulary is TROCK Scope's (`processing`, `settled`, `empty`,
+ * `failed`, `held`, `stale` at the time of writing) and it grows without asking us. Narrowing it here
+ * would mean a state added over there arrives as a type error at best and a dropped field at worst; kept
+ * as a string, an unrecognised state renders neutrally and says its own name, which is strictly more
+ * useful than hiding it. Same reasoning as `UNKNOWN_STATE_BADGE` on the panel.
+ */
+export interface GlassesWalkthroughPipelineHealth {
+  /** TROCK Scope's word for where this walkthrough stands. Never empty; an absent one drops the object. */
+  state: string;
+  /** Which pipeline stage the state is about, when it names one. */
+  stage: string | null;
+  /** Why, in TROCK Scope's words — the sentence a `failed` or `held` walk is worth showing. */
+  reason: string | null;
+  /** Since when, ISO-8601. Passed through verbatim rather than parsed: it is TROCK Scope's timestamp,
+   *  and re-formatting a value we could not validate would turn a bad string into "Invalid Date". */
+  since: string | null;
+}
+
+/**
+ * TROCK Scope's `pipeline` object narrowed to what the panel renders, or null.
+ *
+ * TOLERANT BY FIELD, STRICT ON `state`, exactly as `toPanelScopeItem` is tolerant by field and strict on
+ * `id`: every optional field degrades to null on its own, and only a missing `state` drops the object —
+ * because `state` is the whole claim, and a health object that does not say how the walk is doing has
+ * nothing to render. Absent, malformed, or a non-object all mean the same thing here and none of them may
+ * fail the panel: this is decoration on a page an estimator keeps open all day, and the line items are
+ * what they came for.
+ */
+function toPanelPipelineHealth(raw: unknown): GlassesWalkthroughPipelineHealth | null {
+  if (!raw || typeof raw !== "object") return null;
+  const pipeline = raw as Record<string, unknown>;
+  const state = nonEmptyStringOrNull(pipeline.state);
+  if (!state) return null;
+  return {
+    state,
+    stage: nonEmptyStringOrNull(pipeline.stage),
+    reason: nonEmptyStringOrNull(pipeline.reason),
+    since: nonEmptyStringOrNull(pipeline.since),
+  };
+}
+
 export interface GlassesWalkthroughPanelEntry {
   /** The CRM's own `glasses_walkthroughs.id`, not TROCK Scope's. The panel keys and retries on this. */
   id: string;
@@ -128,7 +182,29 @@ export interface GlassesWalkthroughPanelEntry {
    * or the join found no row. Neither is an error, and neither is worth a distinct badge.
    */
   capturedByName: string | null;
+  /**
+   * What the phone's recorder actually wrote during this walk, as the phone counted it, or null for a walk
+   * whose client did not send one. Carried whole rather than summarised, because the person reading it is
+   * diagnosing a bad walk and the counters ARE the diagnosis — which of frames or audio failed, how long
+   * the drop runs were, whether the engine restarted. See shared/src/types/glasses-walk-capture-census.ts.
+   */
+  captureCensus: GlassesWalkCaptureCensus | null;
+  /**
+   * The one number the office needs from the census: how much of the walk has NO narration behind it, in
+   * milliseconds — `walkMs` less the longer of the two audio recordings, floored at zero. Null when there
+   * is no census, which the panel must not confuse with zero: "we do not know" and "nothing was lost" are
+   * different claims. Derived here at read time and never stored, so it cannot disagree with the counts.
+   */
+  narrationShortfallMs: number | null;
   state: GlassesWalkthroughState;
+  /**
+   * What TROCK Scope says about its own processing of this walk, or null when it did not say — which is
+   * every response today, and every response from a build that predates the field.
+   *
+   * Beside `state` rather than folded into it: `state` is the CRM's claim and this is TROCK Scope's, and
+   * collapsing them would make an outage over there indistinguishable from a walk that side has HELD.
+   */
+  pipeline: GlassesWalkthroughPipelineHealth | null;
   scope: { status: "ready"; items: GlassesWalkthroughScopeItem[] } | null;
 }
 
@@ -141,6 +217,7 @@ export interface GlassesWalkthroughRow {
   capturedAt: Date;
   capturedByUserId: string | null;
   capturedByName: string | null;
+  captureCensus: GlassesWalkCaptureCensus | null;
 }
 
 /**
@@ -199,6 +276,19 @@ export interface GlassesWalkthroughScopeReader {
          * forward publishes `scope_walkthrough_id` BEFORE it uploads a single clip.
          */
         pipeline: "working" | "finished" | "failed";
+        /**
+         * TROCK Scope's `pipeline` HEALTH object, verbatim and unparsed — a different thing from the
+         * three-value `pipeline` above, which this CRM DERIVES from the walkthrough's status when the
+         * scope came back empty.
+         *
+         * Two fields, one word, and the collision is worth the awkwardness of the name: the derived one
+         * answers "may I call an empty list a result?" and nothing else, while this is the far end's own
+         * account of its processing and is present whether the list is empty or not. Kept `unknown` here
+         * so the port stays a transport — `toPanelPipelineHealth` is the only thing that decides what a
+         * well-formed one looks like, which keeps the store free of a shape it would otherwise have to
+         * validate twice.
+         */
+        pipelineHealth?: unknown;
       }
     | { outcome: "missing" }
   >;
@@ -230,6 +320,7 @@ export async function loadDealGlassesWalkthroughRows(
       capturedAt: glassesWalkthroughs.capturedAt,
       capturedByUserId: glassesWalkthroughs.capturedByUserId,
       capturedByName: users.displayName,
+      captureCensus: glassesWalkthroughs.captureCensus,
     })
     .from(glassesWalkthroughs)
     // LEFT, not inner: `captured_by_user_id` is nullable AND ON DELETE SET NULL, so an inner join would
@@ -247,6 +338,7 @@ export async function loadDealGlassesWalkthroughRows(
     capturedAt: row.capturedAt,
     capturedByUserId: row.capturedByUserId ?? null,
     capturedByName: nonEmptyStringOrNull(row.capturedByName),
+    captureCensus: row.captureCensus ?? null,
   }));
 }
 
@@ -478,6 +570,14 @@ export async function resolveGlassesWalkthroughScope(
     capturedAt: row.capturedAt.toISOString(),
     capturedByUserId: row.capturedByUserId,
     capturedByName: row.capturedByName,
+    captureCensus: row.captureCensus,
+    // Derived from our own row, so it is settled here with the other database facts and no TROCK Scope
+    // outcome below can touch it: a walk whose scope read fails still says how much narration it lost.
+    narrationShortfallMs: glassesWalkNarrationShortfallMs(row.captureCensus),
+    // Null until TROCK Scope is actually asked, and null forever for a walk we never ask about (no remote
+    // walkthrough yet) or cannot reach. "We did not hear" is what null means here, and it is why the chip
+    // is absent rather than showing an invented state on a panel that already has one.
+    pipeline: null,
     // The starting value is the one state that needs no evidence: a row with no scope walkthrough id is
     // "processing" as a fact about our own table, and a row WITH one has not been read yet, so anything
     // that prevents the read from happening at all — an unconfigured reader, the deadline firing before a
@@ -533,6 +633,12 @@ export async function resolveGlassesWalkthroughScope(
           entry.state = "missing";
           continue;
         }
+        // COMMITTED BEFORE ANY STATE DECISION BELOW, because it is orthogonal to all of them: a walk that
+        // resolves to `processing` because its list is empty, one that resolves to `unavailable` because
+        // every row was unusable, and one that is plainly `ready` are all walks TROCK Scope just told us
+        // something about. Assigning it inside one branch would drop it in the two cases where the
+        // question "what is that service actually doing with this?" is most worth answering.
+        entry.pipeline = toPanelPipelineHealth(answer.pipelineHealth);
         // An EMPTY list is only `ready` once TROCK Scope says the pipeline is done. Before that it is a
         // walk in progress, and calling it ready tells the estimator the machine looked and found
         // nothing — which they cannot correct, and will not re-check, because this panel does not poll.

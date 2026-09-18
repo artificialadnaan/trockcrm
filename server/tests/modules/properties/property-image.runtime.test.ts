@@ -34,6 +34,7 @@ beforeAll(async () => {
       companycam_id text, companycam_project_id text, hubspot_property_id text,
       image_r2_key text, image_thumbnail_r2_key text,
       notes text,
+      created_by_user_id uuid,
       is_test_data boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true,
       created_at timestamptz NOT NULL DEFAULT now(),

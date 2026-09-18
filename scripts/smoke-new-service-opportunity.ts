@@ -105,6 +105,10 @@ async function ensureFixture(client: Client, schemaName: string) {
   const companyName = `${SMOKE_PREFIX} Company ${suffix}`;
   const propertyName = `${SMOKE_PREFIX} Property ${suffix}`;
   const companySlug = `smoke-service-opportunity-${suffix}`;
+  // Split across the two name columns because the picker renders "first last" — the smoke has to click a
+  // label it can predict, so the marker lives in `notes` rather than mangling the displayed name.
+  const contactFirstName = "Smoke";
+  const contactLastName = `Contact ${suffix}`;
 
   const company = await client.query(
     `
@@ -123,11 +127,27 @@ async function ensureFixture(client: Client, schemaName: string) {
     [company.rows[0].id, propertyName]
   );
 
+  // A Service Opportunity now REQUIRES a point of contact, and the picker only offers contacts belonging
+  // to the selected company — so without this the form has nothing to choose and the smoke cannot reach
+  // Create at all. `category` is NOT NULL; 'client' is what the app's own inline add-contact uses.
+  // company_name is set alongside company_id because several surfaces read the denormalised text without
+  // joining companies.
+  const contact = await client.query(
+    `
+      INSERT INTO ${schema}.contacts (first_name, last_name, company_id, company_name, category, notes, is_test_data, is_active, updated_at)
+      VALUES ($1, $2, $3, $4, 'client', 'SMOKE TEST DELETE fixture for Service Opportunity smoke', true, true, now())
+      RETURNING id
+    `,
+    [contactFirstName, contactLastName, company.rows[0].id, companyName]
+  );
+
   return {
     companyId: company.rows[0].id as string,
     companyName,
     propertyId: property.rows[0].id as string,
     propertyName,
+    contactId: contact.rows[0].id as string,
+    contactName: `${contactFirstName} ${contactLastName}`,
   };
 }
 
@@ -158,6 +178,15 @@ async function cleanup(client: Client, schemaName: string, ids: { dealId?: strin
   }
   if (ids.propertyId) {
     await client.query(`DELETE FROM ${schema}.properties WHERE id = $1 AND is_test_data = true`, [ids.propertyId]);
+  }
+  // AFTER the deals, whose primary_contact_id references these rows. Deleted by COMPANY rather than by the
+  // one fixture id so that a contact created through the form's inline "+ Add new contact" — which links
+  // the new contact to this same company — is swept up too, rather than leaking one row per run.
+  if (ids.companyId) {
+    await client.query(
+      `DELETE FROM ${schema}.contacts WHERE company_id = $1 AND is_test_data = true`,
+      [ids.companyId]
+    );
   }
   if (ids.companyId) {
     await client.query(`DELETE FROM ${schema}.companies WHERE id = $1 AND is_test_data = true`, [ids.companyId]);
@@ -205,6 +234,12 @@ async function main() {
     await page.getByRole("button", { name: /select property/i }).click();
     await page.getByPlaceholder(/search properties/i).fill(fixture.propertyName);
     await page.getByText(fixture.propertyName).click();
+    // The point of contact is REQUIRED, and the picker only lists contacts on the selected company — so
+    // this must come after the company pick, and the form will refuse to submit without it. The trigger
+    // carries id="primaryContactId" (set inside PointOfContactField, which the form's <Label htmlFor>
+    // points at); its options are the company's contacts rendered as "First Last".
+    await page.locator("#primaryContactId").click();
+    await page.getByRole("option", { name: new RegExp(fixture.contactName, "i") }).click();
     await page.getByRole("button", { name: /create service opportunity/i }).click();
     await page.waitForURL(/\/deals\/[0-9a-f-]{36}$/i, { timeout: 30_000 });
     createdDealId = page.url().match(/\/deals\/([0-9a-f-]{36})$/i)?.[1];
@@ -230,6 +265,7 @@ async function main() {
                d.read_only_synced_at,
                d.company_id,
                d.property_id,
+               d.primary_contact_id,
                d.assigned_rep_id
           FROM ${schema}.deals d
           JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -253,19 +289,51 @@ async function main() {
     assertCondition(deal.is_read_only_mirror === false, "New Service opportunity should not be read-only mirror.");
     assertCondition(deal.read_only_synced_at == null, "New Service opportunity should not have read-only sync timestamp.");
     assertCondition(deal.company_id === fixture.companyId, "Company id mismatch.");
+    // The point of the whole change: the contact the rep picked has to be ON the deal, not merely required
+    // by a form guard. Asserting the exact id also proves the picker sent the selection rather than any
+    // contact that happened to be on the company.
+    assertCondition(
+      deal.primary_contact_id === fixture.contactId,
+      `Expected primary_contact_id ${fixture.contactId}, got ${deal.primary_contact_id}`
+    );
     assertCondition(deal.property_id === fixture.propertyId, "Property id mismatch.");
     assertCondition(Boolean(deal.assigned_rep_id), "Assigned rep missing.");
 
+    // Carries a VALID point of contact deliberately: without one this now trips the contact guard, which
+    // also answers 400 — so the assertion would pass while proving nothing about project-type gating. The
+    // message is asserted for the same reason; two guards on one route can otherwise silently cover for
+    // each other.
     const malicious = await apiFetch<{ error?: { message?: string } }>(apiBaseUrl, cookies, "/deals/service-opportunity", {
       method: "POST",
       body: JSON.stringify({
         name: `${SMOKE_PREFIX} malicious non-service`,
         companyId: fixture.companyId,
         propertyId: fixture.propertyId,
+        primaryContactId: fixture.contactId,
         projectType: "roofing",
       }),
     });
     assertCondition(malicious.status === 400, `Expected malicious non-Service create to return 400, got ${malicious.status}.`);
+    assertCondition(
+      malicious.body?.error?.message === "Direct-create is only available for Service projects.",
+      `Expected the non-Service message, got ${JSON.stringify(malicious.body?.error?.message)}.`
+    );
+
+    // The other half of the pair: a well-formed Service create with NO contact must be rejected, and for
+    // the contact reason. This is the guard the whole change exists for, so the smoke states it directly.
+    const contactless = await apiFetch<{ error?: { message?: string } }>(apiBaseUrl, cookies, "/deals/service-opportunity", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `${SMOKE_PREFIX} contactless service`,
+        companyId: fixture.companyId,
+        propertyId: fixture.propertyId,
+      }),
+    });
+    assertCondition(contactless.status === 400, `Expected contact-less Service create to return 400, got ${contactless.status}.`);
+    assertCondition(
+      contactless.body?.error?.message === "Point of contact is required",
+      `Expected the point-of-contact message, got ${JSON.stringify(contactless.body?.error?.message)}.`
+    );
 
     const readiness = await apiFetch<{ readiness: { status: string } }>(
       apiBaseUrl,

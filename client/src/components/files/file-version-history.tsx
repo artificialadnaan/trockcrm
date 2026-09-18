@@ -59,6 +59,7 @@ export function FileVersionHistory({ fileId, onBack }: FileVersionHistoryProps) 
               variant="ghost"
               size="icon"
               className="h-8 w-8"
+              aria-label={`Download version ${v.version}`}
               onClick={() => downloadFile(v.id)}
             >
               <Download className="h-4 w-4" />

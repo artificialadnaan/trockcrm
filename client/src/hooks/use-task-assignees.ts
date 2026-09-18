@@ -7,7 +7,22 @@ export interface TaskAssignee {
   displayName: string;
 }
 
-export function useTaskAssignees(options: OfficeRequestOptions = {}) {
+export interface UseTaskAssigneesOptions extends OfficeRequestOptions {
+  /**
+   * When false, no request is issued and `assignees` stays empty.
+   *
+   * Mirrors useRepRoster's gate, and exists for the same reason: a component that mounts this hook
+   * unconditionally but is nested under a page that ALREADY loaded the same feed makes the page issue
+   * /tasks/assignees twice per load. The deals list section sits under the /deals board, which resolves
+   * owner names for its own header controls — so it takes the parent's list instead of fetching a second
+   * copy. `loadedOfficeId` still settles to the requested office when disabled, so a caller gating on it
+   * is not left waiting for a load that will never happen.
+   */
+  enabled?: boolean;
+}
+
+export function useTaskAssignees(options: UseTaskAssigneesOptions = {}) {
+  const { enabled = true } = options;
   const [assignees, setAssignees] = useState<TaskAssignee[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -20,6 +35,13 @@ export function useTaskAssignees(options: OfficeRequestOptions = {}) {
   const load = useCallback(async () => {
     const requestId = ++requestRef.current;
     const requestOfficeId = options.officeId ?? null;
+    if (!enabled) {
+      setAssignees([]);
+      setError(null);
+      setLoading(false);
+      setLoadedOfficeId(requestOfficeId);
+      return;
+    }
     setLoading(true);
     setError(null);
     setAssignees([]);
@@ -39,7 +61,7 @@ export function useTaskAssignees(options: OfficeRequestOptions = {}) {
         setLoadedOfficeId(requestOfficeId);
       }
     }
-  }, [options.officeId]);
+  }, [options.officeId, enabled]);
 
   useEffect(() => {
     load();

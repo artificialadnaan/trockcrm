@@ -165,9 +165,10 @@ describe("needsScorecardPdfRegeneration — content generation", () => {
     expect(needsScorecardPdfRegeneration(artifact({ pdfContentGeneration: null }))).toBe(true);
   });
 
-  it("compares at millisecond precision so Postgres microseconds cannot force a false regeneration", () => {
-    // node-postgres materializes timestamps as millisecond Dates while Postgres retains microseconds.
-    // Comparing raw values would report every artifact stale forever and re-render on every download.
+  it("normalises a Date and its ISO text to the same generation", () => {
+    // The two sides can reach this comparison as different JavaScript types (a Drizzle timestamp, the
+    // canonical text the loaders now select). The SAME INSTANT must not read as a change just because one
+    // side arrived as a string — that would re-render on every single download.
     expect(
       needsScorecardPdfRegeneration(
         artifact({
@@ -176,6 +177,68 @@ describe("needsScorecardPdfRegeneration — content generation", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("REGRESSION: regenerates when the generations differ by less than a millisecond", () => {
+    // The core defect. `timestamptz` is a MICROSECOND type; a JS Date is milliseconds. Comparing through
+    // millisecond values, a render that read the card at .123456 and a corrective-action response that
+    // committed at .123900 produce generations that compare EQUAL — so a PDF of the pre-response content
+    // classifies as current and the download hands it out. Nothing later fixes it when that response is the
+    // card's last write, which for a completed corrective action is the ordinary case.
+    //
+    // Written as EXPLICIT microsecond literals rather than derived from a clock: neither JS nor PGlite's
+    // now() (Emscripten's gettimeofday is backed by Date.now()) can produce a sub-millisecond difference, so
+    // a derived fixture could not express this failure at all.
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({
+          pdfContentGeneration: "2026-07-27T12:00:00.123456Z",
+          currentGeneration: "2026-07-27T12:00:00.123900Z",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("REGRESSION: regenerates a row still holding a millisecond-truncated rendered generation", () => {
+    // Every row published before this fix stamped pdf_content_generation from a JS Date, so it landed as
+    // `.mmm000` while updated_at kept the microseconds Postgres actually stored. Those rows read STALE ONCE
+    // under the exact comparison, re-render, and the republish stamps the full-precision value — after
+    // which they compare equal and settle. They cannot thrash: the publication CAS requires updated_at to
+    // be exactly the generation the render read, and writes that same string.
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({
+          pdfContentGeneration: "2026-07-27T12:00:00.123000Z",
+          currentGeneration: "2026-07-27T12:00:00.123456Z",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("is current once the republished artifact carries the full-precision generation", () => {
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({
+          pdfContentGeneration: "2026-07-27T12:00:00.123456Z",
+          currentGeneration: "2026-07-27T12:00:00.123456Z",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("regenerates rather than serving an artifact whose generation is AHEAD of the card's", () => {
+    // Exact equality, not `current <= rendered`. Every writer advances updated_at strictly forward, so a
+    // stored generation ahead of the live one means the row was restored, rolled back or hand-edited
+    // beneath the artifact: those bytes were rendered from content the card no longer has. Re-rendering
+    // costs one render; an ordering comparison would serve that artifact forever.
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({
+          pdfContentGeneration: "2026-07-27T12:00:00.123900Z",
+          currentGeneration: "2026-07-27T12:00:00.123456Z",
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("still regenerates a legacy render version even when the generation matches", () => {
@@ -238,6 +301,22 @@ describe("isFutureRendererArtifactStale", () => {
     ).toBe(false);
   });
 
+  it("REGRESSION: flags a newer artifact whose generation moved by less than a millisecond", () => {
+    // The rolling-deploy path must see a sub-millisecond change too. Rounded to milliseconds this returned
+    // false, an old instance called the artifact serviceable, and the download presigned bytes rendered
+    // from the pre-response card — the outcome the 503 exists to avoid.
+    expect(
+      isFutureRendererArtifactStale(
+        artifact({
+          pdfR2Key: futureKey,
+          pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION + 1,
+          pdfContentGeneration: "2026-07-27T12:00:00.123456Z",
+          currentGeneration: "2026-07-27T12:00:00.123900Z",
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("never flags an artifact at or below this renderer — those take the normal regeneration path", () => {
     for (const version of [CURRENT_SCORECARD_PDF_RENDER_VERSION, CURRENT_SCORECARD_PDF_RENDER_VERSION - 1]) {
       expect(
@@ -275,6 +354,20 @@ describe("classifyScorecardArtifactRecheck", () => {
         }),
       ),
     ).toBe("awaiting-newer-renderer");
+  });
+
+  it("REGRESSION: a sub-millisecond change classifies stale, not current", () => {
+    // The pre-presign recheck is the LAST thing standing between a corrective-action response and a
+    // presigned URL for the pre-response PDF. At millisecond resolution it returned "current" for a
+    // response that committed inside the millisecond the render read.
+    expect(
+      classifyScorecardArtifactRecheck(
+        artifact({
+          pdfContentGeneration: "2026-07-27T12:00:00.123456Z",
+          currentGeneration: "2026-07-27T12:00:00.123900Z",
+        }),
+      ),
+    ).toBe("stale");
   });
 
   it("still serves a future-renderer artifact whose generation MATCHES", () => {

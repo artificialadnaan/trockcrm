@@ -7,6 +7,7 @@ import { DrillProvider } from "./drill";
 import { periodWord, shouldShowWowDelta, type WeekMode } from "../week-mode";
 import { UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, DepartmentMetric } from "./types";
+import { emptyEstimatingReport } from "./test-fixtures";
 
 // CodeRabbit downstream FIX 2 (labels) + FIX 3 (WoW delta chips), now asserted on the consolidated Hybrid
 // (VariantExecHero — the survivor of A1/A2/Hero; the old A2 scoreboard these tests targeted was removed in
@@ -38,6 +39,7 @@ const dataFor = (mode: WeekMode): MondayShowcaseData => ({
   officeProjection: { bands: [], coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: "" },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  estimatingReport: emptyEstimatingReport(),
   routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 });

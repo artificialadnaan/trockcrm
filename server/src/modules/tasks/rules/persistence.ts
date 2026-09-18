@@ -121,6 +121,8 @@ function mapDrizzleTaskRow(row: typeof tasks.$inferSelect): TaskRecord {
 
 function taskDraftValues(draft: SystemTaskDraft) {
   return {
+    // Every draft that reaches this file came from the rules engine, so the answer is never in doubt.
+    source: "automated" as const,
     title: draft.title,
     description: draft.description ?? null,
     type: draft.type as (typeof tasks.$inferInsert)["type"],
@@ -221,8 +223,8 @@ export function createTenantTaskRulePersistence(
         `INSERT INTO ${schemaName}.tasks
            (title, description, type, priority, status, assigned_to, office_id, origin_rule,
             source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id,
-            email_id, due_date, due_time, remind_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            email_id, due_date, due_time, remind_at, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'automated')
          RETURNING
            id,
            title,

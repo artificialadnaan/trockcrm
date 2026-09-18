@@ -27,6 +27,7 @@ const {
   confirmCorrectiveActionUpload,
   uploadCorrectiveActionPhoto,
   discardCorrectiveActionPhoto,
+  retriggerCorrectiveAction,
   useCorrectiveActions,
 } = await import("./use-corrective-actions");
 
@@ -172,6 +173,16 @@ describe("corrective-action client API", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
     expect(apiMock.mock.calls[0][1]).not.toHaveProperty("fieldCsrf");
+  });
+
+  it("retriggerCorrectiveAction POSTs the director-only fresh-cycle request and returns its queue state", async () => {
+    apiMock.mockResolvedValue({ queued: true });
+
+    await expect(retriggerCorrectiveAction("deal-1", "scorecard-1")).resolves.toEqual({ queued: true });
+    expect(apiMock).toHaveBeenCalledWith(
+      "/deals/deal-1/scorecards/scorecard-1/corrective-actions/retrigger",
+      { method: "POST" },
+    );
   });
 
   it("useCorrectiveActions loads items in token mode and exposes loading/error", async () => {

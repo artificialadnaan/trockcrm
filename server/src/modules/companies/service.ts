@@ -369,6 +369,11 @@ export async function createCompany(
     // The user creating the company becomes its account owner ("whoever creates it owns it").
     // Optional + null-safe so non-interactive callers (imports/sync) can omit it and stay unowned.
     ownerUserId?: string | null;
+    // Who keyed the record in. Deliberately SEPARATE from ownerUserId even though the two start equal on
+    // an interactive create: ownership is reassigned over a record's life, authorship is not, and the
+    // canvassing report counts what a person entered rather than what they currently hold. Null for
+    // machine callers (ingestion, imports, seeds), which the report reads as unattributed.
+    createdByUserId?: string | null;
   },
   skipDedupCheck = false
 ): Promise<{ company: typeof companies.$inferSelect | null; dedupResult?: CompanyDedupResult }> {
@@ -402,6 +407,7 @@ export async function createCompany(
       website: data.website,
       notes: data.notes,
       ownerId: data.ownerUserId ?? null,
+      createdByUserId: data.createdByUserId ?? null,
     })
     .returning();
   return { company: rows[0] };

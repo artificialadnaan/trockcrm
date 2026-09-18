@@ -22,6 +22,15 @@ const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
+  // `reps` is typed rather than left to infer from the empty literal — otherwise it widens to never[] and
+  // any test supplying an actual roster fails to compile.
+  useRepRosterMock: vi.fn(() => ({
+    reps: [] as Array<{ id: string; displayName: string; group?: "sales" | "estimator" }>,
+    loading: false,
+    error: null as string | null,
+    loadedOfficeId: null as string | null,
+    refetch: vi.fn(),
+  })),
   apiMock: vi.fn(),
 }));
 
@@ -35,6 +44,13 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 
 vi.mock("@/hooks/use-task-assignees", () => ({
   useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+// The owner FILTER now reads the sales roster while the name map still reads the assignee list. Mocked to
+// an empty roster because these tests are about search/export/sort behaviour — left unmocked, the real
+// hook issues its own api() call and the "last api call" assertions below start reading that request.
+vi.mock("@/hooks/use-rep-roster", () => ({
+  useRepRoster: mocks.useRepRosterMock,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -696,6 +712,52 @@ describe("DealsListSection", () => {
     }
   });
 
+  it("names a roster rep the assignee feed has never heard of (Codex P2)", () => {
+    // getRepRosterOptions admits someone through its owner_rows branch — owns a deal in THIS tenant —
+    // even with no primary-office row or access grant, while listUsers(officeId) behind useTaskAssignees
+    // does not. Such a rep is offered in the dropdown under their real name; resolving the trigger label
+    // from the assignee feed alone rendered them as "Selected rep" permanently once picked.
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [{ id: "rep-owner-only", displayName: "Cross Office Owner" }],
+      loading: false,
+      error: null,
+      loadedOfficeId: null,
+      refetch: vi.fn(),
+    });
+    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [{ id: "rep-1", displayName: "Brett Jones" }] });
+
+    const html = render({ lockedOwnerId: "rep-owner-only" });
+
+    expect(html).toContain("Cross Office Owner");
+    expect(html).not.toContain("Selected rep");
+  });
+
+  it("omits estimators from the owner control — picking one could only ever return nothing", async () => {
+    // This control writes an OWNER filter (effectiveAssignedRepId -> assignedRepId). A pure estimator
+    // owns no deals, so offering them here reproduces exactly the bug the Estimators group was added to
+    // fix on the deals dashboard: a name you can pick that always returns an empty list. The estimator
+    // dimension lives on the dashboard header, which writes ?estimatorId instead.
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [
+        // Deliberately NOT the fixture's "Brett Jones" — that name is already on the deal row, so it
+        // would satisfy the positive assertion even if the dropdown rendered nothing at all.
+        { id: "rep-7", displayName: "Chase Kelly", group: "sales" },
+        { id: "est-1", displayName: "Sidney Gibson", group: "estimator" },
+      ],
+      loading: false,
+      error: null,
+      loadedOfficeId: null,
+      refetch: vi.fn(),
+    });
+
+    // The ui/select module is mocked at the top of this file, so every SelectItem renders inline as a
+    // plain div — the offered options are in the markup without opening anything.
+    const html = render();
+
+    expect(html).toContain("Chase Kelly");
+    expect(html).not.toContain("Sidney Gibson");
+  });
+
   it("forwards updatedFrom and updatedTo into the CSV export request", async () => {
     const originalCreateObjectURL = URL.createObjectURL;
     const originalRevokeObjectURL = URL.revokeObjectURL;
@@ -1072,6 +1134,75 @@ describe("DealsListSection", () => {
     ).toBeNull();
   });
 
+  it("renders the bid due date in its own column without replacing the expected execution date", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          bidDueDate: "2026-08-01T00:00:00.000Z",
+          resolvedBidDueDate: "2026-07-03",
+          expectedCloseDate: "2026-08-15",
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain("Bid due");
+    expect(html).toContain("Jul 3, 2026"); // Uses the authoritative list projection, not the raw snapshot.
+    expect(html).toContain("Bid due: Jul 3, 2026"); // The mobile list card keeps the same deadline visible.
+    expect(html).toContain("Aug 15"); // The existing expected-execution / Close column remains separate.
+  });
+
+  it("does not revive a stale raw deadline when the authoritative list date was cleared", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          bidDueDate: "2026-08-01T00:00:00.000Z",
+          resolvedBidDueDate: null,
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).not.toContain("Aug 1, 2026");
+  });
+
+  it("sorts the bid due column soonest first, then reverses it from its header arrow", () => {
+    const { container, unmount } = renderInteractive();
+    const bidDueHeader = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Bid due")
+    );
+    expect(bidDueHeader).toBeTruthy();
+
+    act(() => {
+      bidDueHeader!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    let lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall).toMatchObject({ sortBy: "bid_due_date", sortDir: "asc" });
+    expect(
+      Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Bid due"))?.textContent
+    ).toContain("↑");
+
+    act(() => {
+      Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent?.includes("Bid due"))!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall).toMatchObject({ sortBy: "bid_due_date", sortDir: "desc" });
+
+    unmount();
+  });
+
   it("defaults the list to newest and lets the user toggle oldest", () => {
     const { container, unmount } = renderInteractive({
       initialSort: { key: "name", dir: "asc" },
@@ -1149,7 +1280,7 @@ describe("DealsListSection", () => {
     });
 
     expect(html).toContain("overflow-x-auto");
-    expect(html).toContain("md:min-w-[44rem] lg:min-w-[58rem]");
+    expect(html).toContain("md:min-w-[44rem] lg:min-w-[66rem]");
     expect(html).toContain("md:w-[13.5rem] md:!px-2 lg:w-[15rem]");
     expect(html).toContain("hidden lg:table-cell lg:w-[11rem]");
     expect(html).toContain("md:w-[4rem] md:!px-2 lg:w-[7.5rem]");
@@ -1335,7 +1466,7 @@ describe("DealsListSection", () => {
     // There are TWO export paths on this component — buildFilterBarCsvRows (covered in
     // deals-list-csv-export.test.ts) and this LEGACY inline one. They must not diverge, or which
     // columns accounting gets depends on which surface they exported from.
-    it("includes the Scope Title column on the LEGACY export path too", async () => {
+    it("includes the Scope Title and Bid Due Date columns on the LEGACY export path too", async () => {
       const csvParts: string[] = [];
       const OriginalBlob = globalThis.Blob;
       const originalCreate = URL.createObjectURL;
@@ -1347,7 +1478,7 @@ describe("DealsListSection", () => {
         }
       } as unknown as typeof Blob;
       mocks.apiMock.mockResolvedValue({
-        deals: [makeDeal({ scopeTitle: "Balcony Repair" })],
+        deals: [makeDeal({ scopeTitle: "Balcony Repair", resolvedBidDueDate: "2026-07-03" })],
         pagination: { totalPages: 1 },
       });
       const { container, cleanup } = await renderDom({ enableExport: true, lockedOwnerId: "rep-1" });
@@ -1369,9 +1500,11 @@ describe("DealsListSection", () => {
           "Stage",
           "Days",
           "Value",
+          "Bid Due Date",
           "Last Touch",
         ]);
         expect(firstRow.split(",")[1]).toBe("Balcony Repair");
+        expect(firstRow.split(",")[7]).toBe("2026-07-03");
       } finally {
         globalThis.Blob = OriginalBlob;
         Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });

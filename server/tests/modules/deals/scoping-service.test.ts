@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { and, eq, getTableColumns, or } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import { dealHistory, dealScopingIntake, deals, files, leads, users } from "@trock-crm/shared/schema";
+import { dealHistory, dealScopingIntake, deals, files, leads, projectTypeConfig, users } from "@trock-crm/shared/schema";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertDealScopingWriteAllowed,
@@ -92,6 +92,8 @@ interface FakeDealRow {
   propertyState: string | null;
   propertyZip: string | null;
   description: string | null;
+  scopeTitle?: string | null;
+  projectType?: string | null;
   projectTypeId: string | null;
   assignedRepId: string;
   sourceLeadId?: string | null;
@@ -152,6 +154,7 @@ interface FakeDealScopingIntakeRow {
 }
 
 interface FakeTenantState {
+  projectTypeConfig: Array<{ id: string; code: string }>;
   deals: FakeDealRow[];
   leads: Array<Record<string, unknown>>;
   users: FakeUserRow[];
@@ -160,8 +163,9 @@ interface FakeTenantState {
   dealHistory: Array<Record<string, unknown>>;
 }
 
-function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
+function createFakeTenantDb(initialState?: Partial<FakeTenantState>, options: { snapshotReads?: boolean } = {}) {
   const state: FakeTenantState = {
+    projectTypeConfig: [],
     deals: [
         {
           id: "deal-1",
@@ -190,6 +194,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     const tableName = (table as { _: { name?: string } })?._?.name;
 
     if (table === deals || tableName === "deals") return state.deals;
+    if (table === projectTypeConfig || tableName === "project_type_config") return state.projectTypeConfig;
     if (table === leads || tableName === "leads") return state.leads;
     if (table === users || tableName === "users") return state.users;
     if (table === files || tableName === "files") return state.files;
@@ -308,7 +313,9 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     select() {
       return {
         from(table: unknown) {
-          const rows = getRows(table);
+          const sourceRows = getRows(table);
+          // Real database reads are snapshots, not live references that mutate when UPDATE writes.
+          const rows = options.snapshotReads ? sourceRows.map((row) => ({ ...row })) : sourceRows;
           return {
             where(condition?: unknown) {
               const filteredRows = applySimpleWhere(rows as Array<Record<string, unknown>>, condition);
@@ -492,6 +499,96 @@ describe("Scoping Service", () => {
     pipelineMocks.getActiveProjectTypes.mockResolvedValue([
       { id: "project-type-1", name: "Roofing", slug: "roofing", code: "3" },
     ]);
+  });
+
+  it.each([
+    ["service", "Repair flashing", null, true],
+    ["service", null, "Repair flashing detail", true],
+    ["service", " ", " ", false],
+    ["normal", "Repair flashing", null, false],
+  ] as const)("scope readiness accepts either service scope field: %s %s %s", async (route, title, description, ready) => {
+    const tenantDb = createFakeTenantDb();
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: route, scopeTitle: title, description, propertyAddress: "123 Main St", projectTypeId: "project-type-1" });
+    const result = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(!result.errors.sections.scopeSummary?.length).toBe(ready);
+    expect(tenantDb.state.deals[0]?.description).toBe(description);
+  });
+
+  it.each(["service", "normal"] as const)("a saved blank intake summary cannot override a canonical service scope title on route %s", async (workflowRoute) => {
+    const tenantDb = createFakeTenantDb({ projectTypeConfig: [{ id: "project-type-1", code: "4" }] });
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute, scopeTitle: "Repair flashing", description: null, propertyAddress: "123 Main St", projectTypeId: "project-type-1" });
+    tenantDb.state.dealScopingIntake.push({
+      id: "intake-1", dealId: "deal-1", officeId: "office-1", workflowRouteSnapshot: "service", status: "draft",
+      projectTypeId: "project-type-1", sectionData: { scopeSummary: { summary: " " } }, completionState: {}, readinessErrors: {},
+      firstReadyAt: null, activatedAt: null, lastAutosavedAt: new Date(), createdBy: "user-1", lastEditedBy: "user-1", createdAt: new Date(), updatedAt: new Date(),
+    });
+    const result = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(result.errors.sections.scopeSummary).toBeUndefined();
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
+  });
+
+  it("uses the canonical service title after an incoming blank scope summary is merged", async () => {
+    const tenantDb = createFakeTenantDb({ projectTypeConfig: [{ id: "project-type-1", code: "4" }] });
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: "normal", scopeTitle: "Repair flashing", description: null,
+      propertyAddress: "123 Main St", projectTypeId: "project-type-1" });
+    const result = await upsertDealScopingIntake(tenantDb as never, "deal-1", { sectionData: { scopeSummary: { summary: " " } } }, "user-1");
+    expect(result.readiness.errors.sections.scopeSummary).toBeUndefined();
+  });
+  it("opening and autosaving a title-only workspace never copies the derived title into description", async () => {
+    const tenantDb = createFakeTenantDb();
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: "service", scopeTitle: "First scope title", description: null });
+    const opened = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
+    expect(opened.intake.sectionData.scopeSummary).toBeUndefined();
+    expect(opened.readiness.errors.sections.scopeSummary).toBeUndefined();
+    tenantDb.state.deals[0]!.scopeTitle = "Revised scope title";
+    const saved = await upsertDealScopingIntake(tenantDb as never, "deal-1", { sectionData: { opportunity: { preBidMeetingCompleted: true } } }, "user-1");
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
+    expect(saved.intake.sectionData.scopeSummary).toBeUndefined();
+    expect(saved.readiness.errors.sections.scopeSummary).toBeUndefined();
+    expect(tenantDb.state.dealHistory).toEqual([]);
+  });
+  it("description-only service readiness survives a saved blank summary without requiring a title", async () => {
+    const tenantDb = createFakeTenantDb();
+    Object.assign(tenantDb.state.deals[0]!, { workflowRoute: "service", scopeTitle: null, description: "Repair flashing detail" });
+    const opened = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+    opened.intake.sectionData = { ...opened.intake.sectionData, scopeSummary: { summary: " " } };
+    tenantDb.state.dealScopingIntake[0]!.sectionData = opened.intake.sectionData;
+    const result = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(result.errors.sections.scopeSummary).toBeUndefined();
+    expect(tenantDb.state.deals[0]?.description).toBe("Repair flashing detail");
+    expect(tenantDb.state.deals[0]?.scopeTitle).toBeNull();
+  });
+  it.each([
+    ["roofing", "service", "4", true],
+    ["service", "roofing", "3", false],
+  ] as const)("classifies scope readiness using the changed type: %s to %s", async (oldType, nextType, code, ready) => {
+    pipelineMocks.getActiveProjectTypes.mockResolvedValue([{ id: "next-type", name: nextType, slug: nextType, code }]);
+    pipelineMocks.getStageById.mockResolvedValue({ id: "stage-opportunity", slug: "opportunity", workflowFamily: "standard_deal" });
+    const tenantDb = createFakeTenantDb({ projectTypeConfig: [{ id: "next-type", code }] }, { snapshotReads: true });
+    Object.assign(tenantDb.state.deals[0]!, { projectType: oldType, projectTypeId: "old-type", dealNumber: "DFW-3-12326-aa",
+      workflowRoute: "normal", scopeTitle: "Repair flashing", description: null });
+    const changed = await upsertDealScopingIntake(tenantDb as never, "deal-1", { projectTypeId: "next-type" }, "user-1");
+    expect(tenantDb.state.deals[0]?.projectType).toBe(nextType);
+    expect(!changed.readiness.errors.sections.scopeSummary?.length).toBe(ready);
+    const fresh = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(fresh.errors.sections.scopeSummary).toEqual(changed.readiness.errors.sections.scopeSummary);
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
+    expect(changed.intake.sectionData.scopeSummary).toBeUndefined();
+  });
+
+  it.each([
+    ["Service", "3", "normal", true],
+    [null, "4", "normal", true],
+    ["Roofing", "4", "service", false],
+    [null, "3", "service", false],
+  ] as const)("scope title fallback follows canonical type precedence: %s %s %s", async (projectType, code, workflowRoute, ready) => {
+    const tenantDb = createFakeTenantDb({ projectTypeConfig: [{ id: "type-1", code }] });
+    Object.assign(tenantDb.state.deals[0]!, { projectType, projectTypeId: "type-1", workflowRoute,
+      scopeTitle: "Repair flashing", description: null, propertyAddress: "123 Main St" });
+    const result = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    expect(!result.errors.sections.scopeSummary?.length).toBe(ready);
+    expect(tenantDb.state.deals[0]?.description).toBeNull();
   });
 
   it("filters fake tenant db rows through composite and/or where predicates", async () => {

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { recordServiceRfpSubmission } from "./service-rfp-submission.js";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, files, jobQueue, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { PROJECT_TYPE_OPTIONS, resolveDealDisplayNumber, type RfpVoteInvitationDealSummary } from "@trock-crm/shared/types";
+import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import {
   generateDownloadUrl,
@@ -12,6 +14,8 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
+import { formatBidBoardActivityNote, loadDealActivityNoteEntries } from "./bid-board-activity-note.js";
+import { resolveRfpPayloadDueDates } from "./bid-due-date.js";
 import { PUBLIC_VIEWER_PAGE_SIZE, generatePublicToken, isPublicProxyServable } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrlFromEnv, publicViewerBaseUrlFromEnv } from "../public-photo-tokens/public-share-url.js";
 import { buildNormalizedRfpRequestBody, buildRfpAttachments, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
@@ -107,6 +111,59 @@ export async function resolveDealOwner(
 }
 
 /**
+ * Renders the deal's CRM activity history for the payload, degrading to null on any failure.
+ *
+ * The load runs inside the caller's tenant TRANSACTION, so a failing SELECT (an older tenant schema
+ * without `activities`, column drift) would leave that transaction aborted and take the job_queue
+ * insert down with it — Postgres: "current transaction is aborted" — losing the whole RFP for the sake
+ * of a display extra. A SAVEPOINT bounds the damage, exactly as enqueueRfpVoteInvitation does for its
+ * dealSummary load.
+ *
+ * The savepoint is best-effort: a caller that is NOT inside a transaction block (a direct-connection
+ * caller, e.g. a runtime test) gets an error from SAVEPOINT itself. That is harmless — there is no
+ * transaction to protect and nothing to roll back to — so we note it and load anyway rather than
+ * silently returning null.
+ */
+async function loadCrmActivityLog(
+  tenantDb: TenantDb,
+  dealId: string,
+  projectLabel: string,
+  generatedAt: Date
+): Promise<string | null> {
+  let savepointHeld = false;
+  try {
+    await tenantDb.execute(sql`SAVEPOINT rfp_activity_log`);
+    savepointHeld = true;
+  } catch (err) {
+    // Expected when the caller is not inside a transaction block; anything else is a real problem and
+    // must not be invisible, so it is logged either way rather than swallowed.
+    savepointHeld = false;
+    console.warn(
+      `[RFP] No savepoint for the CRM activity note on deal ${dealId} (not in a transaction block?):`,
+      err
+    );
+  }
+
+  try {
+    const { entries, olderCount, olderCountIsFloor } = await loadDealActivityNoteEntries(tenantDb, dealId);
+    if (savepointHeld) {
+      await tenantDb.execute(sql`RELEASE SAVEPOINT rfp_activity_log`);
+      // Cleared IMMEDIATELY: once released, the savepoint no longer exists, so a later throw must not
+      // send us into `ROLLBACK TO` it. That would raise "savepoint does not exist", poison the tenant
+      // transaction, and take the job_queue INSERT down with it — the exact failure this guard exists
+      // to prevent, inverted.
+      savepointHeld = false;
+    }
+    return formatBidBoardActivityNote({ projectLabel, generatedAt, entries, olderCount, olderCountIsFloor });
+  } catch (err) {
+    // Roll back only the activity work; the outer tenant txn stays usable so the RFP still enqueues.
+    if (savepointHeld) await tenantDb.execute(sql`ROLLBACK TO SAVEPOINT rfp_activity_log`).catch(() => {});
+    console.error(`[RFP] Failed to render the CRM activity note for deal ${dealId}:`, err);
+    return null;
+  }
+}
+
+/**
  * Builds the SyncHub RFP payload deal AUTHORITATIVELY from the database, keyed by deal id. Every field the
  * payload/owner needs is read from this function's own `SELECT d.*` (+ company/contact/lead JOINs + a fresh
  * owner resolution) — NEVER from the caller's object — so callers may pass just `{ id }`. This makes the enqueue
@@ -114,18 +171,35 @@ export async function resolveDealOwner(
  * and a bare `{ id }` produce an identical payload. (Previously the deal's own columns — projectType, amounts,
  * address, description, estimator, … — were taken from the passed object, so a sparse row yielded an empty payload.)
  */
-async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
+async function loadRfpPayloadDeal(
+  tenantDb: TenantDb,
+  deal: { id: string },
+  // The activity note is only ever consumed by the two BID BOARD CREATE paths. enqueueRfpVoteInvitation
+  // shares this loader purely for the email's dealSummary and copies a fixed field list, so rendering
+  // the note for it means fetching up to 200 activity rows with unbounded bodies and building an 8 KB
+  // string inside the tenant transaction — on a pooled client, under a 30s statement_timeout, in a repo
+  // with a known pool-exhaustion failure mode — only to throw it away. It opts out.
+  options: { includeActivityLog?: boolean } = {}
+) {
   const result = await tenantDb.execute(sql`
     SELECT d.*,
+           p.name AS "propertyName",
            c.name AS "companyName",
            concat_ws(' ', pc.first_name, pc.last_name) AS "contactName",
            pc.email AS "clientEmail",
            pc.phone AS "clientPhone",
-           l.bid_due_date AS "sourceLeadBidDueDate"
+           -- The JOINED lead's id, not d.source_lead_id: the bid-due-date resolver keys on whether the
+           -- lead ROW exists (a dangling source_lead_id must fall back to the deal column), exactly as
+           -- getResolvedDeal and getDealDetail do.
+           l.id AS "sourceLeadRowId",
+           l.bid_due_date AS "sourceLeadBidDueDate",
+           ptc.code AS "projectTypeCode"
       FROM deals d
       LEFT JOIN companies c ON c.id = d.company_id
+      LEFT JOIN properties p ON p.id = d.property_id
       LEFT JOIN contacts pc ON pc.id = d.primary_contact_id
       LEFT JOIN leads l ON l.id = d.source_lead_id
+      LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
      WHERE d.id = ${deal.id}
      LIMIT 1
   `);
@@ -134,8 +208,28 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
   if (!row) {
     // The deal vanished between the caller's write and this read (should not happen inside a tenant txn). Return a
     // well-formed shell so the builder still produces a valid (if empty) payload rather than throwing.
-    return { id: deal.id, name: "", dealNumber: "", rfpApprovalRequestEventId: null, ownerName: null, ownerEmail: null };
+    return {
+      id: deal.id,
+      name: "",
+      dealNumber: "",
+      rfpApprovalRequestEventId: null,
+      ownerName: null,
+      ownerEmail: null,
+      crmActivityLog: null,
+    };
   }
+
+  // BOTH date fields come from ONE decision — see the comment at their use below.
+  const dueDates = resolveRfpPayloadDueDates({
+    bidBoardDueDate: row.bid_board_due_date ?? null,
+    bidDueDateFromBidBoardAt: row.bid_due_date_from_bid_board_at ?? null,
+    bidDueDateBidBoardProjectNumber: (row.bid_due_date_bid_board_project_number as string | null) ?? null,
+    bidBoardProjectNumber: (row.bid_board_project_number as string | null) ?? null,
+    bidBoardDetachedAt: row.bid_board_detached_at ?? null,
+    hasSourceLead: (row.sourceLeadRowId as string | null) != null,
+    leadBidDueDate: row.sourceLeadBidDueDate ?? null,
+    dealBidDueDate: row.bid_due_date ?? null,
+  });
 
   // Owner resolved from the DB row's authoritative owner columns (never a caller-passed object, which may be a
   // sparse projection). Priority: assigned rep → HubSpot owner email → deal creator (see resolveDealOwner).
@@ -145,12 +239,36 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     createdByUserId: (row.created_by_user_id as string | null) ?? null,
   });
 
+  // The activity note's heading doubles as SyncHub's idempotency marker, so it must carry the SAME
+  // formatted number the payload ships — never a raw HubSpot id or a UUID. resolveDealDisplayNumber
+  // guards HS ids out; when there is no real number yet, fall back to the deal NAME (a UUID in the
+  // heading would be meaningless to the estimator reading the note in Procore).
+  const projectLabel =
+    resolveDealDisplayNumber({
+      projectNumber: (row.project_number as string | null) ?? null,
+      dealNumber: (row.deal_number as string | null) ?? null,
+    }) ?? ((row.name as string | null) ?? "").trim();
+  const crmActivityLog =
+    options.includeActivityLog === false
+      ? null
+      : await loadCrmActivityLog(
+          tenantDb,
+          row.id as string,
+          projectLabel.length > 0 ? projectLabel : "Untitled Deal",
+          new Date()
+        );
+
   return {
     id: row.id as string,
     name: (row.name as string | null) ?? "",
+    propertyName: (row.propertyName as string | null) ?? null,
+    scopeTitle: (row.scope_title as string | null) ?? null,
     dealNumber: (row.deal_number as string | null) ?? "",
     projectNumber: (row.project_number as string | null) ?? null,
     projectType: (row.project_type as string | null) ?? null,
+    // The CONFIGURED digit. Without it the payload ships type 9 for a deal typed only by project_type_id
+    // -- the common import shape -- telling SyncHub a service job is residential work.
+    projectTypeCode: (row.projectTypeCode as string | null) ?? null,
     workflowRoute: (row.workflow_route as "normal" | "service" | null) ?? null,
     awardedAmount: row.awarded_amount ?? null,
     bidEstimate: row.bid_estimate ?? null,
@@ -164,12 +282,34 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     propertyZip: (row.property_zip as string | null) ?? null,
     propertyCountry: (row.property_country as string | null) ?? null,
     description: (row.description as string | null) ?? null,
-    // The deal's own bid_due_date wins; else fall back to the source lead's bid_due_date.
-    bidDueDate: row.bid_due_date ?? row.sourceLeadBidDueDate ?? null,
-    bidBoardDueDate: row.bid_board_due_date ?? null,
+    // Rendered here rather than in the builder so BOTH create paths (insertOpportunityRfpRequestJob and
+    // enqueueRfpBidBoardCreate) inherit it with no further change, and a sparse `{ id }` caller still
+    // produces a complete payload. Note that enqueueRfpVoteInvitation copies a FIXED field list into
+    // dealSummary, so this deliberately never reaches the voter invitation EMAIL — an 8 KB activity dump
+    // would bury the decision.
+    crmActivityLog,
+    // BOTH date fields come from one decision, because buildNormalizedRfpRequestBody's `dueDate` is
+    // `cleanIso(bidDueDate) ?? cleanIso(bidBoardDueDate)` — so passing the mirror independently would let a
+    // value the resolver REJECTED reach SyncHub through the fallback and be typed into the Procore Bid
+    // Board project's Due Date field.
+    //
+    // FULLY gated on BID_BOARD_DUE_DATE_READBACK — including the lead/deal ordering, which this site has
+    // always had backwards relative to the deal-detail banner and getResolvedDeal. Flag OFF reproduces
+    // `row.bid_due_date ?? row.sourceLeadBidDueDate ?? null` plus the untouched mirror fallback, verbatim.
+    //
+    // The backwards ordering is a real bug, and it is deliberately NOT fixed ahead of the flag: this value
+    // leaves the CRM for an external system, so correcting it ungated would write a new date into Procore
+    // before anyone had read the census. See resolveRfpPayloadDueDates for the full reasoning — do not
+    // collapse it into resolveDealBidDueDateForRead.
+    bidDueDate: dueDates.bidDueDate,
+    bidBoardDueDate: dueDates.bidBoardDueDate,
     createdAt: row.created_at ?? null,
     // Round-precise event id for enqueueRfpBidBoardCreate's sourceEventId (authoritative, from the DB row).
     rfpApprovalRequestEventId: (row.rfp_approval_request_event_id as string | null) ?? null,
+    // The deal's own FK columns, already in `SELECT d.*`. They travel so downstream resolution keys on a
+    // uuid instead of on the joined names below — see RfpPayloadSourceDeal for why the name route is unsafe.
+    companyId: (row.company_id as string | null) ?? null,
+    propertyId: (row.property_id as string | null) ?? null,
     companyName: (row.companyName as string | null) ?? null,
     contactName: (row.contactName as string | null) ?? null,
     clientEmail: (row.clientEmail as string | null) ?? null,
@@ -278,7 +418,11 @@ export async function insertOpportunityRfpRequestJob(
     })
     .returning({ id: jobQueue.id });
 
-  return { jobId: Number(jobRows[0]?.id) };
+  const jobId = Number(jobRows[0]?.id);
+  if (resolveProjectTypeCode({ projectType: rfpPayloadDeal.projectType, projectTypes: rfpPayloadDeal.projectTypeCode, workflowRoute: rfpPayloadDeal.workflowRoute ?? "normal" }) === "4") {
+    await recordServiceRfpSubmission(input.tenantDb, input.officeId, input.deal.id, input.eventId, jobId);
+  }
+  return { jobId };
 }
 
 /**
@@ -353,7 +497,14 @@ export async function enqueueRfpVoteInvitation(input: {
     // "current transaction is aborted"), blocking the round from opening. This keeps the "never block the round"
     // promise true.
     await input.tenantDb.execute(sql`SAVEPOINT rfp_vote_summary`);
-    const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, { id: input.deal.id });
+    // No activity note: dealSummary below copies a FIXED field list, so rendering one here would be
+    // paid for inside the tenant transaction and then discarded. (It must also never reach a voter's
+    // inbox — an 8 KB activity dump would bury the decision they are being asked to make.)
+    const rfpPayloadDeal = await loadRfpPayloadDeal(
+      input.tenantDb,
+      { id: input.deal.id },
+      { includeActivityLog: false }
+    );
     const body = buildNormalizedRfpRequestBody({ deal: rfpPayloadDeal, sourceEventId: "" });
     const addr = body.deal.address;
     dealSummary = {
@@ -439,7 +590,11 @@ export async function enqueueRfpBidBoardCreate(input: {
       maxAttempts: 8,
     })
     .returning({ id: jobQueue.id });
-  return { jobId: Number(jobRows[0]?.id) };
+  const jobId = Number(jobRows[0]?.id);
+  if (body.deal.projectType === "4") {
+    await recordServiceRfpSubmission(input.tenantDb, input.officeId, input.deal.id, body.sourceEventId, jobId);
+  }
+  return { jobId };
 }
 
 /**

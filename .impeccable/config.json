@@ -5,6 +5,17 @@
       "worker/src/**",
       "server/src/**"
     ],
-    "ignoreValues": []
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "arial",
+        "files": [
+          "client/src/lib/report-export.ts",
+          "client/src/pages/deals/deal-estimates-tab.tsx"
+        ],
+        "createdAt": "2026-08-18T21:55:42.277Z",
+        "reason": "Generated print/PDF document HTML, not UI: these build a standalone document string with no stylesheet, no webfont loading and no token ramp, so Arial is the correct stack for the same reason it is in the HTML email builders. Scoped to these two files rather than repo-wide so a future Arial in real UI is still flagged. The email builders themselves need no entry - worker/src is already ignored above."
+      }
+    ]
   }
 }

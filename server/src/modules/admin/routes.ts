@@ -156,7 +156,7 @@ router.patch("/admin/offices/:id", requireAdmin, async (req: Request, res: Respo
 
 router.get("/admin/users", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userList = await getUsersWithStats();
+    const userList = await getUsersWithStats(req.user!.activeOfficeId ?? req.user!.officeId);
     return res.json({ users: userList });
   } catch (err) {
     return next(err);
@@ -653,7 +653,8 @@ router.put("/admin/notification-recipient-groups/:key/assignments", requireAdmin
     const result = await updateNotificationRecipientAssignments(
       req.tenantDb ?? (drizzle(pool) as any),
       req.params.key as string,
-      userIds
+      userIds,
+      req.user!.activeOfficeId ?? req.user!.officeId,
     );
     return res.json(result);
   } catch (err) {

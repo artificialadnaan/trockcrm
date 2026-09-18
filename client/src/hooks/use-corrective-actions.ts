@@ -281,6 +281,32 @@ export interface ApprovalOutcomeView {
   generation?: string | null;
 }
 
+/**
+ * Result of starting a fresh responder-notification cycle from the QC report. `queued` means the durable
+ * job was accepted; the worker sends it after its normal short delay, so the UI must not call this
+ * "delivered". `alreadyQueued` keeps a rapid repeat click honest when the server has already accepted the
+ * same request.
+ */
+export interface RetriggerCorrectiveActionResult {
+  queued: boolean;
+  alreadyQueued?: boolean;
+}
+
+/**
+ * Queue a fresh "Document Corrective Action" email for the scorecard's CURRENT superintendent and project
+ * manager. This is deliberately session-only and lives beside the approval verbs: the server enforces the
+ * director/admin gate, rotates the notification cycle, and invalidates prior secure response tokens.
+ */
+export async function retriggerCorrectiveAction(
+  dealId: string,
+  scorecardId: string,
+): Promise<RetriggerCorrectiveActionResult> {
+  return api<RetriggerCorrectiveActionResult>(
+    `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/retrigger`,
+    { method: "POST" },
+  );
+}
+
 /** Approve specific items, or every item awaiting approval when `itemIds` is omitted (approve-all). */
 export async function approveCorrectiveActions(
   dealId: string,

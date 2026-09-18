@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
 import { aliasedEffectiveOnHoldConditionSql } from "./deal-value-sql.js";
+import { readTenantSchemaTag } from "./tenant-schema.js";
 
 type TenantDbLike = {
   execute?: (query: any) => PromiseLike<unknown> | unknown;
@@ -12,7 +13,34 @@ type MineVisibilityOptions = {
   includeSubscriptionDeletedAt?: boolean;
 };
 
+/**
+ * Per-INSTANCE fallback for a db that carries no office-schema tag (unit tests, the worker, a direct
+ * `drizzle(pool)`). Behaviour is exactly what this file has always had for those callers.
+ */
 const schemaCapabilityCache = new WeakMap<object, Map<string, Promise<boolean>>>();
+
+/**
+ * Per-OFFICE cache, which is the one that actually works in production.
+ *
+ * The instance cache above cannot hit under the API: `tenantMiddleware` builds a fresh
+ * `drizzle(client)` per request, so every request arrived with a brand-new WeakMap key and re-ran all
+ * six catalog probes (two `to_regclass`, four `information_schema.columns`) before it could even build
+ * the Mine predicate. On the deals board that is six extra round trips on the single tenant client,
+ * every load, for answers that change only when a MIGRATION runs.
+ *
+ * Keyed on the office schema name published by tenant.ts. TTL'd rather than permanent because migrations
+ * run at API start but new offices are provisioned while the process is live — a bounded staleness window
+ * keeps a freshly-provisioned schema from being pinned to a stale "capability missing" answer, which
+ * would silently NARROW a Mine-scoped board instead of failing loudly.
+ */
+const SCHEMA_CAPABILITY_TTL_MS = 5 * 60 * 1000;
+type CapabilityEntry = { promise: Promise<boolean>; expiresAt: number };
+const officeCapabilityCache = new Map<string, Map<string, CapabilityEntry>>();
+
+/** Test/ops hook: drop every cached capability answer (e.g. after provisioning or a migration). */
+export function resetSchemaCapabilityCache(): void {
+  officeCapabilityCache.clear();
+}
 
 function requireSchemaValue<T>(value: T | undefined, name: string): T {
   if (value === undefined) {
@@ -72,6 +100,39 @@ async function currentSchemaColumnExists(
 }
 
 async function currentSchemaCapability(
+  tenantDb: TenantDbLike,
+  key: string,
+  loader: () => Promise<boolean>
+) {
+  const officeSchema = readTenantSchemaTag(tenantDb);
+  if (officeSchema == null) {
+    return instanceScopedCapability(tenantDb, key, loader);
+  }
+
+  let entry = officeCapabilityCache.get(officeSchema);
+  if (!entry) {
+    entry = new Map<string, CapabilityEntry>();
+    officeCapabilityCache.set(officeSchema, entry);
+  }
+
+  const existing = entry.get(key);
+  if (existing && existing.expiresAt > Date.now()) {
+    return existing.promise;
+  }
+
+  const promise = loader();
+  entry.set(key, { promise, expiresAt: Date.now() + SCHEMA_CAPABILITY_TTL_MS });
+  // A FAILED probe must not be cached. The previous per-instance cache stored the promise itself, so a
+  // rejection was memoised too — harmless there only because the instance died with the request. In a
+  // process-wide cache a single transient error would pin the failure for the whole TTL and, once the
+  // caller swallowed it, quietly answer "capability missing" for every request in that window.
+  promise.catch(() => {
+    if (entry!.get(key)?.promise === promise) entry!.delete(key);
+  });
+  return promise;
+}
+
+async function instanceScopedCapability(
   tenantDb: TenantDbLike,
   key: string,
   loader: () => Promise<boolean>

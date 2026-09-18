@@ -6,6 +6,7 @@ import {
   taskStatusEnum,
   taskResolutionStatusEnum,
   taskResolutionState,
+  taskComments,
 } from "../../../../shared/src/schema/index.js";
 
 vi.mock("../../../src/db.js", () => ({
@@ -18,6 +19,7 @@ const {
   completeTask,
   dismissTask,
   transitionTaskStatus,
+  TASK_RESOLUTION_NOTE_MAX_LENGTH,
   isTaskIncludedInActiveBuckets,
   getTaskCounts,
 } = await import("../../../src/modules/tasks/service.js");
@@ -28,6 +30,7 @@ function createTransitionDb(initialTask: TaskState, rows: TaskState[] = []) {
   let currentTask = { ...initialTask };
   let lastUpdate: Record<string, any> | null = null;
   const insertedRows: Array<Record<string, any>> = [];
+  const insertedComments: Array<Record<string, any>> = [];
 
   const selectChain: any = {
     from: vi.fn(),
@@ -62,16 +65,28 @@ function createTransitionDb(initialTask: TaskState, rows: TaskState[] = []) {
     })),
   };
 
+  const insert = vi.fn((table: unknown) => {
+    if (table === taskComments) {
+      return {
+        values: vi.fn(async (values: Record<string, any>) => {
+          insertedComments.push(values);
+        }),
+      };
+    }
+    return insertChain;
+  });
+
   return {
     db: {
       select: vi.fn(() => selectChain),
       update: vi.fn(() => updateChain),
-      insert: vi.fn(() => insertChain),
+      insert,
       execute: vi.fn(async () => ({ rows })),
     },
     getCurrentTask: () => currentTask,
     getLastUpdate: () => lastUpdate,
     getInsertedRows: () => insertedRows,
+    getInsertedComments: () => insertedComments,
   };
 }
 
@@ -392,7 +407,7 @@ describe("Task Service", () => {
       vi.setSystemTime(now);
 
       try {
-        const { db, getInsertedRows } = createTransitionDb(
+        const { db, getInsertedRows, getInsertedComments } = createTransitionDb(
           makeTask({
             officeId: "office-1",
             originRule: "stale_lead",
@@ -405,13 +420,21 @@ describe("Task Service", () => {
         const result = await transitionTaskStatus(
           db as any,
           "task-1",
-          { nextStatus: "dismissed" },
+          { nextStatus: "dismissed", resolutionNote: "  Not needed after the customer withdrew.  " },
           "director",
           "user-1"
         );
 
         expect(result.status).toBe("dismissed");
         expect(result.completedAt).toEqual(now);
+        expect(getInsertedComments()).toEqual([
+          {
+            taskId: "task-1",
+            authorId: "user-1",
+            kind: "note",
+            body: "Dismissed: Not needed after the customer withdrew.",
+          },
+        ]);
         expect(getInsertedRows()).toContainEqual(
           expect.objectContaining({
             officeId: "office-1",
@@ -616,15 +639,64 @@ describe("Task Service", () => {
   });
 
   describe("Completion Behavior", () => {
+    it.each([
+      ["complete", (db: any) => completeTask(db, "task-1", "director", "user-1")],
+      ["dismiss", (db: any) => dismissTask(db, "task-1", "director", "user-1")],
+      [
+        "terminal transition",
+        (db: any) => transitionTaskStatus(
+          db,
+          "task-1",
+          { nextStatus: "completed" },
+          "director",
+          "user-1"
+        ),
+      ],
+    ])("requires a nonblank explanation before %s", async (_action, close) => {
+      const { db, getCurrentTask, getInsertedComments } = createTransitionDb(makeTask());
+
+      await expect(close(db)).rejects.toMatchObject({
+        statusCode: 400,
+        message: "Tell us what action you took before closing this task",
+      });
+      expect(getCurrentTask().status).toBe("pending");
+      expect(getInsertedComments()).toEqual([]);
+    });
+
+    it("rejects explanations above the configured limit before changing the task", async () => {
+      const { db, getCurrentTask, getInsertedComments } = createTransitionDb(makeTask());
+
+      await expect(
+        completeTask(db as any, "task-1", "director", "user-1", {
+          resolutionNote: "a".repeat(TASK_RESOLUTION_NOTE_MAX_LENGTH + 1),
+        })
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: `A task close explanation cannot be longer than ${TASK_RESOLUTION_NOTE_MAX_LENGTH} characters`,
+      });
+      expect(getCurrentTask().status).toBe("pending");
+      expect(getInsertedComments()).toEqual([]);
+    });
+
     it("completes waiting_on tasks", async () => {
-      const { db } = createTransitionDb(makeTask({ status: "waiting_on", waitingOn: { reason: "client" } }));
-      const result = await completeTask(db as any, "task-1", "director", "user-1");
+      const { db, getInsertedComments } = createTransitionDb(makeTask({ status: "waiting_on", waitingOn: { reason: "client" } }));
+      const result = await completeTask(db as any, "task-1", "director", "user-1", {
+        resolutionNote: "  Called the client and documented the answer.  ",
+      });
 
       expect(result.status).toBe("completed");
       expect(result.completedAt).toBeInstanceOf(Date);
       expect(result.isOverdue).toBe(false);
       expect(result.waitingOn).toBeNull();
       expect(result.blockedBy).toBeNull();
+      expect(getInsertedComments()).toEqual([
+        {
+          taskId: "task-1",
+          authorId: "user-1",
+          kind: "note",
+          body: "Completed: Called the client and documented the answer.",
+        },
+      ]);
     });
 
     it("treats scheduled tasks as inactive even after scheduledFor passes", () => {
@@ -654,7 +726,7 @@ describe("Task Service", () => {
       vi.setSystemTime(now);
 
       try {
-        const { db, getInsertedRows } = createTransitionDb(
+        const { db, getInsertedRows, getInsertedComments } = createTransitionDb(
           makeTask({
             officeId: "office-1",
             originRule: "stale_lead",
@@ -664,10 +736,20 @@ describe("Task Service", () => {
           })
         );
 
-        const result = await dismissTask(db as any, "task-1", "director", "user-1");
+        const result = await dismissTask(db as any, "task-1", "director", "user-1", {
+          resolutionNote: "The customer withdrew the request.",
+        });
 
         expect(result.status).toBe("dismissed");
         expect(result.completedAt).toEqual(now);
+        expect(getInsertedComments()).toEqual([
+          {
+            taskId: "task-1",
+            authorId: "user-1",
+            kind: "note",
+            body: "Dismissed: The customer withdrew the request.",
+          },
+        ]);
         expect(getInsertedRows()).toHaveLength(1);
         expect(getInsertedRows()[0]).toEqual(
           expect.objectContaining({

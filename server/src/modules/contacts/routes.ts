@@ -241,9 +241,10 @@ router.post("/", async (req, res, next) => {
 
     const { contact, dedupResult } = await createContact(
       req.tenantDb!,
-      // The creator becomes the owner so newly-created contacts aren't left unassigned; placed after
-      // ...rest so a client-supplied ownerUserId can't override the authenticated creator.
-      { firstName, lastName, ...rest, ownerUserId: req.user!.id },
+      // The creator becomes the owner so newly-created contacts aren't left unassigned, and is recorded
+      // separately as the AUTHOR — ownership is reassigned over an account's life, authorship is not.
+      // BOTH are placed after ...rest so a client-supplied value can't override the authenticated user.
+      { firstName, lastName, ...rest, ownerUserId: req.user!.id, createdByUserId: req.user!.id },
       skipDedupCheck === true
     );
 

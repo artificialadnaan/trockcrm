@@ -13,6 +13,9 @@ import {
   buildNoDateEvidenceSql,
   buildPipelineEvidenceSql,
   buildLeadEvidenceSql,
+  buildCurrentEstimatingProjectsSql,
+  buildRfpInitiatedProjectsSql,
+  buildEstimateSentProjectsSql,
   eightWeekStartsEndingAt,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
@@ -84,6 +87,30 @@ describe("Monday showcase SQL builders compose F1-F5", () => {
     expect(trend).toContain(filterText); // trend now matches the cohort basis
   });
 
+  it("A1 current estimating is a live effective-stage snapshot with direct DD and hold-aware stage age", () => {
+    const text = extractSqlText(buildCurrentEstimatingProjectsSql());
+    expect(text).toContain("COALESCE(NULLIF");
+    expect(text).toContain("bid_board_stage_slug");
+    expect(text).toContain("estimate_in_progress"); // legacy estimating alias stays visible
+    expect(text).toContain("d.dd_estimate");
+    expect(text).toContain("d.is_active = true");
+    expect(text).toContain("on_hold_accumulated_seconds"); // aliasedEffectiveStageAgeDaysSql, not raw age
+  });
+
+  it("A1 RFP and sent cohorts use their distinct CT date sources and raw latest Bid Board fields", () => {
+    const rfp = extractSqlText(buildRfpInitiatedProjectsSql("2026-05-24", "2026-05-30"));
+    expect(rfp).toContain("rfp_approval_requested_at");
+    expect(rfp).toContain("America/Chicago");
+    expect(rfp).toContain("assigned_rep_id");
+
+    const sent = extractSqlText(buildEstimateSentProjectsSql("2026-05-24", "2026-05-30"));
+    expect(sent).toContain("dsh.to_stage_id");
+    expect(sent).toContain("MIN(dsh.created_at)");
+    expect(sent).toContain("bid_board_total_sales");
+    expect(sent).toContain("bid_board_profit_margin_pct");
+    expect(sent).not.toContain("d.bid_estimate AS latest_bid_board_total_sales");
+  });
+
   it("lead status: active (open) leads grouped by stage, per rep", () => {
     const text = extractSqlText(buildLeadStatusSql());
     expect(text).toContain("l.stage_id"); // grouped by lead stage
@@ -120,6 +147,9 @@ describe("the Service / Other route filter reaches every deal-sourced builder", 
   const DEAL_BUILDERS: Array<[string, (routes?: readonly ("service" | "other")[]) => unknown]> = [
     ["stageEntryCohort(sent)", (r) => buildStageEntryCohortSql(SENT_STAGE_SLUGS, "2026-06-01", "2026-06-07", r)],
     ["stageEntryCohort(estimated)", (r) => buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, "2026-06-01", "2026-06-07", r)],
+    ["a1CurrentEstimating", (r) => buildCurrentEstimatingProjectsSql(r)],
+    ["a1RfpInitiated", (r) => buildRfpInitiatedProjectsSql("2026-06-01", "2026-06-07", r)],
+    ["a1EstimateSent", (r) => buildEstimateSentProjectsSql("2026-06-01", "2026-06-07", r)],
     ["projectionBands", (r) => buildProjectionBandsSql(r)],
     ["projectionCoverage", (r) => buildProjectionCoverageSql(r)],
     ["weeklyCohortTrend", (r) => buildWeeklyCohortTrendSql("2026-05-01", "2026-06-07", undefined, r)],
@@ -132,16 +162,42 @@ describe("the Service / Other route filter reaches every deal-sourced builder", 
     ["pipelineEvidence", (r) => buildPipelineEvidenceSql(undefined, undefined, undefined, r)],
   ];
 
-  it.each(DEAL_BUILDERS)("%s narrows on workflow_route when one bucket is selected", (_name, build) => {
-    expect(extractSqlText(build(["service"]))).toContain("workflow_route = 'service'");
+  // The signature of the CANONICAL predicate -- its configured-code tier, which nothing else emits.
+  //
+  // Deliberately NOT "project_type_config": the evidence builders already LEFT JOIN that table for their
+  // deal_type display column, so asserting on its name would pass whether or not the filter was applied
+  // -- a vacuous test dressed as a strict one. And deliberately not a long literal spanning the alias:
+  // extractSqlText joins queryChunks with a SPACE, so an interpolated `sql.raw("d")` splits any substring
+  // written across it (`COALESCE( d .project_type`), and such an assertion fails for the wrong reason.
+  const CANONICAL_PROJECT_TYPE_TEST = "~ '^[1-9]$'";
+
+  it.each(DEAL_BUILDERS)("%s narrows on the canonical project-type test, not the raw route column", (_name, build) => {
+    const service = extractSqlText(build(["service"]));
+    // THE FIX. Every one of these builders used to narrow on `workflow_route` alone -- the input the
+    // canonical resolution consults LAST -- so a service deal typed correctly (and stamped DFW-4-… in its
+    // deal number) was counted as normal work. They must now ask project_type FIRST.
+    expect(service).toContain(CANONICAL_PROJECT_TYPE_TEST);
+    expect(service).toContain(".project_type");
+    // ...while workflow_route survives as the final fallback, for deals carrying no type at all.
+    expect(service).toContain("workflow_route = 'service'");
+
     const other = extractSqlText(build(["other"]));
-    // The null leg is what keeps the partition total -- a bare not-equals would drop null rows from BOTH
-    // buckets and break additivity, so assert the IS NULL disjunct explicitly.
-    expect(other).toContain("workflow_route IS NULL");
-    expect(other).toContain("workflow_route <> 'service'");
+    // "other" is the strict COMPLEMENT of "service", which is what keeps the partition total. The old
+    // spelling needed an explicit `IS NULL` leg because a bare `<>` is UNKNOWN for a NULL row and would
+    // drop it from BOTH buckets; the canonical predicate COALESCEs to false, so NOT is total by
+    // construction and the null leg is no longer a thing that can be forgotten.
+    expect(other).toContain("AND NOT");
+    expect(other).toContain(CANONICAL_PROJECT_TYPE_TEST);
+    // That the two buckets are exact complements (and therefore additive) is proven behaviourally, on
+    // real rows, by the "additivity: service-only + other-only === both-selected" suite in
+    // monday-showcase-route-filter.runtime.test.ts. It is NOT asserted here by string shape: several of
+    // these builders legitimately contain their own "AND NOT" for date predicates, so a text test would
+    // be measuring the wrong thing.
   });
 
   it.each(DEAL_BUILDERS)("%s emits NO route predicate by default or with both buckets", (_name, build) => {
+    expect(extractSqlText(build(undefined))).not.toContain(CANONICAL_PROJECT_TYPE_TEST);
+    expect(extractSqlText(build(["service", "other"]))).not.toContain(CANONICAL_PROJECT_TYPE_TEST);
     expect(extractSqlText(build(undefined))).not.toContain("workflow_route");
     expect(extractSqlText(build(["service", "other"]))).not.toContain("workflow_route");
     // Byte-identical, not merely "both lack the column name": the default page load must issue the exact

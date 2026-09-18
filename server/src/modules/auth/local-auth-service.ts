@@ -1,7 +1,13 @@
 import crypto from "crypto";
 import { promisify } from "util";
 import { and, eq, sql } from "drizzle-orm";
-import { dealTeamMembers, userLocalAuth, userLocalAuthEvents, users } from "@trock-crm/shared/schema";
+import {
+  dealTeamMembers,
+  localAuthEventTypeEnum,
+  userLocalAuth,
+  userLocalAuthEvents,
+  users,
+} from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
@@ -13,9 +19,10 @@ import {
   type FieldTenantDb,
 } from "../field/cross-office.js";
 import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
+import { validatePasswordPolicy, PASSWORD_MIN_LENGTH } from "./password-policy.js";
+import { closeUserSseConnections, incrementTokenVersion } from "./session-invalidation.js";
 
 const scryptAsync = promisify(crypto.scrypt);
-const PASSWORD_MIN_LENGTH = 12;
 const TEMP_PASSWORD_LENGTH = 18;
 const INVITE_TTL_HOURS = 72;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
@@ -52,14 +59,13 @@ function computeLockoutUntil(baseDate: Date): Date {
   return new Date(baseDate.getTime() + LOCKOUT_WINDOW_MINUTES * 60 * 1000);
 }
 
-function validatePasswordPolicy(password: string) {
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    throw new AppError(
-      400,
-      `Password must be at least ${PASSWORD_MIN_LENGTH} characters`
-    );
-  }
-}
+// The policy itself now lives in ./password-policy.js, which has no database imports so that callers
+// and tests can reach the real function without importing (or mocking) this module. Re-exported here
+// because existing callers import it from local-auth-service.
+//
+// `import` + `export`, never a bare `export { x } from` -- this module calls validatePasswordPolicy
+// internally (hashPassword, changeLocalPassword) and a bare re-export creates no local binding.
+export { validatePasswordPolicy, PASSWORD_MIN_LENGTH };
 
 type InviteEmailContent = {
   subject: string;
@@ -147,17 +153,19 @@ function inviteLoginUrl(inputUrl?: string): string {
   return inputUrl ?? process.env.ONBOARDING_CLEANUP_URL ?? DEFAULT_CLEANUP_LOGIN_URL;
 }
 
-async function recordLocalAuthEvent(input: {
+/**
+ * Every value the local_auth_event_type Postgres enum accepts, derived from the Drizzle enum rather
+ * than hand-listed.
+ *
+ * This union used to be retyped by hand and had already drifted: 'password_change_forced' existed in
+ * both the Postgres and Drizzle enums but was missing here, so a legal event type was a type error at
+ * the call site. Deriving it means adding a value in one place is enough, forever.
+ */
+export type LocalAuthEventType = (typeof localAuthEventTypeEnum.enumValues)[number];
+
+export async function recordLocalAuthEvent(input: {
   userId: string;
-  eventType:
-    | "invite_previewed"
-    | "invite_sent"
-    | "invite_resent"
-    | "invite_revoked"
-    | "login_succeeded"
-    | "login_failed"
-    | "login_locked"
-    | "password_changed";
+  eventType: LocalAuthEventType;
   actorUserId?: string | null;
   metadata?: Record<string, unknown> | null;
 }) {
@@ -664,22 +672,62 @@ export async function changeLocalPassword(input: {
   const nextHash = await hashPassword(input.newPassword);
   const currentTime = now();
 
-  await db
-    .update(userLocalAuth)
-    .set({
-      passwordHash: nextHash,
-      mustChangePassword: false,
-      inviteExpiresAt: null,
-      failedLoginAttempts: 0,
-      lastFailedLoginAt: null,
-      lockedUntil: null,
-      passwordChangedAt: currentTime,
-      updatedAt: currentTime,
-    })
-    .where(eq(userLocalAuth.userId, input.userId));
+  // The new hash and the session kill go in ONE transaction. Committing the hash without the bump is
+  // the exact failure this fixes — the password looks changed while every stolen session stays live.
+  const tokenVersion = await db.transaction(async (tx) => {
+    await tx
+      .update(userLocalAuth)
+      .set({
+        passwordHash: nextHash,
+        mustChangePassword: false,
+        inviteExpiresAt: null,
+        failedLoginAttempts: 0,
+        lastFailedLoginAt: null,
+        lockedUntil: null,
+        passwordChangedAt: currentTime,
+        updatedAt: currentTime,
+      })
+      .where(eq(userLocalAuth.userId, input.userId));
 
-  await recordLocalAuthEvent({
-    userId: input.userId,
-    eventType: "password_changed",
+    // Invalidates every session carrying the old version. People change a password precisely because
+    // they think it leaked; leaving the attacker's 30-day cookie alive would defeat the whole action.
+    await incrementTokenVersion(tx, input.userId);
+
+    const [bumped] = await tx
+      .select({ tokenVersion: users.tokenVersion })
+      .from(users)
+      .where(eq(users.id, input.userId))
+      .limit(1);
+
+    // Read back rather than guessing. Signing the caller a token at a stale version would sign them
+    // straight out, and defaulting to 0 here would do it silently.
+    if (bumped?.tokenVersion == null) {
+      throw new AppError(404, "User not found");
+    }
+    return bumped.tokenVersion;
   });
+
+  // Bumping token_version only stops NEW requests. An SSE stream authenticates once at connect and
+  // then stays open indefinitely, so without this the stolen session someone just changed their
+  // password to kill keeps receiving their notifications.
+  try {
+    closeUserSseConnections(input.userId);
+  } catch (err) {
+    console.error("[change-password] sse teardown failed", err);
+  }
+
+  // Non-fatal. The password IS changed and every session IS dead by this point; letting a failed audit
+  // insert throw would report a committed change as a 500 AND skip the cookie re-mint below, silently
+  // signing the user out of the device they just used while telling them nothing happened.
+  try {
+    await recordLocalAuthEvent({
+      userId: input.userId,
+      eventType: "password_changed",
+    });
+  } catch (err) {
+    console.error("[change-password] audit event failed", err);
+  }
+
+  // The caller re-mints THIS session's cookie at the returned version; see /local/change-password.
+  return { tokenVersion };
 }

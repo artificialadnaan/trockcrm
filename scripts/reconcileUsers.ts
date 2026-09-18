@@ -564,10 +564,14 @@ async function createMissingUsers(client: pg.Client, orgUsers: OrgChartUser[], a
   for (const user of plan.wouldCreate) {
     const officeId = await getOfficeIdBySlug(client, user.officeSlug);
     const inserted = await client.query(
-      `INSERT INTO public.users (email, display_name, role, office_id, is_active, notification_prefs, updated_at)
-       VALUES ($1, $2, $3::user_role, $4, $5, COALESCE($6::jsonb, '{}'::jsonb), NOW())
+      // generates_sales is EXPLICIT, not left to the column default (migration 0219). This script creates
+      // admins, directors and construction users from the org chart; the default is `true`, so omitting it
+      // would put every one of them straight onto the director-dashboard rosters — the exact clutter the
+      // flag exists to remove. Same role-derived rule as createCrmUser and the user import.
+      `INSERT INTO public.users (email, display_name, role, office_id, is_active, generates_sales, notification_prefs, updated_at)
+       VALUES ($1, $2, $3::user_role, $4, $5, $7, COALESCE($6::jsonb, '{}'::jsonb), NOW())
        RETURNING id, email, role, is_active`,
-      [user.email, user.name, user.crmRole, officeId, user.status !== "inactive", notificationPrefsPatch({ flags: user.flags ?? [], notes: user.notes ?? null, source: "org_chart_cleanup" })]
+      [user.email, user.name, user.crmRole, officeId, user.status !== "inactive", notificationPrefsPatch({ flags: user.flags ?? [], notes: user.notes ?? null, source: "org_chart_cleanup" }), user.crmRole === "rep"]
     );
     auditRows.push({
       timestamp: nowIso(),
@@ -593,7 +597,8 @@ async function tenantSchemas(client: pg.Client): Promise<string[]> {
   return slugs.map((slug) => validateSchemaName(`office_${slug}`));
 }
 
-async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUserId: string, email: string, step: string, auditRows: AuditRow[]) {
+/** Exported for server/tests/scripts/reconcile-users-assignment-stamp.runtime.test.ts. */
+export async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUserId: string, email: string, step: string, auditRows: AuditRow[]) {
   for (const schemaName of await tenantSchemas(client)) {
     const deals = await client.query(
       `UPDATE ${schemaName}.deals SET assigned_rep_id = $2, updated_at = NOW() WHERE assigned_rep_id = $1 AND is_active = true RETURNING id, deal_number`,
@@ -607,8 +612,46 @@ async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUse
     );
     for (const row of leads.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_lead", entityType: `${schemaName}.lead`, entityId: row.id, email, before: fromUserId, after: toUserId, details: row.name ?? "" });
 
+    // A merge has TWO independent task identities to reconcile. Moving only assigned_to leaves a
+    // source user who ASSIGNED work to somebody else as `COALESCE(last_assigned_by, created_by)`.
+    // Once that source is deactivated, replies intentionally skip their inactive assigner forever.
+    // Transfer that resolved assigner to the replacement, but preserve created_by: it is permanent
+    // historical attribution, not a routing pointer.
+    //
+    // Do this separately from assignee reassignment so the audit record does not claim a task moved
+    // when only its reply recipient changed. `IS DISTINCT FROM` also makes a task already assigned to
+    // the replacement a deliberate self-assignment: the replacement is both assignee and current
+    // assigner, so a reply records normally but never emails the author themself.
+    const assignerLoops = await client.query(
+      `UPDATE ${schemaName}.tasks
+          SET last_assigned_by = $2, updated_at = NOW()
+        WHERE assigned_to IS DISTINCT FROM $1
+          AND COALESCE(last_assigned_by, created_by) = $1
+      RETURNING id, title, status`,
+      [fromUserId, toUserId]
+    );
+    for (const row of assignerLoops.rows) auditRows.push({ timestamp: nowIso(), step, action: "transfer_task_assigner", entityType: `${schemaName}.task`, entityId: row.id, email, before: fromUserId, after: toUserId, details: `${row.status}:${row.title ?? ""}` });
+
+    // If the retiring user is also the assignee, move that ownership and stamp the new assignment.
+    // A source-resolved assigner on the same row follows the replacement too; that is the genuine
+    // replacement self-assignment case above, whereas an unrelated previous assigner remains the
+    // person waiting on the reply. `assigned_at` makes an earlier acknowledgement stop answering this
+    // handoff, so the login modal shows the transfer instead of silently inheriting stale state.
+    // `NOW()` is frozen at BEGIN, and merges hold this transaction while earlier rows move. An
+    // acknowledgement written after BEGIN but before this UPDATE would otherwise compare newer than
+    // a falsely old assignment stamp and suppress the new handoff. `clock_timestamp()` is the actual
+    // row-change time, matching updateTask's concurrent-acknowledgement protection.
     const tasks = await client.query(
-      `UPDATE ${schemaName}.tasks SET assigned_to = $2, updated_at = NOW() WHERE assigned_to = $1 RETURNING id, title, status`,
+      `UPDATE ${schemaName}.tasks
+          SET assigned_to = $2,
+              assigned_at = clock_timestamp(),
+              last_assigned_by = CASE
+                WHEN COALESCE(last_assigned_by, created_by) = $1 THEN $2
+                ELSE last_assigned_by
+              END,
+              updated_at = NOW()
+        WHERE assigned_to = $1
+      RETURNING id, title, status`,
       [fromUserId, toUserId]
     );
     for (const row of tasks.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_task", entityType: `${schemaName}.task`, entityId: row.id, email, before: fromUserId, after: toUserId, details: `${row.status}:${row.title ?? ""}` });

@@ -1,8 +1,12 @@
 import { useState } from "react";
 import { ArrowRight, Camera, Eye, EyeOff, Loader2, ShieldCheck, Zap } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+
+// Matches the TTL the server mints the reset link with. User-facing copy, so it has to move with it.
+const RESET_LINK_TTL_MINUTES = 60;
 
 const featureBullets = [
   { icon: Zap, label: "Bid Board synced in real time" },
@@ -17,6 +21,9 @@ export function AuthEntryScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetStatus, setResetStatus] = useState<"idle" | "sending" | "sent">("idle");
   const returnTo = new URLSearchParams(window.location.search).get("returnTo");
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -34,6 +41,22 @@ export function AuthEntryScreen() {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Anti-enumeration: this handler has exactly ONE outcome. The server answers 200 whether or not the
+  // address exists, and a thrown request (offline, 500) lands on the same confirmation too — a
+  // distinguishable failure message would leak which addresses have accounts just as loudly.
+  const handleResetRequest = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setResetStatus("sending");
+
+    try {
+      await api("/auth/password-reset/request", { method: "POST", json: { email: resetEmail } });
+    } catch {
+      // Deliberately swallowed — see above.
+    } finally {
+      setResetStatus("sent");
     }
   };
 
@@ -147,16 +170,59 @@ export function AuthEntryScreen() {
               )}
             </Button>
           </form>
-          <p className="mt-5 text-center text-sm text-slate-500">
-            Forgot password?{" "}
-            <a
-              className="font-semibold text-brand-red underline underline-offset-4 hover:text-red-800"
-              href="mailto:aiqbal@trockgc.com?subject=Password%20reset%20request"
+          {resetStatus === "sent" ? (
+            <p
+              className="mt-5 rounded-lg border border-slate-200 bg-white px-4 py-3 text-center text-sm font-medium text-slate-700 shadow-sm"
+              role="status"
             >
-              Contact your administrator
-            </a>
-            .
-          </p>
+              If that address has an account, a reset link is on its way. It expires in {RESET_LINK_TTL_MINUTES} minutes.
+            </p>
+          ) : resetOpen ? (
+            <form className="mt-5 space-y-4" onSubmit={handleResetRequest}>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-800" htmlFor="reset-email">
+                  Email address
+                </label>
+                <Input
+                  id="reset-email"
+                  type="email"
+                  value={resetEmail}
+                  onChange={(event) => setResetEmail(event.target.value)}
+                  placeholder="you@trockgc.com"
+                  autoComplete="username"
+                  required
+                  // The trigger button unmounts when this form appears, so focus would otherwise drop
+                  // to the body mid-task. Only ever rendered on an explicit click, never on page load.
+                  autoFocus
+                  className="h-14 rounded-lg border-slate-200 bg-white px-4 text-base shadow-sm transition focus-visible:ring-2 focus-visible:ring-brand-red/60"
+                />
+              </div>
+              <Button
+                className="h-12 w-full rounded-lg border border-slate-200 bg-white text-sm font-black text-slate-800 shadow-sm transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-brand-red/60 focus-visible:ring-offset-2"
+                type="submit"
+                disabled={resetStatus === "sending"}
+              >
+                {resetStatus === "sending" ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                    Sending...
+                  </>
+                ) : (
+                  "Send reset link"
+                )}
+              </Button>
+            </form>
+          ) : (
+            <p className="mt-5 text-center text-sm text-slate-500">
+              <button
+                type="button"
+                onClick={() => setResetOpen(true)}
+                className="font-semibold text-brand-red underline underline-offset-4 hover:text-red-800"
+              >
+                Forgot password?
+              </button>
+            </p>
+          )}
         </div>
       </section>
     </main>

@@ -27,6 +27,8 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text NOT NULL);
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text NOT NULL, slug text UNIQUE NOT NULL, workflow_family text NOT NULL DEFAULT 'standard_deal', is_terminal boolean NOT NULL DEFAULT false);
+    -- Intentionally omit A1-only detail columns. The Rep Pack consumes aggregate/reps data only, so this
+    -- fixture fails fast if it ever starts materializing the office-wide A1 detail queries it discards.
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid,
       is_test_data boolean NOT NULL DEFAULT false, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,

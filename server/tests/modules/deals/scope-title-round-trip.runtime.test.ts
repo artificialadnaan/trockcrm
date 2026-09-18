@@ -24,6 +24,7 @@ import {
   companies,
   dealHistory,
   deals,
+  leads,
   pipelineStageConfig,
   userOfficeAccess,
   users,
@@ -78,6 +79,8 @@ beforeAll(async () => {
       userOfficeAccess,
       pipelineStageConfig,
       companies,
+      // getDeals LEFT JOINs leads to resolve the effective bid-due date.
+      leads,
       deals,
       dealHistory,
       activities,
@@ -92,6 +95,13 @@ beforeAll(async () => {
       last_suffix text NOT NULL,
       created_at timestamptz NOT NULL DEFAULT NOW(),
       updated_at timestamptz NOT NULL DEFAULT NOW()
+    );
+    -- The deal projections resolve the configured project-type digit through this table (it is what the
+    -- At Risk service split reads), so every fixture exercising them needs it present.
+    CREATE TABLE IF NOT EXISTS public.project_type_config (
+      id uuid PRIMARY KEY,
+      name text NOT NULL,
+      code text
     );
   `);
   await pg.query(

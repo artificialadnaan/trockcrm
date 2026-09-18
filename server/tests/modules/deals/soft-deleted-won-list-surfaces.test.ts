@@ -17,19 +17,30 @@ import { PgDialect } from "drizzle-orm/pg-core";
 const WON = "00000000-0000-0000-0000-0000000057a1";
 const OPP = "00000000-0000-0000-0000-0000000057a2";
 
-// listDealStages() + getDealsForPipeline's stage read both hit the module-level db (not tenantDb).
+const stageState = vi.hoisted(() => ({
+  stages: [
+    { id: "00000000-0000-0000-0000-0000000057a2", slug: "opportunity", name: "Opportunity", workflowFamily: "standard_deal", displayOrder: 1, isActivePipeline: true, isTerminal: false },
+    { id: "00000000-0000-0000-0000-0000000057a1", slug: "won", name: "Won", workflowFamily: "standard_deal", displayOrder: 9, isActivePipeline: true, isTerminal: true },
+  ] as unknown[],
+}));
+
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
+// listDealStages() still hits the module-level db. getDealsForPipeline's OWN stage read moved to the
+// REQUEST's tenant client (it used to take a SECOND pool slot from this global pool while the tenant
+// middleware already held one), so capturingTenantDb below has to answer it too.
 vi.mock("../../../src/db.js", () => {
-  const stages = [
-    { id: OPP, slug: "opportunity", name: "Opportunity", workflowFamily: "standard_deal", displayOrder: 1, isActivePipeline: true, isTerminal: false },
-    { id: WON, slug: "won", name: "Won", workflowFamily: "standard_deal", displayOrder: 9, isActivePipeline: true, isTerminal: true },
-  ];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const chain: any = {};
   chain.select = () => chain;
   chain.from = () => chain;
   chain.where = () => chain;
-  chain.orderBy = () => Promise.resolve(stages);
-  chain.then = (resolve: (v: unknown) => unknown) => resolve(stages);
+  chain.orderBy = () => Promise.resolve(stageState.stages);
+  chain.then = (resolve: (v: unknown) => unknown) => resolve(stageState.stages);
   return { db: chain, pool: {} };
 });
 
@@ -41,6 +52,7 @@ const render = (v: unknown) => dialect.sqlToQuery(v as never).sql.toLowerCase();
 function capturingTenantDb() {
   const wheres: unknown[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fromTable: unknown = null;
   const chain: any = new Proxy(
     function () {
       /* callable so apply traps never throw */
@@ -48,7 +60,12 @@ function capturingTenantDb() {
     {
       apply: () => chain,
       get(_t, prop) {
-        if (prop === "then") return (resolve: (rows: unknown[]) => unknown) => resolve([]);
+        // The board's pipeline_stage_config read runs on the tenant client now, so this stub answers it
+        // with the stage list; every other query still resolves to [] (shape capture only).
+        if (prop === "then")
+          return (resolve: (rows: unknown[]) => unknown) =>
+            resolve(isPipelineStageConfigTable(fromTable) ? stageState.stages : []);
+        if (prop === "from") return (table: unknown) => { fromTable = table; return chain; };
         if (prop === "where") return (arg: unknown) => { wheres.push(arg); return chain; };
         if (prop === "offset") return () => Promise.resolve([]);
         return () => chain;

@@ -149,6 +149,8 @@ export interface Deal {
   // value, so it arrives as e.g. "2026-07-03T00:00:00.000Z". Format in UTC for display (see
   // BidDueDateBanner) to avoid the off-by-one day west of UTC.
   bidDueDate?: string | null;
+  /** Authoritative date-only bid deadline selected by the list query (lead / Bid Board / deal precedence). */
+  resolvedBidDueDate?: string | null;
   estimator?: string | null;
   // The CRM estimator (a real user, distinct from the free-text `estimator` above). Set only via the
   // dedicated admin/director PATCH /deals/:id/estimator route; the display name is surfaced by
@@ -165,8 +167,15 @@ export interface Deal {
   officeCode?: string | null;
   projectType?: string | null;
   projectTypeId: string | null;
+  /** The CONFIGURED project-type digit, resolved server-side through projectTypeId. Load-bearing for the
+   *  At Risk service split: most deals carry no projectType text and are typed only by the FK. */
+  projectTypeCode?: string | null;
   bidBoardProjectNumber?: string | null;
   bidBoardLinkedAt?: string | null;
+  // Set once "Move back to Opportunity" disconnected the deal from Bid Board sync. Drives the standing
+  // "delete it from the Bid Board yourself" reminder — the CRM cannot delete the Bid Board project.
+  bidBoardDetachedAt?: string | null;
+  bidBoardDetachReason?: string | null;
   intendedProjectNumber?: string | null;
   regionId: string | null;
   isReadOnlyMirror?: boolean;
@@ -276,6 +285,18 @@ export interface DealDetail extends Deal {
     mirroredInCrm: string[];
     reason: string;
     message: string;
+    detachedAt?: string | null;
+    /**
+     * True only when the detach severed a REAL Bid Board project. Server-derived from the identity
+     * columns the detach deliberately preserves — the client cannot work this out for itself, because
+     * the detach nulls bidBoardLinkedAt and bidBoardProjectNumber.
+     */
+    detachedFromLinkedProject?: boolean;
+    /**
+     * Does the deal still have a live Bid Board footprint to sever? Server-derived from the same
+     * predicate the return-to-opportunity service uses, so the menu item and the route agree.
+     */
+    isBidBoardLinked?: boolean;
   };
   stageHistory: Array<{
     id: string;
@@ -376,8 +397,18 @@ export interface DealChangeOrder {
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
+  /** The synthetic Pending RFP bucket (an Opportunity subset), not a pipeline-stage UUID. */
+  pendingRfpOnly?: boolean;
+  /** On a surface that renders Pending RFP as a separate stage option, keep an ordinary Opportunity
+   *  choice disjoint from that bucket. Other stage-id callers retain their legacy inclusive behavior. */
+  excludePendingRfpFromOpportunity?: boolean;
   inactiveStageIds?: string[];
   assignedRepId?: string;
+  /** Deals this person is ESTIMATING. The sibling of assignedRepId — the server ANDs them, and the header
+   *  control writes one or the other, never both. Must be declared here AND serialized below: a spread of
+   *  `{ estimatorId }` into baseFilters type-checks either way, so omitting it drops the filter silently
+   *  and the list, totals and CSV keep every estimator's deals under a filtered board. */
+  estimatorId?: string;
   projectTypeId?: string;
   regionId?: string;
   source?: string;
@@ -450,9 +481,59 @@ export interface DealBoardColumn {
   };
   count: number;
   activeCount?: number;
+  /**
+   * EVERY matching row in this column, on-hold included — the population `cards` is a slice OF.
+   *
+   * The only honest denominator for the "Showing N of M" notice. `count` is the ACTIVE figure (the
+   * server filters `COALESCE(on_hold,false)=false`) while the card query applies no such filter, so
+   * comparing `cards.length` against `count` can make a truncated column look complete: 70 rows with 25
+   * on hold gives count=45 against 50 cards, and `50 < 45` is false — no "view all", 20 deals invisible.
+   */
   totalCount?: number;
+  /**
+   * How many rows this column's "view all" target will list, when that target is a stage drill-down.
+   *
+   * Separate from `totalCount` because they legitimately differ on Opportunity: its cards (and therefore
+   * `totalCount`) exclude the Pending RFP bucket, which the stage page does NOT filter out. Undefined
+   * when the column has no stage drill-down that can be counted — the synthetic Pending RFP column opens
+   * the office-wide cross-rep queue, whose size a scope-filtered board cannot know.
+   */
+  drilldownTotalCount?: number;
   totalValue: number;
   cards: Deal[];
+}
+
+/**
+ * Board-wide aggregates the SERVER computes over EVERY matching row, not the per-column card slice.
+ *
+ * The At-Risk KPI counts and the synthetic Pending RFP column used to be derived here from
+ * `column.cards`, which is a capped preview. That was only ever correct because the board asked for
+ * 1000 cards per column; the moment the slice shrinks those numbers under-report silently. Anything in
+ * here is authoritative and must be preferred over a card-derived count.
+ *
+ * Optional so a client can still render against an older API response (and so the existing card-derived
+ * fallbacks stay exercised in tests) — but on a live board it is always present.
+ */
+export interface DealBoardSummary {
+  /**
+   * At-risk deal counts keyed by CANONICAL board column slug, split by workflow route. Service +
+   * non-service partition the cohort exactly, so `all` is simply their sum.
+   *
+   * Keyed by canonical slug, not by the raw column the row was queried from, because a card does not
+   * necessarily render in the column it came from: a Bid Board-owned deal can sit in the CRM
+   * `opportunity` stage while its Bid Board slug puts it under Estimate Sent. This is the same grouping
+   * buildCanonicalDealBoardColumns applies, so summing these per rendered column reproduces the
+   * card-derived total exactly.
+   */
+  atRiskByStageSlug: Record<string, { service: number; nonService: number }>;
+  /** The synthetic Pending RFP column's ACTIVE (non-on-hold) count and $. */
+  pendingRfp: {
+    /** ACTIVE (non-on-hold) count — the column header figure, and what Opportunity's is reduced by. */
+    count: number;
+    /** Every pending-RFP row incl. on-hold: the population the preview cards are a slice of. */
+    totalCount: number;
+    totalValue: number;
+  };
 }
 
 export interface DealBoardResponse {
@@ -465,6 +546,18 @@ export interface DealBoardResponse {
     totalValue?: number;
     deals?: Deal[];
   }>;
+  summary: DealBoardSummary | null;
+  /**
+   * The synthetic Pending RFP column's own card slice, fetched server-side rather than carved out of the
+   * Opportunity column's (capped) slice — where every pending deal below the cap used to disappear.
+   *
+   * OPTIONAL, and the distinction is load-bearing: `undefined` means "this API does not send the field"
+   * and MUST fall back to carving the cards out of Opportunity; `[]` means "the server looked and the
+   * bucket is empty". Normalizing absence to `[]` would make the fallback unreachable and render an
+   * empty Pending RFP column under a non-zero header count — which is exactly the window a rolling
+   * deploy opens, where a new bundle talks to an API that predates the field.
+   */
+  pendingRfpCards?: Deal[];
 }
 
 export interface DealStagePageResponse {
@@ -507,6 +600,8 @@ interface DealBoardApiResponse {
   }>;
   terminalStages: DealBoardResponse["terminalStages"];
   columns?: DealBoardApiColumn[];
+  boardSummary?: DealBoardSummary;
+  pendingRfpDeals?: Deal[];
 }
 
 export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBoardResponse {
@@ -515,7 +610,11 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
     return {
       ...column,
       activeCount: sourceColumn.activeCount ?? sourceColumn.count,
-      totalCount: sourceColumn.totalCount ?? sourceColumn.count,
+      // NOT `?? count`. `count` is the ACTIVE figure while `cards` includes on-hold rows, so substituting
+      // it produces exactly the denominator that hid the truncation notice. An API that does not send
+      // totalCount leaves it undefined, and the consumers that need a real row total say "unknown"
+      // instead of quoting a number they cannot substantiate.
+      totalCount: sourceColumn.totalCount,
       cards: sourceColumn.cards ?? sourceColumn.deals ?? [],
     };
   });
@@ -528,7 +627,28 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
       totalCount: terminal.totalCount ?? terminal.count,
       totalValue: terminal.totalValue ?? 0,
     })),
+    // Guard the SHAPE, not just presence: a malformed payload here would otherwise be read as
+    // "0 at risk" — a wrong number rendered confidently — where a null falls back to counting cards.
+    summary: normalizeDealBoardSummary(result.boardSummary),
+    // ABSENT stays absent. `Array.isArray(...) ? ... : []` collapsed "the API predates this field" into
+    // "the bucket is empty", and `[]` never triggers the `?? carvedPendingRfpCards` fallback.
+    pendingRfpCards: Array.isArray(result.pendingRfpDeals) ? result.pendingRfpDeals : undefined,
   };
+}
+
+function normalizeDealBoardSummary(summary: DealBoardSummary | undefined): DealBoardSummary | null {
+  if (!summary || typeof summary !== "object") return null;
+  const atRisk = summary.atRiskByStageSlug;
+  const pending = summary.pendingRfp;
+  if (!atRisk || typeof atRisk !== "object" || !pending || typeof pending !== "object") return null;
+  if (
+    !Number.isFinite(pending.count) ||
+    !Number.isFinite(pending.totalCount) ||
+    !Number.isFinite(pending.totalValue)
+  ) {
+    return null;
+  }
+  return summary;
 }
 
 /**
@@ -542,8 +662,11 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   const params = new URLSearchParams();
   if (filters.search) params.set("search", filters.search);
   if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
+  if (filters.pendingRfpOnly) params.set("pendingRfpOnly", "true");
+  if (filters.excludePendingRfpFromOpportunity) params.set("excludePendingRfpFromOpportunity", "true");
   if (filters.inactiveStageIds?.length) params.set("inactiveStageIds", filters.inactiveStageIds.join(","));
   if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+  if (filters.estimatorId) params.set("estimatorId", filters.estimatorId);
   if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
   if (filters.regionId) params.set("regionId", filters.regionId);
   if (filters.source) params.set("source", filters.source);
@@ -618,8 +741,16 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
   }, [
     filters.search,
     filters.stageIds?.join(","),
+    filters.pendingRfpOnly,
+    filters.excludePendingRfpFromOpportunity,
     filters.inactiveStageIds?.join(","),
     filters.assignedRepId,
+    // This list is EXPLICIT SCALARS, not the filters object, so a field missing here is not merely a lint
+    // nit: fetchDeals keeps its identity, the effect that calls it never re-runs, and the list holds its
+    // previous rows, pagination and value total while the board above refetches. That is the real
+    // mechanism behind "the list does not follow the estimator" — distinct from the outer drill-down memo,
+    // which re-runs anyway because searchParams changes identity.
+    filters.estimatorId,
     filters.projectTypeId,
     filters.regionId,
     filters.source,
@@ -770,6 +901,7 @@ export type CreateServiceOpportunityInput = Partial<Pick<
   | "scopeTitle"
   | "expectedCloseDate"
   | "officeCode"
+  | "primaryContactId"
   | "projectNumber"
   | "projectType"
   | "projectTypeId"
@@ -921,6 +1053,9 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
       mirroredInCrm: string[];
       reason: string;
       message: string;
+      detachedAt?: string | null;
+      detachedFromLinkedProject?: boolean;
+      isBidBoardLinked?: boolean;
     } | null;
   }>(`/deals/${dealId}/stage/preflight`, {
     method: "POST",
@@ -930,6 +1065,54 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
 
 export async function deleteDeal(dealId: string, reason: string) {
   return api<{ success: boolean }>(`/deals/${dealId}`, { method: "DELETE", json: { reason } });
+}
+
+export interface ReturnToOpportunityPreview {
+  dealId: string;
+  dealName: string;
+  currentStageSlug: string | null;
+  currentStageName: string | null;
+  allowed: boolean;
+  blockCode: string | null;
+  blockReason: string | null;
+  voidsCommission: boolean;
+  commissionRowCount: number;
+  commissionTotal: string;
+  isWonFamily: boolean;
+  requiredRole: "admin" | "director";
+  isBidBoardLinked: boolean;
+  bidBoardDetachedAt: string | null;
+  procoreCompanyId: string | null;
+  procoreBidId: string | null;
+  effectiveContractSignedDate: string | null;
+}
+
+/** What the confirm dialog needs BEFORE the operator commits — above all the exact commission total. */
+export async function getReturnToOpportunityPreview(dealId: string) {
+  return api<ReturnToOpportunityPreview>(`/deals/${dealId}/return-to-opportunity/preview`);
+}
+
+/**
+ * `acknowledgedCommissionTotal` + `acknowledgedCommissionRowCount` are the two numbers the dialog SHOWED
+ * the operator ("$26,250.00 across 2 rows"), echoed back. The server refuses the move when either no
+ * longer matches the live rows, so a stale dialog can never destroy an amount — or a set of rows —
+ * nobody agreed to.
+ */
+export async function returnDealToOpportunity(
+  dealId: string,
+  input: {
+    reason: string;
+    acknowledgedCommissionTotal?: string | null;
+    acknowledgedCommissionRowCount?: number | null;
+  }
+) {
+  return api<{
+    commissionRowsVoided: number;
+    commissionTotalVoided: string;
+    contractSignedDateCleared: string | null;
+    wasBidBoardLinked: boolean;
+    rfpSubmissionMayExist: boolean;
+  }>(`/deals/${dealId}/return-to-opportunity`, { method: "POST", json: input });
 }
 
 export async function getDealScopingIntake(dealId: string) {
@@ -999,9 +1182,38 @@ export function useDealBoard(
   previewLimit: number | null = 8,
   wonPeriodRange?: { from?: string; to?: string } | null,
   assignedRepId?: string,
-  estimateSentDateRange?: { from?: string; to?: string }
+  estimateSentDateRange?: { from?: string; to?: string },
+  /** Deals this person is ESTIMATING (deals.estimator_user_id) — the sibling of assignedRepId, never
+   *  both at once. See the deals dashboard header control. */
+  estimatorId?: string,
+  /**
+   * `enabled: false` holds the fetch without ever settling `loading`, so the caller keeps rendering its
+   * loading state rather than flashing an empty board.
+   *
+   * This exists for one specific waste: /deals restores a saved Rep + timeframe from localStorage into
+   * the URL on mount, which changes the board's own parameters. Fetching before that lands meant the
+   * page issued the 1.6–2.5s pipeline query twice on every cold load — once for the default view, then
+   * again for the restored one, with the first result discarded by the latest-wins guard below.
+   *
+   * LAST, deliberately: `estimatorId` was already the 8th positional argument on main, so the options bag
+   * takes the 9th rather than displacing it. Getting that order wrong is caught by the compiler at any
+   * call site that passes the bag (`{ enabled }` is not a `string`) — which is exactly how the merge that
+   * introduced this ninth parameter found the one probe that had been passing it in the 8th slot.
+   */
+  options: { enabled?: boolean; search?: string } = {}
 ) {
+  const { enabled = true, search } = options;
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
+  /**
+   * The search term the board currently IN STATE was fetched with — not the one being typed.
+   *
+   * A drill-down destination must describe the population the user can see. `search` changes the moment
+   * the debounce settles, but the pipeline request behind it can take seconds, and this hook deliberately
+   * keeps the previous response on screen meanwhile (no blanking). During that window the KPI cards show
+   * the OLD cohort's numbers while a destination built from the new term would open a different one — so
+   * clicking a displayed count lands somewhere it does not describe. Callers build links from this.
+   */
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Latest-wins guard (mirrors useDeals): a stale response from a superseded request must never overwrite
@@ -1011,6 +1223,7 @@ export function useDealBoard(
   const boardRequestIdRef = useRef(0);
 
   const refetch = useCallback(() => {
+    if (!enabled) return Promise.resolve<DealBoardResponse | null>(null);
     const requestId = boardRequestIdRef.current + 1;
     boardRequestIdRef.current = requestId;
     setLoading(true);
@@ -1018,6 +1231,11 @@ export function useDealBoard(
     const params = new URLSearchParams({
       scope,
       includeDd: String(includeDd),
+      // Opt in to the board-aggregates contract: `boardSummary`, the Pending RFP column's own capped
+      // preview, and the Opportunity cards being pending-free because we render those rows from that
+      // preview. Server-side default is OFF so mobile-crm (which never reads the summary) and any web
+      // bundle predating this change keep the response they already had — see includeBoardAggregates.
+      boardAggregates: "true",
     });
     if (previewLimit !== null) {
       params.set("previewLimit", String(previewLimit));
@@ -1034,21 +1252,43 @@ export function useDealBoard(
     if (assignedRepId) {
       params.set("assignedRepId", assignedRepId);
     }
+    if (estimatorId) {
+      params.set("estimatorId", estimatorId);
+    }
     if (estimateSentDateRange?.from) {
       params.set("estimateSentFrom", estimateSentDateRange.from);
     }
     if (estimateSentDateRange?.to) {
       params.set("estimateSentTo", estimateSentDateRange.to);
     }
+    // The board's text search, resolved SERVER-side across every matching deal. It was a client-side
+    // filter over the cards already in hand, which turned into "search the top 50 of each column" the
+    // moment the board started fetching a slice — a real project name returned 0/0 board-wide. Sent as a
+    // request parameter, it narrows the column aggregates, the cards and the Pending RFP preview
+    // together, so the caller must NOT re-filter the returned cards: the server matches more fields than
+    // any client haystack does (scope title, description, address, contact and company names), and a
+    // second pass would drop rows the header count still counts.
+    const requestedSearch = search?.trim() ?? "";
+    if (requestedSearch.length > 0) {
+      params.set("search", requestedSearch);
+    }
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
-        if (requestId === boardRequestIdRef.current) setBoard(normalized);
+        // Latest-wins, and the term is recorded with the response it belongs to — so a caller building
+        // drill-down links can never describe a cohort the user is not looking at yet.
+        if (requestId === boardRequestIdRef.current) {
+          setBoard(normalized);
+          setAppliedSearch(requestedSearch);
+        }
         return normalized;
       })
       .catch((err: unknown) => {
         if (requestId === boardRequestIdRef.current) {
           setBoard(null);
+          // No board, no cohort to describe — clear the term with it so a stale one cannot outlive the
+          // response it belonged to.
+          setAppliedSearch("");
           setError(err instanceof Error ? err.message : "Failed to load deal board");
         }
         throw err;
@@ -1058,11 +1298,16 @@ export function useDealBoard(
       });
   }, [
     assignedRepId,
+    enabled,
+    estimatorId,
     estimateSentDateRange?.from,
     estimateSentDateRange?.to,
     includeDd,
     previewLimit,
     scope,
+    // A new term must re-issue the request — without this dep the board keeps showing the previous
+    // search's rows. Callers pass a DEBOUNCED value so a keystroke does not fire the pipeline query.
+    search,
     terminalDateFilters,
     wonPeriodRange?.from,
     wonPeriodRange?.to,
@@ -1072,7 +1317,7 @@ export function useDealBoard(
     void refetch().catch(() => undefined);
   }, [refetch]);
 
-  return { board, loading, error, refetch };
+  return { board, appliedSearch, loading, error, refetch };
 }
 
 export function useDealStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" | "watched" | "on_hold" }) {
@@ -1092,6 +1337,10 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       sort: input.sort,
       search: input.search,
       ...(input.filters.assignedRepId ? { assignedRepId: input.filters.assignedRepId } : {}),
+      // The summary must narrow with the list it heads. Without this the stage page shows one estimator's
+      // deals under a count and value computed across every estimator — the same half-applied filtering
+      // this PR removed from the dashboard, reappearing one page over.
+      ...(input.filters.estimatorId ? { estimatorId: input.filters.estimatorId } : {}),
       ...(input.filters.estimateSentFrom ? { estimateSentFrom: input.filters.estimateSentFrom } : {}),
       ...(input.filters.estimateSentTo ? { estimateSentTo: input.filters.estimateSentTo } : {}),
       ...(input.filters.staleOnly ? { staleOnly: "true" } : {}),
@@ -1155,6 +1404,9 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
     };
   }, [
     input.filters.assignedRepId,
+    // Without this the summary keeps a stale count when only the estimator changes: the request is built
+    // inside the effect, so a value the deps do not watch never triggers the refetch that would apply it.
+    input.filters.estimatorId,
     input.filters.estimateSentFrom,
     input.filters.estimateSentTo,
     input.filters.source,
@@ -1266,7 +1518,26 @@ export function usePendingRfp() {
     const isCurrent = () => requestId === requestIdRef.current;
     setLoading(true);
     setError(null);
-    return api<{ deals: PendingRfpDeal[] }>("/deals/pending-rfp")
+    // Carry the estimator filter through. The board's Pending RFP column IS narrowed by it (the predicate
+    // is ANDed into getDealsForPipeline's common conditions), and openStage forwards the whole query
+    // string here — so requesting the unfiltered queue made the destination list every pending RFP under
+    // a count that had been scoped to one estimator. `search` is already this callback's dependency, so
+    // changing the filter refetches.
+    //
+    // The board's TEXT search rides along for exactly the same reason, and through the same door: it is
+    // ANDed into those common conditions too, so this column's count is search-narrowed and a queue that
+    // ignored the term would list deals the number never counted.
+    const inbound = new URLSearchParams(search);
+    const outbound = new URLSearchParams();
+    const estimatorId = inbound.get("estimatorId");
+    if (estimatorId) outbound.set("estimatorId", estimatorId);
+    // Guarded at >= 2 characters to match the server's own rule, so this never asks for a narrowing the
+    // board did not apply. URLSearchParams handles the encoding.
+    const boardSearch = (inbound.get("search") ?? "").trim();
+    if (boardSearch.length >= 2) outbound.set("search", boardSearch);
+    const query = outbound.toString();
+    const path = query ? `/deals/pending-rfp?${query}` : "/deals/pending-rfp";
+    return api<{ deals: PendingRfpDeal[] }>(path)
       .then((r) => {
         if (isCurrent()) setDeals(r.deals);
         return r.deals;

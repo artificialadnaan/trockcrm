@@ -126,7 +126,7 @@ export function PublicPhotoViewerPage() {
 
       <Dialog open={Boolean(selectedPhoto)} onOpenChange={(open) => !open && setSelectedId(null)}>
         {selectedPhoto && (
-          <DialogContent className="max-w-5xl overflow-hidden bg-black p-0">
+          <DialogContent className="sm:max-w-5xl overflow-hidden bg-black p-0">
             <div className="relative flex max-h-[90vh] min-h-[60vh] items-center justify-center">
               <button
                 type="button"
@@ -147,6 +147,7 @@ export function PublicPhotoViewerPage() {
                 className="absolute left-3 top-1/2"
                 variant="secondary"
                 size="icon"
+                aria-label="Previous photo"
                 disabled={selectedIndex <= 0}
                 onClick={() => setSelectedId(photos[selectedIndex - 1]?.id)}
               >
@@ -156,6 +157,7 @@ export function PublicPhotoViewerPage() {
                 className="absolute right-3 top-1/2"
                 variant="secondary"
                 size="icon"
+                aria-label="Next photo"
                 disabled={selectedIndex >= photos.length - 1}
                 onClick={() => setSelectedId(photos[selectedIndex + 1]?.id)}
               >

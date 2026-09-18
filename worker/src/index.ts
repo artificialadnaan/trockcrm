@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, pollWeeklyReportSendJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -12,6 +12,17 @@ import { runEmailSync } from "./jobs/email-sync.js";
 import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
+import {
+  runWeeklyReportRepEscalations,
+  runWeeklyReportReminders,
+} from "./jobs/weekly-report-reminders.js";
+import { runWeeklyReportSendSweep } from "./jobs/weekly-report-send-sweep.js";
+import {
+  BID_DUE_REPORT_CRON,
+  BID_DUE_REPORT_TZ,
+  runBidDueDateReport,
+} from "./jobs/bid-due-date-report.js";
+import { runWeeklyReportViewPurge } from "./jobs/weekly-report-view-purge.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
@@ -85,6 +96,14 @@ async function main() {
   // this poller claims only that type (one at a time).
   setInterval(pollGlassesWalkthroughForwardJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling glasses_walkthrough_forward queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // And the client weekly-report send, which renders the report's PDF before it can send — decoding every
+  // photo on it into memory and uploading to R2. On the main poller's three shared slots that is both the
+  // OOM shape ai_report_generation is serialized to avoid and a starvation shape, since the same poller
+  // carries RFP delivery and email sync and a Monday morning sends many reports at once. pollJobs excludes
+  // weekly_report_send; this poller claims only that type, one at a time.
+  setInterval(pollWeeklyReportSendJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling weekly_report_send queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
   // NOTE: the recoverStaleJobs call above is no longer the ONLY one. It now also runs periodically, from
   // inside pollJobs (startExpiredJobLeaseSweepIfDue, which STARTS the sweep beside the tick rather than
@@ -211,6 +230,104 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: activity drop detection at 7:00 AM CT daily");
+
+  // Weekly Reports reminders: 7:00 AM CT daily, with catch-up ticks at 9 and 11.
+  //
+  // Daily rather than on a fixed weekday because each project carries its OWN cadence_weekday — the job
+  // derives per-project due dates and only emails the ones landing on t-2, t-1 or today, so most days it
+  // sends nothing for most projects.
+  //
+  // The catch-up ticks are not belt-and-braces. A reminder is bound to a LEAD TIME, so tomorrow's 07:00
+  // run is not a retry of today's: by then t-2 has become t-1 and the due date has passed. Without a
+  // second attempt inside the same day, one Resend 5xx or a saturated connection pool at 07:00 means that
+  // reminder is never sent at all. Re-running is free — weekly_report_reminders_sent makes an already-sent
+  // reminder a no-op, and the advisory lock keeps overlapping ticks single-flight.
+  cron.schedule("0 7,9,11 * * *", async () => {
+    console.log("[Worker:cron] Running weekly report reminders...");
+    try {
+      await runWeeklyReportReminders();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report reminders failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: weekly report reminders at 7:00 AM CT daily (catch-up 9 & 11 AM)");
+
+  // Weekly Reports SALES-REP ESCALATION: 17:00 CT, on the due day only.
+  //
+  // A SEPARATE tick, not a fourth entry on the line above, because it is selected by the CLOCK rather
+  // than by days-until-due. The 07/09/11 pass has claimed t−2, t−1 and the digest hours before this runs;
+  // this one computes ONLY `rep_escalation` (see WeeklyReportReminderMode), so it cannot re-send the
+  // day's digest to leadership every evening.
+  //
+  // NO CATCH-UP TICK, deliberately. This is the last word on a day that has already produced three
+  // reminders, and the failure it guards against — nobody knowing the client will not get their report —
+  // is not made worse by arriving tomorrow morning instead. A second evening tick would mostly be a
+  // second chance to annoy a sales rep about a report that was filed at 17:30.
+  cron.schedule("0 17 * * *", async () => {
+    console.log("[Worker:cron] Running weekly report sales-rep escalations...");
+    try {
+      await runWeeklyReportRepEscalations();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report escalations failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: weekly report sales-rep escalation at 5:00 PM CT daily");
+
+  // Estimating bid-due-date report: Wednesday 17:00 CT, with a Thursday catch-up tick.
+  //
+  // THE SCHEDULE IS NOT WRITTEN HERE. It comes from BID_DUE_REPORT_CRON/_TZ in the job module, because
+  // this file boots the worker on import and can never be loaded from a test — so a cron expression
+  // spelled here is a string nothing in the repo asserts, and mutating "0 17 * * 3,4" to "0 18 * * 3"
+  // would leave every suite green. Importing the constant is what makes the DST test able to drive
+  // node-cron's own TimeMatcher against the value this line actually schedules.
+  cron.schedule(BID_DUE_REPORT_CRON, async () => {
+    console.log("[Worker:cron] Running estimating bid-due-date report...");
+    try {
+      await runBidDueDateReport();
+    } catch (err) {
+      console.error("[Worker:cron] Bid-due-date report failed:", err);
+    }
+  }, { timezone: BID_DUE_REPORT_TZ });
+  console.log("[Worker] Cron scheduled: estimating bid-due-date report Wed 5:00 PM CT (catch-up Thu)");
+
+  // Weekly Reports dead-letter sweep: every 15 minutes, round the clock.
+  //
+  // NOT on the reminders' business-hours schedule, and not daily. This one is about a CLIENT-facing email
+  // that never went out, and the threshold it measures is thirty minutes — a daily pass would report a
+  // Monday-morning failure on Tuesday, by which point the client has spent a working day wondering where
+  // their report is. Fifteen minutes means the alert lands while the person who pressed Send is still at
+  // their desk.
+  //
+  // Cheap to run this often: the read is a partial index holding only the sends currently in flight, and
+  // the alert is claimed per report, so a pass with nothing new to say does two SELECTs per office and
+  // sends nothing. No timezone is set because the schedule has no time-of-day component.
+  cron.schedule("*/15 * * * *", async () => {
+    try {
+      await runWeeklyReportSendSweep();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report send sweep failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: weekly report send sweep every 15 minutes");
+
+  // Weekly Reports view-log retention: 03:20 CT daily.
+  //
+  // Off-hours and off the hour, because it is the only weekly-report job that deletes anything and there
+  // is no reason for it to contend with the 07:00 reminder pass or a nightly rollup landing on :00. The
+  // work is bounded — it walks an index built for this one query and stops at a batch ceiling — so a
+  // daily pass keeps each run small rather than letting two years of rows arrive at once.
+  //
+  // Daily rather than hourly on purpose: the boundary this enforces is twenty-four MONTHS. A row living
+  // an extra few hours past its second birthday is not a retention failure, and twenty-four wake-ups a
+  // day to establish that nothing has aged out is noise in the log for no gain.
+  cron.schedule("20 3 * * *", async () => {
+    try {
+      await runWeeklyReportViewPurge();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly report view purge failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: weekly report view-log purge at 3:20 AM CT daily");
 
   // Weekly digest: Monday at 7:00 AM CT
   cron.schedule("0 7 * * 1", async () => {

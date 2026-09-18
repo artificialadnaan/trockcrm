@@ -66,6 +66,9 @@ function walkRow(overrides: Record<string, unknown> = {}) {
     scopeWalkthroughId: SCOPE_ID,
     capturedAt: new Date("2026-08-02T22:21:47.702Z"),
     capturedByUserId: USER,
+    // Explicit, as the real read returns it: `loadDealGlassesWalkthroughRows` normalises the jsonb column to
+    // null, and a fixture that omitted it would let `undefined` fall out of the JSON body unnoticed.
+    captureCensus: null,
     ...overrides,
   };
 }
@@ -135,6 +138,14 @@ describe("GET /api/deals/:id/glasses-walkthroughs", () => {
           scopeWalkthroughId: SCOPE_ID,
           capturedAt: "2026-08-02T22:21:47.702Z",
           capturedByUserId: USER,
+          // The capture census and the number derived from it, both null for a walk filed without one —
+          // "we do not know", which the contract keeps distinct from zero narration lost.
+          captureCensus: null,
+          narrationShortfallMs: null,
+          // TROCK Scope's own health object, null because this fixture's answer carries none — the shape
+          // of every real response until that service ships the field. It is on the contract at null so
+          // the panel can rely on the KEY existing rather than on `undefined` reading as "not sent yet".
+          pipeline: null,
           state: "ready",
           scope: {
             status: "ready",
@@ -161,6 +172,36 @@ describe("GET /api/deals/:id/glasses-walkthroughs", () => {
           },
         },
       ],
+    });
+  });
+
+  it("carries TROCK Scope's pipeline health onto the contract when that service sends one", async () => {
+    // The field crosses TWO service boundaries — TROCK Scope's response into the scope reader, and this
+    // route's body out to the panel — and neither hop has a type that would catch it being dropped. The
+    // unit suite proves the parse; only this proves the wire.
+    panelMocks.loadDealGlassesWalkthroughRows.mockResolvedValue([walkRow()]);
+    panelMocks.createGlassesWalkthroughScopeReader.mockReturnValue({
+      isConfigured: () => true,
+      fetchScopeItems: async () => ({
+        outcome: "found",
+        items: [{ id: "1f0c0a6e-2222-4333-8444-555566667777", description: "Paint wall red" }],
+        pipelineHealth: {
+          state: "held",
+          stage: "grounding",
+          reason: "no active work-type catalog",
+          since: "2026-09-02T10:00:00.000Z",
+        },
+      }),
+    });
+
+    const res = await request(createApp([])).get(`/api/deals/${DEAL}/glasses-walkthroughs`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.walkthroughs[0].pipeline).toEqual({
+      state: "held",
+      stage: "grounding",
+      reason: "no active work-type catalog",
+      since: "2026-09-02T10:00:00.000Z",
     });
   });
 

@@ -158,6 +158,30 @@ describe("useNormalizedStageRoute", () => {
     cleanup();
   });
 
+  it("drops a stale ESTIMATOR filter when coercing a parked team stage bookmark (Codex #1067 P2)", () => {
+    // The stage page now feeds estimatorId into its list's base filters, so a retained one would narrow
+    // the coerced Mine view — and the redirect/back links are built from these same cleaned params.
+    const { route, cleanup } = renderStageRoute(
+      "director",
+      "/deals/stages/stage-1?scope=team&estimatorId=est-1"
+    );
+    expect(route.scope).toBe("mine");
+    expect(route.redirectTo).toBe("/deals/stages/stage-1?scope=mine");
+    expect(route.backTo).toBe("/deals?scope=mine");
+    cleanup();
+  });
+
+  it("keeps an estimator filter when the scope is NOT being coerced", () => {
+    // The drop is specific to the Team coercion; an ordinary All-scope stage link must still carry it, or
+    // the drill-down stops matching the board column that opened it.
+    const { route, cleanup } = renderStageRoute(
+      "director",
+      "/deals/stages/stage-1?scope=all&estimatorId=est-1"
+    );
+    expect(route.backTo).toContain("estimatorId=est-1");
+    cleanup();
+  });
+
   it.each([
     ["rep", "all", "all", false, "/deals/stages/stage-1?scope=all"],
     ["rep", "team", "mine", true, "/deals/stages/stage-1?scope=mine"],

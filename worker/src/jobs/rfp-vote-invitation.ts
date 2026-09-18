@@ -1,6 +1,6 @@
 import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { resolveDealDisplayNumber, type RfpVoteInvitationDealSummary } from "@trock-crm/shared/types";
 import { escapeHtml, normalizeText } from "../lib/email-format.js";

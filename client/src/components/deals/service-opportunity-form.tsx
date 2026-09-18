@@ -14,9 +14,10 @@ import {
 } from "@/components/ui/select";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
+import { PointOfContactField } from "@/components/contacts/point-of-contact-field";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
-import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useRepRoster } from "@/hooks/use-rep-roster";
 import { useSalesReps } from "@/hooks/use-sales-reps";
 import { createServiceOpportunity, type Deal } from "@/hooks/use-deals";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
@@ -98,10 +99,13 @@ export function ServiceOpportunityForm({
     name: initialValues?.name ?? "",
     companyId: initialValues?.companyId ?? "",
     propertyId: initialValues?.propertyId ?? "",
+    primaryContactId: "",
     scopeTitle: "",
     description: "",
     assignedRepId: user?.role === "rep" ? user.id : "",
+    assignedRepName: user?.role === "rep" ? user.displayName : "",
     salesSourceUserId: "",
+    salesSourceName: "",
     officeCode: initialOfficeCode,
     expectedCloseDate: "",
     winProbability: "",
@@ -197,7 +201,17 @@ export function ServiceOpportunityForm({
   // opportunity is created — only the deal_number prefix.
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
-  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: effectiveOfficeId });
+  const { reps: roster, loading: assigneesLoading, loadedOfficeId, error: rosterError } = useRepRoster({
+    officeId: effectiveOfficeId,
+    assignableOnly: true,
+    enabled: Boolean(effectiveOfficeId),
+  });
+  const assignees = roster.filter((rep) => rep.group === "sales");
+  const rosterReady = !assigneesLoading && loadedOfficeId === effectiveOfficeId && !rosterError;
+  const assignedRepLabel = assignees.find((rep) => rep.id === formData.assignedRepId)?.displayName
+    ?? (formData.assignedRepId ? formData.assignedRepName || null : null)
+    ?? (formData.assignedRepId === user?.id ? user.displayName : null)
+    ?? (assigneesLoading ? "Loading sales reps…" : "Select sales rep");
   // "sales-source" scopes the feed to the office's internal CRM roster (any role except field_contractor —
   // reps, directors like Chase Kelly, etc., matching assertSalesSourceIsCrmUser), so a plain rep sees real
   // source choices (not just themselves) and no pick 422s on submit.
@@ -221,6 +235,14 @@ export function ServiceOpportunityForm({
   const handleChange = (field: keyof typeof formData, value: string) => {
     setFormData((prev) => {
       const next = { ...prev, [field]: value };
+      if (field === "assignedRepId") {
+        next.assignedRepName = assignees.find((rep) => rep.id === value)?.displayName
+          ?? (value === prev.assignedRepId ? prev.assignedRepName : "");
+      }
+      if (field === "salesSourceUserId") {
+        next.salesSourceName = salesReps.find((rep) => rep.id === value)?.displayName
+          ?? (value === prev.salesSourceUserId ? prev.salesSourceName : "");
+      }
       // Switching companies must drop the property — a property belongs to exactly one company and the
       // server rejects a mismatched pair. Guarded on an ACTUAL change: a picker that re-emits the company it
       // is already showing (value resolution / remount) would otherwise silently wipe a prefilled property,
@@ -228,6 +250,10 @@ export function ServiceOpportunityForm({
       if (field === "companyId" && value !== prev.companyId) {
         next.propertyId = "";
         next.propertyState = "";
+        // A contact belongs to exactly one company and the server rejects a mismatched pair, so a company
+        // switch must drop it for the same reason it drops the property. Guarded on an ACTUAL change: the
+        // picker re-emits the company it is already showing on value resolution and remount.
+        next.primaryContactId = "";
       }
       // Clearing the property must drop its captured state too, so region auto-detect doesn't keep deriving
       // from a property that's no longer selected (onPropertySelected only fires on a NEW selection).
@@ -256,6 +282,21 @@ export function ServiceOpportunityForm({
       // PropertySelector re-emits the resolved record whenever its value changes, so the state (and with it
       // the auto-detected region) refills on its own — blanking it here just avoids a frame of stale region.
       propertyState: "",
+      // This restores a DIFFERENT company by writing state directly, bypassing handleChange's
+      // company-change branch — so a contact picked for the company being restored FROM would survive and
+      // be submitted against the restored one, earning a server 400 ("Primary contact does not belong to
+      // the company") while the picker itself looked unselected, since the contact is not in the restored
+      // company's list.
+      // Restore writes state directly, bypassing handleChange's company-change branch, so a contact picked
+      // for the company being restored FROM would otherwise survive and be submitted against the restored
+      // one — a server 400 ("Primary contact does not belong to the company") while the picker looked
+      // unselected, since that contact is not in the restored company's list.
+      //
+      // Guarded on an ACTUAL company change, exactly as handleChange guards it. The restore button also
+      // appears after a same-company PROPERTY swap (its condition is a pure property mismatch), and there
+      // the contact was never invalidated — blanking it unconditionally would make the rep re-pick a
+      // perfectly valid contact and hit "Point of contact is required" for no reason.
+      primaryContactId: preloaded.companyId !== prev.companyId ? "" : prev.primaryContactId,
     }));
     // …and because the state is blank again, the record counts as un-held until that re-emit arrives, or a
     // Create fired in between would slip through the region guard exactly as it would on a fresh prefill.
@@ -274,8 +315,16 @@ export function ServiceOpportunityForm({
       setError("Company and property are required");
       return;
     }
+    if (!formData.primaryContactId) {
+      setError("Point of contact is required");
+      return;
+    }
     if (!formData.assignedRepId) {
       setError("Assigned sales rep is required");
+      return;
+    }
+    if (!rosterReady || !assignees.some((rep) => rep.id === formData.assignedRepId)) {
+      setError(rosterError ?? "Select an active sales-generating rep after the sales roster loads.");
       return;
     }
     if (!effectiveOfficeId || !formData.officeCode) {
@@ -321,6 +370,7 @@ export function ServiceOpportunityForm({
           name: formData.name.trim(),
           companyId: formData.companyId,
           propertyId: formData.propertyId,
+          primaryContactId: formData.primaryContactId,
           assignedRepId: formData.assignedRepId,
           salesSourceUserId: formData.salesSourceUserId || null,
           scopeTitle: formData.scopeTitle.trim() || null,
@@ -447,14 +497,33 @@ export function ServiceOpportunityForm({
           </div>
 
           <div className="space-y-2">
-            <Label>Assigned Sales Rep <span className="text-red-500">*</span></Label>
+            <Label htmlFor="primaryContactId">
+              Point of Contact <span className="text-red-500">*</span>
+            </Label>
+            <PointOfContactField
+              companyId={formData.companyId}
+              value={formData.primaryContactId}
+              onChange={(contactId) => handleChange("primaryContactId", contactId)}
+              officeId={effectiveOfficeId ?? null}
+            />
+            <p className="text-xs text-muted-foreground">
+              Who the service crew should call about this job.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="service-assigned-rep">Assigned Sales Rep <span className="text-red-500">*</span></Label>
             <Select
               value={formData.assignedRepId || "none"}
-              onValueChange={(value) => handleChange("assignedRepId", value && value !== "none" ? value : "")}
-              disabled={user?.role === "rep"}
+              onValueChange={(value) => {
+                // Base UI's hidden native select emits a reset while async options disappear.
+                // Keep the selected identity/name until the current office's roster is ready.
+                if (rosterReady) handleChange("assignedRepId", value && value !== "none" ? value : "");
+              }}
+              disabled={user?.role === "rep" || !rosterReady}
             >
-              <SelectTrigger>
-                <SelectValue placeholder={assigneesLoading ? "Loading assignees..." : "Select assignee"} />
+              <SelectTrigger id="service-assigned-rep">
+                <SelectValue>{assignedRepLabel}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">Select assignee</SelectItem>
@@ -468,13 +537,18 @@ export function ServiceOpportunityForm({
           </div>
 
           <div className="space-y-2">
-            <Label>Sales Source (optional)</Label>
+            <Label htmlFor="service-sales-source">Sales Source (optional)</Label>
             <Select
               value={formData.salesSourceUserId || "__none__"}
-              onValueChange={(v) => handleChange("salesSourceUserId", v && v !== "__none__" ? v : "")}
+              onValueChange={(v) => {
+                if (!salesRepsLoading) handleChange("salesSourceUserId", v && v !== "__none__" ? v : "");
+              }}
+              disabled={salesRepsLoading}
             >
-              <SelectTrigger>
-                <SelectValue placeholder={salesRepsLoading ? "Loading reps..." : "None"} />
+              <SelectTrigger id="service-sales-source">
+                <SelectValue>{salesReps.find((rep) => rep.id === formData.salesSourceUserId)?.displayName
+                  ?? (formData.salesSourceUserId ? formData.salesSourceName || null : null)
+                  ?? (formData.salesSourceUserId && salesRepsLoading ? "Loading sales source…" : "None")}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__none__">None</SelectItem>
@@ -572,7 +646,7 @@ export function ServiceOpportunityForm({
               aria-describedby="scopeTitle-help"
             />
             <p id="scopeTitle-help" className="text-xs text-muted-foreground">
-              A few words naming the overall scope. Accounting uses this as the project title.{" "}
+              A short scope label used in the service RFP and documents.{" "}
               <span className={formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH ? "text-red-600" : undefined}>
                 {formData.scopeTitle.length}/{DEAL_SCOPE_TITLE_MAX_LENGTH}
               </span>
@@ -588,6 +662,7 @@ export function ServiceOpportunityForm({
               value={formData.description}
               onChange={(event) => handleChange("description", event.target.value)}
             />
+            <p className="text-xs text-muted-foreground">Provide either a scope title or a description before triggering RFP. You can save the opportunity and add scope later.</p>
           </div>
 
           <div className="space-y-2">

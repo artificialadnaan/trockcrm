@@ -103,3 +103,81 @@ describe("worker SYSTEM_EMAIL_BCC", () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe("what a caller LEARNS from a failure", () => {
+  // `outcome` answers "is a re-send safe". It does not answer "what do I do about this", and a caller that
+  // persists a failure for a human to act on needs both — `rejected` covers a typo in a client's domain
+  // (fix: correct the address), a rate limit (fix: wait) and an unset RESEND_API_KEY (fix: an env var)
+  // alike. `reason` is what carries them apart.
+  beforeEach(() => {
+    sendMock.mockReset();
+    sendMock.mockResolvedValue({ data: { id: "m-1" } });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("RESEND_API_KEY", "test-resend-key");
+  });
+
+  it("carries the provider's own name and message back, not just success:false", async () => {
+    sendMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        statusCode: 422,
+        name: "validation_error",
+        message: "Invalid `to` field. The following addresses are invalid: jay@exmaple.cmo",
+      },
+    });
+
+    const result = await sendSystemEmailWithMetadata("jay@exmaple.cmo", "Subject", "<p>Body</p>");
+
+    expect(result.outcome).toBe("rejected");
+    expect(result.reason).toContain("validation_error");
+    expect(result.reason).toContain("422");
+    expect(result.reason).toContain("jay@exmaple.cmo");
+  });
+
+  it("carries the swallowed-fetch shape resend@6 returns for a transport failure", async () => {
+    // Verified against node_modules/resend/dist/index.cjs: `fetchRequest` wraps the WHOLE fetch in
+    // try/catch and returns exactly this on any throw, so a socket hang-up, a DNS failure and a gateway
+    // timeout never reach a caller as an exception. `statusCode: null` is what makes it `unknown` — no
+    // request outcome exists — rather than a definitive rejection.
+    sendMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        name: "application_error",
+        statusCode: null,
+        message: "Unable to fetch data. The request could not be resolved.",
+      },
+    });
+
+    const result = await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>");
+
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe("unknown");
+    expect(result.reason).toContain("application_error");
+    expect(result.reason).toContain("could not be resolved");
+  });
+
+  it("names the missing key when RESEND_API_KEY is unset in production", async () => {
+    // The one production failure that never reaches Resend at all. Without a reason it is indistinguishable
+    // from a malformed address, and the fixes have nothing in common.
+    vi.stubEnv("RESEND_API_KEY", "");
+    vi.stubEnv("NODE_ENV", "production");
+
+    const result = await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>");
+
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe("rejected");
+    expect(result.reason).toMatch(/RESEND_API_KEY/);
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it("adds nothing to a successful send", async () => {
+    const result = await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>");
+
+    expect(result.success).toBe(true);
+    expect(result.outcome).toBe("delivered");
+    expect(result.reason ?? null).toBeNull();
+  });
+});

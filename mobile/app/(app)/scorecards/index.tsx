@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
@@ -70,6 +70,11 @@ export default function ScorecardsScreen() {
   const router = useRouter();
   const { fetcher, user, activeOfficeId } = useAuth();
   const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
+  // Which entry on the Reports hub sent us here, so "Leadership Scorecard" opens the leadership picker
+  // rather than landing on this list with two identical-looking buttons. Consumed ONCE (the ref below):
+  // the param survives on the route, so without that guard the picker would spring open again every time
+  // the user backed out of it or returned from a draft.
+  const { start } = useLocalSearchParams<{ start?: string }>();
 
   const [drafts, setDrafts] = useState<LocatedScorecardDraft[]>([]);
   const [discardingDraftId, setDiscardingDraftId] = useState<string | null>(null);
@@ -94,6 +99,19 @@ export default function ScorecardsScreen() {
   useEffect(() => {
     void registerUploadBackgroundTask();
   }, []);
+
+  // Consume by CLEARING THE PARAM, not by latching a ref.
+  //
+  // `scorecards` is a sibling tab with no `unmountOnBlur`, so pushing to it from the Reports stack is a
+  // NAVIGATE onto an already-mounted screen — the component is never remounted and a boolean ref would
+  // survive. The result: the first hub entry works, and from then on BOTH entries are dead links that
+  // only switch tabs. Clearing the param leaves the effect idempotent and lets the same entry be tapped
+  // again later.
+  useEffect(() => {
+    if (start !== "project" && start !== "leadership") return;
+    setPickerKind(start);
+    router.setParams({ start: undefined });
+  }, [start, router]);
 
   const recent = useQuery({
     queryKey: ["scorecards-recent", user?.id ?? "anon"],
@@ -246,7 +264,13 @@ export default function ScorecardsScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader />
+      {/* This list is no longer a tab of its own — it is pushed from the Reports hub — so it needs a way
+          back. `replace`, NOT `back()`: this Stack is at its own index and cannot pop, so GO_BACK bubbles
+          to the Tabs navigator, whose default backBehavior is "firstRoute" — the chevron would land the
+          user on Projects rather than the hub they came from. Naming the destination also covers the
+          cold-start deep link (an emailed corrective-action link opens straight here with nothing beneath
+          it), where `back()` is a no-op that strands the user on a screen with no exit. */}
+      <ScreenHeader title="Scorecards" onBack={() => router.replace("/(app)/reports")} />
       <ScrollView
         contentContainerStyle={styles.body}
         refreshControl={

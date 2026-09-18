@@ -761,14 +761,19 @@ export function RepDashboardPage() {
               value={`${data.followUpCompliance.complianceRate}%`}
               subtitle={`${data.followUpCompliance.onTime} of ${data.followUpCompliance.total} on time`}
               emphasis={data.followUpCompliance.complianceRate < 80 ? "warning" : "neutral"}
-              to="/tasks"
+              // ?source=all, because BOTH of these numbers count every task regardless of who created
+              // it -- the server's overdue count (dashboard/service.ts) has no source predicate, and
+              // overdueTasks is fetched with none either. The Tasks page now opens on Manual, so a
+              // bare /tasks link would send a rep from "Overdue 42" straight to a list showing 1.
+              // The tile's number and the page it opens have to describe the same set.
+              to="/tasks?source=all"
             />
             <MetricCell
               label="Overdue"
               value={Math.max(data.tasksToday.overdue, overdueTasks.length)}
               subtitle="tasks"
               emphasis={data.tasksToday.overdue > 0 || overdueTasks.length > 0 ? "danger" : "neutral"}
-              to="/tasks?filter=overdue"
+              to="/tasks?source=all&filter=overdue"
             />
           </div>
           <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-slate-100 pt-5 sm:grid-cols-4">

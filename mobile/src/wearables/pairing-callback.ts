@@ -72,7 +72,11 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
  * `EXPO_PUBLIC_FIELD_APP_HOST` via `associatedDomains: applinks:<host>` in app.config.ts, and an
  * emailed invite is exactly how it arrives.
  */
-const APP_OWN_ROUTES = new Set(["accept-invite", "scorecards"]);
+// "reports" is the Weekly Reports tab group. It MUST be listed: this is a deny-list, so an
+// unlisted trockcam://reports/... or /reports/... link counts as possibly-a-Meta-callback, is
+// retained, and EVICTS a genuinely held pairing callback — leaving the glasses unpaired after a
+// link the app itself owns. Every route group the app adds has to be added here too.
+const APP_OWN_ROUTES = new Set(["accept-invite", "scorecards", "reports"]);
 
 /**
  * The route key of a deep link, lowercased.

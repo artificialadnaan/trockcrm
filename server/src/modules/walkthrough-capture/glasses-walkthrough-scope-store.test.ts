@@ -130,6 +130,32 @@ describe("createGlassesWalkthroughScopeReader — a 200 is not automatically an 
     });
   });
 
+  it("passes TROCK Scope's `pipeline` health object through UNREAD", async () => {
+    // Deliberately not validated here. `toPanelPipelineHealth` (the scope service) is the single place
+    // that decides what a usable health object looks like; a second opinion in this module would give the
+    // panel two chances to disagree with itself about the same bytes. So this asserts transport, and the
+    // scope-service suite asserts judgement.
+    stubFetch(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [{ id: "item-1", description: "Paint wall red" }],
+            pipeline: { state: "stale", stage: null, reason: "media replaced", since: "2026-09-02T10:00:00.000Z" },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    const answer = await createGlassesWalkthroughScopeReader().fetchScopeItems(
+      SCOPE_ID,
+      new AbortController().signal,
+    );
+
+    expect(answer).toMatchObject({
+      pipelineHealth: { state: "stale", reason: "media replaced", since: "2026-09-02T10:00:00.000Z" },
+    });
+  });
+
   it("REGRESSION: THROWS on a 200 with no `items` array, instead of reporting an empty scope", async () => {
     // Coercing an unrecognised body to `[]` would render as "this walk produced no line items" — a claim
     // about the estimator's site visit rather than about our failure to read the answer, and unfalsifiable

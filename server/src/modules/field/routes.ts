@@ -103,11 +103,13 @@ import {
 import {
   ingestGlassesWalkthrough,
   requestGlassesWalkthroughArtifactUploadUrl,
+  resolveGlassesWalkthroughJobTypeForDeal,
   validateGlassesWalkthroughArtifactUploadUrlInput,
   validateGlassesWalkthroughCompleteInput,
 } from "../walkthrough-capture/glasses-walkthrough-service.js";
 import { createGlassesWalkthroughArtifactStore } from "../walkthrough-capture/glasses-walkthrough-store.js";
 import { registerCorrectiveActionRoutes } from "./corrective-action-routes.js";
+import { weeklyReportFieldRoutes } from "../weekly-reports/field-routes.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
 // the GLOBAL cap when the cross-office picker merges per-office results.
@@ -119,6 +121,13 @@ export const fieldRoutes = Router();
 // on the field router; the token path intentionally bypasses requireFieldContractor (email-only responders
 // have no session) and authorizes via the scorecard's office + the ?token instead.
 registerCorrectiveActionRoutes(fieldRoutes);
+
+// Weekly Reports — the superintendent's authoring surface and the PM's review queue. Mounted HERE rather
+// than as its own top-level app.use so it inherits /api/field's field-session policy automatically; the
+// route-access-policy test asserts /api/field is the only field-accessible mount, and a sibling mount
+// would be a second one nobody had to declare. Its own router applies requireFieldContractor +
+// tenantMiddleware, so it needs no middleware from this file.
+fieldRoutes.use("/weekly-reports", weeklyReportFieldRoutes);
 
 function parseOptionalPositiveInt(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
@@ -145,6 +154,24 @@ function parseOptionalClientUploadId(value: unknown): string | undefined {
     throw new AppError(400, "clientUploadId must be a non-empty string of at most 64 characters.");
   }
   return value.trim();
+}
+
+/**
+ * Device-reported count of captures still queued behind this upload. Telemetry ONLY — it is written to
+ * the photo audit event's metadata and read by nobody at request time.
+ *
+ * Deliberately lenient rather than a 400: this is a diagnostic a client volunteers, and rejecting an
+ * otherwise-valid photo confirm because a telemetry field was malformed would trade a real photo for a
+ * number. A junk value is dropped; a sane one is clamped so a client cannot write an unbounded integer
+ * into a JSON column.
+ */
+const MAX_REPORTED_QUEUE_DEPTH = 100_000;
+
+function parseOptionalQueueDepth(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.min(Math.floor(n), MAX_REPORTED_QUEUE_DEPTH);
 }
 
 function parseScorecardDiscardEvidenceIds(value: unknown): string[] {
@@ -557,6 +584,7 @@ fieldRoutes.post("/photos/confirm-upload", requireFieldContractor, async (req, r
         addressSource: req.body.addressSource,
         takenAt: req.body.takenAt,
         auditContext: requestAuditContext(req),
+        queueDepth: parseOptionalQueueDepth(req.body.queueDepth),
       }),
     );
     res.status(201).json(result);
@@ -845,13 +873,27 @@ fieldRoutes.post("/projects/:dealId/glasses-walkthroughs", requireFieldContracto
       { dealId },
       async (officeDb, office) => {
         await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
-        const input = validateGlassesWalkthroughCompleteInput({
+        const stated = validateGlassesWalkthroughCompleteInput({
           ...(req.body as Record<string, unknown> | undefined),
           dealId,
           userId: req.fieldUser!.id,
           officeSlug: office.slug,
           officeId: office.id,
         });
+        // WHICH WORK-TYPE CATALOG TROCK SCOPE SHOULD GRADE THIS WALK AGAINST, settled here rather than
+        // inside the ingest — because it is a fact about the DEAL, and this is the layer that has one.
+        // No capture client sends `jobType` yet, so in practice this is where every walk's answer comes
+        // from; see ./../walkthrough-capture/glasses-walkthrough-job-type.ts for the mapping and for why
+        // getting it wrong has cost 86% of extracted line items their work type.
+        //
+        // AFTER the access assert, deliberately: it reads the deal, and a caller who may not reach this
+        // deal must be refused before anything about it is read, not merely before the walk is filed.
+        const input = {
+          ...stated,
+          // `as never` for the same reason the ingest call below uses it: the field router's tenant db
+          // handle is structurally the same connection, typed differently.
+          jobType: await resolveGlassesWalkthroughJobTypeForDeal(officeDb as never, dealId, stated.jobType),
+        };
         return ingestGlassesWalkthrough(officeDb as never, input, {
           artifactStore: createGlassesWalkthroughArtifactStore(),
         });
@@ -1349,6 +1391,11 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
     const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
     const perPageRaw = parseInt(req.query.perPage as string, 10);
     const perPage = Number.isFinite(perPageRaw) ? perPageRaw : undefined;
+    // `withTotal=0` opts OUT of the count(*), which is the expensive half of a deep page and is identical
+    // on every page of a walk. Opt-IN semantics (absent param ⇒ counted) is what keeps the already-shipped
+    // T-Rock Cam builds correct: their photo-viewer re-scanner reads totalPages off every page and would
+    // stop walking if one came back null, and `mobile/` has no OTA to fix them with.
+    const withTotal = !(req.query.withTotal === "0" || req.query.withTotal === "false");
     const { value, office } = await withResolvedOffice(
       "deal",
       dealId,
@@ -1359,7 +1406,7 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
           from: req.query.from as string | undefined,
           to: req.query.to as string | undefined,
           includeDeleted: false,
-        }, { page, perPage }),
+        }, { page, perPage, withTotal }),
       "Project not found",
     );
     res.json({ ...value, ...officeTag(office) });

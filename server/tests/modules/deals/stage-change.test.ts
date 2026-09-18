@@ -99,6 +99,7 @@ type FakeTenantDb = ReturnType<typeof createTenantDb>;
 
 function createTenantDb(overrides?: Partial<FakeDeal>) {
   const state = {
+    taskUpdates: [] as Array<{ values: Record<string, unknown>; condition: unknown }>,
     deals: [
       {
         id: "deal-1",
@@ -147,6 +148,24 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
     stageHistory: [] as Array<Record<string, unknown>>,
     auditLog: [] as Array<Record<string, unknown>>,
     jobs: [] as Array<Record<string, unknown>>,
+    // Approvals the deal carries into the transition. The reopen branch retires these, so the fake has
+    // to hold real rows for the retirement's audit itemization to have anything to itemize.
+    approvals: [
+      {
+        id: "approval-1",
+        targetStageId: "stage-closed-won",
+        requiredRole: "director",
+        status: "approved",
+        approvedBy: "user-9",
+      },
+      {
+        id: "approval-2",
+        targetStageId: "stage-estimating",
+        requiredRole: "admin",
+        status: "pending",
+        approvedBy: null,
+      },
+    ] as Array<Record<string, unknown>>,
     ops: [] as string[],
   };
 
@@ -197,7 +216,12 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
       return {
         set(values: Record<string, unknown>) {
           return {
-            where() {
+            where(condition?: unknown) {
+              // Recorded so the terminal-sweep tests can assert the SET payload directly and EXECUTE the
+              // real WHERE condition against real rows, rather than matching its text.
+              if (name === tableName(tasks)) {
+                state.taskUpdates.push({ values, condition });
+              }
               return {
                 returning() {
                   if (name === "deals") {
@@ -216,6 +240,23 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
                   throw new Error(`Unexpected update on ${name}`);
                 },
               };
+            },
+          };
+        },
+      };
+    },
+    delete(table: unknown) {
+      const name = tableName(table);
+      return {
+        where() {
+          return {
+            returning() {
+              if (name === tableName(dealApprovals)) {
+                state.ops.push("delete:deal_approvals");
+                return Promise.resolve(state.approvals.splice(0));
+              }
+
+              throw new Error(`Unexpected delete on ${name}`);
             },
           };
         },
@@ -1469,6 +1510,67 @@ describe("changeDealStage", () => {
     ).toBe("crm");
   });
 
+  // The SECOND owner of the approval-retirement rule. "Move back to Opportunity" hit this defect first,
+  // but the terminal-reopen path here has always had it too: marking approved rows `rejected` in place
+  // left them occupying the (deal_id, target_stage_id, required_role) unique key that the bare-INSERT
+  // request route cannot get past, so the reopened deal could never re-request that approval; and a row
+  // still `pending` was not matched at all, so it stayed resolvable to `approved` for the closed cycle.
+  // Fixing only the move-back would have left this owner wrong, so both now call retireDealApprovals.
+  it("RETIRES the closed cycle's approvals on reopen — pending ones too — instead of rejecting them in place", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-closed-won",
+      isBidBoardOwned: true,
+      actualCloseDate: "2026-04-21",
+    });
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: true,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        isActivePipeline: true,
+        displayOrder: 0,
+      },
+      currentStage: {
+        id: "stage-closed-won",
+        name: "Sent to Production",
+        slug: "sent_to_production",
+        isTerminal: true,
+        isActivePipeline: true,
+        displayOrder: 10,
+      },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    // Rows GONE — both the approved one and the pending one. Rejecting in place leaves both behind.
+    expect(tenantDb.state.approvals).toHaveLength(0);
+    expect(tenantDb.state.ops).toContain("delete:deal_approvals");
+
+    // …itemized into audit_log, because a delete has to leave the forensic record somewhere.
+    const approvalAudits = tenantDb.state.auditLog.filter(
+      (row) => row.tableName === "deal_approvals" && row.action === "delete"
+    );
+    expect(approvalAudits).toHaveLength(2);
+    expect(approvalAudits.map((row) => row.recordId).sort()).toEqual(["approval-1", "approval-2"]);
+    expect(
+      approvalAudits.every(
+        (row) =>
+          (row.changes as Record<string, { from: unknown; to: unknown }>).retiredBecause.to ===
+          "deal reopen"
+      )
+    ).toBe(true);
+  });
+
   it("fails closed when the estimating boundary stage config is missing for an owned deal", async () => {
     const tenantDb = createTenantDb({
       stageId: "stage-estimating",
@@ -1738,4 +1840,107 @@ describe("changeDealStage", () => {
     });
   });
 
+});
+
+/**
+ * The terminal-stage task sweep, which two review rounds found to be doing two wrong things at once.
+ *
+ * The WHERE condition is not matched as text: it is captured from the real call and EXECUTED against real
+ * rows in PGlite, so the assertion is "which tasks would actually be swept", not "how the predicate reads".
+ */
+describe("the terminal-stage task sweep", () => {
+  async function sweepOn(slug: string, isTerminalStage = true) {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T09:00:00.000Z"));
+    const tenantDb = createTenantDb({ stageId: "stage-opportunity" });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: `stage-${slug}`, name: slug, slug, isTerminal: isTerminalStage, isActivePipeline: true, displayOrder: 9 },
+      currentStage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: `stage-${slug}`,
+      userId: "user-1",
+      userRole: "director",
+      // Required when closing as lost; harmless on the other paths.
+      lostReasonId: "reason-1",
+      lostNotes: "Client went with another bidder.",
+      auditContext: { actor: { type: "user", userId: "user-1", name: "Dee", role: "director" }, ipAddress: null, userAgent: null },
+    } as never);
+    vi.useRealTimers();
+    return tenantDb.state.taskUpdates;
+  }
+
+  /** Run the captured predicate over real rows and report which survive the sweep. */
+  async function sweptBy(condition: unknown): Promise<string[]> {
+    const { PGlite } = await import("@electric-sql/pglite");
+    const { drizzle } = await import("drizzle-orm/pglite");
+    const pg = new PGlite();
+    await pg.exec(`
+      CREATE TABLE tasks (
+        id uuid PRIMARY KEY, deal_id uuid, origin_rule varchar(120), status text NOT NULL,
+        is_overdue boolean NOT NULL DEFAULT false, auto_dismissed_reason varchar(120)
+      );
+      INSERT INTO tasks (id, deal_id, origin_rule, status) VALUES
+        ('00000000-0000-4000-8000-000000000001', 'deal-1'::text::uuid, 'inbound_email_reply_needed', 'pending'),
+        ('00000000-0000-4000-8000-000000000002', 'deal-1'::text::uuid, 'daily_close_date_follow_up', 'pending'),
+        ('00000000-0000-4000-8000-000000000003', 'deal-1'::text::uuid, NULL, 'pending');
+    `).catch(async () => {
+      // deal-1 is not a uuid in this harness; use a text column instead.
+      await pg.exec(`
+        DROP TABLE IF EXISTS tasks;
+        CREATE TABLE tasks (
+          id text PRIMARY KEY, deal_id text, origin_rule varchar(120), status text NOT NULL,
+          is_overdue boolean NOT NULL DEFAULT false, auto_dismissed_reason varchar(120)
+        );
+        INSERT INTO tasks (id, deal_id, origin_rule, status) VALUES
+          ('t-reply', 'deal-1', 'inbound_email_reply_needed', 'pending'),
+          ('t-followup', 'deal-1', 'daily_close_date_follow_up', 'pending'),
+          ('t-manual', 'deal-1', NULL, 'pending');
+      `);
+    });
+    const db = drizzle(pg);
+    const rows = await db.select({ id: tasks.id, originRule: tasks.originRule }).from(tasks).where(condition as never);
+    await pg.close();
+    return rows.map((r: { originRule: string | null }) => r.originRule ?? "(manual)");
+  }
+
+  beforeEach(() => vi.mocked(validateStageGate).mockReset());
+
+  // P1, Codex round 2: winning the job is not a reason to stop replying to the customer, and email-sync
+  // evaluates the reply rule only at ingest -- so anything this sweep deletes is never recreated.
+  it("does NOT sweep an unanswered client email when the deal is WON", async () => {
+    const [update] = await sweepOn("won");
+    expect(update).toBeDefined();
+    const swept = await sweptBy(update.condition);
+    expect(swept).not.toContain("inbound_email_reply_needed");
+    expect(swept).toContain("daily_close_date_follow_up");
+    expect(swept).toContain("(manual)");
+  });
+
+  it("DOES sweep it when the deal is LOST — there is nothing left to reply about", async () => {
+    const [update] = await sweepOn("lost");
+    expect(update).toBeDefined();
+    const swept = await sweptBy(update.condition);
+    expect(swept).toContain("inbound_email_reply_needed");
+    expect(swept).toContain("daily_close_date_follow_up");
+  });
+
+  it("marks what it sweeps as auto-dismissed, so compliance does not score it as a rep's miss", async () => {
+    const [update] = await sweepOn("won");
+    expect(update.values).toMatchObject({
+      status: "dismissed",
+      isOverdue: false,
+      autoDismissedReason: "deal_reached_terminal_stage",
+    });
+  });
+
+  it("does not sweep at all on a non-terminal transition", async () => {
+    const updates = await sweepOn("estimate_in_progress", false);
+    expect(updates).toHaveLength(0);
+  });
 });

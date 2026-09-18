@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowUp, CalendarClock, ChevronsUpDown, Download, ExternalLink, Loader2 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
@@ -344,6 +344,18 @@ export function EvidenceDrawer({
   const { data, loading, error, refetch } = useShowcaseEvidence(request, mode, routes);
   // The row whose close date is being set inline (undated list only); null = the editor is closed.
   const [editing, setEditing] = useState<EvidenceRecord | null>(null);
+
+  // The drawer itself stays mounted while the parent clears its request (including an office-scope
+  // transition). Do not let its nested editor outlive that evidence: otherwise an office A row can remain
+  // editable after the parent has closed the office A drawer and moved to office B.
+  useEffect(() => {
+    if (request == null) setEditing(null);
+  }, [request]);
+
+  const closeDrawer = useCallback(() => {
+    setEditing(null);
+    onClose();
+  }, [onClose]);
   // The inline close-date editor writes through the OWNER-ONLY PATCH /deals/:id (the same gate the deal
   // detail uses: canMoveCloseDate={viewerOwnsDeal}). The Monday Showcase is rep-accessible and its
   // office-wide undated drawer lists EVERY rep's undated deals, so offer "Set close date" only on rows the
@@ -377,7 +389,7 @@ export function EvidenceDrawer({
     <Dialog
       open={request != null}
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (!open) closeDrawer();
       }}
     >
       <DialogContent className="flex max-h-[85vh] w-[min(96vw,1120px)] flex-col gap-3 sm:max-w-[min(96vw,1120px)]">
@@ -441,19 +453,21 @@ export function EvidenceDrawer({
         write path + activity-note audit are identical. On save we refetch the evidence list (the now-dated
         deal drops out of this M − N set) AND notify the parent so the showcase re-bands it; the dialog
         closes itself via onOpenChange. */}
-      <MoveCloseDateDialog
-        open={editing != null}
-        onOpenChange={(open) => {
-          if (!open) setEditing(null);
-        }}
-        dealId={editing?.id ?? ""}
-        currentDate={editing?.cohortDate ?? null}
-        officeId={officeId}
-        onSaved={async () => {
-          await refetch?.();
-          await onMutated?.();
-        }}
-      />
+      {request != null && editing != null ? (
+        <MoveCloseDateDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setEditing(null);
+          }}
+          dealId={editing.id}
+          currentDate={editing.cohortDate}
+          officeId={officeId}
+          onSaved={async () => {
+            await refetch?.();
+            await onMutated?.();
+          }}
+        />
+      ) : null}
     </>
   );
 }

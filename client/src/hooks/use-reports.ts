@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import type { ServiceRfpReport } from "@trock-crm/shared/types";
 import { useOfficeScopeId } from "./use-office-scope";
 import { api } from "@/lib/api";
 import type {
@@ -502,6 +503,81 @@ export interface DailyActivityLogQueryOptions extends PerformanceReportQueryOpti
   limit?: number;
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * Canvassing Activity — who entered new companies/properties/contacts/leads, per person, per period.
+ * Mirrors server/src/modules/reports/canvassing-activity-service.ts.
+ * ---------------------------------------------------------------------------------------------- */
+
+export const CANVASSING_KINDS = ["company", "property", "contact", "lead"] as const;
+export type CanvassingKind = (typeof CANVASSING_KINDS)[number];
+export type CanvassingBucket = "week" | "month" | "quarter";
+
+export type CanvassingCounts = Record<CanvassingKind, number> & { total: number };
+
+export interface CanvassingPersonRow {
+  userId: string;
+  displayName: string;
+  email: string | null;
+  role: string | null;
+  isActive: boolean;
+  counts: CanvassingCounts;
+  notesLogged: number;
+}
+
+export interface CanvassingBucketRow {
+  bucketStart: string;
+  label: string;
+  /** The range covers only PART of this calendar period — normal for the first and last bucket. */
+  partial: boolean;
+  counts: CanvassingCounts;
+  /** Records created in this bucket that name NO creator — pre-0220 rows and machine-created ones. */
+  unattributed: CanvassingCounts;
+  perUser: Array<{ userId: string; counts: CanvassingCounts; notesLogged: number }>;
+}
+
+export interface CanvassingNoteRow {
+  id: string;
+  type: string;
+  subject: string | null;
+  body: string | null;
+  occurredAt: string;
+  userId: string | null;
+  userName: string | null;
+  /** Set only when someone OTHER than the attributed user actually logged it. */
+  performedByName: string | null;
+  targetType: "company" | "property" | "contact" | "lead" | "deal" | null;
+  targetId: string | null;
+  targetName: string | null;
+}
+
+export interface CanvassingActivityReport {
+  range: { from: string; to: string };
+  /** The requested window was longer than supported and `range.from` was moved forward. */
+  rangeClamped: boolean;
+  bucket: CanvassingBucket;
+  totals: CanvassingCounts;
+  unattributed: CanvassingCounts;
+  notesLogged: number;
+  people: CanvassingPersonRow[];
+  buckets: CanvassingBucketRow[];
+  notes: CanvassingNoteRow[];
+  notesTruncated: boolean;
+  /** The feed shows only the viewer's own notes; the counts still describe everyone. */
+  notesRestrictedToSelf: boolean;
+  /** Earliest attributed creation; before this the report is structurally blind, not empty. */
+  attributionStartHint: string | null;
+}
+
+export interface CanvassingActivityQueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  bucket?: CanvassingBucket;
+  userIds?: string[];
+  /** The filter bar's legacy name/email owner selectors; resolved to ids server-side. */
+  ownerNames?: string[];
+  ownerEmails?: string[];
+}
+
 export interface ForecastAccuracyReport {
   kpis: {
     commit: number;
@@ -943,6 +1019,10 @@ export function usePipelineVelocityReport(options: SalesReportQueryOptions = {})
   );
 }
 
+export function useServiceRfpReport(options: SalesReportQueryOptions = {}) {
+  return useSalesReport<ServiceRfpReport>("/reports/service-rfps", options, "Failed to load service RFP contributions");
+}
+
 export function useClosedWonRevenueReport(options: SalesReportQueryOptions = {}) {
   return useSalesReport<ClosedWonRevenueOverview>(
     "/reports/closed-won-revenue",
@@ -1356,7 +1436,7 @@ function useOfficeScopeKey() {
  * │ (useLeadSourceROI, useForecastVarianceOverview, useMarketMixReport,                            │
  * │ useCustomerConcentrationReport, useExecutiveTrendsReport, useUnifiedWorkflowOverview,          │
  * │ useDataMiningOverview, useRegionalOwnershipOverview) and the showcase family                   │
- * │ (useMondayShowcase, useShowcaseEvidence, useRepPack, useAtRiskWatchlist, useRegionReport).     │
+ * │ (useShowcaseEvidence, useRepPack, useAtRiskWatchlist, useRegionReport).                        │
  * │                                                                                               │
  * │ ALSO OPEN, one hop further out: the scope now survives report -> entity detail, but company    │
  * │ and property DETAIL pages emit bare onward links of their own (related deals, properties), so  │
@@ -1524,6 +1604,80 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
   );
 }
 
+export function useCanvassingActivityReport(options: CanvassingActivityQueryOptions = {}) {
+  const userKey = options.userIds?.join(",") ?? "";
+  const nameKey = options.ownerNames?.join(",") ?? "";
+  const emailKey = options.ownerEmails?.join(",") ?? "";
+  return useScopedReport<CanvassingActivityReport>(
+    async () => {
+      const params = new URLSearchParams();
+      if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+      if (options.dateTo) params.set("dateTo", options.dateTo);
+      if (options.bucket) params.set("bucket", options.bucket);
+      if (userKey) params.set("userIds", userKey);
+      if (nameKey) params.set("owners", nameKey);
+      if (emailKey) params.set("ownerEmails", emailKey);
+      const qs = params.toString();
+      return (await api<{ data: CanvassingActivityReport }>(`/reports/canvassing-activity${qs ? `?${qs}` : ""}`)).data;
+    },
+    [options.dateFrom, options.dateTo, options.bucket, userKey, nameKey, emailKey],
+    "Failed to load canvassing activity"
+  );
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Canvassing Activity drill-to-evidence — the records behind ONE number.
+ * ---------------------------------------------------------------------------------------------- */
+
+/** `all` is the grid's combined column — counts.total — and returns the four kinds in one list. */
+export type CanvassingEvidenceKind = CanvassingKind | "all" | "unattributed" | "notes";
+
+export interface CanvassingEvidenceRecord {
+  id: string;
+  label: string;
+  sublabel: string | null;
+  occurredAt: string;
+  href: string | null;
+  /** Which of the four this row is. Present on record drills; the combined list needs it to be readable. */
+  kind?: CanvassingKind;
+  /** What a NOTE was attached to — the deal, contact, company, lead or property it documents. */
+  attachedTo?: string | null;
+}
+
+export interface CanvassingEvidenceResult {
+  kind: CanvassingEvidenceKind;
+  /** Null for an office-wide drill. */
+  userId: string | null;
+  bucketStart: string | null;
+  /** The figure the drill was opened from. Counted with the report's own predicate, not rows.length. */
+  total: number;
+  rows: CanvassingEvidenceRecord[];
+  truncated: boolean;
+  /** Rows narrowed to the viewer's own notes; `total` still describes everyone's. */
+  restrictedToSelf: boolean;
+}
+
+/** Fetched on demand when a cell is clicked, rather than prefetched for every cell on the page. */
+export async function fetchCanvassingEvidence(input: {
+  kind: CanvassingEvidenceKind;
+  /** Omitted for an office-wide figure — a KPI card or an "Office totals by period" cell. */
+  userId?: string | null;
+  bucketStart?: string | null;
+  bucket: CanvassingBucket;
+  dateFrom?: string;
+  dateTo?: string;
+  ownerIds?: string[];
+}): Promise<CanvassingEvidenceResult> {
+  const params = new URLSearchParams();
+  params.set("kind", input.kind);
+  if (input.userId) params.set("userId", input.userId);
+  params.set("bucket", input.bucket);
+  if (input.bucketStart) params.set("bucketStart", input.bucketStart);
+  if (input.dateFrom) params.set("dateFrom", input.dateFrom);
+  if (input.dateTo) params.set("dateTo", input.dateTo);
+  return (await api<{ data: CanvassingEvidenceResult }>(`/reports/canvassing-activity/evidence?${params.toString()}`)).data;
+}
+
 export function useForecastAccuracyReport(options: PerformanceReportQueryOptions = {}) {
   return usePerformanceReport<ForecastAccuracyReport>(
     "forecast-accuracy",
@@ -1568,13 +1722,29 @@ export function useMondayShowcase(
   const [data, setData] = useState<MondayShowcaseData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const officeScopeKey = useOfficeScopeKey();
   // Monotonic request id: this endpoint fans out many queries, so a mode toggle can leave an older
   // request in flight. Only the latest request is allowed to write state -- a stale response is dropped,
   // so the page never shows the new toggle with the previous period's data.
   const latestRequest = useRef(0);
+  const isFirstScopeLayout = useRef(true);
   // Depend on the VALUE, not the array identity -- a caller rebuilding the array each render must not
   // retrigger an infinite fetch loop.
   const routesKey = routes?.join(",") ?? "";
+
+  // api() derives its tenant header from ?officeId, while A1 derives its deal links from that same URL.
+  // Clear in a layout effect so a scope switch cannot paint office A's rows with office B's link targets,
+  // and invalidate pending requests before an older office response can land.
+  useLayoutEffect(() => {
+    latestRequest.current += 1;
+    if (isFirstScopeLayout.current) {
+      isFirstScopeLayout.current = false;
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setData(null);
+  }, [officeScopeKey]);
 
   const fetchShowcase = useCallback(async () => {
     const requestId = ++latestRequest.current;
@@ -1608,7 +1778,7 @@ export function useMondayShowcase(
     } finally {
       if (requestId === latestRequest.current) setLoading(false);
     }
-  }, [mode, routesKey, enabled]);
+  }, [mode, routesKey, enabled, officeScopeKey]);
 
   useEffect(() => {
     fetchShowcase();

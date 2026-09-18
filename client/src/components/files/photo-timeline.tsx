@@ -203,6 +203,7 @@ export function PhotoTimeline({ dealId }: PhotoTimelineProps) {
               variant="ghost"
               size="icon"
               className="absolute -top-12 right-0 text-white hover:bg-white/20"
+              aria-label="Close photo viewer"
               onClick={() => setLightboxIndex(null)}
             >
               <X className="h-6 w-6" />
@@ -214,6 +215,7 @@ export function PhotoTimeline({ dealId }: PhotoTimelineProps) {
                 variant="ghost"
                 size="icon"
                 className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-12 text-white hover:bg-white/20"
+                aria-label="Previous photo"
                 onClick={() => setLightboxIndex(lightboxIndex - 1)}
               >
                 <ChevronLeft className="h-8 w-8" />
@@ -224,6 +226,7 @@ export function PhotoTimeline({ dealId }: PhotoTimelineProps) {
                 variant="ghost"
                 size="icon"
                 className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-12 text-white hover:bg-white/20"
+                aria-label="Next photo"
                 onClick={() => setLightboxIndex(lightboxIndex + 1)}
               >
                 <ChevronRight className="h-8 w-8" />

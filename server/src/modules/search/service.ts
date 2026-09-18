@@ -636,6 +636,9 @@ async function searchFiles(tenantDb: TenantDb, query: string, limit: number): Pr
       ts_rank(f.search_vector, plainto_tsquery('english', ${query})) AS rank
     FROM files f
     WHERE f.is_active = true
+      -- Expense-request attachments are private to their request; global search has no idea who may see
+      -- one, and its result rows carry the display name.
+      AND f.marketing_expense_request_id IS NULL
       AND f.search_vector @@ plainto_tsquery('english', ${query})
     ORDER BY rank DESC
     LIMIT ${limit}

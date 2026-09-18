@@ -50,7 +50,7 @@ function makeSend() {
       _subject: string,
       _html: string,
       _options: { text: string; idempotencyKey: string }
-    ) => ({ success: true as const, messageId: "msg_new" })
+    ) => ({ success: true as const, messageId: "msg_new", outcome: "delivered" as const })
   );
   return sendEmail;
 }

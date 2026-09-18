@@ -32,7 +32,7 @@ export function MyCleanupDealEditorDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-5xl max-h-[92vh] overflow-y-auto">
         <DialogHeader>
           {/* A change-order child is STORED as "<Parent> — Change Order N"; lead the title with the label.
               Display-only — the DealForm below still edits the stored name. */}

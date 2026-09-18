@@ -49,15 +49,21 @@ async function seed() {
 
     for (const user of devUsers) {
       const result = await client.query(
-        `INSERT INTO users (email, display_name, role, office_id)
-         VALUES ($1, $2, $3::user_role, $4)
+                 -- Explicit, never the column default (migration 0219): the default is true, so a seeded admin
+         -- or director would land on the director-dashboard rosters on every fresh database, and the
+         -- migration's backfill cannot reach rows inserted after it ran. Same role-derived rule as
+         -- createCrmUser, the user import, the field-invite flow and reconcileUsers. Carried into the
+         -- CONFLICT branch too, so re-seeding CORRECTS an existing row instead of leaving it stale.
+        `INSERT INTO users (email, display_name, role, office_id, generates_sales)
+         VALUES ($1, $2, $3::user_role, $4, $5)
          ON CONFLICT (email) DO UPDATE SET
+           generates_sales = EXCLUDED.generates_sales,
            display_name = EXCLUDED.display_name,
            role = EXCLUDED.role::user_role,
            office_id = EXCLUDED.office_id,
            is_active = TRUE
          RETURNING id, email, role`,
-        [user.email, user.displayName, user.role, officeId]
+        [user.email, user.displayName, user.role, officeId, user.role === "rep"]
       );
       console.log(`User seeded: ${result.rows[0].email} (${result.rows[0].role})`);
     }
