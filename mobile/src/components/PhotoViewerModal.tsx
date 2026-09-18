@@ -97,6 +97,7 @@ export function PhotoViewerModal({
   onClose,
   projectDealId,
   photoWindow,
+  photoTimeZone,
 }: {
   photos: FieldPhoto[];
   initialIndex: number;
@@ -115,6 +116,16 @@ export function PhotoViewerModal({
    * feature was built to make reachable.
    */
   photoWindow?: { from?: string; to?: string };
+  /**
+   * The zone the gallery's bounds were resolved in — passed rather than re-resolved here.
+   *
+   * The snapshot this modal is showing was selected under the gallery's zone. Re-resolving at refresh
+   * time reinterprets the SAME bare month bounds in whatever zone the device is in now, so a device
+   * that moves between zones while the viewer is open (Dallas to Atlanta is one hour, and both are
+   * offices here) can re-scan a window that no longer contains the photo it is trying to refresh —
+   * leaving retry and Save permanently unable to re-mint a boundary photo's URL.
+   */
+  photoTimeZone?: string;
 }) {
   const { width, height } = useWindowDimensions();
   const { fetcher } = useAuth();
@@ -243,7 +254,7 @@ export function PhotoViewerModal({
               perPage: REFRESH_PER_PAGE,
               from: photoWindow?.from || undefined,
               to: photoWindow?.to || undefined,
-              timeZone: deviceTimeZone(),
+              timeZone: photoTimeZone ?? deviceTimeZone(),
             }),
           maxPages: REFRESH_MAX_PAGES,
         });

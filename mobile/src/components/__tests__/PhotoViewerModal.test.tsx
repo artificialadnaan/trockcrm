@@ -252,6 +252,45 @@ describe("PhotoViewerModal expired-URL refresh", () => {
     expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
   });
 
+  /**
+   * The zone must come from the GALLERY, not be re-resolved here. The snapshot on screen was selected
+   * under the gallery's zone; re-resolving reinterprets the same bare month bounds in whatever zone the
+   * device is in NOW, so a move between zones with the viewer open (Dallas to Atlanta is an hour, and
+   * both are offices here) can re-scan a window that no longer holds the photo being refreshed.
+   */
+  it("re-scans using the zone the gallery used, not the device's current one", async () => {
+    mockSavePhotoToDevice.mockResolvedValueOnce("failed").mockResolvedValueOnce("saved");
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        photoWindow={{ from: "2026-06-01", to: "2026-06-30" }}
+        photoTimeZone="Pacific/Auckland"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(
+      expect.anything(),
+      "d1",
+      // Deliberately a zone this runner is NOT in. Asserting the machine's own zone would pass whether
+      // the prop is used or re-resolved locally — which it did: with the prop ignored, the test stayed
+      // green because deviceTimeZone() returns the same America/Chicago the prop carried.
+      expect.objectContaining({ timeZone: "Pacific/Auckland" }),
+    );
+    expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
+  });
+
   it("sends no window when the gallery has none selected", async () => {
     mockSavePhotoToDevice.mockResolvedValueOnce("failed").mockResolvedValueOnce("saved");
     mockGetProjectPhotos.mockResolvedValueOnce({

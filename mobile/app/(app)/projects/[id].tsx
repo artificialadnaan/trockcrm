@@ -194,16 +194,25 @@ export default function ProjectDetailScreen() {
 
     sync();
     scheduleMidnight();
-    // Still listen to foreground: a suspended app's timer does not fire on schedule, so resuming is the
-    // other moment the calendar may have moved.
+    // Foreground does two things, and the second is easy to miss: a suspended app's timer does not fire
+    // on schedule, AND a resume may be in a different zone — where the pending timeout is still aimed at
+    // the PREVIOUS zone's midnight. Travelling east, the destination's month boundary can pass hours
+    // before it fires, so the timer is cancelled and re-aimed rather than left running.
     const sub = AppState.addEventListener("change", (next) => {
-      if (next === "active") sync();
+      if (next !== "active") return;
+      sync();
+      if (timer) clearTimeout(timer);
+      scheduleMidnight();
     });
     return () => {
       if (timer) clearTimeout(timer);
       sub.remove();
     };
   }, []);
+
+  // The zone the gallery's own bounds are resolved in. Derived from calendarKey so it moves with the
+  // same resync the month list uses, rather than being read independently at some other moment.
+  const galleryTimeZone = useMemo(() => calendarKey.split("@")[1] || undefined, [calendarKey]);
 
   // Rebuilt only when the project's span or the calendar month changes — not per render, which would
   // rebuild the list and its chip keys on every unrelated state change.
@@ -755,6 +764,7 @@ export default function ProjectDetailScreen() {
           visible
           projectDealId={dealId}
           photoWindow={photoWindow}
+          photoTimeZone={galleryTimeZone}
           onClose={() => setViewer(null)}
         />
       ) : null}
