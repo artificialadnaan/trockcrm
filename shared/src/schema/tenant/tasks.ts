@@ -37,6 +37,12 @@ export const tasks = pgTable(
     sourceEvent: varchar("source_event", { length: 120 }),
     dedupeKey: varchar("dedupe_key", { length: 255 }),
     reasonCode: varchar("reason_code", { length: 120 }),
+    // Why this task was closed WITHOUT a person deciding to close it — set by the paths that sweep tasks
+    // automatically (a deal reaching a terminal stage, the terminal-deal drain). NULL means a human closed
+    // it, or it is still open. Recorded at the moment of dismissal precisely because every derivable
+    // alternative is mutable: task_resolution_state is re-pointed by a later same-key task, and the deal's
+    // stage moves under the task in both directions. See migration 0246.
+    autoDismissedReason: varchar("auto_dismissed_reason", { length: 120 }),
     entitySnapshot: jsonb("entity_snapshot"),
     scheduledFor: timestamp("scheduled_for", { withTimezone: true }),
     waitingOn: jsonb("waiting_on"),

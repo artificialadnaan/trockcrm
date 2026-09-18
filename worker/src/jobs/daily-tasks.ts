@@ -324,6 +324,9 @@ export async function dismissResolvedTerminalDealTasks(
     `WITH dismissed AS (
        UPDATE ${schemaName}.tasks AS t
        SET status = 'dismissed',
+           -- Records that no person decided this, immutably, on the task itself. getFollowUpCompliance
+           -- reads it so a swept task is not scored as the rep's missed follow-up. See migration 0246.
+           auto_dismissed_reason = $4,
            -- NOT completed_at. The "Completed this week" count is
            -- status IN ('completed','dismissed') AND completed_at >= NOW() - 7 days, so stamping it here
            -- would report ~3,268 completions nobody made and leave that card disagreeing with its own

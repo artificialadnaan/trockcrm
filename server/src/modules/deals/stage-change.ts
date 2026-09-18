@@ -1,5 +1,6 @@
 import { eq, and, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   deals,
   dealStageHistory,
@@ -493,15 +494,37 @@ export async function changeDealStage(
     });
   }
 
-  // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
+  // Auto-dismiss pending/in-progress tasks when the deal reaches a terminal stage.
+  //
+  // TWO THINGS THIS SWEEP MUST NOT DO, both found in review:
+  //
+  // 1. It must not destroy an unanswered client email. `is_terminal` is true for the whole WON family,
+  //    including sent_to_production / service_sent_to_production — awarded jobs still being built. An
+  //    inbound_email_reply_needed task says "a client wrote and nobody has answered", and email-sync
+  //    evaluates that rule only at INGEST, so once this sweep deletes it nothing ever recreates it.
+  //    Winning the job is not a reason to stop replying to the customer. Only the LOST family is.
+  //    (Gating the drain alone was not enough — Codex P1: this is an independent dismissal path.)
+  //
+  // 2. It must not look like a rep's missed follow-up. getFollowUpCompliance counts every dismissal in its
+  //    denominator, so an unmarked sweep here scores against whoever happened to own the deal. The marker
+  //    records that no person decided this, at the moment it happens — see migration 0246 for why every
+  //    derivable alternative turned out to be mutable.
   if (targetStage.isTerminal) {
+    const targetIsDead = LOST_STAGE_SLUGS.includes(targetStage.slug as (typeof LOST_STAGE_SLUGS)[number]);
     await tenantDb
       .update(tasks)
-      .set({ status: "dismissed", isOverdue: false })
+      .set({ status: "dismissed", isOverdue: false, autoDismissedReason: "deal_reached_terminal_stage" })
       .where(
         and(
           eq(tasks.dealId, dealId),
           inArray(tasks.status, ["pending", "in_progress"]),
+          // IS DISTINCT FROM, not `ne`: origin_rule is NULLABLE, and `NULL <> 'x'` is NULL, not true --
+          // so a plain inequality would have quietly stopped sweeping every MANUAL task (origin_rule IS
+          // NULL) on a Won deal, changing behaviour this fix never meant to touch. Caught by the test
+          // below asserting the manual task is still swept.
+          targetIsDead
+            ? undefined
+            : sql`${tasks.originRule} IS DISTINCT FROM 'inbound_email_reply_needed'`,
         )
       );
   }

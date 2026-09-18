@@ -1878,34 +1878,22 @@ export async function getFollowUpCompliance(
       AND t.created_at >= ${from}::timestamptz
       AND t.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
       AND t.status IN ('completed', 'dismissed')
-      -- A follow-up DISMISSED on a deal that is already closed is not a compliance data point. The
-      -- denominator counts every completed-or-dismissed follow-up while the numerator counts only
-      -- completions, so a dismissal is scored as a miss, and the terminal-deal drain retires hundreds of
-      -- follow-ups that were minted onto deals ALREADY Won or Lost, over a window that defaults to the
-      -- whole calendar year. Without this, every rep's compliance is rewritten downward retroactively and
-      -- the "below 80%" alert fires for almost all of them: the rep who reported the phantom follow-ups
-      -- would have watched his own number get worse the morning after the fix.
+      -- A dismissal nobody decided is not a rep's missed follow-up. The denominator counts every
+      -- completed-or-dismissed follow-up while the numerator counts only completions, so an automatic
+      -- sweep is scored as a miss: the terminal-deal drain retires hundreds at once, over a window that
+      -- defaults to the whole calendar year, and the rep who reported the phantom follow-ups would have
+      -- watched his own compliance get worse the morning after the fix.
       --
-      -- Keyed on the DEAL'S STAGE, not on task_resolution_state. Codex P2: that table is keyed
-      -- (origin_rule, dedupe_key) and worker/src/jobs/task-completed.ts upserts it setting
-      -- task_id = EXCLUDED.task_id and resolution_reason = EXCLUDED.resolution_reason, so a reopened deal
-      -- minting a same-key task and completing it would REPLACE the pointer and the original drained task
-      -- would silently re-enter the denominator. A deal's stage cannot be rewritten out from under the
-      -- task that way.
+      -- Reads the IMMUTABLE marker stamped at dismissal time (migration 0246). Two derived tests were
+      -- tried on this branch and both were wrong: task_resolution_state.resolution_reason is re-pointed by
+      -- a later same-key task, and the deal's current stage moves under the task in BOTH directions —
+      -- erasing a genuine miss when a live deal later closes, and re-admitting a swept task when a closed
+      -- deal is reopened. Neither could express "what happened when this task was closed".
       --
-      -- Only DISMISSALS are excluded: a completed follow-up always counts, so closing a deal can never
-      -- erase a rep's credit for work they did. A dismissal on a still-OPEN deal also still counts, since
-      -- that is a human choosing to drop live work.
-      AND NOT (
-        t.status = 'dismissed'
-        AND EXISTS (
-          SELECT 1
-          FROM deals d
-          JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE d.id = t.deal_id
-            AND psc.is_terminal = true
-        )
-      )
+      -- A completed follow-up always counts, whatever later happens to its deal, so closing or reopening
+      -- can never erase a rep's credit for work they did. A dismissal a PERSON made still counts, because
+      -- that column is NULL for it.
+      AND t.auto_dismissed_reason IS NULL
   `);
 
   const rows = (result as any).rows ?? result;

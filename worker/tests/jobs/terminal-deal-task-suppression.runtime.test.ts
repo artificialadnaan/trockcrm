@@ -114,6 +114,7 @@ async function setup(pg: PGlite) {
       waiting_on jsonb,
       blocked_by jsonb,
       completed_at timestamptz,
+      auto_dismissed_reason varchar(120),
       entity_snapshot jsonb,
       updated_at timestamptz NOT NULL DEFAULT now()
     );
@@ -335,6 +336,26 @@ describe("dismissResolvedTerminalDealTasks", () => {
       `SELECT resolved_at FROM ${SCHEMA}.task_resolution_state LIMIT 1`
     );
     expect(new Date(audit[0].resolved_at).toISOString()).toBe(resolvedAt.toISOString());
+  });
+
+  // The compliance report reads this marker to tell "nobody decided this" from "a rep dropped live work".
+  // It is stamped on the TASK because every derivable alternative proved mutable (migration 0246).
+  it("stamps auto_dismissed_reason so the sweep is not scored as a rep's missed follow-up", async () => {
+    await dismissResolvedTerminalDealTasks(db as any, SCHEMA, OFFICE_ID);
+    const { rows } = await db.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM ${SCHEMA}.tasks
+       WHERE status = 'dismissed' AND auto_dismissed_reason IS DISTINCT FROM 'deal_reached_terminal_stage'
+         AND id = ANY($1::uuid[])`,
+      [ALL.filter(([, , , , , want]) => want === "dismissed").map(([id]) => id)]
+    );
+    expect(rows[0].n).toBe(0);
+
+    // And a task the sweep LEFT ALONE keeps a null marker, so it still counts as the rep's own.
+    const { rows: kept } = await db.query<{ auto_dismissed_reason: string | null }>(
+      `SELECT auto_dismissed_reason FROM ${SCHEMA}.tasks WHERE id = $1`,
+      [U("b001")]
+    );
+    expect(kept[0].auto_dismissed_reason).toBeNull();
   });
 
   it("audits each dismissal with suppressed_until NULL, so a reopened deal can mint again", async () => {

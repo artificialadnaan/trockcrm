@@ -45,6 +45,7 @@ beforeEach(async () => {
       id uuid PRIMARY KEY, title text, type text, status text NOT NULL,
       assigned_to uuid, contact_id uuid, deal_id uuid,
       due_date date, completed_at timestamptz,
+      auto_dismissed_reason varchar(120),
       is_test_data boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now()
@@ -67,15 +68,15 @@ beforeEach(async () => {
 describe("follow-up compliance after the drain", () => {
   beforeEach(async () => {
     await pg.exec(`
-      INSERT INTO tasks (id, title, type, status, assigned_to, deal_id, due_date, completed_at, created_at) VALUES
-        ('${U("f01")}', 'done on time', 'follow_up', 'completed', '${REP}', '${U("d001")}', CURRENT_DATE - 5, now() - interval '6 days', now() - interval '10 days'),
-        ('${U("f02")}', 'rep dismissed live work', 'follow_up', 'dismissed', '${REP}', '${U("d001")}', CURRENT_DATE - 5, NULL, now() - interval '10 days'),
-        ('${U("f03")}', 'drained as debris', 'follow_up', 'dismissed', '${REP}', '${U("d002")}', CURRENT_DATE - 5, NULL, now() - interval '10 days'),
-        ('${U("f04")}', 'completed on a won deal', 'follow_up', 'completed', '${REP}', '${U("d002")}', CURRENT_DATE - 5, now() - interval '6 days', now() - interval '10 days');
+      INSERT INTO tasks (id, title, type, status, assigned_to, deal_id, due_date, completed_at, auto_dismissed_reason, created_at) VALUES
+        ('${U("f01")}', 'done on time', 'follow_up', 'completed', '${REP}', '${U("d001")}', CURRENT_DATE - 5, now() - interval '6 days', NULL, now() - interval '10 days'),
+        ('${U("f02")}', 'rep dismissed live work', 'follow_up', 'dismissed', '${REP}', '${U("d001")}', CURRENT_DATE - 5, NULL, NULL, now() - interval '10 days'),
+        ('${U("f03")}', 'drained as debris', 'follow_up', 'dismissed', '${REP}', '${U("d002")}', CURRENT_DATE - 5, NULL, 'deal_reached_terminal_stage', now() - interval '10 days'),
+        ('${U("f04")}', 'completed on a won deal', 'follow_up', 'completed', '${REP}', '${U("d002")}', CURRENT_DATE - 5, now() - interval '6 days', NULL, now() - interval '10 days');
     `);
   });
 
-  it("does not score a follow-up dismissed on an already-closed deal against the rep", async () => {
+  it("does not score an AUTO-dismissed follow-up against the rep", async () => {
     const result = await getFollowUpCompliance(tdb, REP);
     // f01 completed (open deal) + f02 human dismissal (open deal) + f04 completed (won deal) = 3.
     // f03 -- dismissed on a Won deal -- is excluded entirely.
@@ -83,13 +84,29 @@ describe("follow-up compliance after the drain", () => {
     expect(result.onTime).toBe(2);
   });
 
-  it("CONTROL — a dismissal on a still-OPEN deal is still counted, so the exclusion is not blanket", async () => {
-    // Move the drained task's deal back to an open stage: it must re-enter the denominator, proving the
-    // predicate reads the DEAL'S STAGE and not merely the task's 'dismissed' status.
-    await pg.exec(`UPDATE deals SET stage_id = '${U("50e0")}' WHERE id = '${U("d002")}'`);
+  it("CONTROL — a dismissal a PERSON made is still counted, so the exclusion is not blanket", async () => {
+    // Clear only the marker. f03 becomes an ordinary human dismissal and must re-enter the denominator,
+    // proving the predicate reads WHO closed the task and not merely that it is 'dismissed'.
+    await pg.exec(`UPDATE tasks SET auto_dismissed_reason = NULL WHERE id = '${U("f03")}'`);
     const result = await getFollowUpCompliance(tdb, REP);
     expect(result.total).toBe(4);
     expect(result.onTime).toBe(2);
+  });
+
+  // The two derived tests this branch tried and review rejected, pinned so neither can come back: the
+  // verdict must not move when the DEAL'S STAGE moves, in either direction.
+  it("is immune to the deal's stage changing afterwards, in both directions", async () => {
+    const before = await getFollowUpCompliance(tdb, REP);
+
+    // (a) The drained task's deal is REOPENED — it must NOT re-enter the denominator as a miss.
+    await pg.exec(`UPDATE deals SET stage_id = '${U("50e0")}' WHERE id = '${U("d002")}'`);
+    expect((await getFollowUpCompliance(tdb, REP)).total).toBe(before.total);
+
+    // (b) The deal a rep dismissed live work on later CLOSES — that genuine miss must NOT disappear.
+    await pg.exec(`UPDATE deals SET stage_id = '${U("50e1")}' WHERE id = '${U("d001")}'`);
+    const after = await getFollowUpCompliance(tdb, REP);
+    expect(after.total).toBe(before.total);
+    expect(after.onTime).toBe(before.onTime);
   });
 
   it("a COMPLETED follow-up still counts even once its deal is Won — closing never erases credit", async () => {
