@@ -17,7 +17,7 @@ import { describe, it, expect } from "vitest";
 
 import { __auditTestables } from "../../../src/modules/bid-board-sync/service.js";
 
-const { sameAuditValue, onlyRealChanges } = __auditTestables;
+const { sameAuditValue, onlyRealChanges, bookkeepingSuppressed } = __auditTestables;
 
 describe("sameAuditValue — compares like the database, not like a string", () => {
   it("treats numerically equal renderings as unchanged", () => {
@@ -102,5 +102,41 @@ describe("onlyRealChanges — the row lists edits, or is not written", () => {
     expect(onlyRealChanges({ bidBoardTotalSales: { from: "125000.00", to: "0" } })).toEqual({
       bidBoardTotalSales: { from: "125000.00", to: "0" },
     });
+  });
+});
+
+describe("bookkeepingSuppressed — the export's clock is not an edit to the deal", () => {
+  it("writes nothing when the export timestamp is the only thing that moved", () => {
+    // Measured across one post-deploy cycle: 837 of 838 mirror rows carried ONLY this field, after the
+    // format fix (#1144) and the precision fix (#1151) had removed everything else. It is the one field
+    // no comparison can settle, because it genuinely changes on every run — the same claim
+    // `readOnlySyncedAt` was making, and it gets the same answer.
+    expect(
+      bookkeepingSuppressed({
+        bidBoardLastUpdatedAt: { from: "2026-09-18T20:14:12.731Z", to: "2026-09-18T21:46:11.402Z" },
+      })
+    ).toEqual({});
+  });
+
+  it("KEEPS the timestamp as context when something real moved alongside it", () => {
+    // It is barred from being the REASON a row exists, not from appearing in one. Losing it would strip
+    // useful context from genuine edits.
+    const real = {
+      bidBoardStatus: { from: "bidding", to: "submitted" },
+      bidBoardLastUpdatedAt: { from: "2026-09-18T20:14:12.731Z", to: "2026-09-18T21:46:11.402Z" },
+    };
+    expect(bookkeepingSuppressed(real)).toEqual(real);
+  });
+
+  it("leaves an already-empty map alone, and never invents a row", () => {
+    expect(bookkeepingSuppressed({})).toEqual({});
+  });
+
+  it("does not suppress a money move that happens to arrive with the timestamp", () => {
+    const moved = {
+      bidBoardTotalSales: { from: "125000.00", to: "0" },
+      bidBoardLastUpdatedAt: { from: "2026-09-18T20:14:12.731Z", to: "2026-09-18T21:46:11.402Z" },
+    };
+    expect(bookkeepingSuppressed(moved)).toEqual(moved);
   });
 });
