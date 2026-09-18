@@ -212,7 +212,77 @@ const BID_BOARD_PROJECT_NUMBER_UNIQUE_CONSTRAINT = "deals_bid_board_project_numb
  * Measured consequence: 63,226 `bid_board_mirror` audit rows in 24 hours, most listing 16 fields of which
  * ~14 had not moved. Normalizing only the write and not the COMPARISON is what produced them.
  */
-function sameAuditValue(from: unknown, to: unknown): boolean {
+/**
+ * The mirror columns Postgres stores as `numeric`, with the SCALE it stores them at. Verified against
+ * production `information_schema.columns` rather than inferred from the field name:
+ * `bid_board_sales_price_per_area` looks numeric and is a TEXT column, so it is deliberately absent.
+ *
+ * Numeric equivalence is applied ONLY to these keys, for two reasons Codex raised:
+ *   - A field-agnostic "both sides look like digits" rule silently swallows a REAL change to a text
+ *     column whose value happens to be all digits — `bid_board_project_number` going `00123` -> `123`
+ *     is a genuine edit Postgres stores distinctly, and an audit that drops it is worse than one that
+ *     is merely noisy. Long digit strings can also collapse through JS float precision.
+ *   - The scale matters in the other direction: an export sending `737.704918` into a numeric(14,2)
+ *     column is STORED as `737.70`, so comparing the raw strings reports a change on every single
+ *     sync for a value that never moves — the exact treadmill this PR exists to stop.
+ */
+const AUDIT_NUMERIC_SCALES: Record<string, number> = {
+  bidBoardProjectCost: 2,
+  bidBoardProfitMarginPct: 4,
+  bidBoardTotalSales: 2,
+};
+
+/**
+ * Round a DECIMAL STRING the way Postgres rounds `numeric`: half away from zero, on the decimal value.
+ *
+ * Deliberately never touches `Number`. IEEE-754 does not hold these values exactly, so rounding the
+ * binary64 approximation disagrees with the database on any half-way input — verified against production
+ * rather than reasoned about:
+ *
+ *   value        numeric(14,2)   (v).toFixed(2)
+ *   1.005        1.01            1.00      <- disagree
+ *   -1.005       -1.01           -1.00     <- disagree
+ *   1.015        1.02            1.01      <- disagree
+ *   2.675        2.68            2.67      <- disagree
+ *
+ * Four of six sampled values diverged. Getting this wrong is not cosmetic in either direction: rounding
+ * DOWN when the database rounds up hides a real numeric edit (and, with the heartbeat gate, suppresses
+ * the entire audit row for that cycle), while the inverse manufactures a change that recurs every sync.
+ *
+ * Returns null for anything that is not a plain decimal, so the caller falls back to exact comparison.
+ */
+function roundDecimalStringLikePostgres(raw: string, scale: number): string | null {
+  const match = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(raw);
+  if (!match) return null;
+  const [, sign, intPart = "", fracPart = ""] = match;
+  if (intPart === "" && fracPart === "") return null;
+
+  const digits = (intPart || "0") + fracPart.slice(0, scale).padEnd(scale, "0");
+  let rounded = digits;
+
+  if (fracPart.length > scale && fracPart.charCodeAt(scale) - 48 >= 5) {
+    // Increment the digit string by one, right to left — string math, so precision does not decay with
+    // magnitude the way it would through a float.
+    const out = rounded.split("");
+    let i = out.length - 1;
+    for (; i >= 0; i -= 1) {
+      if (out[i] === "9") { out[i] = "0"; continue; }
+      out[i] = String(Number(out[i]) + 1);
+      break;
+    }
+    rounded = (i < 0 ? "1" : "") + out.join("");
+  }
+
+  const padded = rounded.padStart(scale + 1, "0");
+  const whole = padded.slice(0, padded.length - scale).replace(/^0+(?=\d)/, "");
+  const frac = scale > 0 ? padded.slice(padded.length - scale) : "";
+  const magnitude = scale > 0 ? `${whole}.${frac}` : whole;
+  // -0.00 and 0.00 are the same stored value; never let the sign alone report a change.
+  const isZero = /^0(\.0*)?$/.test(magnitude);
+  return `${isZero ? "" : sign === "-" ? "-" : ""}${magnitude}`;
+}
+
+function sameAuditValue(from: unknown, to: unknown, numericScale?: number): boolean {
   const blank = (v: unknown) => v === null || v === undefined || v === "";
   if (blank(from) && blank(to)) return true;
   if (blank(from) !== blank(to)) return false;
@@ -225,9 +295,14 @@ function sameAuditValue(from: unknown, to: unknown): boolean {
 
   const fs = String(from).trim();
   const ts = String(to).trim();
-  // Numeric only when BOTH sides are plainly numeric — never coerce "" or a date string into 0.
-  const numeric = /^-?\d+(\.\d+)?$/;
-  if (numeric.test(fs) && numeric.test(ts)) return Number(fs) === Number(ts);
+
+  // Numeric comparison is opt-in PER FIELD, and happens at the column's own scale so the comparison
+  // asks the only question that matters: "would Postgres store a different value?"
+  if (numericScale != null) {
+    const fr = roundDecimalStringLikePostgres(fs, numericScale);
+    const tr = roundDecimalStringLikePostgres(ts, numericScale);
+    if (fr != null && tr != null) return fr === tr;
+  }
 
   return fs === ts;
 }
@@ -238,16 +313,32 @@ function onlyRealChanges(
 ): Record<string, { from: unknown; to: unknown }> {
   const out: Record<string, { from: unknown; to: unknown }> = {};
   for (const [key, pair] of Object.entries(changes)) {
-    if (!sameAuditValue(pair.from, pair.to)) out[key] = pair;
+    if (!sameAuditValue(pair.from, pair.to, AUDIT_NUMERIC_SCALES[key])) out[key] = pair;
   }
   return out;
+}
+
+/**
+ * Bookkeeping fields that move on EVERY cycle by construction and therefore cannot be evidence that the
+ * cycle did anything. `bidBoardLastUpdatedAt` is the run's own `extractedAt` (or `now()`), so it always
+ * differs from the stored value — which meant `onlyRealChanges` retained at least this one pair for every
+ * matched row and the ~63k/day mirror rows this change exists to suppress were still written, just with
+ * fewer fields in them. The filter looked like it worked and suppressed nothing.
+ *
+ * They are still REPORTED when something substantive moved (a heartbeat alongside a real edit tells you
+ * when the edit was synced); they just cannot be the reason a row exists.
+ */
+const MIRROR_AUDIT_HEARTBEAT_KEYS = new Set(["bidBoardLastUpdatedAt"]);
+
+function hasSubstantiveChange(changes: Record<string, { from: unknown; to: unknown }>): boolean {
+  return Object.keys(changes).some((key) => !MIRROR_AUDIT_HEARTBEAT_KEYS.has(key));
 }
 
 /**
  * Internal seam for the audit-suppression tests. These two are pure and carry the whole judgement about
  * what counts as a change, so they are worth asserting directly rather than through a sync run.
  */
-export const __auditTestables = { sameAuditValue, onlyRealChanges };
+export const __auditTestables = { sameAuditValue, onlyRealChanges, hasSubstantiveChange, AUDIT_NUMERIC_SCALES, roundDecimalStringLikePostgres };
 
 
 function textValue(value: unknown): string | null {
@@ -883,6 +974,33 @@ async function updateBidBoardStageMetadata(
   row: NormalizedBidBoardRow
 ): Promise<boolean> {
   const status = row.bidBoardStatus ?? targetStageSlug;
+  // LOCK FIRST, THEN READ. The pre-image used to come from a plain `prev` CTE in the same statement, and
+  // Codex was right that this is not the row the UPDATE acts on: under READ COMMITTED the CTE keeps the
+  // statement's original MVCC snapshot, while the UPDATE, on finding a concurrently-updated tuple, waits
+  // and then re-evaluates against the NEWLY COMMITTED version. A SyncHub linkage write landing in that
+  // window would have had its `false -> true` ownership flip attributed to this refresh, which merely
+  // preserved it.
+  //
+  // `FOR UPDATE` closes the window: it blocks on the other writer, returns the version that writer left
+  // behind, and holds the lock — so the UPDATE below acts on exactly the row this read returned. The whole
+  // ingest already runs inside one BEGIN/COMMIT, so the lock is held for the rest of the run rather than
+  // released immediately.
+  //
+  // It reads EVERY column the audit below compares, not just the two the UPDATE writes blind. The three
+  // stage columns were still being compared against the `deal` snapshot taken at match time, and SyncHub
+  // writes those same columns (procore/synchub-routes.ts). A concurrent `Bidding -> Awarded` followed by
+  // this refresh restoring `Bidding` would be compared as `Bidding -> Bidding` and suppressed — the sync
+  // silently reverting someone else's write and logging nothing.
+  const prevResult = await client.query(
+    `SELECT is_bid_board_owned, bid_board_stage_entered_at,
+            bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status
+       FROM ${schemaName}.deals
+      WHERE id = $1
+      FOR UPDATE`,
+    [deal.id]
+  );
+  const prevRow = prevResult.rows?.[0];
+
   const result = await client.query(
     `UPDATE ${schemaName}.deals
         SET is_bid_board_owned = true,
@@ -897,10 +1015,12 @@ async function updateBidBoardStageMetadata(
         -- This is the easy one to miss: it fires on a cycle where the CRM stage ALREADY equals the
         -- mapped Bid Board stage, and it re-asserts is_bid_board_owned = true. Without the predicate a
         -- detached deal that happens to sit at the mapped stage would be silently re-owned.
-        AND bid_board_detached_at IS NULL`,
+        AND bid_board_detached_at IS NULL
+      RETURNING id, is_bid_board_owned, bid_board_stage_entered_at`,
     [deal.id, targetStageSlug, stageFamilyForSlug(targetStageSlug), status, expectedStageId]
   );
-  const updated = (result.rowCount ?? 0) > 0;
+  const updatedRow = result.rows?.[0];
+  const updated = updatedRow != null;
   if (updated) {
     // AUDIT A STAGE MOVE, NOT A SYNC HEARTBEAT. This UPDATE always sets read_only_synced_at = NOW(), so
     // it always matches a row — and as the predicate note above says, it fires on cycles where the CRM
@@ -912,9 +1032,24 @@ async function updateBidBoardStageMetadata(
     // written. The sync still records that it ran; that is what the run metrics are for.
     await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name },
       onlyRealChanges({
-        bidBoardStageSlug: { from: deal.bid_board_stage_slug, to: targetStageSlug },
-        bidBoardStageFamily: { from: deal.bid_board_stage_family, to: stageFamilyForSlug(targetStageSlug) },
-        bidBoardStageStatus: { from: deal.bid_board_stage_status, to: status },
+        // `from` comes from the LOCKED row, not the match-time snapshot — see the pre-image read above.
+        bidBoardStageSlug: { from: prevRow?.bid_board_stage_slug ?? null, to: targetStageSlug },
+        bidBoardStageFamily: {
+          from: prevRow?.bid_board_stage_family ?? null,
+          to: stageFamilyForSlug(targetStageSlug),
+        },
+        bidBoardStageStatus: { from: prevRow?.bid_board_stage_status ?? null, to: status },
+        // Read from the statement's own pre/post image, not from `deal` — neither column is carried on
+        // DealMatch, and an adoption (false -> true) is exactly the case the no-op filter would
+        // otherwise erase.
+        isBidBoardOwned: {
+          from: prevRow?.is_bid_board_owned ?? null,
+          to: updatedRow?.is_bid_board_owned ?? null,
+        },
+        bidBoardStageEnteredAt: {
+          from: prevRow?.bid_board_stage_entered_at ?? null,
+          to: updatedRow?.bid_board_stage_entered_at ?? null,
+        },
       }),
       { source: "stage_metadata_refresh" });
   }
@@ -1806,6 +1941,24 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           ? { ...normalized, bidBoardDueDate: null }
           : normalized;
 
+      // The mirror audit's `from` side must be the row the UPDATE is about to overwrite, not the snapshot
+      // findDealMatches took earlier. Same class as the stage path, and the substantive-change gate makes
+      // it sharper: if a user edits name A -> B and this sync restores A, a stale comparison sees A -> A,
+      // reports nothing substantive, and now writes NO ROW AT ALL — so the sync overwrites a person's edit
+      // and leaves no trace. Before the gate the heartbeat would at least have forced a row.
+      const mirrorPreImage = await client.query(
+        `SELECT name, bid_board_estimator, estimator_user_id, bid_board_office, bid_board_status,
+                bid_board_sales_price_per_area, bid_board_project_cost, bid_board_profit_margin_pct,
+                bid_board_total_sales, bid_board_created_at, bid_board_due_date,
+                bid_board_customer_name, bid_board_customer_contact_raw, bid_board_project_number,
+                bid_board_last_updated_at
+           FROM ${schemaName}.deals
+          WHERE id = $1
+          FOR UPDATE`,
+        [matches[0].id]
+      );
+      const mirrorPrevDeal = { ...matches[0], ...(mirrorPreImage.rows?.[0] ?? {}) };
+
       let updateResult;
       await client.query(`SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
       try {
@@ -1834,17 +1987,28 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         // estimator between findDealMatches and this UPDATE would make a snapshot-derived value wrong;
         // the RETURNING value is the source of truth for the mirror's `to` (Codex #741 TOCTOU).
         const writtenEstimatorUserId = (updateDeal.estimator_user_id ?? null) as string | null;
-        await logBidBoardActivity(
-          client,
-          schemaName,
-          updateDeal,
-          // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
-          // claim a mirror move that did not happen.
-          onlyRealChanges(
-            buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled)
-          ),
-          { source: "bid_board_mirror", runId }
+        // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
+        // claim a mirror move that did not happen.
+        const mirrorChanges = onlyRealChanges(
+          buildBidBoardMirrorFieldChanges(
+            // mirrorPrevDeal, not matches[0]: the locked pre-image, so a field another writer changed
+            // between matching and this UPDATE is reported as the overwrite it is.
+            mirrorPrevDeal,
+            mirrorRow,
+            bidBoardLastUpdatedAt,
+            writtenEstimatorUserId,
+            bidDueDateReadbackEnabled
+          )
         );
+        // The heartbeat check, not just the emptiness check. `bidBoardLastUpdatedAt` is this run's own
+        // timestamp, so it differs every cycle and `mirrorChanges` is therefore NEVER empty — gating on
+        // emptiness alone left every one of the ~63k/day rows in place with a single field in it.
+        if (hasSubstantiveChange(mirrorChanges)) {
+          await logBidBoardActivity(client, schemaName, updateDeal, mirrorChanges, {
+            source: "bid_board_mirror",
+            runId,
+          });
+        }
       }
 
       const estimateResult = await writeEstimateIfNeeded(client, schemaName, matches[0], normalized, changedByUserId);

@@ -1055,3 +1055,160 @@ describe("Bid Board Due Date read-back (flag OFF)", () => {
     expect(rows[0].mirror).toBe("2026-09-01");
   });
 });
+
+/**
+ * The stage-metadata refresh writes SEVEN columns and, before review, compared only THREE of them when
+ * deciding whether to audit. `is_bid_board_owned` is one of the four it never looked at — so a cycle that
+ * ADOPTED a previously unowned deal (false -> true) recorded nothing at all once the no-op filter landed.
+ * That is the loudest thing this function ever does and it was the one change the filter erased.
+ *
+ * Run against the real ingest and a real Postgres, because the before/after now comes from a
+ * data-modifying CTE — a mock would assert my belief about that SQL rather than the SQL.
+ */
+describe("stage_metadata_refresh — an ownership adoption is audited, a no-op cycle is not", () => {
+  /** Put the deal at the mapped stage with every stage field ALREADY correct, so the only thing the
+   *  refresh can change is ownership. */
+  async function seedAtMappedStage(owned: boolean) {
+    await pg.exec(`DELETE FROM ${SCHEMA}.deals;`);
+    await pg.exec(`DELETE FROM ${SCHEMA}.audit_log;`);
+    await pg.exec(`DELETE FROM ${SCHEMA}.deal_history;`);
+    await pg.exec(`DELETE FROM ${SCHEMA}.bid_board_sync_runs;`);
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.deals
+         (id, name, stage_id, stage_entered_at, workflow_route, deal_number, project_number,
+          bid_board_project_number, bid_estimate, is_bid_board_owned, bid_board_stage_slug,
+          bid_board_stage_family, bid_board_stage_status, bid_board_stage_entered_at,
+          is_active, bid_due_date, bid_board_detached_at, updated_at)
+       VALUES
+         ($1, 'Riverbend Tower', $2, now() - interval '5 days', 'normal',
+          'DFW-1-00001-aa', 'DFW-1-00001-aa', 'DFW-1-00001-aa', 250000, $3, 'estimating',
+          'estimating', 'Estimate in Progress', now() - interval '5 days',
+          true, NULL, NULL, now() - interval '1 day')`,
+      [DEAL, ST_ESTIMATING, owned]
+    );
+  }
+
+
+  it("AUDITS the adoption when an unowned deal at the mapped stage becomes bid-board owned", async () => {
+    await seedAtMappedStage(false);
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    const { rows: deal } = await pg.query<{ is_bid_board_owned: boolean }>(
+      `SELECT is_bid_board_owned FROM ${SCHEMA}.deals WHERE id = $1`, [DEAL]
+    );
+    expect(deal[0].is_bid_board_owned).toBe(true);
+
+    // The adoption is visible in the trail, keyed by the column the refresh actually flipped.
+    const owned = (await auditFieldChanges()).filter((c) => "isBidBoardOwned" in c);
+    expect(owned).toHaveLength(1);
+    expect(owned[0].isBidBoardOwned).toEqual({ from: false, to: true });
+  });
+
+  // Same staleness as the mirror path, on the three stage columns. SyncHub writes these too
+  // (procore/synchub-routes.ts), so a concurrent change followed by this refresh restoring the old value
+  // is precisely a silent revert — and a snapshot-based comparison reports it as no change at all.
+  it("reports the stage overwrite when bid_board_stage_slug changed after matching", async () => {
+    await seedAtMappedStage(true);
+
+    let matched = false;
+    const spy = vi.spyOn(client, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      const out: unknown = await (pg as never as { query: Function }).query(text, params as never);
+      const row = out as { rows: unknown[]; affectedRows?: number; rowCount?: number };
+      const shaped = { ...row, rowCount: row.affectedRows ?? row.rowCount ?? row.rows?.length ?? 0 };
+      if (!matched && /translate\(normalize\(/i.test(text)) {
+        matched = true;
+        await pg.query(
+          `UPDATE ${SCHEMA}.deals
+              SET bid_board_stage_slug = 'awarded', bid_board_stage_status = 'Awarded'
+            WHERE id = $1`,
+          [DEAL]
+        );
+      }
+      return shaped;
+    });
+
+    try {
+      await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const slugChanges = (await auditFieldChanges())
+      .map((c) => c.bidBoardStageSlug as { from?: unknown; to?: unknown } | undefined)
+      .filter((c): c is { from?: unknown; to?: unknown } => c != null);
+    expect(slugChanges.length).toBeGreaterThan(0);
+    // 'awarded' is what the row actually held when the UPDATE locked it; 'estimating' is the revert.
+    expect(slugChanges[0].from).toBe("awarded");
+    expect(slugChanges[0].to).toBe("estimating");
+  });
+
+  it("CONTROL — an already-owned deal with every stage field matching writes NO stage audit", async () => {
+    await seedAtMappedStage(true);
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    // Nothing about ownership or the stage fields moved, so the refresh contributes no row at all.
+    // (The mirror may still audit its own fields; this asserts the stage refresh specifically.)
+    const stageish = (await auditFieldChanges()).filter(
+      (c) => "isBidBoardOwned" in c || "bidBoardStageSlug" in c || "bidBoardStageStatus" in c
+    );
+    expect(stageish).toHaveLength(0);
+  });
+});
+
+/**
+ * THE AUDIT'S `from` SIDE MUST BE THE ROW THE UPDATE OVERWRITES, not the snapshot findDealMatches took.
+ *
+ * This is the shape that makes it matter, and the substantive-change gate is what makes it dangerous:
+ * a person edits a mirrored field between matching and the write, the sync restores the board's value,
+ * and a snapshot-based comparison sees `A -> A`. It reports nothing substantive, so NO ROW IS WRITTEN —
+ * the sync overwrites someone's edit and leaves no trace of it. Before the gate the heartbeat would at
+ * least have forced a row out.
+ *
+ * Simulated the only way a single-connection test can: mutate the row AFTER the match query has answered
+ * but BEFORE the mirror UPDATE runs, which is exactly the state a concurrent writer leaves behind.
+ */
+describe("mirror audit — the pre-image is the locked row, not the match-time snapshot", () => {
+  it("reports the overwrite of a value changed after matching", async () => {
+    await seedDeals();
+
+    // Let the match query answer with the ORIGINAL name, then change it underneath — the interleaving a
+    // concurrent edit produces. The pre-image read happens after this, under FOR UPDATE.
+    let matched = false;
+    const spy = vi.spyOn(client, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      const out: unknown = await (pg as never as { query: Function }).query(text, params as never);
+      const row = out as { rows: unknown[]; affectedRows?: number; rowCount?: number };
+      const shaped = { ...row, rowCount: row.affectedRows ?? row.rowCount ?? row.rows?.length ?? 0 };
+      if (!matched && /translate\(normalize\(/i.test(text)) {
+        matched = true;
+        await pg.query(`UPDATE ${SCHEMA}.deals SET name = 'Edited By A Person' WHERE id = $1`, [DEAL]);
+      }
+      return shaped;
+    });
+
+    try {
+      await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The export's name is restored over the person's edit; the trail must say so.
+    const nameChanges = (await auditFieldChanges())
+      .map((c) => c.name as { from?: unknown; to?: unknown } | undefined)
+      .filter((c): c is { from?: unknown; to?: unknown } => c != null);
+    expect(nameChanges.length).toBeGreaterThan(0);
+    expect(nameChanges[0].from).toBe("Edited By A Person");
+    expect(nameChanges[0].to).toBe("Riverbend Tower");
+  });
+
+  it("CONTROL — with nothing changed underneath, the cycle still writes no mirror row", async () => {
+    await seedDeals();
+    await pg.query(`UPDATE ${SCHEMA}.deals SET name = 'Riverbend Tower' WHERE id = $1`, [DEAL]);
+    await pg.exec(`DELETE FROM ${SCHEMA}.audit_log;`);
+
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    // Only the heartbeat could have moved, and a heartbeat is not an edit.
+    const withName = (await auditFieldChanges()).filter((c) => "name" in c);
+    expect(withName).toHaveLength(0);
+  });
+});
