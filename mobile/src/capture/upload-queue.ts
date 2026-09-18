@@ -776,13 +776,17 @@ export async function drainUploadQueue(
           item,
           {
             shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId),
-            // Outstanding work at the moment this photo is confirmed, counted WITHIN this pass.
+            // How much is still waiting on this device as this photo is confirmed.
             //
-            // `succeeded` is cumulative across coalesced passes while plannedIds is pass-local, so mixing
-            // them reported 0 for exactly the photos this telemetry exists to surface: after 100 shipped,
-            // a follow-up pass planning 10 new captures would compute max(0, 10 - 100). The audit row is
-            // written once, when the photo row is created, so that zero would be permanent.
-            queueDepth: Math.max(0, plannedIds.length - passSucceeded),
+            // Counted from the WHOLE queue at this pass's start minus this pass's own progress, and both
+            // halves of that matter. Mixing the call-cumulative `succeeded` with a pass-local plan
+            // reported 0 for precisely the photos this telemetry exists to surface — after 100 shipped, a
+            // follow-up pass planning 10 new captures computed max(0, 10 - 100), and the audit row is
+            // written once at creation so that zero was permanent. Using the pass's PLAN as the base
+            // would be arithmetically sound but still understate: a follow-up pass plans only new work,
+            // so a photo confirmed while 298 others sat failed behind it would report a depth of 2.
+            // planned.total is the real outstanding count, which is the number worth having.
+            queueDepth: Math.max(0, planned.total - passSucceeded),
           },
         );
         activeUploadPromises.set(item.clientUploadId, promise);

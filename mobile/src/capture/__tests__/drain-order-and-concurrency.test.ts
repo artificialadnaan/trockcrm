@@ -291,7 +291,7 @@ describe("drainUploadQueue follow-up passes", () => {
     for (const row of await queueRows()) expect(row.attempts).toBe(1);
   });
 
-  it("reports queue depth per PASS, not cumulative totals minus a pass-local plan", async () => {
+  it("reports the real outstanding queue depth, not a pass-local plan minus a cumulative total", async () => {
     // The bug this pins: `succeeded` is cumulative across coalesced passes while the plan is pass-local,
     // so after a big first pass a follow-up pass computed max(0, small - big) = 0 for every photo. The
     // audit row is written once, at creation, so that zero would be permanent — and precisely for the
@@ -318,9 +318,11 @@ describe("drainUploadQueue follow-up passes", () => {
 
     const late = mockReportedDepths.filter((d) => d.id.startsWith("late-"));
     expect(late).toHaveLength(2);
-    // Non-zero: these two were a backlog of two in their own pass. Under the cumulative-vs-pass-local
-    // arithmetic this reported 0, permanently, for exactly the captures the telemetry exists to reveal.
-    for (const entry of late) expect(entry.depth).toBeGreaterThan(0);
+    // 2 is the REAL outstanding count when the follow-up pass runs: a, b and c shipped in pass 1 and
+    // left the index, so these two are what is left. Under the old cumulative-vs-pass-local arithmetic
+    // this computed max(0, 2 - 3) = 0 — permanently, for exactly the captures the telemetry exists to
+    // reveal — so asserting the exact value is what distinguishes the fix from the bug.
+    for (const entry of late) expect(entry.depth).toBe(2);
   });
 
   it("reports the deals it shipped for, including ones only a follow-up pass touched", async () => {
