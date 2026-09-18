@@ -245,7 +245,10 @@ export default function ProjectDetailScreen() {
   const photosPartial = photosQuery.data?.partial ?? false;
   // Over the page ceiling: structurally incomplete, and no amount of refreshing changes that.
   const photosTruncated = photosQuery.data?.truncated ?? false;
-  const photosIncomplete = photosPartial || photosTruncated;
+  // Still filling: the gallery now paints page 1 immediately and streams the rest in, so there is a
+  // window where photos are on screen but the set is not yet whole.
+  const photosStreaming = photosQuery.data ? photosQuery.data.complete !== true : false;
+  const photosIncomplete = photosPartial || photosTruncated || photosStreaming;
 
   const [grouping, setGrouping] = useState<PhotoGrouping>("date");
   const [categories, setCategories] = useState<string[]>([]);
@@ -451,6 +454,17 @@ export default function ProjectDetailScreen() {
               `This project has more photos than can be shown at once, so only the most recent ${allPhotos.length} are loaded. ` +
               "Set a date range under Filters to see older photos and to build a report."
             }
+            tone="info"
+          />
+        ) : null}
+
+        {/* Say WHY the buttons are dim. The gallery renders as soon as the first page lands, so without
+            this a crew sees photos and a disabled Build report and concludes it is broken — the same
+            "the app is lying to me" reading that produced the original report. Only shown once there is
+            something on screen; before that the spinner already explains itself. */}
+        {photosStreaming && !photosPartial && !photosTruncated && allPhotos.length > 0 ? (
+          <Banner
+            message={`Loading photos… ${allPhotos.length} so far. Report and share unlock once they are all in.`}
             tone="info"
           />
         ) : null}
