@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { companies, leads } from "@trock-crm/shared/schema";
+import { leads } from "@trock-crm/shared/schema";
 import {
   LEAD_COMPANY_PREQUAL_FIELD_KEYS,
   LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
@@ -200,9 +200,6 @@ function questionnaireFieldKey(rawKey: string): string {
 function questionnaireFieldLabel(key: string): string {
   const known = WORKFLOW_GATE_FIELD_LABELS[key as keyof typeof WORKFLOW_GATE_FIELD_LABELS];
   if (known) return known;
-  if (key === "company.verification_pending") {
-    return "Company verification (pending approver review)";
-  }
   if (key === "leadDueDiligence.pending") {
     return "Awaiting Due Diligence approval. The lead will be eligible for qualification once the DD review is complete.";
   }
@@ -234,7 +231,6 @@ export function evaluateLeadStageGate(input: {
   targetStage: LeadStageRecord;
   userRole?: string;
   questionnaireGate?: LeadQuestionGateMissing | null;
-  companyVerificationPending?: boolean;
   dueDiligenceStatus?: "pending" | "approved" | "rejected" | "superseded" | null;
 }): LeadStageGateResult {
   const requiredFields = LEAD_STAGE_REQUIREMENTS[input.targetStage.slug] ?? [];
@@ -264,9 +260,6 @@ export function evaluateLeadStageGate(input: {
       ? ["leadQuestionnaire.scopeRequired"]
       : [];
 
-  const companyVerificationKeys = input.companyVerificationPending
-    ? ["company.verification_pending"]
-    : [];
   const dueDiligenceKeys =
     input.targetStage.slug === "qualified_lead" && input.dueDiligenceStatus === "pending"
       ? ["leadDueDiligence.pending"]
@@ -279,7 +272,6 @@ export function evaluateLeadStageGate(input: {
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
     ...scopeSelectionKeys,
-    ...companyVerificationKeys,
     ...dueDiligenceKeys,
   ];
 
@@ -290,7 +282,6 @@ export function evaluateLeadStageGate(input: {
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
     ...scopeSelectionKeys,
-    ...companyVerificationKeys,
     ...dueDiligenceKeys,
   ];
   const seen = new Set<string>();
@@ -392,24 +383,6 @@ export async function validateLeadStageGate(
     });
   }
 
-  // Block advancement past sales_validation while the linked company's
-  // verification is still pending. Belt-and-suspenders for legacy leads
-  // that got into sales_validation before PR1's verificationStatus gate
-  // existed.
-  const advancingPastSalesValidation =
-    currentStage.slug === "sales_validation_stage" &&
-    (targetStage.displayOrder ?? 0) > (currentStage.displayOrder ?? 0);
-
-  let companyVerificationPending = false;
-  if (advancingPastSalesValidation && lead.companyId) {
-    const [companyRow] = await tenantDb
-      .select({ status: companies.companyVerificationStatus })
-      .from(companies)
-      .where(eq(companies.id, lead.companyId))
-      .limit(1);
-    companyVerificationPending = companyRow?.status === "pending";
-  }
-
   let dueDiligenceStatus: "pending" | "approved" | "rejected" | "superseded" | null = null;
   if (targetStage.slug === "qualified_lead") {
     const approval = await getLeadDueDiligenceApprovalForLead(tenantDb, lead.id);
@@ -428,7 +401,6 @@ export async function validateLeadStageGate(
     targetStage,
     userRole,
     questionnaireGate,
-    companyVerificationPending,
     dueDiligenceStatus,
   });
 }
