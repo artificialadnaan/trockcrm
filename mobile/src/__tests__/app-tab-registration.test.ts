@@ -115,6 +115,7 @@ describe("(app) tab registration", () => {
     expect(byName.get("scorecards")).toEqual({ name: "scorecards", hidden: true, hasTitle: false });
     expect(fs.existsSync(path.join(APP_DIR, "scorecards", "index.tsx"))).toBe(true);
     expect(fs.existsSync(path.join(APP_DIR, "scorecards", "[draftId].tsx"))).toBe(true);
+    expect(fs.existsSync(path.join(APP_DIR, "scorecards", "leadership", "[draftId].tsx"))).toBe(true);
     expect(fs.existsSync(path.join(APP_DIR, "scorecards", "corrective-action", "[id].tsx"))).toBe(true);
   });
 
