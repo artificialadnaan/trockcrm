@@ -17,9 +17,16 @@ import { AppState, type AppStateStatus } from "react-native";
 
 jest.mock("expo-router", () => {
   const ReactLib = require("react");
-  const { View } = require("react-native");
+  const { View, Text } = require("react-native");
   const Tabs = ({ children }: { children: React.ReactNode }) => ReactLib.createElement(View, null, children);
-  Tabs.Screen = () => null;
+  // Renders `tabBarBadge` rather than returning null. Without this the badge value never reaches the
+  // tree, and every assertion about it passes whatever the code does — verified: with `Tabs.Screen = ()
+  // => null`, the stale-read test below passed with its guard deleted. This also covers the wiring
+  // itself, i.e. that the count is actually handed to tabBarBadge.
+  Tabs.Screen = ({ options }: { options?: { tabBarBadge?: number } }) =>
+    options?.tabBarBadge == null
+      ? null
+      : ReactLib.createElement(Text, { testID: "capture-tab-badge" }, String(options.tabBarBadge));
   return {
     Tabs,
     Redirect: () => null,
@@ -124,8 +131,10 @@ afterEach(() => {
  *  does under the real root layout's QueryClientProvider. */
 let queryClient: QueryClient;
 
+let view: ReturnType<typeof render>;
+
 async function renderShell(): Promise<ReturnType<typeof render>> {
-  const view = render(
+  view = render(
     <QueryClientProvider client={queryClient}>
       <AppLayout />
     </QueryClientProvider>,
@@ -301,6 +310,14 @@ describe("authenticated shell photo-queue drain", () => {
 
     // Re-read purely because the queue changed — no mount, no foreground transition, no drain.
     expect(mockGetQueuedCount).toHaveBeenCalledWith(OWNER);
+    // ...and the new count actually reaches the badge.
+    expect(view.getByTestId("capture-tab-badge").props.children).toBe("40");
+  });
+
+  it("shows no badge when the queue is empty", async () => {
+    mockGetQueuedCount.mockResolvedValue(0);
+    const rendered = await renderShell();
+    expect(rendered.queryByTestId("capture-tab-badge")).toBeNull();
   });
 
   it("unsubscribes from queue changes on unmount", async () => {
@@ -308,6 +325,44 @@ describe("authenticated shell photo-queue drain", () => {
     expect(mockQueueChangeListeners).toHaveLength(1);
     view.unmount();
     expect(mockQueueChangeListeners).toHaveLength(0);
+  });
+
+  /**
+   * Out-of-order badge reads. Every queue mutation notifies, so an enqueue followed immediately by a
+   * successful drain starts two independent async counts with nothing ordering their resolution. If the
+   * earlier read (queue non-empty) lands last, an unguarded update restores a positive count over the
+   * newer zero — and the badge then sits there claiming photos are waiting when none are, until some
+   * unrelated mutation corrects it.
+   */
+  it("ignores a stale badge read that resolves after a newer one", async () => {
+    mockGetSchedulableCount.mockResolvedValue(0);
+    await renderShell();
+    expect(mockQueueChangeListeners).toHaveLength(1);
+
+    // Two reads in flight: the FIRST sees 40 queued, the SECOND sees the queue emptied by a drain.
+    // They are released in reverse, which is the race.
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    mockGetQueuedCount
+      .mockImplementationOnce(
+        () => new Promise<number>((resolve) => { releaseFirst = () => resolve(40); }),
+      )
+      .mockImplementationOnce(
+        () => new Promise<number>((resolve) => { releaseSecond = () => resolve(0); }),
+      );
+
+    await act(async () => {
+      for (const listener of mockQueueChangeListeners) listener(OWNER); // read #1 (40)
+      for (const listener of mockQueueChangeListeners) listener(OWNER); // read #2 (0)
+      await Promise.resolve();
+      releaseSecond();                                                  // newer resolves FIRST
+      for (let i = 0; i < 4; i += 1) await Promise.resolve();
+      releaseFirst();                                                   // older resolves LAST
+      for (let i = 0; i < 4; i += 1) await Promise.resolve();
+    });
+
+    // The badge must reflect read #2 (the newest issued), not whichever happened to land last.
+    expect(view.queryByTestId("capture-tab-badge")).toBeNull();
   });
 
   /**

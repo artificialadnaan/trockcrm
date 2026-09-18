@@ -146,16 +146,28 @@ export default function AppLayout() {
    */
   React.useEffect(() => {
     // uploadOwnerKey returns "" without a signed-in user, so a non-empty key already implies one — but
-    // name it explicitly rather than asserting, since listScorecardDraftOwners keys its registry on it
-    // and a wrong/absent id would enumerate someone else's namespaces or none at all.
+    // name it explicitly rather than asserting, since the gallery invalidation below keys its query on
+    // it and a wrong id would refresh nobody's cache.
     const userId = user?.id;
     if (!token || !photoOwnerKey || !userId) return;
     let active = true;
     void registerUploadBackgroundTask();
 
+    // Monotonic guard for the badge reads. Every queue mutation notifies, so an enqueue immediately
+    // followed by a successful drain starts two independent async counts — and nothing makes them
+    // resolve in the order they were issued. The earlier read (queue non-empty) landing last would
+    // restore a positive count over the newer read's zero, and the badge would then sit there lying
+    // until some unrelated mutation or foreground transition corrected it. A badge whose whole purpose
+    // is to be the honest answer to "did my photos send?" cannot be allowed to say 40 when it is 0.
+    //
+    // Local to the effect rather than a ref: each effect instance owns its own sequence, and `active`
+    // already discards reads belonging to a torn-down one. Same shape as the request-seq stale guard
+    // usePhotoFeed uses on the web photo feed.
+    let latestBadgeRead = 0;
     const refreshBadge = async () => {
+      const read = (latestBadgeRead += 1);
       const queued = await getQueuedCount(photoOwnerKey).catch(() => 0);
-      if (active) setQueuedPhotos(queued);
+      if (active && read === latestBadgeRead) setQueuedPhotos(queued);
     };
 
     const drainIfQueued = async () => {
