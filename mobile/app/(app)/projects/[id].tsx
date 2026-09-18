@@ -259,6 +259,8 @@ export default function ProjectDetailScreen() {
   // Snapshot the photo list + index at open time so a background refetch or a
   // filter change can never desync the viewer onto a different photo.
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
+  /** The photo the viewer is showing right now — it reports this as the user swipes. */
+  const [viewerPhotoId, setViewerPhotoId] = useState<string | null>(null);
   /**
    * The photo set each modal was opened over, captured at open.
    *
@@ -309,10 +311,14 @@ export default function ProjectDetailScreen() {
   useEffect(() => {
     if (!viewer || !photosComplete) return;
     if (viewer.photos.length === flattened.length) return;
-    const anchorId = viewer.photos[viewer.index]?.id;
+    // Anchor on the photo the user is LOOKING AT, which the modal reports as they swipe — not on the
+    // index it was opened at. Later pages can insert whole groups ahead of the current position under
+    // category or uploader grouping, so re-anchoring on the opening index would scroll them back to
+    // where they started and silently discard however far they had paged.
+    const anchorId = viewerPhotoId ?? viewer.photos[viewer.index]?.id;
     const idx = anchorId ? flattened.findIndex((p) => p.id === anchorId) : -1;
     setViewer({ photos: flattened, index: idx < 0 ? Math.min(viewer.index, flattened.length - 1) : idx });
-  }, [viewer, photosComplete, flattened]);
+  }, [viewer, viewerPhotoId, photosComplete, flattened]);
 
   function openPhoto(photo: FieldPhoto) {
     const idx = flattened.findIndex((p) => p.id === photo.id);
@@ -816,7 +822,11 @@ export default function ProjectDetailScreen() {
           projectDealId={dealId}
           photoWindow={photoWindow}
           photoTimeZone={galleryTimeZone}
-          onClose={() => setViewer(null)}
+          onCurrentPhotoChange={setViewerPhotoId}
+          onClose={() => {
+            setViewer(null);
+            setViewerPhotoId(null);
+          }}
         />
       ) : null}
 

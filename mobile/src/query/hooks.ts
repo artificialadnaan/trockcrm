@@ -226,6 +226,12 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
       publish(false);
 
       for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
+        // Stop FETCHING once cancelled, not merely stop publishing. Suppressing the writes alone left an
+        // abandoned walk downloading every remaining page — on a 50-page gallery that is thousands of
+        // photos still being fetched and server-presigned, competing for bandwidth and pool with the
+        // replacement query the user is actually waiting on. Checked before scheduling each batch and
+        // again after it settles, because the cancellation usually lands mid-batch.
+        if (signal.aborted) break;
         const batch = [];
         for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
           batch.push(
@@ -235,6 +241,7 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
         // allSettled, not all: a transient 429/5xx on one later page must not blank the whole gallery —
         // we keep every page that did load (page 1 is already in `photos`).
         const results = await Promise.allSettled(batch);
+        if (signal.aborted) break;
         for (const result of results) {
           if (result.status === "fulfilled") absorb(result.value.photos);
           else partial = true;
