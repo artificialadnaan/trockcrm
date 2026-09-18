@@ -28,6 +28,9 @@ const CO = {
   pipelineStale: U("co2"), // pipeline 30k, never active → stale
   emptyStale: U("co3"), // no deals → pipeline 0, 60d → stale
   onHoldFresh: U("co4"), // only an on-hold deal → pipeline 0, 3d → not stale
+  // co5 has NO deal but DOES have a lead — it must NOT count as "no opportunity". Without it the
+  // predicate could check only `deals` and still pass, which is the half-right version of this filter.
+  leadOnly: U("co5"),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -49,12 +52,17 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text NOT NULL);
     CREATE TABLE contacts (id uuid PRIMARY KEY, company_id uuid, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE properties (id uuid PRIMARY KEY, company_id uuid, is_active boolean NOT NULL DEFAULT true);
+    CREATE TABLE leads (id uuid PRIMARY KEY, company_id uuid);
 
     INSERT INTO companies (id, name, slug, category, last_activity_at) VALUES
       ('${CO.pipelineFresh}','Co One','co-one','client', NOW() - interval '5 days'),
       ('${CO.pipelineStale}','Co Two','co-two','client', NULL),
       ('${CO.emptyStale}','Co Three','co-three','client', NOW() - interval '60 days'),
-      ('${CO.onHoldFresh}','Co Four','co-four','client', NOW() - interval '3 days');
+      ('${CO.onHoldFresh}','Co Four','co-four','client', NOW() - interval '3 days'),
+      ('${CO.leadOnly}','Co Five','co-five','client', NOW() - interval '2 days');
+
+    -- co5: a lead and no deal. The account HAS been worked, so it is not "no opportunity".
+    INSERT INTO leads (id, company_id) VALUES ('${U("ld1")}','${CO.leadOnly}');
 
     INSERT INTO deals (id, company_id, is_active, on_hold, bid_estimate) VALUES
       ('${U("dd1")}','${CO.pipelineFresh}', true, false, 50000),
@@ -75,7 +83,7 @@ const isStaleRow = (lastActivityAt: string | null | undefined) =>
 describe("companies drilldown — card === drilled-list (reconcile by construction)", () => {
   it("Active-pipeline $ and Untouched count reconcile with the lists they drill to", async () => {
     const all = await listCompanies(tdb, {});
-    expect(all.total).toBe(4);
+    expect(all.total).toBe(5);
     expect(all.pipelineTotal).toBe(80000); // 50k + 30k (+0 on-hold +0 no-deal)
     expect(all.staleCount).toBe(2); // co2 (null) + co3 (60d)
 
@@ -90,10 +98,28 @@ describe("companies drilldown — card === drilled-list (reconcile by constructi
     expect(staleDrill.companies.every((c) => isStaleRow(c.lastActivityAt))).toBe(true);
   });
 
+  it("No-opportunity count reconciles with its drill, and a lead counts as having been worked", async () => {
+    // The card exists because the new-company flow persists company, property and contact as separate
+    // steps: stopping before the lead leaves those behind with nothing saying the job was never started.
+    // Only co3 qualifies — co1/co2/co4 carry deals (on-hold still counts as worked), and co5 carries a
+    // LEAD with no deal, which is the case a deals-only predicate would wrongly flag.
+    const all = await listCompanies(tdb, {});
+    expect(all.noOpportunityCount).toBe(1);
+
+    const drill = await listCompanies(tdb, { noOpportunity: true });
+    expect(drill.total).toBe(all.noOpportunityCount); // card === count of the list it opens
+    expect(drill.companies.map((c: { id: string }) => c.id)).toEqual([CO.emptyStale]);
+
+    // The lead-only account is NOT in the drill — having a lead means the account was worked.
+    expect(drill.companies.some((c: { id: string }) => c.id === CO.leadOnly)).toBe(false);
+    // …and an on-hold deal still counts as worked, unlike the pipeline card which values it at 0.
+    expect(drill.companies.some((c: { id: string }) => c.id === CO.onHoldFresh)).toBe(false);
+  });
+
   it("aggregates are FULL-SET, not page-only (the bug): they hold even when limit=1 returns one row", async () => {
     const page = await listCompanies(tdb, { limit: 1 });
     expect(page.companies.length).toBe(1);
-    expect(page.total).toBe(4);
+    expect(page.total).toBe(5);
     expect(page.pipelineTotal).toBe(80000); // NOT just the one visible company's pipeline
     expect(page.staleCount).toBe(2);
   });
@@ -103,7 +129,7 @@ describe("companies drilldown — card === drilled-list (reconcile by constructi
     // would mismatch. With Stale active the list narrows to 2, but every card still reflects the base.
     const staleActive = await listCompanies(tdb, { stale: true });
     expect(staleActive.total).toBe(2); // drilled list (co2, co3)
-    expect(staleActive.baseTotal).toBe(4);
+    expect(staleActive.baseTotal).toBe(5);
     expect(staleActive.staleCount).toBe(2);
     // Active-pipeline $ stays the BASE total (80k), not stale-companies' pipeline — clicking it opens all
     // pipeline companies, which sum to exactly 80k.
@@ -111,7 +137,7 @@ describe("companies drilldown — card === drilled-list (reconcile by constructi
 
     const pipelineActive = await listCompanies(tdb, { hasActivePipeline: true });
     expect(pipelineActive.total).toBe(2); // drilled list (co1, co2)
-    expect(pipelineActive.baseTotal).toBe(4);
+    expect(pipelineActive.baseTotal).toBe(5);
     expect(pipelineActive.pipelineTotal).toBe(80000);
     expect(pipelineActive.staleCount).toBe(2); // stable, not stale-among-pipeline (1)
   });

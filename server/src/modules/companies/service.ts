@@ -1,5 +1,5 @@
 import { eq, and, ilike, asc, desc, count, inArray, sql, getTableColumns, type SQL } from "drizzle-orm";
-import { companies, contacts, deals, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
+import { companies, contacts, deals, leads, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildCompanySearchCondition } from "../search/unified-search.js";
@@ -93,6 +93,7 @@ export async function listCompanies(
     // Summary-card drill-downs (?card=pipeline / ?card=stale on the companies page).
     hasActivePipeline?: boolean; // company has > 0 active (non-held) pipeline value
     stale?: boolean; // last activity is null or > 30 days ago
+    noOpportunity?: boolean; // no lead and no deal has ever been opened against this company
     sortBy?: string;
     sortDir?: "asc" | "desc";
     page?: number;
@@ -115,6 +116,21 @@ export async function listCompanies(
        AND deals.is_active = true
   )`;
   const companyStaleSql = sql<boolean>`(${companies.lastActivityAt} IS NULL OR ${companies.lastActivityAt} < NOW() - interval '30 days')`;
+  // NOTHING WAS EVER OPENED AGAINST THIS ACCOUNT — no lead and no deal, in any stage, terminal included.
+  //
+  // The new-company flow persists its steps as it goes: the company, then a property, then a contact,
+  // each its own record. If the person stops before submitting the lead, those records remain and nothing
+  // anywhere says the job was never started. On 2026-09-18 that produced a company with a property and a
+  // contact and no lead, and it took a database query to discover. Twelve companies in the preceding 90
+  // days are in that state.
+  //
+  // Deliberately NOT restricted to active deals, unlike companyPipelineSql: a company whose only deal was
+  // lost years ago HAS been worked, and listing it as untouched would be the over-warning that trains
+  // people to ignore the card.
+  const companyNoOpportunitySql = sql<boolean>`(
+    NOT EXISTS (SELECT 1 FROM ${deals} WHERE ${deals.companyId} = ${companies.id})
+    AND NOT EXISTS (SELECT 1 FROM ${leads} WHERE ${leads.companyId} = ${companies.id})
+  )`;
 
   const conditions = [eq(companies.isActive, true)];
   if (options.search && options.search.trim().length >= 2) {
@@ -140,6 +156,9 @@ export async function listCompanies(
   }
   if (options.stale) {
     listConditions.push(companyStaleSql);
+  }
+  if (options.noOpportunity) {
+    listConditions.push(companyNoOpportunitySql);
   }
   const where = and(...listConditions);
 
@@ -222,6 +241,7 @@ export async function listCompanies(
       baseTotal: sql<number>`count(*)`,
       pipelineTotal: sql<string>`COALESCE(SUM(${companyPipelineSql}), 0)::text`,
       staleCount: sql<number>`COUNT(*) FILTER (WHERE ${companyStaleSql})`,
+      noOpportunityCount: sql<number>`COUNT(*) FILTER (WHERE ${companyNoOpportunitySql})`,
     })
     .from(companies)
     .where(baseWhere);
@@ -240,6 +260,8 @@ export async function listCompanies(
     baseTotal: Number(aggregateResult[0]?.baseTotal ?? 0),
     pipelineTotal: Number(aggregateResult[0]?.pipelineTotal ?? 0),
     staleCount: Number(aggregateResult[0]?.staleCount ?? 0),
+    // Same predicate as the drill filter above, so the card === the count of the list it opens.
+    noOpportunityCount: Number(aggregateResult[0]?.noOpportunityCount ?? 0),
   };
 }
 

@@ -45,6 +45,9 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text NOT NULL);
     CREATE TABLE contacts (id uuid PRIMARY KEY, company_id uuid, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE properties (id uuid PRIMARY KEY, company_id uuid, is_active boolean NOT NULL DEFAULT true);
+    -- listCompanies' "no opportunity" aggregate probes leads on EVERY call, so this island needs the
+    -- table even though these tests are about the folded aggregate columns.
+    CREATE TABLE leads (id uuid PRIMARY KEY, company_id uuid);
 
     INSERT INTO companies (id, name, slug, category) VALUES
       ('${A}','Co A','co-a','client'),

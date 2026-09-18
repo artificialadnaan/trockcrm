@@ -204,6 +204,43 @@ describe("CompanyListPage", () => {
     }
   });
 
+  it("?card=no-opportunity drills to accounts with no lead and no deal, and shows the count", async () => {
+    // The gap this card exists for: the new-company flow persists the company, then the property, then
+    // the contact, each as its own record. Stopping before the lead leaves those behind and nothing says
+    // the job was never started — on 2026-09-18 that took a database query to discover, and twelve
+    // accounts in the preceding 90 days were sitting in that state.
+    mocks.useCompaniesMock.mockReturnValue({
+      companies: [],
+      pagination: {
+        page: 1,
+        limit: 50,
+        total: 12,
+        totalPages: 1,
+        pipelineTotal: 80000,
+        staleCount: 2,
+        noOpportunityCount: 12,
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const { container, cleanup } = await renderDomAt("/companies?card=no-opportunity");
+    try {
+      const allCalls = mocks.useCompaniesMock.mock.calls;
+      const lastCall = allCalls[allCalls.length - 1]?.[0];
+      expect(lastCall?.noOpportunity).toBe(true);
+      // ?card= REPLACES rather than composes — the other drills must stay off.
+      expect(lastCall?.hasActivePipeline).toBeUndefined();
+      expect(lastCall?.stale).toBeUndefined();
+      expect(container.textContent).toContain("Filtered: No opportunity yet");
+      // The card renders the server aggregate, not the page length — the list here is empty.
+      expect(container.textContent).toContain("12");
+      expect(container.querySelectorAll(".ring-brand-red").length).toBe(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("?card=stale wires the stale drill (not pipeline) into the query", async () => {
     mocks.useCompaniesMock.mockReturnValue({
       companies: [],
