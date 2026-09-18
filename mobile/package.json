@@ -8,6 +8,7 @@
     "ios": "expo run:ios",
     "build:export": "expo export --platform ios --output-dir dist",
     "postinstall": "patch-package",
+    "pretypecheck": "expo customize tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "EXPO_PUBLIC_API_BASE_URL=https://api.test.local jest",
     "doctor": "npx expo-doctor"
