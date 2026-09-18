@@ -133,9 +133,19 @@ export async function runAiDisconnectAdminTaskGeneration(): Promise<void> {
                 )
                 AND FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(d.last_activity_at, d.stage_entered_at, d.updated_at))) / 86400) >= 3
             )
-            SELECT *
-            FROM disconnect_rows
-            ORDER BY age_days DESC, deal_number ASC
+            -- Terminal-stage (Won / Lost) deals are excluded HERE, at the outer select, rather than in each
+            -- of the four disconnect branches above: one predicate that provably covers every branch,
+            -- including any added later, instead of four that can drift apart.
+            --
+            -- This is not only noise. The branches ORDER BY age_days DESC under a LIMIT 10, and a closed
+            -- deal's disconnect only ever gets older -- so closed work was crowding the live disconnects out
+            -- of the window entirely. Prod: 778 of the 3,395 tasks stuck on closed deals came from this job.
+            SELECT dr.*
+            FROM disconnect_rows dr
+            JOIN ${schemaName}.deals d ON d.id = dr.deal_id
+            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+            WHERE psc.is_terminal = false
+            ORDER BY dr.age_days DESC, dr.deal_number ASC
             LIMIT 10
           `
         );
