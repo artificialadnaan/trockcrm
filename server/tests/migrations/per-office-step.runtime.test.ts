@@ -22,6 +22,15 @@ import { PGlite } from "@electric-sql/pglite";
 import { runPerOfficeTransactionalStep } from "../../src/migrations/per-office-step.js";
 
 let pg: PGlite;
+// CI HEADROOM for a file that does real plpgsql DDL in PGlite. "drives a different table, column and
+// trigger" runs in ~1.8s locally and 20/20 in isolation, but it has twice timed out at the 15s per-test
+// limit inside the full 945-file suite (PRs #1141 and #1151), passing on re-run with no code change —
+// an ~8x slowdown from parallel load, not a race. Each occurrence costs a ~30-minute re-run.
+//
+// Same reasoning and same limit as 0218-deals-scope-title.runtime.test.ts: a bound this generous still
+// fails a genuine hang, it just does not fail a slow start on a cold runner.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+
 const asClient = () => pg as unknown as Parameters<typeof runPerOfficeTransactionalStep>[0];
 
 const OFFICES = ["office_dallas", "office_atlanta", "office_houston"] as const;
