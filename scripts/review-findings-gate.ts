@@ -52,7 +52,12 @@ export interface ReviewGateInput {
   headSha: string;
   reviews: ReviewRecord[];
   reactions: ReactionRecord[];
-  comments: CommentRecord[];
+  /**
+   * FULL 40-char SHAs the review bot named in its comments, already resolved from whatever abbreviation
+   * it used. Resolution is the caller's job precisely so this function cannot be handed an abbreviation
+   * and quietly prefix-match it.
+   */
+  mentionedCommits: string[];
 }
 
 export interface ReviewGateResult {
@@ -78,15 +83,19 @@ export function isReviewBot(login: string): boolean {
 }
 
 /**
- * Two SHA strings refer to the same commit when one is a prefix of the other. Necessary, not sloppy: the
- * summary comment abbreviates inconsistently — `7d99a9c` (7) in the status table and `0ab0258f8a` (10) in
- * the "Reviewed commit" line — while the API head SHA is full length.
+ * EXACT identity, both sides full length. Prefix matching used to live here, and it was a real hole: the
+ * bot abbreviates to 7 hex characters in its status table, which is 28 bits — cheap to mine. With a
+ * thumbs-up persisting across pushes, a contributor could craft a commit sharing the reviewed commit's
+ * 7-char prefix and have it evaluated clean on arrival, without any review.
+ *
+ * Abbreviations are now resolved to full SHAs by the caller (GitHub errors on an ambiguous prefix, so a
+ * mined collision fails closed there), and this only ever compares the resolved results.
  */
 export function sameCommit(a: string, b: string): boolean {
   const x = a.trim().toLowerCase();
   const y = b.trim().toLowerCase();
-  if (x.length < 7 || y.length < 7) return false;
-  return x.startsWith(y) || y.startsWith(x);
+  if (x.length !== 40 || y.length !== 40) return false;
+  return x === y;
 }
 
 /**
@@ -127,7 +136,7 @@ export function decideReviewVerdict(input: ReviewGateInput): ReviewGateResult {
 
   // 2. A clean pass is a 👍 PLUS independent evidence that this exact commit is what was reviewed.
   const thumbsUp = input.reactions.some((r) => isReviewBot(r.user) && r.content === "+1");
-  const reviewedThisCommit = commitsMentionedByBot(input.comments).some((sha) => sameCommit(sha, headSha));
+  const reviewedThisCommit = input.mentionedCommits.some((sha) => sameCommit(sha, headSha));
 
   if (thumbsUp && reviewedThisCommit) {
     return { verdict: "clean", reason: `Reviewed clean at ${headSha.slice(0, 9)}.` };
@@ -243,42 +252,65 @@ async function publishStatus(
     }),
   });
   if (!res.ok) {
-    console.error(`Could not publish the commit status: ${res.status} ${(await res.text()).slice(0, 200)}`);
+    // THROW, do not log and continue. This status is the authoritative signal; if the write failed
+    // (rate limit, permissions, a transient 5xx) then a clean verdict never reached the commit, and
+    // exiting 0 here would show a green run next to an absent-or-stale required status — the PR blocked
+    // for a reason nothing on screen explains. A failed run is retryable and legible.
+    throw new Error(`Could not publish the commit status: ${res.status} ${(await res.text()).slice(0, 200)}`);
   }
 }
 
-export async function main(argv = process.argv): Promise<number> {
-  const repo = process.env.GITHUB_REPOSITORY;
-  const token = process.env.GITHUB_TOKEN;
-  const prNumber = argv[2] ?? process.env.PR_NUMBER;
-  if (!repo || !token || !prNumber) {
-    console.error("Need GITHUB_REPOSITORY, GITHUB_TOKEN and a PR number (argv[2] or PR_NUMBER).");
-    return 2;
+/**
+ * Resolve whatever the bot abbreviated to a full 40-char SHA. Returns null when the ref does not resolve
+ * or is AMBIGUOUS — GitHub answers 422 for a prefix matching more than one object, which is exactly the
+ * mined-collision case, and null there means the gate declines to treat it as evidence.
+ */
+async function resolveCommitSha(repo: string, ref: string, token: string): Promise<string | null> {
+  if (!/^[0-9a-f]{7,40}$/i.test(ref)) return null;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/commits/${ref}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "trockcrm-review-findings-gate",
+      },
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { sha?: string };
+    return typeof body.sha === "string" && body.sha.length === 40 ? body.sha.toLowerCase() : null;
+  } catch {
+    return null;
   }
+}
 
+/** Evaluate one PR: gather its evidence, resolve the commits its reviewer named, and rule. */
+async function evaluatePr(repo: string, prNumber: string | number, token: string) {
   const pr = (await ghOne(`/repos/${repo}/pulls/${prNumber}`, token)) as unknown as {
     head?: { sha?: string };
     draft?: boolean;
-    state?: string;
   };
   const headSha = pr.head?.sha;
-  if (!headSha) {
-    console.error(`Could not read a head SHA for PR #${prNumber}.`);
-    return 2;
-  }
-
-  // A draft is not a merge candidate; blocking one is just noise while the author is still writing.
-  if (pr.draft) {
-    console.log(`PR #${prNumber} is a draft — review gate not applicable.`);
-    await publishStatus(repo, headSha, token, "success", "Draft — review gate not applicable.");
-    return 0;
-  }
+  if (!headSha) throw new Error(`Could not read a head SHA for PR #${prNumber}.`);
 
   const [reviews, reactions, comments] = await Promise.all([
     ghJsonAll(`/repos/${repo}/pulls/${prNumber}/reviews?per_page=100`, token),
     ghJsonAll(`/repos/${repo}/issues/${prNumber}/reactions?per_page=100`, token),
     ghJsonAll(`/repos/${repo}/issues/${prNumber}/comments?per_page=100`, token),
   ]);
+
+  const mentioned = [
+    ...new Set(
+      commitsMentionedByBot(
+        comments.map((c) => ({
+          user: String((c.user as { login?: string } | undefined)?.login ?? ""),
+          body: String(c.body ?? ""),
+        }))
+      )
+    ),
+  ];
+  const resolved = (await Promise.all(mentioned.map((ref) => resolveCommitSha(repo, ref, token)))).filter(
+    (sha): sha is string => sha != null
+  );
 
   const result = decideReviewVerdict({
     headSha,
@@ -291,23 +323,87 @@ export async function main(argv = process.argv): Promise<number> {
       user: String((r.user as { login?: string } | undefined)?.login ?? ""),
       content: String(r.content ?? ""),
     })),
-    comments: comments.map((c) => ({
-      user: String((c.user as { login?: string } | undefined)?.login ?? ""),
-      body: String(c.body ?? ""),
-    })),
+    mentionedCommits: resolved,
   });
 
-  const icon = result.verdict === "clean" ? "✅" : result.verdict === "findings" ? "❌" : "⏳";
-  const line = `${icon} review gate — ${result.verdict}: ${result.reason}`;
+  return { headSha, draft: pr.draft === true, result, counts: { reviews: reviews.length, reactions: reactions.length, comments: comments.length } };
+}
+
+/** Worst verdict wins: findings > not-reviewed > clean. */
+export function worstVerdict(verdicts: ReviewVerdict[]): ReviewVerdict {
+  if (verdicts.includes("findings")) return "findings";
+  if (verdicts.includes("not-reviewed")) return "not-reviewed";
+  return "clean";
+}
+
+export async function main(argv = process.argv): Promise<number> {
+  const repo = process.env.GITHUB_REPOSITORY;
+  const token = process.env.GITHUB_TOKEN;
+  const prNumber = argv[2] ?? process.env.PR_NUMBER;
+  if (!repo || !token || !prNumber) {
+    console.error("Need GITHUB_REPOSITORY, GITHUB_TOKEN and a PR number (argv[2] or PR_NUMBER).");
+    return 2;
+  }
+
+  const primary = await evaluatePr(repo, prNumber, token);
+  const { headSha } = primary;
+
+  // A draft is not a merge candidate; blocking one is just noise while the author is still writing.
+  if (primary.draft) {
+    console.log(`PR #${prNumber} is a draft — review gate not applicable.`);
+    await publishStatus(repo, headSha, token, "success", "Draft — review gate not applicable.");
+    return 0;
+  }
+
+  // A commit status is keyed by (repo, SHA, context) and knows nothing about pull requests, while the
+  // evidence is per-PR. If two open PRs share a head commit, one writing `success` would satisfy branch
+  // protection on the other — which may have findings, or have never been reviewed at all. So every open
+  // PR on this commit is evaluated and the WORST verdict is what gets published: the status then means
+  // "every PR on this commit is clean", which is the only reading that is safe for all of them.
+  const siblings = (await ghJsonAll(`/repos/${repo}/commits/${headSha}/pulls?per_page=100`, token))
+    .map((pr) => ({ number: Number(pr.number), state: String(pr.state ?? "") }))
+    .filter((pr) => pr.state === "open" && String(pr.number) !== String(prNumber));
+
+  const evaluations = [primary];
+  for (const sibling of siblings) {
+    try {
+      const evaluated = await evaluatePr(repo, sibling.number, token);
+      if (evaluated.draft) continue;
+      evaluations.push(evaluated);
+      console.log(`  (also on this commit: PR #${sibling.number} -> ${evaluated.result.verdict})`);
+    } catch (err) {
+      // Fail closed: a sibling we cannot evaluate is a sibling we cannot vouch for.
+      console.error(`Could not evaluate sibling PR #${sibling.number}:`, err);
+      evaluations.push({
+        ...primary,
+        result: {
+          verdict: "not-reviewed" as ReviewVerdict,
+          reason: `Could not evaluate PR #${sibling.number}, which shares this commit.`,
+        },
+      });
+    }
+  }
+
+  const verdict = worstVerdict(evaluations.map((e) => e.result.verdict));
+  const reason =
+    evaluations.find((e) => e.result.verdict === verdict)?.result.reason ?? primary.result.reason;
+
+  const icon = verdict === "clean" ? "✅" : verdict === "findings" ? "❌" : "⏳";
+  const line = `${icon} review gate — ${verdict}: ${reason}`;
   console.log(line);
-  console.log(`(evaluated ${reviews.length} review(s), ${reactions.length} reaction(s), ${comments.length} comment(s))`);
+  console.log(
+    `(evaluated ${primary.counts.reviews} review(s), ${primary.counts.reactions} reaction(s), ` +
+      `${primary.counts.comments} comment(s) on #${prNumber}` +
+      (siblings.length > 0 ? `, plus ${siblings.length} PR(s) sharing this commit` : "") +
+      ")"
+  );
 
   await publishStatus(
     repo,
     headSha,
     token,
-    result.verdict === "clean" ? "success" : result.verdict === "findings" ? "failure" : "pending",
-    result.reason
+    verdict === "clean" ? "success" : verdict === "findings" ? "failure" : "pending",
+    reason
   );
 
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
@@ -316,7 +412,7 @@ export async function main(argv = process.argv): Promise<number> {
     appendFileSync(summaryPath, `### Review findings gate\n\n${line}\n`);
   }
 
-  return result.verdict === "clean" ? 0 : 1;
+  return verdict === "clean" ? 0 : 1;
 }
 
 const invokedDirectly =

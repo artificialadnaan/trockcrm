@@ -4,6 +4,7 @@ import {
   decideReviewVerdict,
   isReviewBot,
   sameCommit,
+  worstVerdict,
   type ReviewGateInput,
 } from "./review-findings-gate.js";
 
@@ -17,7 +18,7 @@ const BOT_APP = "chatgpt-codex-connector[bot]";
 const HEAD = "0ab0258f8a1b2c3d4e5f60718293a4b5c6d7e8f9";
 
 function input(overrides: Partial<ReviewGateInput> = {}): ReviewGateInput {
-  return { headSha: HEAD, reviews: [], reactions: [], comments: [], ...overrides };
+  return { headSha: HEAD, reviews: [], reactions: [], mentionedCommits: [], ...overrides };
 }
 
 /** The summary layout carrying an explicit "Reviewed commit" line (10 chars). */
@@ -41,14 +42,14 @@ describe("decideReviewVerdict", () => {
 
   it("ALLOWS a 👍 corroborated by a summary naming the head commit", () => {
     const result = decideReviewVerdict(
-      input({ reactions: [{ user: BOT_APP, content: "+1" }], comments: [summaryReviewedCommit(HEAD)] })
+      input({ reactions: [{ user: BOT_APP, content: "+1" }], mentionedCommits: [HEAD] })
     );
     expect(result.verdict).toBe("clean");
   });
 
   it("accepts the 7-char table layout as well as the 10-char line", () => {
     const result = decideReviewVerdict(
-      input({ reactions: [{ user: BOT_APP, content: "+1" }], comments: [summaryTable(HEAD)] })
+      input({ reactions: [{ user: BOT_APP, content: "+1" }], mentionedCommits: [HEAD] })
     );
     expect(result.verdict).toBe("clean");
   });
@@ -58,7 +59,7 @@ describe("decideReviewVerdict", () => {
     const result = decideReviewVerdict(
       input({
         reactions: [{ user: BOT_APP, content: "+1" }],
-        comments: [summaryReviewedCommit("deadbeef00112233445566778899aabbccddeeff")],
+        mentionedCommits: ["deadbeef00112233445566778899aabbccddeeff"],
       })
     );
     expect(result.verdict).toBe("not-reviewed");
@@ -71,7 +72,7 @@ describe("decideReviewVerdict", () => {
 
   it("BLOCKS when the bot has only acknowledged it (👀), not ruled", () => {
     const result = decideReviewVerdict(
-      input({ reactions: [{ user: BOT_APP, content: "eyes" }], comments: [summaryReviewedCommit(HEAD)] })
+      input({ reactions: [{ user: BOT_APP, content: "eyes" }], mentionedCommits: [HEAD] })
     );
     expect(result.verdict).toBe("not-reviewed");
   });
@@ -81,7 +82,7 @@ describe("decideReviewVerdict", () => {
       input({
         reviews: [{ user: BOT, commitId: HEAD }],
         reactions: [{ user: BOT_APP, content: "+1" }],
-        comments: [summaryReviewedCommit(HEAD)],
+        mentionedCommits: [HEAD],
       })
     );
     expect(result.verdict).toBe("findings");
@@ -95,7 +96,7 @@ describe("decideReviewVerdict", () => {
           { user: BOT, commitId: "2222222222222222222222222222222222222222" },
         ],
         reactions: [{ user: BOT_APP, content: "+1" }],
-        comments: [summaryReviewedCommit(HEAD)],
+        mentionedCommits: [HEAD],
       })
     );
     expect(result.verdict).toBe("clean");
@@ -106,7 +107,7 @@ describe("decideReviewVerdict", () => {
       input({
         reviews: [{ user: "coderabbitai[bot]", commitId: HEAD }, { user: "a-person", commitId: HEAD }],
         reactions: [{ user: "greptile-apps[bot]", content: "+1" }],
-        comments: [{ user: "a-person", body: `looks good, ${HEAD}` }],
+        mentionedCommits: [HEAD],
       })
     );
     // A human's 👍 and a CodeRabbit review are both irrelevant to THIS gate's question.
@@ -124,7 +125,7 @@ describe("decideReviewVerdict", () => {
       headSha: pr1144Head,
       reviews: [{ user: BOT, commitId: pr1144Head }],
       reactions: [],
-      comments: [summaryReviewedCommit(pr1144Head)],
+      mentionedCommits: [pr1144Head],
     });
     expect(result.verdict).toBe("findings");
     expect(result.reason).toMatch(/unresolved findings/);
@@ -132,18 +133,45 @@ describe("decideReviewVerdict", () => {
 });
 
 describe("sameCommit", () => {
-  it("matches an abbreviation against a full SHA, in either direction", () => {
-    expect(sameCommit(HEAD, HEAD.slice(0, 7))).toBe(true);
-    expect(sameCommit(HEAD.slice(0, 10), HEAD)).toBe(true);
+  it("matches only a full SHA against the identical full SHA", () => {
+    expect(sameCommit(HEAD, HEAD)).toBe(true);
+    expect(sameCommit(HEAD.toUpperCase(), HEAD)).toBe(true);
   });
 
-  it("does not match different commits that share a short prefix", () => {
-    expect(sameCommit("0ab0258f8a", "0ab0258f9b")).toBe(false);
+  // THE COLLISION-MINING HOLE. The bot abbreviates to 7 hex chars in its status table — 28 bits, cheap to
+  // mine. With a 👍 persisting across pushes, prefix matching would let a crafted commit sharing that
+  // prefix arrive pre-approved. Abbreviations are resolved by the caller now; this refuses them outright.
+  it("REFUSES an abbreviation, however long", () => {
+    expect(sameCommit(HEAD, HEAD.slice(0, 7))).toBe(false);
+    expect(sameCommit(HEAD, HEAD.slice(0, 10))).toBe(false);
+    expect(sameCommit(HEAD, HEAD.slice(0, 39))).toBe(false);
   });
 
-  it("refuses anything too short to be meaningful rather than matching loosely", () => {
-    expect(sameCommit(HEAD, "0ab025")).toBe(false);
+  it("does not match different commits that share a prefix", () => {
+    const sibling = `${HEAD.slice(0, 7)}${"f".repeat(33)}`;
+    expect(sameCommit(HEAD, sibling)).toBe(false);
+  });
+
+  it("refuses empty input rather than matching loosely", () => {
     expect(sameCommit(HEAD, "")).toBe(false);
+  });
+});
+
+describe("worstVerdict", () => {
+  // A commit status knows nothing about pull requests, so when two open PRs share a head commit the
+  // published verdict has to be safe for BOTH. Worst wins.
+  it("findings beats everything", () => {
+    expect(worstVerdict(["clean", "findings", "not-reviewed"])).toBe("findings");
+    expect(worstVerdict(["findings"])).toBe("findings");
+  });
+
+  it("not-reviewed beats clean", () => {
+    expect(worstVerdict(["clean", "not-reviewed"])).toBe("not-reviewed");
+  });
+
+  it("clean only when every PR on the commit is clean", () => {
+    expect(worstVerdict(["clean", "clean"])).toBe("clean");
+    expect(worstVerdict([])).toBe("clean");
   });
 });
 
@@ -154,6 +182,7 @@ describe("commitsMentionedByBot", () => {
       summaryTable("1234567890abcdef1234567890abcdef12345678"),
       { user: "a-person", body: "see cafebabe1234" },
     ]);
+    // Extraction is deliberately permissive — resolution is what establishes identity.
     expect(found).toContain(HEAD.slice(0, 10));
     expect(found).toContain("1234567");
     expect(found).not.toContain("cafebabe1234");
@@ -184,7 +213,7 @@ describe("attribution cannot be spoofed", () => {
     const result = decideReviewVerdict(
       input({
         reactions: [{ user: "codex-lookalike[bot]", content: "+1" }],
-        comments: [{ user: "codex-lookalike[bot]", body: `**Reviewed commit:** \`${HEAD.slice(0, 10)}\`` }],
+        mentionedCommits: [HEAD],
       })
     );
     expect(result.verdict).toBe("not-reviewed");
@@ -197,7 +226,7 @@ describe("dismissed reviews", () => {
       input({
         reviews: [{ user: BOT, commitId: HEAD, state: "DISMISSED" }],
         reactions: [{ user: BOT_APP, content: "+1" }],
-        comments: [summaryReviewedCommit(HEAD)],
+        mentionedCommits: [HEAD],
       })
     );
     expect(result.verdict).toBe("clean");
