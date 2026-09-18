@@ -84,7 +84,8 @@ describe("PATCH /api/deals/:id/awarded-amount", () => {
       expect.any(Object),
       "deal-1",
       "439120.68",
-      `${role}-1`
+      `${role}-1`,
+      expect.objectContaining({ actor: expect.anything() })
     );
     // Office/scope is still proven for THIS deal — requireRole alone is leadership in the abstract.
     expect(accessMocks.assertDealCollaboratorAccess).toHaveBeenCalled();
@@ -122,8 +123,44 @@ describe("PATCH /api/deals/:id/awarded-amount", () => {
       expect.any(Object),
       "deal-1",
       null,
-      "admin-1"
+      "admin-1",
+      expect.objectContaining({ actor: expect.anything() })
     );
+  });
+
+  // Codex P2: Number(true)===1 and Number([1])===1 are finite, so a boolean or array slipped past a
+  // bare Number() check and `String(raw)` then sent "true" to a numeric(14,2) column — a 500, not the
+  // documented 422. Only a number or a numeric STRING is a money value.
+  it.each([true, false, [1], [], {}, "12abc"])("rejects the non-numeric JSON value %j", async (value) => {
+    const res = await request(createApp(createUser("admin")))
+      .patch("/api/deals/deal-1/awarded-amount")
+      .send({ awardedAmount: value });
+
+    expect(res.status).toBe(422);
+    expect(dealsServiceMocks.setDealAwardedAmount).not.toHaveBeenCalled();
+  });
+
+  it("accepts a numeric string and a JSON number alike", async () => {
+    for (const value of ["439120.68", 439120.68]) {
+      dealsServiceMocks.setDealAwardedAmount.mockClear();
+      const res = await request(createApp(createUser("admin")))
+        .patch("/api/deals/deal-1/awarded-amount")
+        .send({ awardedAmount: value });
+      expect(res.status).toBe(200);
+      expect(dealsServiceMocks.setDealAwardedAmount).toHaveBeenCalled();
+    }
+  });
+
+  it("forwards the route audit context so a money edit is legible in the activity feed", async () => {
+    await request(createApp(createUser("admin")))
+      .patch("/api/deals/deal-1/awarded-amount")
+      .send({ awardedAmount: "500" });
+
+    // 5th arg — without it the service takes the legacy writeAuditLog path, which records no
+    // field_changes_jsonb / entity / role / IP, so the feed shows an uninformative "update".
+    const call = dealsServiceMocks.setDealAwardedAmount.mock.calls[0];
+    expect(call?.[4]).toBeTruthy();
+    expect(call?.[4]).toHaveProperty("actor");
   });
 
   it.each(["abc", -1, 1_000_000_000])("rejects %j", async (value) => {

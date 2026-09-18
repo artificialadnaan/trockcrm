@@ -2759,6 +2759,15 @@ router.patch(
       if (raw == null || (typeof raw === "string" && raw.trim() === "")) {
         awardedAmount = null;
       } else {
+        // TYPE FIRST, then range. A bare Number() check is not enough: Number(true) === 1 and
+        // Number([1]) === 1 are both finite, so a boolean or array would clear the range check and then
+        // `String(raw)` would send "true" to a numeric(14,2) column — a 500 rather than the documented
+        // 422. Only a JSON number or a numeric string is a money value.
+        const isNumericString =
+          typeof raw === "string" && /^-?\d+(?:\.\d+)?$/.test(raw.trim());
+        if (typeof raw !== "number" && !isNumericString) {
+          throw new AppError(422, "awardedAmount must be a number >= 0, or null to clear it");
+        }
         const n = Number(raw);
         if (!Number.isFinite(n) || n < 0) {
           throw new AppError(422, "awardedAmount must be a number >= 0, or null to clear it");
@@ -2774,7 +2783,11 @@ router.patch(
         req.tenantDb!,
         req.params.id as string,
         awardedAmount,
-        req.user!.id
+        req.user!.id,
+        // Same as the neighbouring contract-signed route: without this the service falls back to the
+        // legacy writeAuditLog, which records no field_changes_jsonb / entity / role / IP — so a money
+        // edit shows in the All Activity feed as an "update" with nothing to see.
+        buildRouteAuditContext(req)
       );
       if (!deal) throw new AppError(404, "Deal not found");
       await req.commitTransaction!();

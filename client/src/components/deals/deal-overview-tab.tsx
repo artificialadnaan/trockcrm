@@ -316,7 +316,12 @@ export function DealOverviewTab({ deal, officeId, onDealUpdated }: DealOverviewT
           canManage={user?.role === "admin"}
           // Awarded amount is admin OR director (the dedicated route's requireRole), unlike change
           // orders which stay admin-only.
-          canEditAwarded={user?.role === "admin" || user?.role === "director"}
+          // ...and never on a change-order child: setDealAwardedAmount 409s CHANGE_ORDER_FIELD_LOCKED on
+          // one, so offering the pencil there is an action that can never succeed. Mirrors the estimator
+          // editor, which gates on (canEdit && !deal.isChangeOrder).
+          canEditAwarded={
+            (user?.role === "admin" || user?.role === "director") && !deal.isChangeOrder
+          }
           onChanged={onDealUpdated}
         />
 

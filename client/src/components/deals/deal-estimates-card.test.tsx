@@ -141,3 +141,20 @@ describe("DealEstimatesCard — awarded amount editor", () => {
     expect(html).toContain("--");
   });
 });
+
+describe("DealEstimatesCard — the awarded editor and change orders", () => {
+  // setDealAwardedAmount 409s CHANGE_ORDER_FIELD_LOCKED on a CO child, so a pencil there is an action
+  // that can never succeed. The parent decides this (it owns the capability), but the card must honour
+  // a false canEditAwarded regardless of role.
+  it("shows no editor when the parent withholds the capability on a change order", () => {
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard
+        deal={makeDeal({ isChangeOrder: true, awardedAmount: "-61828.57" } as any)}
+        changeOrders={[]}
+        canEditAwarded={false}
+      />
+    );
+
+    expect(html).not.toContain('aria-label="Edit awarded amount"');
+  });
+});

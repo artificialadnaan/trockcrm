@@ -5206,6 +5206,17 @@ export async function setDealContractSignedDate(
  * recalcs live in setDealContractSignedDate — so re-basing here would make the two awarded-amount write
  * paths disagree about money. A stored commission row keeps its snapshotted source_value_amount.
  */
+/**
+ * A money value at `deals.awarded_amount`'s stored precision (numeric(14,2)), for change detection.
+ * Anything beyond two decimals is rounded away by the column, so it must not read as a change.
+ */
+function roundToColumnScale(value: string | number | null | undefined): string | null {
+  const normalized = normalizeMoneyForCompare(value);
+  if (normalized === null) return null;
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n.toFixed(2) : normalized;
+}
+
 export async function setDealAwardedAmount(
   tenantDb: TenantDb,
   dealId: string,
@@ -5237,10 +5248,12 @@ export async function setDealAwardedAmount(
 
     const oldValue = existing.awardedAmount ?? null;
     const newValue = awardedAmount ?? null;
-    // Change-detected on the CANONICAL money form, so "37027" and "37027.00" are one value. A no-op
-    // re-save must not latch awarded_amount_overridden: that flag permanently freezes Bid Board sync for
-    // this column, and merely opening and saving a deal should never do that.
-    if (normalizeMoneyForCompare(oldValue) === normalizeMoneyForCompare(newValue)) {
+    // Change-detected at the COLUMN'S PRECISION, so "37027" and "37027.00" are one value — and so are
+    // a stored 100.00 and an entered 100.001, which numeric(14,2) rounds straight back to 100.00.
+    // Comparing on the raw canonical form would call that a change: no persisted difference, but
+    // awarded_amount_overridden latched, permanently freezing Bid Board sync for the column on a write
+    // that changed nothing. Merely re-saving a deal must never cost it its Procore sync.
+    if (roundToColumnScale(oldValue) === roundToColumnScale(newValue)) {
       return existing;
     }
 
