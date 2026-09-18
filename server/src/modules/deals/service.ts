@@ -5190,6 +5190,112 @@ export async function setDealContractSignedDate(
  * NOTE: this is intentionally NOT wired to a route in this PR (the estimator picker + route land in PR3);
  * it is the tested service spine for that follow-up.
  */
+/**
+ * Set a deal's awarded amount from the dedicated admin/director route.
+ *
+ * WHY A DEDICATED PATH. `awardedAmount` is admin/director-only (updateDeal's `touchesAwarded` RBAC), but
+ * `PATCH /deals/:id` also enforces REP OWNERSHIP — and it does not pass `allowAdmin` to
+ * assertDealOwnerAccess. The two gates are mutually exclusive on a rep-owned deal: the owning rep passes
+ * ownership and fails the RBAC, a leader passes the RBAC and fails ownership. So NOBODY could set the
+ * awarded amount on a deal owned by a rep — 7 such deals in production sat with a blank awarded amount,
+ * and the UI's Edit button is disabled for a non-owner, which is why it read as "nothing to do" rather
+ * than as a bug. This mirrors setDealEstimator, the codebase's existing answer to exactly this shape:
+ * a leadership-only field reachable on any deal in the caller's office.
+ *
+ * Deliberately does NOT recalculate commission. `updateDeal` does not either — the only commission
+ * recalcs live in setDealContractSignedDate — so re-basing here would make the two awarded-amount write
+ * paths disagree about money. A stored commission row keeps its snapshotted source_value_amount.
+ */
+export async function setDealAwardedAmount(
+  tenantDb: TenantDb,
+  dealId: string,
+  awardedAmount: string | null,
+  userId: string,
+  auditContext?: AuditContext
+): Promise<typeof deals.$inferSelect | null> {
+  return tenantDb.transaction(async (tx) => {
+    // is_active + FOR UPDATE, matching setDealEstimator: a soft-deleted deal must 404 here rather than
+    // be mutable through a route the detail/edit flows hide.
+    const [existing] = await tx
+      .select()
+      .from(deals)
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
+      .limit(1)
+      .for("update");
+    if (!existing) return null;
+
+    // A change order's awarded amount IS its CO value, and updateDeal 409s on exactly this. A second
+    // write path must not become a hole in that guard: editing it here would move Won value without the
+    // change-order endpoint's commission recompute.
+    if (existing.isChangeOrder === true) {
+      throw new AppError(
+        409,
+        "A change order's amount is managed through the change-order endpoints, not the awarded-amount path.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+
+    const oldValue = existing.awardedAmount ?? null;
+    const newValue = awardedAmount ?? null;
+    // Change-detected on the CANONICAL money form, so "37027" and "37027.00" are one value. A no-op
+    // re-save must not latch awarded_amount_overridden: that flag permanently freezes Bid Board sync for
+    // this column, and merely opening and saving a deal should never do that.
+    if (normalizeMoneyForCompare(oldValue) === normalizeMoneyForCompare(newValue)) {
+      return existing;
+    }
+
+    const [updated] = await tx
+      .update(deals)
+      .set({
+        awardedAmount: newValue,
+        // A genuine leadership edit is a permanent manual override, same as updateDeal's touchesAwarded
+        // branch — otherwise the Bid Board mirror re-asserts Procore's value over the human correction.
+        awardedAmountOverridden: true,
+        updatedAt: new Date(),
+      })
+      .where(eq(deals.id, dealId))
+      .returning();
+    if (!updated) return null;
+
+    const changeSet = {
+      awardedAmount: { from: oldValue, to: newValue },
+      awardedAmountOverridden: { from: existing.awardedAmountOverridden ?? false, to: true },
+    };
+    if (auditContext) {
+      await logActivity({
+        tenantDb: tx,
+        actor: auditContext.actor,
+        action: "update",
+        entity: buildDealAuditEntity(updated),
+        fieldChanges: changeSet,
+        ipAddress: auditContext.ipAddress ?? null,
+        userAgent: auditContext.userAgent ?? null,
+      });
+    } else {
+      await writeAuditLog(tx, {
+        tableName: "deals",
+        recordId: dealId,
+        action: "update",
+        changedBy: userId,
+        changes: changeSet,
+      });
+    }
+
+    // Timeline row — the deal-history feed does not read audit_log, and an awarded-amount correction is
+    // exactly the kind of money change someone will later ask to trace.
+    await tx.insert(dealHistory).values({
+      dealId,
+      fieldName: "awarded_amount",
+      oldValue: oldValue,
+      newValue: newValue,
+      changedBy: userId,
+      source: "deal_edit",
+    });
+
+    return updated;
+  });
+}
+
 export async function setDealEstimator(
   tenantDb: TenantDb,
   dealId: string,

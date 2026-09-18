@@ -102,3 +102,42 @@ describe("DealEstimatesCard — manual-override indicator", () => {
     expect(html).not.toContain("Manually set");
   });
 });
+
+describe("DealEstimatesCard — awarded amount editor", () => {
+  // The route this drives exists because the generic PATCH is ownership-gated: on a rep-owned deal the
+  // owning rep fails the awarded RBAC and a leader fails ownership, so nobody could set it. The pencil
+  // must therefore appear for a leader on ANY deal, and never for a rep.
+  it("offers the editor when the viewer may edit the awarded amount", () => {
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal({ awardedAmount: null })} changeOrders={[]} canEditAwarded />
+    );
+
+    expect(html).toContain('aria-label="Edit awarded amount"');
+  });
+
+  it("hides the editor when the viewer may not", () => {
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal({ awardedAmount: null })} changeOrders={[]} />
+    );
+
+    expect(html).not.toContain('aria-label="Edit awarded amount"');
+  });
+
+  it("does not couple the awarded editor to change-order management", () => {
+    // canManage (change orders, admin-only) and canEditAwarded (admin OR director) are separate roles.
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal()} changeOrders={[]} canManage onChanged={() => {}} />
+    );
+
+    expect(html).toContain("Add Change Order");
+    expect(html).not.toContain('aria-label="Edit awarded amount"');
+  });
+
+  it("still shows the blank value honestly when there is no awarded amount", () => {
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal({ awardedAmount: null })} changeOrders={[]} canEditAwarded />
+    );
+
+    expect(html).toContain("--");
+  });
+});

@@ -953,6 +953,22 @@ export async function updateDeal(
 // SAME tenant the deal was read from; without it the PATCH would hit the default/active office.
 // The estimatorUserId key is ALWAYS sent (even when null) so the server can distinguish an explicit
 // clear from an omitted field.
+// Dedicated awarded-amount mutation — hits PATCH /deals/:id/awarded-amount (admin/director only),
+// NOT the generic updateDeal. The generic PATCH also enforces rep OWNERSHIP, so on a rep-owned deal the
+// owning rep fails the awarded RBAC and a leader fails the ownership check: nobody could set it. This
+// route is office-scoped rather than ownership-scoped. Pass null to clear.
+export async function updateDealAwardedAmount(
+  dealId: string,
+  awardedAmount: string | null,
+  options: OfficeRequestOptions = {}
+) {
+  return api<{ deal: Deal }>(`/deals/${dealId}/awarded-amount`, {
+    method: "PATCH",
+    json: { awardedAmount },
+    ...getOfficeRequestOptions(options.officeId),
+  });
+}
+
 export async function updateDealEstimator(
   dealId: string,
   estimatorUserId: string | null,

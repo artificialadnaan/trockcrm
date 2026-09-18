@@ -314,6 +314,9 @@ export function DealOverviewTab({ deal, officeId, onDealUpdated }: DealOverviewT
           changeOrders={deal.dealChangeOrders}
           changeOrderTotal={deal.dealChangeOrderTotal}
           canManage={user?.role === "admin"}
+          // Awarded amount is admin OR director (the dedicated route's requireRole), unlike change
+          // orders which stay admin-only.
+          canEditAwarded={user?.role === "admin" || user?.role === "director"}
           onChanged={onDealUpdated}
         />
 

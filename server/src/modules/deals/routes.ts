@@ -33,6 +33,7 @@ import {
   getDealsForPipeline,
   listDealStagePage,
   getDealSources,
+  setDealAwardedAmount,
   setDealContractSignedDate,
   setDealEstimator,
   setDealSalesSource,
@@ -2721,6 +2722,59 @@ router.patch(
         estimatorUserId,
         req.user!.id,
         req.user!.activeOfficeId ?? req.user!.officeId
+      );
+      if (!deal) throw new AppError(404, "Deal not found");
+      await req.commitTransaction!();
+      const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+      res.json({ deal: redactDealResponse(deal, { includeHubspotId }) });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// PATCH /api/deals/:id/awarded-amount — set or clear the deal's awarded amount.
+// Admin/director ONLY, dedicated route, for the same reason as /estimator and /sales-source: the
+// generic PATCH /:id enforces REP OWNERSHIP and does not pass allowAdmin, while awardedAmount is
+// leadership-only. Those two gates are mutually exclusive on a rep-owned deal, so before this route
+// NOBODY could set the awarded amount there (7 such deals in production, and the UI's Edit button is
+// disabled for a non-owner, so it read as "nothing to do" rather than as a bug).
+router.patch(
+  "/:id/awarded-amount",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      // Bind the abstract role to THIS deal's office/scope before any read or write — parity with
+      // /estimator. requireRole alone proves leadership in general, not reach to this record.
+      await assertDealRouteAccess(req, req.params.id as string);
+
+      // Distinguish an ABSENT key from an explicit null: a `{}` body must not silently CLEAR a money
+      // field. Clearing requires `awardedAmount: null`, exactly as /estimator requires for its id.
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!("awardedAmount" in body)) {
+        throw new AppError(422, "awardedAmount is required (send null to clear it)");
+      }
+      const raw = body.awardedAmount;
+      let awardedAmount: string | null;
+      if (raw == null || (typeof raw === "string" && raw.trim() === "")) {
+        awardedAmount = null;
+      } else {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) {
+          throw new AppError(422, "awardedAmount must be a number >= 0, or null to clear it");
+        }
+        // Same ceiling validateDealPayload applies on the generic path, so the two cannot disagree.
+        if (n > 999999999) {
+          throw new AppError(422, "awardedAmount must not exceed 999999999");
+        }
+        awardedAmount = String(raw).trim();
+      }
+
+      const deal = await setDealAwardedAmount(
+        req.tenantDb!,
+        req.params.id as string,
+        awardedAmount,
+        req.user!.id
       );
       if (!deal) throw new AppError(404, "Deal not found");
       await req.commitTransaction!();

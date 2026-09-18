@@ -16,6 +16,7 @@ import {
 import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { formatCurrency, currentContractValue, combinedChangeOrderTotal, cents } from "@/lib/deal-utils";
 import {
+  updateDealAwardedAmount,
   addDealChangeOrder,
   updateDealChangeOrder,
   deleteDealChangeOrder,
@@ -36,6 +37,12 @@ interface DealEstimatesCardProps {
   changeOrderTotal?: string | null;
   /** Admins may add / edit / remove change orders. */
   canManage?: boolean;
+  /**
+   * Admin/director may edit the awarded amount. Separate from `canManage` because the two have
+   * different role sets: change orders are admin-only, while the awarded amount is admin OR director
+   * (matching the dedicated route's requireRole).
+   */
+  canEditAwarded?: boolean;
   /** Called after a successful add / edit / delete so the parent can refetch. */
   onChanged?: () => void;
 }
@@ -45,8 +52,39 @@ export function DealEstimatesCard({
   changeOrders = [],
   changeOrderTotal,
   canManage = false,
+  canEditAwarded = false,
   onChanged,
 }: DealEstimatesCardProps) {
+  const [editingAwarded, setEditingAwarded] = useState(false);
+  const [awardedDraft, setAwardedDraft] = useState("");
+  const [savingAwarded, setSavingAwarded] = useState(false);
+
+  const openAwardedEditor = () => {
+    // Seed from the stored value, not the formatted one — "$439,121" is not a number the API accepts.
+    setAwardedDraft(deal.awardedAmount ?? "");
+    setEditingAwarded(true);
+  };
+
+  const saveAwarded = async () => {
+    const trimmed = awardedDraft.trim();
+    // An empty box CLEARS the value; the route takes an explicit null for that. Anything non-numeric is
+    // refused here so the user sees it immediately rather than as a 422.
+    if (trimmed !== "" && !Number.isFinite(Number(trimmed))) {
+      toast.error("Enter a number, or leave it empty to clear the awarded amount");
+      return;
+    }
+    setSavingAwarded(true);
+    try {
+      await updateDealAwardedAmount(deal.id, trimmed === "" ? null : trimmed);
+      toast.success(trimmed === "" ? "Awarded amount cleared" : "Awarded amount updated");
+      setEditingAwarded(false);
+      onChanged?.();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to update the awarded amount");
+    } finally {
+      setSavingAwarded(false);
+    }
+  };
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<DealChangeOrder | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -115,9 +153,49 @@ export function DealEstimatesCard({
           <span className="text-sm font-medium">{formatCurrency(deal.bidEstimate)}</span>
         </div>
         <div className="space-y-1">
-          <div className="flex justify-between items-center">
+          <div className="flex justify-between items-center gap-2">
             <span className="text-sm text-muted-foreground">Awarded Amount</span>
-            <span className="text-sm font-semibold">{formatCurrency(deal.awardedAmount)}</span>
+            {editingAwarded ? (
+              <div className="flex items-center gap-1">
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={awardedDraft}
+                  onChange={(e) => setAwardedDraft(e.target.value)}
+                  className="h-7 w-32 text-right text-sm"
+                  aria-label="Awarded amount"
+                  autoFocus
+                />
+                <Button size="sm" className="h-7" disabled={savingAwarded} onClick={saveAwarded}>
+                  {savingAwarded ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7"
+                  disabled={savingAwarded}
+                  onClick={() => setEditingAwarded(false)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <span className="flex items-center gap-1">
+                <span className="text-sm font-semibold">{formatCurrency(deal.awardedAmount)}</span>
+                {canEditAwarded ? (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-6 w-6"
+                    onClick={openAwardedEditor}
+                    aria-label="Edit awarded amount"
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </Button>
+                ) : null}
+              </span>
+            )}
           </div>
           {deal.awardedAmountOverridden ? (
             <p className="text-xs text-muted-foreground">Manually set — not synced from Procore.</p>
