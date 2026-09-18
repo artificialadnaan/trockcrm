@@ -985,8 +985,15 @@ async function updateBidBoardStageMetadata(
   // behind, and holds the lock — so the UPDATE below acts on exactly the row this read returned. The whole
   // ingest already runs inside one BEGIN/COMMIT, so the lock is held for the rest of the run rather than
   // released immediately.
+  //
+  // It reads EVERY column the audit below compares, not just the two the UPDATE writes blind. The three
+  // stage columns were still being compared against the `deal` snapshot taken at match time, and SyncHub
+  // writes those same columns (procore/synchub-routes.ts). A concurrent `Bidding -> Awarded` followed by
+  // this refresh restoring `Bidding` would be compared as `Bidding -> Bidding` and suppressed — the sync
+  // silently reverting someone else's write and logging nothing.
   const prevResult = await client.query(
-    `SELECT is_bid_board_owned, bid_board_stage_entered_at
+    `SELECT is_bid_board_owned, bid_board_stage_entered_at,
+            bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status
        FROM ${schemaName}.deals
       WHERE id = $1
       FOR UPDATE`,
@@ -1025,9 +1032,13 @@ async function updateBidBoardStageMetadata(
     // written. The sync still records that it ran; that is what the run metrics are for.
     await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name },
       onlyRealChanges({
-        bidBoardStageSlug: { from: deal.bid_board_stage_slug, to: targetStageSlug },
-        bidBoardStageFamily: { from: deal.bid_board_stage_family, to: stageFamilyForSlug(targetStageSlug) },
-        bidBoardStageStatus: { from: deal.bid_board_stage_status, to: status },
+        // `from` comes from the LOCKED row, not the match-time snapshot — see the pre-image read above.
+        bidBoardStageSlug: { from: prevRow?.bid_board_stage_slug ?? null, to: targetStageSlug },
+        bidBoardStageFamily: {
+          from: prevRow?.bid_board_stage_family ?? null,
+          to: stageFamilyForSlug(targetStageSlug),
+        },
+        bidBoardStageStatus: { from: prevRow?.bid_board_stage_status ?? null, to: status },
         // Read from the statement's own pre/post image, not from `deal` — neither column is carried on
         // DealMatch, and an adoption (false -> true) is exactly the case the no-op filter would
         // otherwise erase.
@@ -1930,6 +1941,24 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           ? { ...normalized, bidBoardDueDate: null }
           : normalized;
 
+      // The mirror audit's `from` side must be the row the UPDATE is about to overwrite, not the snapshot
+      // findDealMatches took earlier. Same class as the stage path, and the substantive-change gate makes
+      // it sharper: if a user edits name A -> B and this sync restores A, a stale comparison sees A -> A,
+      // reports nothing substantive, and now writes NO ROW AT ALL — so the sync overwrites a person's edit
+      // and leaves no trace. Before the gate the heartbeat would at least have forced a row.
+      const mirrorPreImage = await client.query(
+        `SELECT name, bid_board_estimator, estimator_user_id, bid_board_office, bid_board_status,
+                bid_board_sales_price_per_area, bid_board_project_cost, bid_board_profit_margin_pct,
+                bid_board_total_sales, bid_board_created_at, bid_board_due_date,
+                bid_board_customer_name, bid_board_customer_contact_raw, bid_board_project_number,
+                bid_board_last_updated_at
+           FROM ${schemaName}.deals
+          WHERE id = $1
+          FOR UPDATE`,
+        [matches[0].id]
+      );
+      const mirrorPrevDeal = { ...matches[0], ...(mirrorPreImage.rows?.[0] ?? {}) };
+
       let updateResult;
       await client.query(`SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
       try {
@@ -1961,7 +1990,15 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
         // claim a mirror move that did not happen.
         const mirrorChanges = onlyRealChanges(
-          buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled)
+          buildBidBoardMirrorFieldChanges(
+            // mirrorPrevDeal, not matches[0]: the locked pre-image, so a field another writer changed
+            // between matching and this UPDATE is reported as the overwrite it is.
+            mirrorPrevDeal,
+            mirrorRow,
+            bidBoardLastUpdatedAt,
+            writtenEstimatorUserId,
+            bidDueDateReadbackEnabled
+          )
         );
         // The heartbeat check, not just the emptiness check. `bidBoardLastUpdatedAt` is this run's own
         // timestamp, so it differs every cycle and `mirrorChanges` is therefore NEVER empty — gating on

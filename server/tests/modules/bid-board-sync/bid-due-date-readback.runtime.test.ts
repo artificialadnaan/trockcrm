@@ -1104,6 +1104,44 @@ describe("stage_metadata_refresh — an ownership adoption is audited, a no-op c
     expect(owned[0].isBidBoardOwned).toEqual({ from: false, to: true });
   });
 
+  // Same staleness as the mirror path, on the three stage columns. SyncHub writes these too
+  // (procore/synchub-routes.ts), so a concurrent change followed by this refresh restoring the old value
+  // is precisely a silent revert — and a snapshot-based comparison reports it as no change at all.
+  it("reports the stage overwrite when bid_board_stage_slug changed after matching", async () => {
+    await seedAtMappedStage(true);
+
+    let matched = false;
+    const spy = vi.spyOn(client, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      const out: unknown = await (pg as never as { query: Function }).query(text, params as never);
+      const row = out as { rows: unknown[]; affectedRows?: number; rowCount?: number };
+      const shaped = { ...row, rowCount: row.affectedRows ?? row.rowCount ?? row.rows?.length ?? 0 };
+      if (!matched && /translate\(normalize\(/i.test(text)) {
+        matched = true;
+        await pg.query(
+          `UPDATE ${SCHEMA}.deals
+              SET bid_board_stage_slug = 'awarded', bid_board_stage_status = 'Awarded'
+            WHERE id = $1`,
+          [DEAL]
+        );
+      }
+      return shaped;
+    });
+
+    try {
+      await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const slugChanges = (await auditFieldChanges())
+      .map((c) => c.bidBoardStageSlug as { from?: unknown; to?: unknown } | undefined)
+      .filter((c): c is { from?: unknown; to?: unknown } => c != null);
+    expect(slugChanges.length).toBeGreaterThan(0);
+    // 'awarded' is what the row actually held when the UPDATE locked it; 'estimating' is the revert.
+    expect(slugChanges[0].from).toBe("awarded");
+    expect(slugChanges[0].to).toBe("estimating");
+  });
+
   it("CONTROL — an already-owned deal with every stage field matching writes NO stage audit", async () => {
     await seedAtMappedStage(true);
     await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
@@ -1114,5 +1152,63 @@ describe("stage_metadata_refresh — an ownership adoption is audited, a no-op c
       (c) => "isBidBoardOwned" in c || "bidBoardStageSlug" in c || "bidBoardStageStatus" in c
     );
     expect(stageish).toHaveLength(0);
+  });
+});
+
+/**
+ * THE AUDIT'S `from` SIDE MUST BE THE ROW THE UPDATE OVERWRITES, not the snapshot findDealMatches took.
+ *
+ * This is the shape that makes it matter, and the substantive-change gate is what makes it dangerous:
+ * a person edits a mirrored field between matching and the write, the sync restores the board's value,
+ * and a snapshot-based comparison sees `A -> A`. It reports nothing substantive, so NO ROW IS WRITTEN —
+ * the sync overwrites someone's edit and leaves no trace of it. Before the gate the heartbeat would at
+ * least have forced a row out.
+ *
+ * Simulated the only way a single-connection test can: mutate the row AFTER the match query has answered
+ * but BEFORE the mirror UPDATE runs, which is exactly the state a concurrent writer leaves behind.
+ */
+describe("mirror audit — the pre-image is the locked row, not the match-time snapshot", () => {
+  it("reports the overwrite of a value changed after matching", async () => {
+    await seedDeals();
+
+    // Let the match query answer with the ORIGINAL name, then change it underneath — the interleaving a
+    // concurrent edit produces. The pre-image read happens after this, under FOR UPDATE.
+    let matched = false;
+    const spy = vi.spyOn(client, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      const out: unknown = await (pg as never as { query: Function }).query(text, params as never);
+      const row = out as { rows: unknown[]; affectedRows?: number; rowCount?: number };
+      const shaped = { ...row, rowCount: row.affectedRows ?? row.rowCount ?? row.rows?.length ?? 0 };
+      if (!matched && /translate\(normalize\(/i.test(text)) {
+        matched = true;
+        await pg.query(`UPDATE ${SCHEMA}.deals SET name = 'Edited By A Person' WHERE id = $1`, [DEAL]);
+      }
+      return shaped;
+    });
+
+    try {
+      await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The export's name is restored over the person's edit; the trail must say so.
+    const nameChanges = (await auditFieldChanges())
+      .map((c) => c.name as { from?: unknown; to?: unknown } | undefined)
+      .filter((c): c is { from?: unknown; to?: unknown } => c != null);
+    expect(nameChanges.length).toBeGreaterThan(0);
+    expect(nameChanges[0].from).toBe("Edited By A Person");
+    expect(nameChanges[0].to).toBe("Riverbend Tower");
+  });
+
+  it("CONTROL — with nothing changed underneath, the cycle still writes no mirror row", async () => {
+    await seedDeals();
+    await pg.query(`UPDATE ${SCHEMA}.deals SET name = 'Riverbend Tower' WHERE id = $1`, [DEAL]);
+    await pg.exec(`DELETE FROM ${SCHEMA}.audit_log;`);
+
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    // Only the heartbeat could have moved, and a heartbeat is not an edit.
+    const withName = (await auditFieldChanges()).filter((c) => "name" in c);
+    expect(withName).toHaveLength(0);
   });
 });

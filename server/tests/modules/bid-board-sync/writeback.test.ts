@@ -37,6 +37,19 @@ function isStagePreImageRead(normalizedSql: string): boolean {
   return normalizedSql.includes("for update") && normalizedSql.includes("is_bid_board_owned");
 }
 
+/**
+ * The mirror path takes its own locked pre-image so the audit's `from` side is the row the UPDATE is
+ * about to overwrite rather than the match-time snapshot.
+ *
+ * These string-mocked suites answer it with an EMPTY row on purpose: `mirrorPrevDeal` then falls back to
+ * the matched deal and every expectation here keeps its original meaning. They are about SQL shape and
+ * control flow, not concurrency — the proof that the locked version is actually used lives in
+ * bid-due-date-readback.runtime.test.ts, against a real database.
+ */
+function isMirrorPreImageRead(normalizedSql: string): boolean {
+  return normalizedSql.includes("for update") && normalizedSql.includes("bid_board_customer_contact_raw");
+}
+
 const query = vi.fn();
 const release = vi.fn();
 
@@ -173,6 +186,7 @@ describe("Bid Board sync stage writeback", () => {
         ]);
         return { rows: [], rowCount: 1 };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
@@ -256,6 +270,7 @@ describe("Bid Board sync stage writeback", () => {
         }
         return { rows: [], rowCount: 0 };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         if (params[0] === "deal-collide") {
           throw duplicateProjectNumberError;
@@ -374,6 +389,7 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
         return { rows: [], rowCount: 1 };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
@@ -419,6 +435,7 @@ describe("Bid Board sync stage writeback", () => {
         };
       }
       if (isStagePreImageRead(normalizedSql)) return { rows: [stagePreImageRow()], rowCount: 1 };
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         expect(normalizedSql).not.toContain("stage_id = $1");
         expect(normalizedSql).not.toContain("on_hold_started_at");
@@ -427,6 +444,7 @@ describe("Bid Board sync stage writeback", () => {
         expect(params).toEqual(["deal-123", "estimating", "estimating", "Estimate in Progress", "stage-estimating"]);
         return { rows: [stageMetadataRow()], rowCount: 1 };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 0 };
       }
@@ -464,6 +482,8 @@ describe("Bid Board sync stage writeback", () => {
       const normalizedSql = sql.toLowerCase();
       // Detached-partition probe for an ATTACHED fixture: exactly one partition can hold a deal.
       if (normalizedSql.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
+      if (isStagePreImageRead(normalizedSql)) return { rows: [stagePreImageRow()], rowCount: 1 };
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return { rows: [matchedDeal()], rowCount: 1 };
       }
@@ -525,6 +545,7 @@ describe("Bid Board sync stage writeback", () => {
           rowCount: 1,
         };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
@@ -625,6 +646,7 @@ describe("Bid Board sync stage writeback", () => {
           rowCount: 1,
         };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
@@ -695,6 +717,7 @@ describe("Bid Board sync stage writeback", () => {
           rowCount: 1,
         };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
@@ -763,6 +786,7 @@ describe("Bid Board sync stage writeback", () => {
           rowCount: 1,
         };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
@@ -786,6 +810,7 @@ describe("Bid Board sync stage writeback", () => {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
       }
       if (isStagePreImageRead(normalizedSql)) return { rows: [stagePreImageRow()], rowCount: 1 };
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         return { rows: [stageMetadataRow()], rowCount: 1 };
       }
@@ -857,6 +882,7 @@ describe("Bid Board sync stage writeback", () => {
           rowCount: 1,
         };
       }
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
@@ -864,6 +890,7 @@ describe("Bid Board sync stage writeback", () => {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
       }
       if (isStagePreImageRead(normalizedSql)) return { rows: [stagePreImageRow()], rowCount: 1 };
+      if (isMirrorPreImageRead(normalizedSql)) return { rows: [{}], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         return { rows: [stageMetadataRow()], rowCount: 1 };
       }
