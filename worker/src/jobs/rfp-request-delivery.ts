@@ -162,11 +162,23 @@ async function updateDealConflict(
  * the answer is far more useful than a generic phrase that carries none.
  */
 function describeRejection(body: Record<string, any>, response: Response): string {
+  // A validation issue's PATH is the actionable half — "Invalid email" names no field, which is the
+  // non-actionable diagnosis this function exists to end. Keep `deal.clientEmail: Invalid email`.
+  const describeIssue = (entry: unknown): string | null => {
+    if (typeof entry === "string" && entry.trim()) return entry.trim();
+    if (typeof entry !== "object" || entry === null) return null;
+    const issue = entry as { path?: unknown; message?: unknown };
+    const message = typeof issue.message === "string" ? issue.message.trim() : "";
+    if (!message) return null;
+    const path = Array.isArray(issue.path) ? issue.path.map((p) => String(p)).filter(Boolean).join(".") : "";
+    return path ? `${path}: ${message}` : message;
+  };
+
   const firstString = (value: unknown): string | null => {
     if (typeof value === "string" && value.trim()) return value.trim();
     if (Array.isArray(value)) {
       for (const entry of value) {
-        const nested = firstString(typeof entry === "object" && entry !== null ? (entry as any).message : entry);
+        const nested = describeIssue(entry);
         if (nested) return nested;
       }
     }

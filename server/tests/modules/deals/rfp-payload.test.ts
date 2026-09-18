@@ -456,3 +456,74 @@ describe("RFP retry — a rescued body must not re-send the value that killed it
     expect(body.deal.propertyId).toBe("property-9");
   });
 });
+
+describe("RFP client email — Codex review findings on PR #1145", () => {
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "deal-1", name: "D", projectType: "service", clientEmail },
+      sourceEventId: "crm:e1",
+    }).deal.clientEmail;
+
+  // P1: the ORIGINAL bug was a pasted mailto link. Real ones carry query params, and stripping only the
+  // scheme leaves `casey@example.com?subject=RFP` — which the first permissive regex ACCEPTED, so the
+  // sanitizer would have forwarded an invalid mailbox and 422'd the RFP exactly as before.
+  it.each([
+    ["mailto:casey@example.com?subject=RFP", "casey@example.com"],
+    ["mailto:casey@example.com?subject=RFP&body=hello", "casey@example.com"],
+    ["mailto:casey@example.com#fragment", "casey@example.com"],
+  ])("drops mailto query/fragment parameters: %j", (input, expected) => {
+    expect(build(input)).toBe(expected);
+  });
+
+  it.each(["casey@example.com?subject=RFP", "casey@example.com#frag", "casey@exa mple.com"])(
+    "rejects %j outright rather than forwarding it",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  // P2: an explicit null from the caller means "this contact HAS no email" and is authoritative.
+  // Treating it as "not supplied" resurrects the stale address the retry is trying to escape.
+  it("treats an explicitly null current email as authoritative, not as absent", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "mailto:stale@old.example.com", contactName: "Old", clientPhone: "1" } } as any,
+      { companyId: "c1", propertyId: "p1", clientEmail: null } as any
+    );
+    expect(body.deal.clientEmail).toBeNull();
+  });
+
+  it("still falls back to the stored value when the caller supplies no clientEmail key at all", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "mailto:kept@example.com" } } as any,
+      { companyId: "c1", propertyId: "p1" } as any
+    );
+    expect(body.deal.clientEmail).toBe("kept@example.com");
+  });
+
+  // P2: refreshing only the email onto a stored body leaves the PREVIOUS contact's name and phone,
+  // shipping SyncHub a hybrid person.
+  it("refreshes name and phone with the email, never a hybrid contact record", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "old@example.com", contactName: "Old Person", clientPhone: "111" } } as any,
+      {
+        companyId: "c1",
+        propertyId: "p1",
+        clientEmail: "new@example.com",
+        contactName: "New Person",
+        clientPhone: "222",
+      } as any
+    );
+    expect(body.deal.clientEmail).toBe("new@example.com");
+    expect(body.deal.contactName).toBe("New Person");
+    expect(body.deal.clientPhone).toBe("222");
+  });
+
+  it("leaves the stored contact tuple alone when no current contact is supplied", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "a@b.com", contactName: "Stored", clientPhone: "999" } } as any,
+      { companyId: "c1", propertyId: "p1" } as any
+    );
+    expect(body.deal.contactName).toBe("Stored");
+    expect(body.deal.clientPhone).toBe("999");
+  });
+});

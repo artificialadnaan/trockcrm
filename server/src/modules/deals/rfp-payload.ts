@@ -246,12 +246,20 @@ function cleanEmail(value: unknown): string | null {
   const angled = text.match(/<([^<>]+)>\s*$/);
   if (angled?.[1]) text = angled[1].trim();
   // A pasted link target, any case, with or without space after the scheme.
+  const hadMailtoScheme = /^\s*mailto:/i.test(text);
   text = text.replace(/^\s*mailto:\s*/i, "").trim();
+  // A real mailto link usually carries parameters — `mailto:a@b.com?subject=RFP&body=...`. Stripping
+  // only the scheme leaves `a@b.com?subject=RFP`, which is NOT a mailbox; drop the query/fragment.
+  // Only for an actual mailto link: a bare address containing `?` or `#` is malformed, not decorated,
+  // and must fail validation below rather than be silently truncated into something plausible.
+  if (hadMailtoScheme) text = text.split(/[?#]/)[0]!.trim();
   // A single trailing separator from a copied recipient list.
   text = text.replace(/[,;]+$/, "").trim();
-  // Conservative shape check: one @, non-empty both sides, a dotted TLD, no whitespace. Anything that
-  // does not clear this bar is omitted rather than forwarded for SyncHub to reject.
-  const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@.]+$/.test(text);
+  // Conservative allowlist rather than "anything without a space or @". The permissive version accepted
+  // `a@b.com?subject=RFP` — `?` and `=` are neither `@` nor whitespace — which would have forwarded an
+  // invalid mailbox and 422'd the RFP, the exact failure this exists to prevent. Anything not clearing
+  // this bar is omitted rather than sent as a guess.
+  const looksLikeEmail = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(text);
   return looksLikeEmail ? text : null;
 }
 
@@ -547,25 +555,45 @@ export function capRfpRequestBody(
  */
 export function withRfpRequestBodyIdentity(
   body: NormalizedRfpRequestBody,
-  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId"> & { clientEmail?: string | null }
+  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId"> & {
+    clientEmail?: string | null;
+    contactName?: string | null;
+    clientPhone?: string | null;
+  }
 ): NormalizedRfpRequestBody {
   // Same tolerance for a partial stored record as capRfpRequestBody, and the same cleanString the
   // builder uses — so a retried body states an absent id exactly the way a first-attempt body does
   // (an explicit null, never an omitted key).
   const storedDeal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
+  // The retry spreads the DEAD job's body, so the contact it carries is whatever was frozen at the
+  // failed attempt. Six RFPs died 422 on a `mailto:`-prefixed address; correcting the contact record
+  // alone would NOT have rescued them, because the retry never rebuilds these fields from the deal.
+  //
+  // A caller that knows the current primary contact passes it and it wins; a caller that does not
+  // OMITS the keys and the stored tuple stands. The distinction is by KEY PRESENCE, not nullishness:
+  // an explicit null means "this contact genuinely has no email", which is authoritative — treating it
+  // as "not supplied" would resurrect the very address the retry is trying to escape.
+  const suppliesContact = "clientEmail" in deal || "contactName" in deal || "clientPhone" in deal;
+  // Refresh the tuple TOGETHER. Injecting only the new email onto a stored body would ship SyncHub a
+  // hybrid person — one contact's address beside another's name and phone.
+  const contact = suppliesContact
+    ? {
+        clientEmail: cleanEmail(deal.clientEmail ?? null),
+        contactName: cleanString(deal.contactName ?? null),
+        clientPhone: cleanString(deal.clientPhone ?? null),
+      }
+    : {
+        // Normalize what was stored even with no current contact to hand: the stored value is exactly
+        // what failed, so re-sending it unexamined repeats the failure.
+        clientEmail: cleanEmail(storedDeal?.clientEmail ?? null),
+      };
   return {
     ...body,
     deal: {
       ...storedDeal,
       companyId: cleanString(deal.companyId),
       propertyId: cleanString(deal.propertyId),
-      // The retry spreads the DEAD job's body, so whatever client email killed the first attempt is
-      // re-sent verbatim unless it is re-resolved here. Six RFPs died 422 on a `mailto:`-prefixed
-      // address; correcting the contact record alone would NOT have rescued them, because the retry
-      // never rebuilds this field from the deal. Prefer the deal's CURRENT contact email (so a fix to
-      // the contact actually takes effect on retry), fall back to what was stored, and normalize
-      // either way — a value we cannot vouch for goes as null rather than sinking the delivery again.
-      clientEmail: cleanEmail(deal.clientEmail ?? storedDeal?.clientEmail ?? null),
+      ...contact,
     },
   };
 }

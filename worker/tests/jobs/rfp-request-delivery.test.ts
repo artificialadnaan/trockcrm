@@ -431,6 +431,7 @@ describe("rfp_request_delivery — surfacing SyncHub's rejection reason", () => 
     ["detail", { detail: "clientEmail must be a valid email" }],
     ["errors[]", { errors: ["clientEmail must be a valid email"] }],
     ["zod issues[]", { issues: [{ path: ["deal", "clientEmail"], message: "clientEmail must be a valid email" }] }],
+
   ])("reports the reason carried under %s", async (_label, body) => {
     const db = makeDb();
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 422 }));
@@ -438,6 +439,22 @@ describe("rfp_request_delivery — surfacing SyncHub's rejection reason", () => 
     await expect(
       handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
     ).rejects.toThrow(/clientEmail must be a valid email/);
+  });
+
+  // The message alone names no field. The earlier fixture hid this by embedding "clientEmail" in its own
+  // message, so the extractor could drop the path and still pass — a self-confirming test.
+  it("keeps the field path when a zod issue message does not name the field", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ issues: [{ path: ["deal", "clientEmail"], message: "Invalid email" }] }), {
+          status: 422,
+        })
+    );
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/deal\.clientEmail: Invalid email/);
   });
 
   it("falls back to the raw body when SyncHub uses a key we do not know", async () => {

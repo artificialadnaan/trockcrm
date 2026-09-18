@@ -1879,7 +1879,17 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
           },
           // Pass the deal's CURRENT primary-contact email so a corrected contact actually takes
           // effect on retry — the stored body's copy is whatever was frozen at the failed attempt.
-          { ...deal, clientEmail: primaryContact?.email ?? null }
+          // Refresh the contact TUPLE from the current primary contact, not just the email: a contact
+          // swapped between the failed attempt and the retry would otherwise pair the new person's
+          // address with the old person's name and phone. Explicit nulls are authoritative.
+          {
+            ...deal,
+            clientEmail: primaryContact?.email ?? null,
+            contactName: primaryContact
+              ? [primaryContact.firstName, primaryContact.lastName].filter(Boolean).join(" ")
+              : null,
+            clientPhone: primaryContact?.phone ?? null,
+          }
         )
       ) as unknown as Record<string, unknown>,
     };
