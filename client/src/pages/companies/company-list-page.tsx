@@ -56,6 +56,7 @@ const ACTIVE_CARD_CLASS = "ring-2 ring-brand-red";
 const COMPANY_CARD_LABELS: Record<string, string> = {
   pipeline: "Active pipeline",
   stale: "Untouched 30d+",
+  "no-opportunity": "No opportunity yet",
 };
 
 function numeric(value: string | number | null | undefined) {
@@ -190,6 +191,7 @@ export function CompanyListPage() {
     ownerScope: ownerScope === "mine" ? "mine" : undefined,
     hasActivePipeline: activeCard === "pipeline" ? true : undefined,
     stale: activeCard === "stale" ? true : undefined,
+    noOpportunity: activeCard === "no-opportunity" ? true : undefined,
     sortBy: sortState?.key,
     sortDir: sortState?.dir,
     page,
@@ -206,7 +208,7 @@ export function CompanyListPage() {
     }
   }, [activeCard]);
 
-  const buildCardTo = (card: "pipeline" | "stale" | null) => {
+  const buildCardTo = (card: "pipeline" | "stale" | "no-opportunity" | null) => {
     const next = new URLSearchParams(searchParams);
     if (card) next.set("card", card);
     else next.delete("card");
@@ -232,9 +234,10 @@ export function CompanyListPage() {
     return {
       pipeline: pagination.pipelineTotal ?? 0,
       stale: pagination.staleCount ?? 0,
+      noOpportunity: pagination.noOpportunityCount ?? 0,
       activeDeals,
     };
-  }, [pagination.pipelineTotal, pagination.staleCount, companies]);
+  }, [pagination.pipelineTotal, pagination.staleCount, pagination.noOpportunityCount, companies]);
 
   return (
     <div className="space-y-5">
@@ -252,7 +255,7 @@ export function CompanyListPage() {
         }}
       />
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-4">
         <MetricCard
           eyebrow="Total accounts"
           value={String(pagination.baseTotal ?? pagination.total)}
@@ -285,6 +288,21 @@ export function CompanyListPage() {
           to={buildCardTo("stale")}
           ariaLabel="Filter to accounts untouched 30+ days"
           className={activeCard === "stale" ? ACTIVE_CARD_CLASS : undefined}
+        />
+        {/* An account nobody ever opened work against. The new-company flow persists the company, the
+            property and the contact as separate steps, so stopping before the lead leaves those behind
+            with nothing saying the job was never started — which is how a miss went unnoticed until
+            somebody queried the database for it. */}
+        <MetricCard
+          eyebrow="No opportunity yet"
+          value={String(totals.noOpportunity)}
+          badge="Unstarted"
+          caption="No lead or deal"
+          tone="red"
+          accent="red"
+          to={buildCardTo("no-opportunity")}
+          ariaLabel="Filter to accounts with no lead or deal"
+          className={activeCard === "no-opportunity" ? ACTIVE_CARD_CLASS : undefined}
         />
       </div>
 

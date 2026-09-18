@@ -47,6 +47,8 @@ export interface CompanyFilters {
   // Summary-card drill-downs (driven by the ?card= URL param on the companies page).
   hasActivePipeline?: boolean;
   stale?: boolean;
+  /** Companies with no lead and no deal ever opened against them (?card=no-opportunity). */
+  noOpportunity?: boolean;
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -63,6 +65,8 @@ export interface Pagination {
   baseTotal?: number;
   pipelineTotal?: number;
   staleCount?: number;
+  /** Accounts with no lead and no deal ever opened — the "No opportunity yet" card. */
+  noOpportunityCount?: number;
 }
 
 export function useCompanies(filters: CompanyFilters = {}) {
@@ -91,6 +95,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
       if (filters.industry) params.set("industry", filters.industry);
       if (filters.ownerScope === "mine") params.set("ownerScope", "mine");
       if (filters.hasActivePipeline) params.set("hasActivePipeline", "true");
+      if (filters.noOpportunity) params.set("noOpportunity", "true");
       if (filters.stale) params.set("stale", "true");
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
@@ -98,7 +103,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
       if (filters.limit) params.set("limit", String(filters.limit));
 
       const qs = params.toString();
-      const data = await api<{ companies: Company[]; total: number; page: number; limit: number; baseTotal?: number; pipelineTotal?: number; staleCount?: number }>(
+      const data = await api<{ companies: Company[]; total: number; page: number; limit: number; baseTotal?: number; pipelineTotal?: number; staleCount?: number; noOpportunityCount?: number }>(
         `/companies${qs ? `?${qs}` : ""}`
       );
       if (requestId !== requestIdRef.current) return; // a newer request superseded this one
@@ -114,6 +119,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
         baseTotal: data.baseTotal,
         pipelineTotal: data.pipelineTotal,
         staleCount: data.staleCount,
+        noOpportunityCount: data.noOpportunityCount,
       });
     } catch (err: unknown) {
       if (requestId !== requestIdRef.current) return;
@@ -123,7 +129,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
         setLoading(false);
       }
     }
-  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.hasActivePipeline, filters.stale, filters.sortBy, filters.sortDir, filters.page, filters.limit]);
+  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.hasActivePipeline, filters.stale, filters.noOpportunity, filters.sortBy, filters.sortDir, filters.page, filters.limit]);
 
   useEffect(() => {
     fetchCompanies();

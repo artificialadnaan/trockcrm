@@ -31,15 +31,16 @@ router.get("/search", async (req, res, next) => {
 // GET /companies — list with search, filter, pagination
 router.get("/", async (req, res, next) => {
   try {
-    const { search, category, industry, ownerScope, hasActivePipeline, stale, sortBy, sortDir, page, limit } = req.query as Record<string, string>;
+    const { search, category, industry, ownerScope, hasActivePipeline, stale, noOpportunity, sortBy, sortDir, page, limit } = req.query as Record<string, string>;
     const result = await listCompanies(req.tenantDb!, {
       search,
       category,
       industry,
       ownerUserId: ownerScope === "mine" ? req.user!.id : undefined,
-      // Summary-card drill-downs (?card=pipeline / ?card=stale on the companies page).
+      // Summary-card drill-downs (?card=pipeline / ?card=stale / ?card=no-opportunity).
       hasActivePipeline: hasActivePipeline === "true" ? true : undefined,
       stale: stale === "true" ? true : undefined,
+      noOpportunity: noOpportunity === "true" ? true : undefined,
       sortBy,
       sortDir: sortDir === "asc" ? "asc" : sortDir === "desc" ? "desc" : undefined,
       page: page ? parseInt(page, 10) : 1,
