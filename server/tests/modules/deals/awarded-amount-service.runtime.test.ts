@@ -114,3 +114,28 @@ describe("setDealAwardedAmount", () => {
     expect(row.awarded_amount_overridden).toBe(true);
   });
 });
+
+describe("setDealAwardedAmount — audit change set", () => {
+  it("records the override flip the FIRST time it happens", async () => {
+    await setDealAwardedAmount(tdb, DEAL, "500.00", USER);
+    const r: any = await tdb.execute(sql`SELECT changes FROM audit_log WHERE record_id = ${DEAL}`);
+    const changes = JSON.stringify((r.rows ?? r)[0].changes);
+
+    expect(changes).toContain("awardedAmountOverridden");
+    expect(changes).toContain("awardedAmount");
+  });
+
+  // logActivity does not filter no-ops, so an unconditional entry would show "true -> true" in the All
+  // Activity feed on every edit after the first — a transition that never occurred.
+  it("omits the flag on later edits, when it is already true", async () => {
+    await setDealAwardedAmount(tdb, DEAL, "500.00", USER);
+    await pg.exec(`DELETE FROM audit_log`);
+    await setDealAwardedAmount(tdb, DEAL, "600.00", USER);
+
+    const r: any = await tdb.execute(sql`SELECT changes FROM audit_log WHERE record_id = ${DEAL}`);
+    const changes = JSON.stringify((r.rows ?? r)[0].changes);
+
+    expect(changes).not.toContain("awardedAmountOverridden");
+    expect(changes).toContain("awardedAmount");
+  });
+});

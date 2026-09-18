@@ -5270,9 +5270,13 @@ export async function setDealAwardedAmount(
       .returning();
     if (!updated) return null;
 
+    // Record the flag ONLY when it actually flips. logActivity formats every entry it is given without
+    // filtering no-ops, so carrying it unconditionally would show "overridden: true -> true" in the All
+    // Activity feed on every edit after the first — a transition that never happened, next to a real one.
+    const wasOverridden = existing.awardedAmountOverridden ?? false;
     const changeSet = {
       awardedAmount: { from: oldValue, to: newValue },
-      awardedAmountOverridden: { from: existing.awardedAmountOverridden ?? false, to: true },
+      ...(wasOverridden ? {} : { awardedAmountOverridden: { from: wasOverridden, to: true } }),
     };
     if (auditContext) {
       await logActivity({
