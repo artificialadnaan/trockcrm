@@ -468,6 +468,22 @@ describe("rfp_request_delivery — surfacing SyncHub's rejection reason", () => 
     ).rejects.toThrow(/clientEmail is not an email/);
   });
 
+  // parseResponseBody wraps a non-JSON response as { raw: <whole body> }. Unbounded, that lands in
+  // job_queue.last_error on every attempt and is copied into deals.rfp_last_attempt_error.
+  it("bounds a huge non-JSON error page instead of persisting it in full", async () => {
+    const db = makeDb();
+    const huge = "E".repeat(20_000);
+    const fetchImpl = vi.fn(async () => new Response(huge, { status: 422 }));
+
+    const err = await handleRfpRequestDelivery(makePayload(), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      secret: "secret",
+    }).catch((e: Error) => e);
+
+    expect((err as Error).message.length).toBeLessThan(700);
+  });
+
   it("still names the status when SyncHub sends no body at all", async () => {
     const db = makeDb();
     const fetchImpl = vi.fn(async () => new Response("", { status: 422 }));

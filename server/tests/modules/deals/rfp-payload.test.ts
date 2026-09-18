@@ -551,3 +551,22 @@ describe("RFP client email — Codex round 2", () => {
     }
   );
 });
+
+describe("RFP client email — Codex round 3 (domain labels)", () => {
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "d", name: "D", projectType: "service", clientEmail },
+      sourceEventId: "crm:e1",
+    }).deal.clientEmail;
+
+  it.each(["casey@-example.com", "casey@foo.-example.com", "casey@example-.com"])(
+    "rejects a hyphen at a domain-label boundary: %j",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  it("still accepts a hyphen INSIDE a label", () => {
+    expect(build("casey@my-host.example.com")).toBe("casey@my-host.example.com");
+  });
+});

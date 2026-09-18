@@ -161,6 +161,8 @@ async function updateDealConflict(
  * Falls back to the raw body (truncated) rather than the statusText, because an unknown key carrying
  * the answer is far more useful than a generic phrase that carries none.
  */
+const MAX_REJECTION_REASON_CHARS = 500;
+
 function describeRejection(body: Record<string, any>, response: Response): string {
   // A validation issue's PATH is the actionable half — "Invalid email" names no field, which is the
   // non-actionable diagnosis this function exists to end. Keep `deal.clientEmail: Invalid email`.
@@ -185,15 +187,21 @@ function describeRejection(body: Record<string, any>, response: Response): strin
     return null;
   };
 
+  // Bound EVERY path, not just the serialize fallback below. `parseResponseBody` wraps a non-JSON
+  // response as `{ raw: <whole body> }`, so a large proxy/error page would otherwise be persisted in
+  // full to job_queue.last_error on every attempt and copied into deals.rfp_last_attempt_error by the
+  // dead-letter sweep — unbounded writes and an error the UI cannot show. (Introduced by the `raw`
+  // fallback added here: stored RFP errors currently top out at 299 chars precisely because nothing
+  // reached for the raw body before.)
   for (const key of ["error", "message", "detail", "details", "errors", "issues", "raw"]) {
     const reason = firstString(body?.[key]);
-    if (reason) return reason;
+    if (reason) return reason.slice(0, MAX_REJECTION_REASON_CHARS);
   }
 
   // Nothing recognisable — ship the body itself before resorting to the statusText.
   try {
     const serialized = JSON.stringify(body);
-    if (serialized && serialized !== "{}") return serialized.slice(0, 500);
+    if (serialized && serialized !== "{}") return serialized.slice(0, MAX_REJECTION_REASON_CHARS);
   } catch {
     /* fall through to statusText */
   }

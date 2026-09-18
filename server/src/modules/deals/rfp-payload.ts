@@ -263,8 +263,13 @@ function cleanEmail(value: unknown): string | null {
   // `.casey@`, `casey.@` and `casey..jones@`, which standard validators reject — so forwarding one
   // reproduces the same 422 this exists to prevent. Segment-and-separator spelling makes a leading,
   // trailing or doubled dot unmatchable rather than relying on extra lookarounds.
+  // Domain labels may not START or END with a hyphen either, so each label is spelled
+  // alphanumeric-bounded rather than as a flat `[A-Za-z0-9-]+`, which accepted `@-example.com` and
+  // `@example-.com`. Same reasoning as the local part: make the invalid shape unmatchable.
   const looksLikeEmail =
-    /^[A-Za-z0-9_%+'-]+(?:\.[A-Za-z0-9_%+'-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(text);
+    /^[A-Za-z0-9_%+'-]+(?:\.[A-Za-z0-9_%+'-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$/.test(
+      text
+    );
   return looksLikeEmail ? text : null;
 }
 
