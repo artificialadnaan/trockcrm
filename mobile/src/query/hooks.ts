@@ -126,6 +126,7 @@ function hasWindow(window?: ProjectPhotoWindow): boolean {
 /** ALL photos for a project in the given window (paged through server-side, concatenated). */
 export function useProjectPhotos(dealId: string | undefined, window?: ProjectPhotoWindow) {
   const { fetcher, user } = useAuth();
+  const queryClient = useQueryClient();
   const from = window?.from || undefined;
   const to = window?.to || undefined;
   // The zone the day bounds were computed in, sent so the server buckets by the SAME calendar the user
@@ -136,25 +137,24 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
   //
   // Falls back to the device zone only when a caller supplies none; the gallery always supplies one.
   const timeZone = window?.timeZone || deviceTimeZone();
+  // The window AND the zone are both part of the identity of this result. Without the dates, changing
+  // the month would serve the previous window from cache and the filter would look like it did nothing.
+  // Without the zone, a device that crosses a time-zone boundary with a warm cache keeps serving photos
+  // bucketed by the OLD zone — same month key, different answer — so the boundary photos this whole
+  // change exists to get right would be wrong again until something forced a refetch.
+  const queryKey = [
+    ...qk.projectPhotos(user?.id ?? "anon", dealId ?? ""),
+    from ?? "",
+    to ?? "",
+    timeZone ?? "",
+  ];
   return useQuery({
-    // The window AND the zone are both part of the identity of this result. Without the dates, changing
-    // the month would serve the previous window from cache and the filter would look like it did
-    // nothing. Without the zone, a device that crosses a time-zone boundary with a warm cache keeps
-    // serving photos bucketed by the OLD zone — same month key, different answer — so the boundary
-    // photos this whole change exists to get right would be wrong again until something forced a
-    // refetch. The zone is an input to the server's day math, so it belongs in the key.
-    queryKey: [
-      ...qk.projectPhotos(user?.id ?? "anon", dealId ?? ""),
-      from ?? "",
-      to ?? "",
-      timeZone ?? "",
-    ],
-    queryFn: async () => {
+    queryKey,
+    queryFn: async ({ signal }) => {
       const page1 = { page: 1, perPage: PHOTOS_PER_PAGE, from, to, timeZone };
       const first = await api.getProjectPhotos(fetcher, dealId!, page1);
       const reportedPages = first.pagination?.totalPages ?? 1;
       const totalPages = Math.min(reportedPages, PHOTOS_MAX_PAGES);
-      const photos = [...first.photos];
 
       // TWO different incompletenesses, deliberately reported separately — they need different words and
       // different remedies, and conflating them produced a banner that told users to retry something
@@ -164,7 +164,74 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
       //                 refreshing is futile forever, and the only remedy is a narrower date window.
       let partial = false;
       const truncated = reportedPages > PHOTOS_MAX_PAGES;
+
+      // Deduped as we go rather than at the end, because every intermediate publish below is rendered.
+      // Independently-fetched pages can overlap, and a duplicate id breaks every consumer that keys on
+      // one — the viewer's FlatList keyExtractor most visibly, where it renders a blank page.
+      const seen = new Set<string>();
+      const photos: typeof first.photos = [];
+      const absorb = (page: typeof first.photos) => {
+        for (const photo of page) {
+          if (seen.has(photo.id)) continue;
+          seen.add(photo.id);
+          photos.push(photo);
+        }
+      };
+
+      const snapshot = (complete: boolean) => ({
+        photos: [...photos],
+        pagination: first.pagination,
+        partial,
+        truncated,
+        windowed: hasWindow(window),
+        oldestAt: first.pagination?.oldestAt ?? null,
+        /**
+         * False while later pages are still arriving. Report and share gate on it: building from a set
+         * that is still filling would silently omit whatever had not landed yet, which is the same
+         * hazard `partial` exists for.
+         */
+        complete,
+      });
+
+      /**
+       * Publish what we have SO FAR, so the gallery paints instead of waiting on the whole walk.
+       *
+       * This is the "took forever to load" half of the original report. The server side is fixed — a
+       * page is ~1.3ms of database time now instead of ~36ms — but the client still waited for EVERY
+       * page before rendering anything, and District at Boynton is 8,652 photos, i.e. 44 pages. At three
+       * concurrent requests that is ~15 sequential round trips of jobsite cellular before a single
+       * thumbnail appeared. Page 1 is the newest 200 photos, which is what someone opening the gallery
+       * is almost always looking for, so it goes on screen immediately and the rest fills in behind it.
+       *
+       * Writing to the cache from inside the queryFn is deliberate: the alternative (useInfiniteQuery)
+       * fetches strictly one page at a time, which would make the FULL load markedly slower in exchange
+       * for the same first paint — a bad trade when report/share need the complete set.
+       */
+      const publish = (complete: boolean) => {
+        const next = snapshot(complete);
+        // NEVER write from a walk that has been cancelled. Pull-to-refresh while pages are still
+        // arriving starts a replacement walk and cancels this one — but cancellation does not stop an
+        // async function, it only makes React Query ignore its RETURN. Writing straight to the cache
+        // side-steps that: the abandoned walk keeps publishing, and if one of its older batches resolves
+        // last it overwrites the fresh result with stale photos and `complete: false`. The gallery would
+        // then show the previous load's set with report and share disabled, and nothing would correct it
+        // until the user refreshed again — a refresh that makes things worse is about the least
+        // forgivable behaviour available here.
+        if (signal.aborted) return next;
+        queryClient.setQueryData(queryKey, next);
+        return next;
+      };
+
+      absorb(first.photos);
+      publish(false);
+
       for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
+        // Stop FETCHING once cancelled, not merely stop publishing. Suppressing the writes alone left an
+        // abandoned walk downloading every remaining page — on a 50-page gallery that is thousands of
+        // photos still being fetched and server-presigned, competing for bandwidth and pool with the
+        // replacement query the user is actually waiting on. Checked before scheduling each batch and
+        // again after it settles, because the cancellation usually lands mid-batch.
+        if (signal.aborted) break;
         const batch = [];
         for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
           batch.push(
@@ -174,21 +241,13 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
         // allSettled, not all: a transient 429/5xx on one later page must not blank the whole gallery —
         // we keep every page that did load (page 1 is already in `photos`).
         const results = await Promise.allSettled(batch);
+        if (signal.aborted) break;
         for (const result of results) {
-          if (result.status === "fulfilled") photos.push(...result.value.photos);
+          if (result.status === "fulfilled") absorb(result.value.photos);
           else partial = true;
         }
+        publish(false);
       }
-
-      // Independently-fetched pages can overlap, so the concatenation can carry the same photo twice.
-      // Duplicate ids break every consumer that keys on id — the viewer's FlatList keyExtractor most
-      // visibly, where a duplicate key renders a blank page. Keep first occurrence, preserving order.
-      const seen = new Set<string>();
-      const deduped = photos.filter((photo) => {
-        if (seen.has(photo.id)) return false;
-        seen.add(photo.id);
-        return true;
-      });
 
       // Enforce the guarantee the comment above only claimed. `partial` previously caught a rejected page
       // and the page cap, but not the case where the walk simply came back with fewer photos than the
@@ -203,18 +262,9 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
       // server counted, so this shortfall check would otherwise fire every time and re-conflate the two
       // states it was just separated from.
       const reportedTotal = first.pagination?.total;
-      if (!truncated && typeof reportedTotal === "number" && deduped.length < reportedTotal) partial = true;
+      if (!truncated && typeof reportedTotal === "number" && photos.length < reportedTotal) partial = true;
 
-      return {
-        photos: deduped,
-        pagination: first.pagination,
-        partial,
-        truncated,
-        windowed: hasWindow(window),
-        // The project's earliest photo IN THIS WINDOW — so it is the true earliest only on the
-        // unwindowed load, which is exactly when the month list needs to be built.
-        oldestAt: first.pagination?.oldestAt ?? null,
-      };
+      return snapshot(true);
     },
     enabled: !!user && !!dealId,
   });

@@ -98,6 +98,7 @@ export function PhotoViewerModal({
   projectDealId,
   photoWindow,
   photoTimeZone,
+  onCurrentPhotoChange,
 }: {
   photos: FieldPhoto[];
   initialIndex: number;
@@ -126,10 +127,22 @@ export function PhotoViewerModal({
    * leaving retry and Save permanently unable to re-mint a boundary photo's URL.
    */
   photoTimeZone?: string;
+  /**
+   * Fired with the id of the photo currently on screen, whenever it changes.
+   *
+   * The parent needs it because swipes are tracked in this modal's own state: when the gallery's page
+   * walk completes and the parent re-anchors the viewer onto the finished set, anchoring on the index it
+   * OPENED at would scroll the user back to where they started, discarding however far they had paged.
+   */
+  onCurrentPhotoChange?: (photoId: string) => void;
 }) {
   const { width, height } = useWindowDimensions();
   const { fetcher } = useAuth();
   const [index, setIndex] = useState(initialIndex);
+  const currentPhotoId = photos[index]?.id;
+  useEffect(() => {
+    if (currentPhotoId) onCurrentPhotoChange?.(currentPhotoId);
+  }, [currentPhotoId, onCurrentPhotoChange]);
   // When a photo is zoomed we disable the pager so a one-finger pan moves the image instead of paging.
   const [zoomed, setZoomed] = useState(false);
   const [editingOpen, setEditingOpen] = useState(false);
