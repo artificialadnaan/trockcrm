@@ -127,8 +127,16 @@ export async function listCompanies(
   // Deliberately NOT restricted to active deals, unlike companyPipelineSql: a company whose only deal was
   // lost years ago HAS been worked, and listing it as untouched would be the over-warning that trains
   // people to ignore the card.
+  //
+  // BOUNDED TO 90 DAYS, and that bound is the difference between a signal and noise. Unbounded this
+  // counts 559 of 782 accounts, because the 2026-05-07 HubSpot import brought in hundreds that were
+  // never worked and never will be. Measured on production: 559 all-time, 559 at 180d, 12 at 90d, 3 at
+  // 30d — 547 of them landed in one import batch, so 90 days excludes it cleanly and leaves exactly the
+  // accounts somebody started this quarter and did not finish. A card reading 559 is the over-warning
+  // that trains people to ignore it.
   const companyNoOpportunitySql = sql<boolean>`(
-    NOT EXISTS (SELECT 1 FROM ${deals} WHERE ${deals.companyId} = ${companies.id})
+    ${companies.createdAt} >= NOW() - interval '90 days'
+    AND NOT EXISTS (SELECT 1 FROM ${deals} WHERE ${deals.companyId} = ${companies.id})
     AND NOT EXISTS (SELECT 1 FROM ${leads} WHERE ${leads.companyId} = ${companies.id})
   )`;
 

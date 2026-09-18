@@ -232,7 +232,9 @@ describe("CompanyListPage", () => {
       // ?card= REPLACES rather than composes — the other drills must stay off.
       expect(lastCall?.hasActivePipeline).toBeUndefined();
       expect(lastCall?.stale).toBeUndefined();
-      expect(container.textContent).toContain("Filtered: No opportunity yet");
+      // The WINDOW is on screen, not just the phrase. Unbounded this counted 559 of 782 accounts
+      // (the 2026-05-07 import), so a reader has to be able to see that it means "recent".
+      expect(container.textContent).toContain("Filtered: No opportunity yet (90d)");
       // The card renders the server aggregate, not the page length — the list here is empty.
       expect(container.textContent).toContain("12");
       expect(container.querySelectorAll(".ring-brand-red").length).toBe(1);
