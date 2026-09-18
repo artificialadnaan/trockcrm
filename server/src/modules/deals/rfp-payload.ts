@@ -223,6 +223,38 @@ function cleanString(value: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+/**
+ * Normalize a client email for the SyncHub contract, or drop it.
+ *
+ * `clientEmail` is OPTIONAL — it is in SACRIFICIAL_DEAL_FIELDS, and 273 RFPs have delivered with it
+ * absent. What SyncHub will NOT accept is a value that is present but unparseable: it 422s the whole
+ * request, so one bad character in an optional passenger field kills the delivery outright. That is
+ * exactly what happened on 2026-09-10 — a contact email pasted as
+ * `mailto:bellavidapm@bellairemultifamily.com` sank six Bella Vida RFPs through 8 retries each, and
+ * they sat in send_failed for eight days.
+ *
+ * So: recover an address when we confidently can (a pasted `mailto:` link, an RFC-5322-style
+ * `Name <addr>` from a mail client, a trailing list comma), and otherwise send NULL. Degrading to
+ * "no email" is a state proven to work hundreds of times; forwarding a guess is not. This deliberately
+ * does NOT try to repair the address itself — a typo'd domain is the user's to fix, and silently
+ * "correcting" one would be worse than omitting it.
+ */
+function cleanEmail(value: unknown): string | null {
+  let text = cleanString(value);
+  if (text === null) return null;
+  // `Name <addr@host>` / `<addr@host>` — mail clients and copy-paste both produce these.
+  const angled = text.match(/<([^<>]+)>\s*$/);
+  if (angled?.[1]) text = angled[1].trim();
+  // A pasted link target, any case, with or without space after the scheme.
+  text = text.replace(/^\s*mailto:\s*/i, "").trim();
+  // A single trailing separator from a copied recipient list.
+  text = text.replace(/[,;]+$/, "").trim();
+  // Conservative shape check: one @, non-empty both sides, a dotted TLD, no whitespace. Anything that
+  // does not clear this bar is omitted rather than forwarded for SyncHub to reject.
+  const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@.]+$/.test(text);
+  return looksLikeEmail ? text : null;
+}
+
 function cleanNumber(value: unknown): number | null {
   if (value == null || value === "") return null;
   const parsed = Number(value);
@@ -515,7 +547,7 @@ export function capRfpRequestBody(
  */
 export function withRfpRequestBodyIdentity(
   body: NormalizedRfpRequestBody,
-  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId">
+  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId"> & { clientEmail?: string | null }
 ): NormalizedRfpRequestBody {
   // Same tolerance for a partial stored record as capRfpRequestBody, and the same cleanString the
   // builder uses — so a retried body states an absent id exactly the way a first-attempt body does
@@ -527,6 +559,13 @@ export function withRfpRequestBodyIdentity(
       ...storedDeal,
       companyId: cleanString(deal.companyId),
       propertyId: cleanString(deal.propertyId),
+      // The retry spreads the DEAD job's body, so whatever client email killed the first attempt is
+      // re-sent verbatim unless it is re-resolved here. Six RFPs died 422 on a `mailto:`-prefixed
+      // address; correcting the contact record alone would NOT have rescued them, because the retry
+      // never rebuilds this field from the deal. Prefer the deal's CURRENT contact email (so a fix to
+      // the contact actually takes effect on retry), fall back to what was stored, and normalize
+      // either way — a value we cannot vouch for goes as null rather than sinking the delivery again.
+      clientEmail: cleanEmail(deal.clientEmail ?? storedDeal?.clientEmail ?? null),
     },
   };
 }
@@ -574,7 +613,7 @@ export function buildNormalizedRfpRequestBody(input: {
       scopeTitle: cleanString(deal.scopeTitle),
       companyName: cleanString(deal.companyName),
       contactName: cleanString(deal.contactName),
-      clientEmail: cleanString(deal.clientEmail),
+      clientEmail: cleanEmail(deal.clientEmail),
       clientPhone: cleanString(deal.clientPhone),
       address: buildAddress(deal),
       description: cleanString(deal.description)

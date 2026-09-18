@@ -419,3 +419,44 @@ describe("runRfpRequestDeadLetterSweep", () => {
     errorSpy.mockRestore();
   });
 });
+
+// Production, 2026-09-10: six RFPs died on a 422 whose recorded error was the bare statusText,
+// "Unprocessable Entity". SyncHub HAD rejected them for a specific reason (a `mailto:`-prefixed client
+// email) but returned it under a key this handler did not read, so the deal recorded a message that told
+// nobody anything and the cause took eight days to find. Whatever SyncHub says, say it.
+describe("rfp_request_delivery — surfacing SyncHub's rejection reason", () => {
+  it.each([
+    ["error", { error: "clientEmail must be a valid email" }],
+    ["message", { message: "clientEmail must be a valid email" }],
+    ["detail", { detail: "clientEmail must be a valid email" }],
+    ["errors[]", { errors: ["clientEmail must be a valid email"] }],
+    ["zod issues[]", { issues: [{ path: ["deal", "clientEmail"], message: "clientEmail must be a valid email" }] }],
+  ])("reports the reason carried under %s", async (_label, body) => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 422 }));
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/clientEmail must be a valid email/);
+  });
+
+  it("falls back to the raw body when SyncHub uses a key we do not know", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ unexpectedKey: "clientEmail is not an email" }), { status: 422 })
+    );
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/clientEmail is not an email/);
+  });
+
+  it("still names the status when SyncHub sends no body at all", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(async () => new Response("", { status: 422 }));
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/RFP delivery failed with 422/);
+  });
+});

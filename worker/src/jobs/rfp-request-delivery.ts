@@ -149,6 +149,45 @@ async function updateDealConflict(
   );
 }
 
+/**
+ * Pull the human reason out of a SyncHub rejection, whatever shape it arrives in.
+ *
+ * This used to read `error ?? message ?? statusText`. On 2026-09-10 six RFPs were rejected 422 for a
+ * specific, fixable reason — a `mailto:`-prefixed client email — and SyncHub returned it under none of
+ * those two keys, so every deal recorded the bare statusText "Unprocessable Entity". The rep saw a
+ * message that named no field and suggested no action, and the cause took eight days to find. A
+ * validation reason the other service took the trouble to send must never be dropped on the floor.
+ *
+ * Falls back to the raw body (truncated) rather than the statusText, because an unknown key carrying
+ * the answer is far more useful than a generic phrase that carries none.
+ */
+function describeRejection(body: Record<string, any>, response: Response): string {
+  const firstString = (value: unknown): string | null => {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const nested = firstString(typeof entry === "object" && entry !== null ? (entry as any).message : entry);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  };
+
+  for (const key of ["error", "message", "detail", "details", "errors", "issues", "raw"]) {
+    const reason = firstString(body?.[key]);
+    if (reason) return reason;
+  }
+
+  // Nothing recognisable — ship the body itself before resorting to the statusText.
+  try {
+    const serialized = JSON.stringify(body);
+    if (serialized && serialized !== "{}") return serialized.slice(0, 500);
+  } catch {
+    /* fall through to statusText */
+  }
+  return response.statusText;
+}
+
 async function parseResponseBody(response: Response): Promise<Record<string, any>> {
   const text = await response.text();
   if (!text) return {};
@@ -283,7 +322,7 @@ export async function handleRfpRequestDelivery(
   }
 
   throw new Error(
-    `RFP delivery failed with ${response.status}: ${responseBody.error ?? responseBody.message ?? response.statusText}`
+    `RFP delivery failed with ${response.status}: ${describeRejection(responseBody, response)}`
   );
 }
 

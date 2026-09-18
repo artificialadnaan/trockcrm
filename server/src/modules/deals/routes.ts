@@ -1848,6 +1848,12 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
     // A dead job has exhausted all auto-retries, so a manual retry can land
     // well past the attachments' presigned-URL TTL. Re-mint the URLs here (the
     // retry is effectively a re-enqueue) so the job doesn't carry dead links.
+    // The retry spreads the DEAD job's body, so its client email is whatever was frozen at the failed
+    // attempt. Re-read the deal's primary contact so a CORRECTED contact actually takes effect on retry
+    // (a mailto:-prefixed address sank six RFPs; fixing the contact alone would not have rescued them).
+    const primaryContact = deal.primaryContactId
+      ? await getContactById(req.tenantDb!, deal.primaryContactId)
+      : null;
     const freshAttachments = await loadRfpAttachmentsForDeal(req.tenantDb!, deal.id, {
       userId: req.user!.id,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
@@ -1871,7 +1877,9 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
             ...(deadJob.payload.body as unknown as NormalizedRfpRequestBody),
             attachments: freshAttachments,
           },
-          deal
+          // Pass the deal's CURRENT primary-contact email so a corrected contact actually takes
+          // effect on retry — the stored body's copy is whatever was frozen at the failed attempt.
+          { ...deal, clientEmail: primaryContact?.email ?? null }
         )
       ) as unknown as Record<string, unknown>,
     };

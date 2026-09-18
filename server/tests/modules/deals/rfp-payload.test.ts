@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildNormalizedRfpRequestBody,
+  withRfpRequestBodyIdentity,
   buildRfpAttachmentsFromFiles,
   buildRfpRequestDeliveryPayload,
   resolveRfpDealAmount,
@@ -377,5 +378,81 @@ describe("resolveRfpDealAmount", () => {
     expect(buildNormalizedRfpRequestBody({ deal, sourceEventId: "e" }).deal.amount).toBe(
       resolveRfpDealAmount(deal)
     );
+  });
+});
+
+describe("RFP client email — a present-but-invalid address must not sink the delivery", () => {
+  // Production, 2026-09-10: six Bella Vida RFPs died on `mailto:bellavidapm@bellairemultifamily.com`
+  // pasted into a contact record. SyncHub 422s a malformed address, the worker burned 8 retries, and
+  // the deals sat in send_failed for 8 days. The field is OPTIONAL — 273 RFPs have delivered with it
+  // absent — so a value we cannot vouch for must degrade to null, never be forwarded as-is.
+
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "deal-1", name: "Bella Vida", projectType: "service", clientEmail },
+      sourceEventId: "crm:event-1",
+    }).deal.clientEmail;
+
+  it("strips a mailto: prefix pasted from a web page or mail client", () => {
+    expect(build("mailto:bellavidapm@bellairemultifamily.com")).toBe("bellavidapm@bellairemultifamily.com");
+  });
+
+  it.each([
+    ["MAILTO:Casey@Example.com", "Casey@Example.com"],
+    ["  mailto:casey@example.com  ", "casey@example.com"],
+    ["<casey@example.com>", "casey@example.com"],
+    ["Casey Jones <casey@example.com>", "casey@example.com"],
+    ["casey@example.com,", "casey@example.com"],
+  ])("recovers the address from %j", (input, expected) => {
+    expect(build(input)).toBe(expected);
+  });
+
+  it("passes a clean address through untouched", () => {
+    expect(build("casey@example.com")).toBe("casey@example.com");
+  });
+
+  it.each(["not-an-email", "mailto:", "@example.com", "casey@", "   "])(
+    "drops %j to null rather than forwarding something SyncHub will reject",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  it("leaves an absent email absent", () => {
+    expect(build(null)).toBeNull();
+    expect(build(undefined)).toBeNull();
+  });
+});
+
+describe("RFP retry — a rescued body must not re-send the value that killed it", () => {
+  // The retry path does NOT rebuild the payload: it spreads the DEAD job's stored body and re-resolves
+  // only identity. So the six Bella Vida RFPs would have re-sent `mailto:...` and 422'd again even after
+  // the contact record was corrected. Re-derive the email from the deal, and normalize either way.
+
+  const rescue = (storedEmail: string | null, dealEmail?: string | null) =>
+    withRfpRequestBodyIdentity(
+      { deal: { clientEmail: storedEmail } } as any,
+      { companyId: "c1", propertyId: "p1", ...(dealEmail === undefined ? {} : { clientEmail: dealEmail }) } as any
+    ).deal.clientEmail;
+
+  it("takes the deal's CURRENT contact email over the one frozen in the dead payload", () => {
+    expect(rescue("mailto:old@example.com", "corrected@example.com")).toBe("corrected@example.com");
+  });
+
+  it("normalizes a stored mailto: when the caller supplies no current email", () => {
+    expect(rescue("mailto:bellavidapm@bellairemultifamily.com")).toBe("bellavidapm@bellairemultifamily.com");
+  });
+
+  it("drops an unrecoverable stored value rather than re-sending it", () => {
+    expect(rescue("not-an-email")).toBeNull();
+  });
+
+  it("still re-resolves the identity ids it always did", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: null } } as any,
+      { companyId: "company-9", propertyId: "property-9" } as any
+    );
+    expect(body.deal.companyId).toBe("company-9");
+    expect(body.deal.propertyId).toBe("property-9");
   });
 });
