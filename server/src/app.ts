@@ -110,7 +110,7 @@ function isTokenizedSpaPath(pathname: string): boolean {
   return TOKENIZED_SPA_PATTERNS.some((pattern) => pattern.test(pathname));
 }
 
-export function createApp() {
+export function createApp(options: { clientDist?: string } = {}) {
   const app = express();
 
   app.use(helmet(getSecurityOptions(process.env)));
@@ -352,7 +352,7 @@ export function createApp() {
 
   // Serve frontend static files in production
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const clientDist = join(__dirname, "../../client/dist");
+  const clientDist = options.clientDist ?? join(__dirname, "../../client/dist");
   if (existsSync(clientDist)) {
     app.use(express.static(clientDist));
     // SPA fallback — serve index.html for non-API routes
@@ -363,7 +363,9 @@ export function createApp() {
       if (isTokenizedSpaPath(req.path)) {
         res.setHeader("Referrer-Policy", "no-referrer");
       }
-      res.sendFile(join(clientDist, "index.html"));
+      // Keep the filename relative to an explicit root. Passing the absolute path makes Express's
+      // dotfile guard reject otherwise-valid checkouts beneath a hidden directory such as `.claude`.
+      res.sendFile("index.html", { root: clientDist });
     });
   }
 
