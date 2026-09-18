@@ -1,9 +1,9 @@
 import express, { type Express } from "express";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import helmet from "helmet";
+import { tmpdir } from "os";
 import { join } from "path";
 import request from "supertest";
-import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.js";
 import { getSecurityOptions } from "../../src/middleware/security.js";
@@ -45,31 +45,20 @@ describe("security Referrer-Policy", () => {
 // fallback never reaches would 404 and STILL carry helmet's global header — so the "ordinary route
 // keeps strict-origin-when-cross-origin" cases would pass against an app that serves nothing at all.
 describe("Referrer-Policy on tokenized SPA documents", () => {
-  // app.ts resolves the SPA from `<repo>/client/dist` and only registers the fallback when that
-  // directory exists — which in a test checkout it usually does not. Stub the minimum that makes the
-  // real handler run, and put back exactly what we found: CI may have a genuine client build here.
-  const clientDist = fileURLToPath(new URL("../../../client/dist", import.meta.url));
+  // Keep this fixture beneath a dot-prefixed directory. Express rejects an absolute sendFile path with
+  // a hidden ancestor, which is the shape used by isolated `.claude/worktrees` clean checkouts.
+  const clientDist = mkdtempSync(join(tmpdir(), ".trockcrm-spa-"));
   const clientIndex = join(clientDist, "index.html");
-  let createdDist = false;
-  let createdIndex = false;
   let app: Express;
 
   beforeAll(() => {
-    if (!existsSync(clientDist)) {
-      mkdirSync(clientDist, { recursive: true });
-      createdDist = true;
-    }
-    if (!existsSync(clientIndex)) {
-      writeFileSync(clientIndex, "<!doctype html><title>spa stub</title>");
-      createdIndex = true;
-    }
+    writeFileSync(clientIndex, "<!doctype html><title>spa stub</title>");
     // Built AFTER the stub exists: the fallback is registered by an existsSync() check at createApp() time.
-    app = createApp();
+    app = createApp({ clientDist });
   });
 
   afterAll(() => {
-    if (createdIndex) rmSync(clientIndex, { force: true });
-    if (createdDist) rmSync(clientDist, { recursive: true, force: true });
+    rmSync(clientDist, { recursive: true, force: true });
   });
 
   it.each([

@@ -28,6 +28,40 @@ npm run db:generate     # Drizzle migration generate
 npm run db:migrate      # Apply migrations (tsx server/src/migrations/runner.ts)
 ```
 
+### Clean-checkout release verification
+
+Use Node.js 22. Install Poppler so `pdftoppm` is available to the PDF-thumbnail raster test (`brew install poppler` on macOS or `sudo apt-get install poppler-utils` on Ubuntu).
+
+The two native apps live outside the root npm workspace graph and have independent lockfiles. Install all three dependency trees from the repository root:
+
+```bash
+npm ci
+npm --prefix mobile ci
+npm --prefix mobile-crm ci
+```
+
+Run the complete release gate from the repository root:
+
+```bash
+# Root workspaces: production builds, test-inclusive typechecks, CI tests, and script tests
+npm run check:premerge
+
+# T-Rock Cam
+npm --prefix mobile run typecheck
+npm --prefix mobile test
+EXPO_PUBLIC_API_BASE_URL=https://api.ci.invalid npm --prefix mobile run build:export
+
+# T-Rock CRM mobile app
+npm --prefix mobile-crm run typecheck
+npm --prefix mobile-crm test
+EXPO_PUBLIC_API_BASE_URL=https://api.ci.invalid npm --prefix mobile-crm run build:export
+
+# Generated build output is ignored; tracked files should remain unchanged
+git status --short
+```
+
+This repository currently has no lint script or lint configuration, so there is no separate lint command in the release gate. The same checks run in `.github/workflows/premerge-build-gate.yml`.
+
 See `docs/superpowers/plans/` for active implementation plans.
 
 ### Call recording transcription env
