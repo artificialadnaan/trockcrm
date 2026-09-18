@@ -17,7 +17,8 @@ import { describe, it, expect } from "vitest";
 
 import { __auditTestables } from "../../../src/modules/bid-board-sync/service.js";
 
-const { sameAuditValue, onlyRealChanges, hasSubstantiveChange, AUDIT_NUMERIC_SCALES } = __auditTestables;
+const { sameAuditValue, onlyRealChanges, hasSubstantiveChange, AUDIT_NUMERIC_SCALES, roundDecimalStringLikePostgres } =
+  __auditTestables;
 
 describe("sameAuditValue — compares like the database, not like a string", () => {
   // REWRITTEN after review. The previous version of this test asserted the defect as correct, twice:
@@ -158,5 +159,64 @@ describe("hasSubstantiveChange — a heartbeat is not an edit", () => {
       bidBoardProfitMarginPct: { from: "39.0000", to: "39" },
     });
     expect(hasSubstantiveChange(changes)).toBe(false);
+  });
+});
+
+/**
+ * Rounding has to match the DATABASE, not IEEE-754. Every expectation below was read off production
+ * Postgres (`select '<v>'::numeric(14,2)`), not reasoned about — and four of the six sampled values
+ * disagree with `Number(v).toFixed(2)`, which is what this code used to do.
+ */
+describe("roundDecimalStringLikePostgres — rounds like numeric, not like a float", () => {
+  // value, scale, what Postgres stores, what Number.toFixed would have said
+  const CASES: Array<[string, number, string, string | null]> = [
+    ["1.005", 2, "1.01", "1.00"],
+    ["-1.005", 2, "-1.01", "-1.00"],
+    ["1.015", 2, "1.02", "1.01"],
+    ["2.675", 2, "2.68", "2.67"],
+    ["737.704918", 2, "737.70", "737.70"],
+    ["0.0049", 2, "0.00", "0.00"],
+    ["39.0000", 4, "39.0000", null],
+    ["0", 2, "0.00", null],
+    ["9.999", 2, "10.00", null],
+    ["999.995", 2, "1000.00", null],
+  ];
+
+  it.each(CASES)("%s at scale %i stores as %s", (value, scale, stored) => {
+    expect(roundDecimalStringLikePostgres(value, scale)).toBe(stored);
+  });
+
+  it("disagrees with Number.toFixed exactly where Postgres does", () => {
+    const divergent = CASES.filter(([, , stored, viaFloat]) => viaFloat != null && viaFloat !== stored);
+    expect(divergent.length).toBeGreaterThan(0);
+    for (const [value, scale, stored, viaFloat] of divergent) {
+      expect(Number(value).toFixed(scale)).toBe(viaFloat);      // what the old code did
+      expect(roundDecimalStringLikePostgres(value, scale)).toBe(stored); // what the database does
+    }
+  });
+
+  it("never reports -0 as different from 0", () => {
+    expect(roundDecimalStringLikePostgres("-0.001", 2)).toBe("0.00");
+    expect(sameAuditValue("0.00", "-0.001", 2)).toBe(true);
+  });
+
+  it("returns null for anything that is not a plain decimal, so exact comparison takes over", () => {
+    expect(roundDecimalStringLikePostgres("abc", 2)).toBeNull();
+    expect(roundDecimalStringLikePostgres("1e5", 2)).toBeNull();
+    expect(roundDecimalStringLikePostgres("", 2)).toBeNull();
+  });
+
+  it("carries the boundary case into sameAuditValue, in both directions", () => {
+    // Stored 1.00, export sends 1.005 -> Postgres would store 1.01. That IS a change, and rounding
+    // through a float hid it — which, with the heartbeat gate, silently dropped the whole audit row.
+    expect(sameAuditValue("1.00", "1.005", 2)).toBe(false);
+    // ...and the inverse must not manufacture one.
+    expect(sameAuditValue("1.01", "1.005", 2)).toBe(true);
+  });
+
+  it("does not lose precision on large values the way a float would", () => {
+    expect(roundDecimalStringLikePostgres("99999999999.995", 2)).toBe("100000000000.00");
+    expect(sameAuditValue("12345678901.23", "12345678901.234", 2)).toBe(true);
+    expect(sameAuditValue("12345678901.23", "12345678901.235", 2)).toBe(false);
   });
 });

@@ -11,16 +11,30 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * production code reads the returned ROW, so an empty `rows` means "matched nothing". Defaults describe
  * the common cycle — already owned, already stamped, nothing moved.
  */
+const STAGE_ENTERED_AT = "2026-09-01T00:00:00.000Z";
+
 function stageMetadataRow(overrides: Record<string, unknown> = {}) {
-  const enteredAt = "2026-09-01T00:00:00.000Z";
   return {
     id: "deal-123",
-    prev_is_bid_board_owned: true,
-    next_is_bid_board_owned: true,
-    prev_bid_board_stage_entered_at: enteredAt,
-    next_bid_board_stage_entered_at: enteredAt,
+    is_bid_board_owned: true,
+    bid_board_stage_entered_at: STAGE_ENTERED_AT,
     ...overrides,
   };
+}
+
+/**
+ * The pre-image the refresh now reads under `FOR UPDATE` before it writes. It is a SEPARATE statement
+ * (not a CTE) precisely so the row it reports is the one the UPDATE locks — a plain sibling read keeps the
+ * statement's older snapshot and would misattribute a concurrent writer's ownership flip to this refresh.
+ * Defaults describe the ordinary cycle: already owned, already stamped.
+ */
+function stagePreImageRow(overrides: Record<string, unknown> = {}) {
+  return { is_bid_board_owned: true, bid_board_stage_entered_at: STAGE_ENTERED_AT, ...overrides };
+}
+
+/** Matches the locked pre-image read so a mock can answer it without a bespoke branch each time. */
+function isStagePreImageRead(normalizedSql: string): boolean {
+  return normalizedSql.includes("for update") && normalizedSql.includes("is_bid_board_owned");
 }
 
 const query = vi.fn();
@@ -404,6 +418,7 @@ describe("Bid Board sync stage writeback", () => {
           rowCount: 1,
         };
       }
+      if (isStagePreImageRead(normalizedSql)) return { rows: [stagePreImageRow()], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         expect(normalizedSql).not.toContain("stage_id = $1");
         expect(normalizedSql).not.toContain("on_hold_started_at");
@@ -770,6 +785,7 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("from public.pipeline_stage_config")) {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
       }
+      if (isStagePreImageRead(normalizedSql)) return { rows: [stagePreImageRow()], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         return { rows: [stageMetadataRow()], rowCount: 1 };
       }
@@ -847,6 +863,7 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("from public.pipeline_stage_config")) {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
       }
+      if (isStagePreImageRead(normalizedSql)) return { rows: [stagePreImageRow()], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         return { rows: [stageMetadataRow()], rowCount: 1 };
       }

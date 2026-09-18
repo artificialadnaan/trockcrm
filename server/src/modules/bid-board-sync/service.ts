@@ -232,6 +232,56 @@ const AUDIT_NUMERIC_SCALES: Record<string, number> = {
   bidBoardTotalSales: 2,
 };
 
+/**
+ * Round a DECIMAL STRING the way Postgres rounds `numeric`: half away from zero, on the decimal value.
+ *
+ * Deliberately never touches `Number`. IEEE-754 does not hold these values exactly, so rounding the
+ * binary64 approximation disagrees with the database on any half-way input — verified against production
+ * rather than reasoned about:
+ *
+ *   value        numeric(14,2)   (v).toFixed(2)
+ *   1.005        1.01            1.00      <- disagree
+ *   -1.005       -1.01           -1.00     <- disagree
+ *   1.015        1.02            1.01      <- disagree
+ *   2.675        2.68            2.67      <- disagree
+ *
+ * Four of six sampled values diverged. Getting this wrong is not cosmetic in either direction: rounding
+ * DOWN when the database rounds up hides a real numeric edit (and, with the heartbeat gate, suppresses
+ * the entire audit row for that cycle), while the inverse manufactures a change that recurs every sync.
+ *
+ * Returns null for anything that is not a plain decimal, so the caller falls back to exact comparison.
+ */
+function roundDecimalStringLikePostgres(raw: string, scale: number): string | null {
+  const match = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(raw);
+  if (!match) return null;
+  const [, sign, intPart = "", fracPart = ""] = match;
+  if (intPart === "" && fracPart === "") return null;
+
+  const digits = (intPart || "0") + fracPart.slice(0, scale).padEnd(scale, "0");
+  let rounded = digits;
+
+  if (fracPart.length > scale && fracPart.charCodeAt(scale) - 48 >= 5) {
+    // Increment the digit string by one, right to left — string math, so precision does not decay with
+    // magnitude the way it would through a float.
+    const out = rounded.split("");
+    let i = out.length - 1;
+    for (; i >= 0; i -= 1) {
+      if (out[i] === "9") { out[i] = "0"; continue; }
+      out[i] = String(Number(out[i]) + 1);
+      break;
+    }
+    rounded = (i < 0 ? "1" : "") + out.join("");
+  }
+
+  const padded = rounded.padStart(scale + 1, "0");
+  const whole = padded.slice(0, padded.length - scale).replace(/^0+(?=\d)/, "");
+  const frac = scale > 0 ? padded.slice(padded.length - scale) : "";
+  const magnitude = scale > 0 ? `${whole}.${frac}` : whole;
+  // -0.00 and 0.00 are the same stored value; never let the sign alone report a change.
+  const isZero = /^0(\.0*)?$/.test(magnitude);
+  return `${isZero ? "" : sign === "-" ? "-" : ""}${magnitude}`;
+}
+
 function sameAuditValue(from: unknown, to: unknown, numericScale?: number): boolean {
   const blank = (v: unknown) => v === null || v === undefined || v === "";
   if (blank(from) && blank(to)) return true;
@@ -249,9 +299,9 @@ function sameAuditValue(from: unknown, to: unknown, numericScale?: number): bool
   // Numeric comparison is opt-in PER FIELD, and happens at the column's own scale so the comparison
   // asks the only question that matters: "would Postgres store a different value?"
   if (numericScale != null) {
-    const fn = Number(fs);
-    const tn = Number(ts);
-    if (Number.isFinite(fn) && Number.isFinite(tn)) return fn.toFixed(numericScale) === tn.toFixed(numericScale);
+    const fr = roundDecimalStringLikePostgres(fs, numericScale);
+    const tr = roundDecimalStringLikePostgres(ts, numericScale);
+    if (fr != null && tr != null) return fr === tr;
   }
 
   return fs === ts;
@@ -288,7 +338,7 @@ function hasSubstantiveChange(changes: Record<string, { from: unknown; to: unkno
  * Internal seam for the audit-suppression tests. These two are pure and carry the whole judgement about
  * what counts as a change, so they are worth asserting directly rather than through a sync run.
  */
-export const __auditTestables = { sameAuditValue, onlyRealChanges, hasSubstantiveChange, AUDIT_NUMERIC_SCALES };
+export const __auditTestables = { sameAuditValue, onlyRealChanges, hasSubstantiveChange, AUDIT_NUMERIC_SCALES, roundDecimalStringLikePostgres };
 
 
 function textValue(value: unknown): string | null {
@@ -924,44 +974,42 @@ async function updateBidBoardStageMetadata(
   row: NormalizedBidBoardRow
 ): Promise<boolean> {
   const status = row.bidBoardStatus ?? targetStageSlug;
-  // The pre-image comes from a CTE in the SAME statement, so it is the snapshot the UPDATE itself acted
-  // on — no second round-trip and no window for another writer to change the answer between them.
+  // LOCK FIRST, THEN READ. The pre-image used to come from a plain `prev` CTE in the same statement, and
+  // Codex was right that this is not the row the UPDATE acts on: under READ COMMITTED the CTE keeps the
+  // statement's original MVCC snapshot, while the UPDATE, on finding a concurrently-updated tuple, waits
+  // and then re-evaluates against the NEWLY COMMITTED version. A SyncHub linkage write landing in that
+  // window would have had its `false -> true` ownership flip attributed to this refresh, which merely
+  // preserved it.
   //
-  // It exists because three of this UPDATE's columns were invisible to the audit decision:
-  // `is_bid_board_owned` and `bid_board_stage_entered_at` are written here but were never compared, so a
-  // cycle that ADOPTED a previously unowned deal (false -> true) recorded nothing at all once the
-  // no-op filter was added. That is a substantive ownership change and the loudest thing this function
-  // ever does.
+  // `FOR UPDATE` closes the window: it blocks on the other writer, returns the version that writer left
+  // behind, and holds the lock — so the UPDATE below acts on exactly the row this read returned. The whole
+  // ingest already runs inside one BEGIN/COMMIT, so the lock is held for the rest of the run rather than
+  // released immediately.
+  const prevResult = await client.query(
+    `SELECT is_bid_board_owned, bid_board_stage_entered_at
+       FROM ${schemaName}.deals
+      WHERE id = $1
+      FOR UPDATE`,
+    [deal.id]
+  );
+  const prevRow = prevResult.rows?.[0];
+
   const result = await client.query(
-    `WITH prev AS (
-       SELECT id, is_bid_board_owned, bid_board_stage_entered_at
-         FROM ${schemaName}.deals
-        WHERE id = $1
-     ),
-     upd AS (
-       UPDATE ${schemaName}.deals
-          SET is_bid_board_owned = true,
-              bid_board_stage_slug = $2::text,
-              bid_board_stage_family = $3::text,
-              bid_board_stage_status = $4::text,
-              bid_board_stage_entered_at = COALESCE(bid_board_stage_entered_at, NOW()),
-              read_only_synced_at = NOW(),
-              updated_at = NOW()
-        WHERE id = $1
-          AND stage_id = $5
-          -- This is the easy one to miss: it fires on a cycle where the CRM stage ALREADY equals the
-          -- mapped Bid Board stage, and it re-asserts is_bid_board_owned = true. Without the predicate a
-          -- detached deal that happens to sit at the mapped stage would be silently re-owned.
-          AND bid_board_detached_at IS NULL
-        RETURNING id, is_bid_board_owned, bid_board_stage_entered_at
-     )
-     SELECT upd.id,
-            prev.is_bid_board_owned      AS prev_is_bid_board_owned,
-            upd.is_bid_board_owned       AS next_is_bid_board_owned,
-            prev.bid_board_stage_entered_at AS prev_bid_board_stage_entered_at,
-            upd.bid_board_stage_entered_at  AS next_bid_board_stage_entered_at
-       FROM upd
-       JOIN prev ON prev.id = upd.id`,
+    `UPDATE ${schemaName}.deals
+        SET is_bid_board_owned = true,
+            bid_board_stage_slug = $2::text,
+            bid_board_stage_family = $3::text,
+            bid_board_stage_status = $4::text,
+            bid_board_stage_entered_at = COALESCE(bid_board_stage_entered_at, NOW()),
+            read_only_synced_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1
+        AND stage_id = $5
+        -- This is the easy one to miss: it fires on a cycle where the CRM stage ALREADY equals the
+        -- mapped Bid Board stage, and it re-asserts is_bid_board_owned = true. Without the predicate a
+        -- detached deal that happens to sit at the mapped stage would be silently re-owned.
+        AND bid_board_detached_at IS NULL
+      RETURNING id, is_bid_board_owned, bid_board_stage_entered_at`,
     [deal.id, targetStageSlug, stageFamilyForSlug(targetStageSlug), status, expectedStageId]
   );
   const updatedRow = result.rows?.[0];
@@ -984,12 +1032,12 @@ async function updateBidBoardStageMetadata(
         // DealMatch, and an adoption (false -> true) is exactly the case the no-op filter would
         // otherwise erase.
         isBidBoardOwned: {
-          from: updatedRow?.prev_is_bid_board_owned ?? null,
-          to: updatedRow?.next_is_bid_board_owned ?? null,
+          from: prevRow?.is_bid_board_owned ?? null,
+          to: updatedRow?.is_bid_board_owned ?? null,
         },
         bidBoardStageEnteredAt: {
-          from: updatedRow?.prev_bid_board_stage_entered_at ?? null,
-          to: updatedRow?.next_bid_board_stage_entered_at ?? null,
+          from: prevRow?.bid_board_stage_entered_at ?? null,
+          to: updatedRow?.bid_board_stage_entered_at ?? null,
         },
       }),
       { source: "stage_metadata_refresh" });
