@@ -5,12 +5,12 @@ import {
   RefreshCw,
   Clock,
   AlertTriangle,
-  XCircle,
   Flame,
   Inbox,
 } from "lucide-react";
 import { usePendingRfp, type PendingRfpDeal } from "@/hooks/use-deals";
 import { formatDealDisplayName } from "@/lib/deal-utils";
+import { pendingRfpPresentation, type PendingRfpTone } from "@/lib/pending-rfp-presentation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -40,20 +40,22 @@ function waitingTone(days: number | null, isStale: boolean): string {
 }
 
 type StatusMeta = { label: string; Icon: typeof Clock; chip: string };
+
+// Ring-outlined pill classes for this page. The LABEL and the TONE come from the shared map, which the
+// /deals board card reads too — so the two surfaces agree on what each status is called and which colour
+// family it belongs to, while each keeps the chip shape its own layout needs.
+const STATUS_CHIP: Record<PendingRfpTone, string> = {
+  sky: "bg-sky-50 text-sky-700 ring-sky-600/20",
+  rose: "bg-rose-50 text-rose-700 ring-rose-600/20",
+  amber: "bg-amber-50 text-amber-800 ring-amber-600/20",
+  red: "bg-red-50 text-red-700 ring-red-600/20",
+};
+
 function statusMeta(deal: PendingRfpDeal): StatusMeta {
-  if (deal.subState === "awaiting") {
-    return { label: "Awaiting approval", Icon: Clock, chip: "bg-sky-50 text-sky-700 ring-sky-600/20" };
-  }
-  switch (deal.rfpApprovalStatus) {
-    case "declined":
-      return { label: "Declined", Icon: XCircle, chip: "bg-rose-50 text-rose-700 ring-rose-600/20" };
-    case "conflict":
-      return { label: "Conflict", Icon: AlertTriangle, chip: "bg-amber-50 text-amber-800 ring-amber-600/20" };
-    case "send_failed":
-      return { label: "Send failed", Icon: AlertTriangle, chip: "bg-red-50 text-red-700 ring-red-600/20" };
-    default:
-      return { label: "Needs attention", Icon: AlertTriangle, chip: "bg-amber-50 text-amber-800 ring-amber-600/20" };
-  }
+  const presentation =
+    pendingRfpPresentation(deal.rfpApprovalStatus) ??
+    ({ label: "Needs attention", tone: "amber", Icon: AlertTriangle } as const);
+  return { label: presentation.label, Icon: presentation.Icon, chip: STATUS_CHIP[presentation.tone] };
 }
 
 const AVATAR_TONES = [

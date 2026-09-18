@@ -74,6 +74,7 @@ import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrder
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import {
   aliasedNotPendingRfpBucketCondition,
+  aliasedPendingRfpAttentionFirstSql,
   aliasedPendingRfpBucketCondition,
   getPendingRfpOpportunityStageIds,
 } from "./pending-rfp-service.js";
@@ -4518,7 +4519,14 @@ export async function getDealsForPipeline(
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
       .where(pendingWhere)
-      .orderBy(asc(deals.rfpApprovalRequestedAt), desc(deals.id))
+      // Attention (send_failed/declined/conflict) first, then oldest-first within each group. The slice
+      // below is CAPPED, so this ordering also decides which cards survive the cap — a deal that needs
+      // someone to act is never pushed out of the column by newer parked ones.
+      .orderBy(
+        desc(aliasedPendingRfpAttentionFirstSql("deals")),
+        asc(deals.rfpApprovalRequestedAt),
+        desc(deals.id)
+      )
       .limit(pipelineCardsPerStageLimit);
 
     const pendingHead = pendingRows[0] as
