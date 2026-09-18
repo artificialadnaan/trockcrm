@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildNormalizedRfpRequestBody,
+  withRfpRequestBodyIdentity,
   buildRfpAttachmentsFromFiles,
   buildRfpRequestDeliveryPayload,
   resolveRfpDealAmount,
@@ -377,5 +378,195 @@ describe("resolveRfpDealAmount", () => {
     expect(buildNormalizedRfpRequestBody({ deal, sourceEventId: "e" }).deal.amount).toBe(
       resolveRfpDealAmount(deal)
     );
+  });
+});
+
+describe("RFP client email — a present-but-invalid address must not sink the delivery", () => {
+  // Production, 2026-09-10: six Bella Vida RFPs died on `mailto:bellavidapm@bellairemultifamily.com`
+  // pasted into a contact record. SyncHub 422s a malformed address, the worker burned 8 retries, and
+  // the deals sat in send_failed for 8 days. The field is OPTIONAL — 273 RFPs have delivered with it
+  // absent — so a value we cannot vouch for must degrade to null, never be forwarded as-is.
+
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "deal-1", name: "Bella Vida", projectType: "service", clientEmail },
+      sourceEventId: "crm:event-1",
+    }).deal.clientEmail;
+
+  it("strips a mailto: prefix pasted from a web page or mail client", () => {
+    expect(build("mailto:bellavidapm@bellairemultifamily.com")).toBe("bellavidapm@bellairemultifamily.com");
+  });
+
+  it.each([
+    ["MAILTO:Casey@Example.com", "Casey@Example.com"],
+    ["  mailto:casey@example.com  ", "casey@example.com"],
+    ["<casey@example.com>", "casey@example.com"],
+    ["Casey Jones <casey@example.com>", "casey@example.com"],
+    ["casey@example.com,", "casey@example.com"],
+  ])("recovers the address from %j", (input, expected) => {
+    expect(build(input)).toBe(expected);
+  });
+
+  it("passes a clean address through untouched", () => {
+    expect(build("casey@example.com")).toBe("casey@example.com");
+  });
+
+  it.each(["not-an-email", "mailto:", "@example.com", "casey@", "   "])(
+    "drops %j to null rather than forwarding something SyncHub will reject",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  it("leaves an absent email absent", () => {
+    expect(build(null)).toBeNull();
+    expect(build(undefined)).toBeNull();
+  });
+});
+
+describe("RFP retry — a rescued body must not re-send the value that killed it", () => {
+  // The retry path does NOT rebuild the payload: it spreads the DEAD job's stored body and re-resolves
+  // only identity. So the six Bella Vida RFPs would have re-sent `mailto:...` and 422'd again even after
+  // the contact record was corrected. Re-derive the email from the deal, and normalize either way.
+
+  const rescue = (storedEmail: string | null, dealEmail?: string | null) =>
+    withRfpRequestBodyIdentity(
+      { deal: { clientEmail: storedEmail } } as any,
+      { companyId: "c1", propertyId: "p1", ...(dealEmail === undefined ? {} : { clientEmail: dealEmail }) } as any
+    ).deal.clientEmail;
+
+  it("takes the deal's CURRENT contact email over the one frozen in the dead payload", () => {
+    expect(rescue("mailto:old@example.com", "corrected@example.com")).toBe("corrected@example.com");
+  });
+
+  it("normalizes a stored mailto: when the caller supplies no current email", () => {
+    expect(rescue("mailto:bellavidapm@bellairemultifamily.com")).toBe("bellavidapm@bellairemultifamily.com");
+  });
+
+  it("drops an unrecoverable stored value rather than re-sending it", () => {
+    expect(rescue("not-an-email")).toBeNull();
+  });
+
+  it("still re-resolves the identity ids it always did", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: null } } as any,
+      { companyId: "company-9", propertyId: "property-9" } as any
+    );
+    expect(body.deal.companyId).toBe("company-9");
+    expect(body.deal.propertyId).toBe("property-9");
+  });
+});
+
+describe("RFP client email — Codex review findings on PR #1145", () => {
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "deal-1", name: "D", projectType: "service", clientEmail },
+      sourceEventId: "crm:e1",
+    }).deal.clientEmail;
+
+  // P1: the ORIGINAL bug was a pasted mailto link. Real ones carry query params, and stripping only the
+  // scheme leaves `casey@example.com?subject=RFP` — which the first permissive regex ACCEPTED, so the
+  // sanitizer would have forwarded an invalid mailbox and 422'd the RFP exactly as before.
+  it.each([
+    ["mailto:casey@example.com?subject=RFP", "casey@example.com"],
+    ["mailto:casey@example.com?subject=RFP&body=hello", "casey@example.com"],
+    ["mailto:casey@example.com#fragment", "casey@example.com"],
+  ])("drops mailto query/fragment parameters: %j", (input, expected) => {
+    expect(build(input)).toBe(expected);
+  });
+
+  it.each(["casey@example.com?subject=RFP", "casey@example.com#frag", "casey@exa mple.com"])(
+    "rejects %j outright rather than forwarding it",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  // P2: an explicit null from the caller means "this contact HAS no email" and is authoritative.
+  // Treating it as "not supplied" resurrects the stale address the retry is trying to escape.
+  it("treats an explicitly null current email as authoritative, not as absent", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "mailto:stale@old.example.com", contactName: "Old", clientPhone: "1" } } as any,
+      { companyId: "c1", propertyId: "p1", clientEmail: null } as any
+    );
+    expect(body.deal.clientEmail).toBeNull();
+  });
+
+  it("still falls back to the stored value when the caller supplies no clientEmail key at all", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "mailto:kept@example.com" } } as any,
+      { companyId: "c1", propertyId: "p1" } as any
+    );
+    expect(body.deal.clientEmail).toBe("kept@example.com");
+  });
+
+  // P2: refreshing only the email onto a stored body leaves the PREVIOUS contact's name and phone,
+  // shipping SyncHub a hybrid person.
+  it("refreshes name and phone with the email, never a hybrid contact record", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "old@example.com", contactName: "Old Person", clientPhone: "111" } } as any,
+      {
+        companyId: "c1",
+        propertyId: "p1",
+        clientEmail: "new@example.com",
+        contactName: "New Person",
+        clientPhone: "222",
+      } as any
+    );
+    expect(body.deal.clientEmail).toBe("new@example.com");
+    expect(body.deal.contactName).toBe("New Person");
+    expect(body.deal.clientPhone).toBe("222");
+  });
+
+  it("leaves the stored contact tuple alone when no current contact is supplied", () => {
+    const body = withRfpRequestBodyIdentity(
+      { deal: { clientEmail: "a@b.com", contactName: "Stored", clientPhone: "999" } } as any,
+      { companyId: "c1", propertyId: "p1" } as any
+    );
+    expect(body.deal.contactName).toBe("Stored");
+    expect(body.deal.clientPhone).toBe("999");
+  });
+});
+
+describe("RFP client email — Codex round 2", () => {
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "d", name: "D", projectType: "service", clientEmail },
+      sourceEventId: "crm:e1",
+    }).deal.clientEmail;
+
+  // Dots may only SEPARATE segments. A character-class local part accepted all of these, and standard
+  // validators reject them — so forwarding one reproduces the 422 this sanitizer exists to prevent.
+  it.each([".casey@example.com", "casey.@example.com", "casey..jones@example.com", "casey@example..com"])(
+    "rejects malformed dot placement: %j",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  it.each(["casey.jones@example.com", "casey@mail.example.co.uk", "o'brien+rfp@example.com"])(
+    "still accepts a legitimate address: %j",
+    (input) => {
+      expect(build(input)).toBe(input);
+    }
+  );
+});
+
+describe("RFP client email — Codex round 3 (domain labels)", () => {
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "d", name: "D", projectType: "service", clientEmail },
+      sourceEventId: "crm:e1",
+    }).deal.clientEmail;
+
+  it.each(["casey@-example.com", "casey@foo.-example.com", "casey@example-.com"])(
+    "rejects a hyphen at a domain-label boundary: %j",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  it("still accepts a hyphen INSIDE a label", () => {
+    expect(build("casey@my-host.example.com")).toBe("casey@my-host.example.com");
   });
 });

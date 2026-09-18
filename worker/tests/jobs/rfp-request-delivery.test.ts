@@ -419,3 +419,77 @@ describe("runRfpRequestDeadLetterSweep", () => {
     errorSpy.mockRestore();
   });
 });
+
+// Production, 2026-09-10: six RFPs died on a 422 whose recorded error was the bare statusText,
+// "Unprocessable Entity". SyncHub HAD rejected them for a specific reason (a `mailto:`-prefixed client
+// email) but returned it under a key this handler did not read, so the deal recorded a message that told
+// nobody anything and the cause took eight days to find. Whatever SyncHub says, say it.
+describe("rfp_request_delivery — surfacing SyncHub's rejection reason", () => {
+  it.each([
+    ["error", { error: "clientEmail must be a valid email" }],
+    ["message", { message: "clientEmail must be a valid email" }],
+    ["detail", { detail: "clientEmail must be a valid email" }],
+    ["errors[]", { errors: ["clientEmail must be a valid email"] }],
+    ["zod issues[]", { issues: [{ path: ["deal", "clientEmail"], message: "clientEmail must be a valid email" }] }],
+
+  ])("reports the reason carried under %s", async (_label, body) => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 422 }));
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/clientEmail must be a valid email/);
+  });
+
+  // The message alone names no field. The earlier fixture hid this by embedding "clientEmail" in its own
+  // message, so the extractor could drop the path and still pass — a self-confirming test.
+  it("keeps the field path when a zod issue message does not name the field", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ issues: [{ path: ["deal", "clientEmail"], message: "Invalid email" }] }), {
+          status: 422,
+        })
+    );
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/deal\.clientEmail: Invalid email/);
+  });
+
+  it("falls back to the raw body when SyncHub uses a key we do not know", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ unexpectedKey: "clientEmail is not an email" }), { status: 422 })
+    );
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/clientEmail is not an email/);
+  });
+
+  // parseResponseBody wraps a non-JSON response as { raw: <whole body> }. Unbounded, that lands in
+  // job_queue.last_error on every attempt and is copied into deals.rfp_last_attempt_error.
+  it("bounds a huge non-JSON error page instead of persisting it in full", async () => {
+    const db = makeDb();
+    const huge = "E".repeat(20_000);
+    const fetchImpl = vi.fn(async () => new Response(huge, { status: 422 }));
+
+    const err = await handleRfpRequestDelivery(makePayload(), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      secret: "secret",
+    }).catch((e: Error) => e);
+
+    expect((err as Error).message.length).toBeLessThan(700);
+  });
+
+  it("still names the status when SyncHub sends no body at all", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(async () => new Response("", { status: 422 }));
+
+    await expect(
+      handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" })
+    ).rejects.toThrow(/RFP delivery failed with 422/);
+  });
+});

@@ -149,6 +149,65 @@ async function updateDealConflict(
   );
 }
 
+/**
+ * Pull the human reason out of a SyncHub rejection, whatever shape it arrives in.
+ *
+ * This used to read `error ?? message ?? statusText`. On 2026-09-10 six RFPs were rejected 422 for a
+ * specific, fixable reason — a `mailto:`-prefixed client email — and SyncHub returned it under none of
+ * those two keys, so every deal recorded the bare statusText "Unprocessable Entity". The rep saw a
+ * message that named no field and suggested no action, and the cause took eight days to find. A
+ * validation reason the other service took the trouble to send must never be dropped on the floor.
+ *
+ * Falls back to the raw body (truncated) rather than the statusText, because an unknown key carrying
+ * the answer is far more useful than a generic phrase that carries none.
+ */
+const MAX_REJECTION_REASON_CHARS = 500;
+
+function describeRejection(body: Record<string, any>, response: Response): string {
+  // A validation issue's PATH is the actionable half — "Invalid email" names no field, which is the
+  // non-actionable diagnosis this function exists to end. Keep `deal.clientEmail: Invalid email`.
+  const describeIssue = (entry: unknown): string | null => {
+    if (typeof entry === "string" && entry.trim()) return entry.trim();
+    if (typeof entry !== "object" || entry === null) return null;
+    const issue = entry as { path?: unknown; message?: unknown };
+    const message = typeof issue.message === "string" ? issue.message.trim() : "";
+    if (!message) return null;
+    const path = Array.isArray(issue.path) ? issue.path.map((p) => String(p)).filter(Boolean).join(".") : "";
+    return path ? `${path}: ${message}` : message;
+  };
+
+  const firstString = (value: unknown): string | null => {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const nested = describeIssue(entry);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  };
+
+  // Bound EVERY path, not just the serialize fallback below. `parseResponseBody` wraps a non-JSON
+  // response as `{ raw: <whole body> }`, so a large proxy/error page would otherwise be persisted in
+  // full to job_queue.last_error on every attempt and copied into deals.rfp_last_attempt_error by the
+  // dead-letter sweep — unbounded writes and an error the UI cannot show. (Introduced by the `raw`
+  // fallback added here: stored RFP errors currently top out at 299 chars precisely because nothing
+  // reached for the raw body before.)
+  for (const key of ["error", "message", "detail", "details", "errors", "issues", "raw"]) {
+    const reason = firstString(body?.[key]);
+    if (reason) return reason.slice(0, MAX_REJECTION_REASON_CHARS);
+  }
+
+  // Nothing recognisable — ship the body itself before resorting to the statusText.
+  try {
+    const serialized = JSON.stringify(body);
+    if (serialized && serialized !== "{}") return serialized.slice(0, MAX_REJECTION_REASON_CHARS);
+  } catch {
+    /* fall through to statusText */
+  }
+  return response.statusText;
+}
+
 async function parseResponseBody(response: Response): Promise<Record<string, any>> {
   const text = await response.text();
   if (!text) return {};
@@ -283,7 +342,7 @@ export async function handleRfpRequestDelivery(
   }
 
   throw new Error(
-    `RFP delivery failed with ${response.status}: ${responseBody.error ?? responseBody.message ?? response.statusText}`
+    `RFP delivery failed with ${response.status}: ${describeRejection(responseBody, response)}`
   );
 }
 

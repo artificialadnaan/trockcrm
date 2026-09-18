@@ -5,6 +5,7 @@ const getDealByIdMock = vi.hoisted(() => vi.fn());
 const loadRfpAttachmentsForDealMock = vi.hoisted(() =>
   vi.fn(async () => [] as Array<{ name: string; url: string; contentType: string }>)
 );
+const getContactByIdMock = vi.hoisted(() => vi.fn(async () => null as any));
 const enqueueRfpBidBoardCreateMock = vi.hoisted(() => vi.fn(async () => ({ jobId: 77 })));
 const enqueueRfpVoteInvitationMock = vi.hoisted(() => vi.fn(async () => ({ jobId: 78 })));
 const accessMocks = vi.hoisted(() => ({
@@ -49,6 +50,10 @@ vi.mock("../../../src/modules/deals/stage-change.js", () => ({
 
 vi.mock("../../../src/modules/deals/stage-gate.js", () => ({
   preflightStageCheck: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/contacts/service.js", () => ({
+  getContactById: getContactByIdMock,
 }));
 
 vi.mock("../../../src/modules/contacts/association-service.js", () => ({
@@ -151,6 +156,88 @@ describe("POST /api/deals/:id/rfp-retry", () => {
       id: "deal-1",
       rfpApprovalStatus: "send_failed",
     });
+  });
+
+  /** The retry harness, parameterised by what getContactById returns for the deal's primary contact. */
+  async function runRetryWithContact(contact: any) {
+    // The deal must actually reference a primary contact, or the route short-circuits and never loads one.
+    getDealByIdMock.mockResolvedValueOnce({
+      id: "deal-1",
+      rfpApprovalStatus: "send_failed",
+      primaryContactId: contact?.id ?? "contact-1",
+    });
+    getContactByIdMock.mockResolvedValueOnce(contact);
+    const inserted: any[] = [];
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: vi.fn(async () => ({
+          rows: [
+            {
+              id: 10,
+              payload: {
+                dealId: "deal-1",
+                syncHubUrl: "https://old.example.com/api/rfp-requests",
+                body: {
+                  sourceSystem: "trock_crm",
+                  sourceDealId: "deal-1",
+                  deal: {
+                    clientEmail: "mailto:archived@example.com",
+                    contactName: "Archived Person",
+                    clientPhone: "555-0001",
+                  },
+                },
+              },
+            },
+          ],
+        })),
+        insert: vi.fn(() => ({ values: vi.fn(async (value) => { inserted.push(value); return {}; }) })),
+        update: vi.fn(() => ({
+          set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) })),
+        })),
+      },
+      user: { id: "user-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = { statusCode: 200, body: undefined as any, status(c: number) { this.statusCode = c; return this; }, json(p: any) { this.body = p; return this; } } as any;
+    const next = vi.fn((err?: unknown) => { if (err) throw err; });
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+    return inserted[0]?.payload?.body?.deal;
+  }
+
+  // An ARCHIVED contact is not a current contact. deleteContact only flips contacts.is_active and leaves
+  // deals.primary_contact_id intact, and getContactById does not filter inactive rows — so without this
+  // gate the retry re-sends an archived person's details. Worse: normalizing their `mailto:` address
+  // would turn it into a DELIVERABLE one, so archiving the bad contact would make the RFP reach them
+  // rather than stop it. 26 active deals in production point at an archived primary contact.
+  it("clears the contact tuple when the deal's primary contact has been archived", async () => {
+    const dealContact = await runRetryWithContact({
+      id: "contact-1",
+      firstName: "Archived",
+      lastName: "Person",
+      email: "mailto:archived@example.com",
+      phone: "555-0001",
+      isActive: false,
+    });
+
+    expect(dealContact.clientEmail).toBeNull();
+    expect(dealContact.contactName).toBeNull();
+    expect(dealContact.clientPhone).toBeNull();
+  });
+
+  it("uses an ACTIVE primary contact's details, normalized", async () => {
+    const dealContact = await runRetryWithContact({
+      id: "contact-2",
+      firstName: "Current",
+      lastName: "Person",
+      email: "mailto:current@example.com",
+      phone: "555-0002",
+      isActive: true,
+    });
+
+    expect(dealContact.clientEmail).toBe("current@example.com");
+    expect(dealContact.contactName).toBe("Current Person");
+    expect(dealContact.clientPhone).toBe("555-0002");
   });
 
   it("rebuilds the SyncHub URL from current env instead of cloning the dead payload URL", async () => {

@@ -1848,6 +1848,19 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
     // A dead job has exhausted all auto-retries, so a manual retry can land
     // well past the attachments' presigned-URL TTL. Re-mint the URLs here (the
     // retry is effectively a re-enqueue) so the job doesn't carry dead links.
+    // The retry spreads the DEAD job's body, so its client email is whatever was frozen at the failed
+    // attempt. Re-read the deal's primary contact so a CORRECTED contact actually takes effect on retry
+    // (a mailto:-prefixed address sank six RFPs; fixing the contact alone would not have rescued them).
+    // getContactById does NOT filter inactive rows and deleteContact only flips contacts.is_active,
+    // leaving deals.primary_contact_id intact — so an ARCHIVED contact would otherwise be treated as
+    // current and its details re-sent. Worse for the motivating case: normalizing an archived contact's
+    // mailto: address would turn it into a DELIVERABLE one, so archiving the bad contact would make the
+    // RFP reach it rather than stop it. An archived (or vanished) contact means "no current contact",
+    // and the explicit nulls below are authoritative — they clear the stale tuple instead of reviving it.
+    const primaryContactRow = deal.primaryContactId
+      ? await getContactById(req.tenantDb!, deal.primaryContactId)
+      : null;
+    const primaryContact = primaryContactRow?.isActive === true ? primaryContactRow : null;
     const freshAttachments = await loadRfpAttachmentsForDeal(req.tenantDb!, deal.id, {
       userId: req.user!.id,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
@@ -1871,7 +1884,19 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
             ...(deadJob.payload.body as unknown as NormalizedRfpRequestBody),
             attachments: freshAttachments,
           },
-          deal
+          // Pass the deal's CURRENT primary-contact email so a corrected contact actually takes
+          // effect on retry — the stored body's copy is whatever was frozen at the failed attempt.
+          // Refresh the contact TUPLE from the current primary contact, not just the email: a contact
+          // swapped between the failed attempt and the retry would otherwise pair the new person's
+          // address with the old person's name and phone. Explicit nulls are authoritative.
+          {
+            ...deal,
+            clientEmail: primaryContact?.email ?? null,
+            contactName: primaryContact
+              ? [primaryContact.firstName, primaryContact.lastName].filter(Boolean).join(" ")
+              : null,
+            clientPhone: primaryContact?.phone ?? null,
+          }
         )
       ) as unknown as Record<string, unknown>,
     };

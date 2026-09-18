@@ -223,6 +223,56 @@ function cleanString(value: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+/**
+ * Normalize a client email for the SyncHub contract, or drop it.
+ *
+ * `clientEmail` is OPTIONAL — it is in SACRIFICIAL_DEAL_FIELDS, and 273 RFPs have delivered with it
+ * absent. What SyncHub will NOT accept is a value that is present but unparseable: it 422s the whole
+ * request, so one bad character in an optional passenger field kills the delivery outright. That is
+ * exactly what happened on 2026-09-10 — a contact email pasted as
+ * `mailto:bellavidapm@bellairemultifamily.com` sank six Bella Vida RFPs through 8 retries each, and
+ * they sat in send_failed for eight days.
+ *
+ * So: recover an address when we confidently can (a pasted `mailto:` link, an RFC-5322-style
+ * `Name <addr>` from a mail client, a trailing list comma), and otherwise send NULL. Degrading to
+ * "no email" is a state proven to work hundreds of times; forwarding a guess is not. This deliberately
+ * does NOT try to repair the address itself — a typo'd domain is the user's to fix, and silently
+ * "correcting" one would be worse than omitting it.
+ */
+function cleanEmail(value: unknown): string | null {
+  let text = cleanString(value);
+  if (text === null) return null;
+  // `Name <addr@host>` / `<addr@host>` — mail clients and copy-paste both produce these.
+  const angled = text.match(/<([^<>]+)>\s*$/);
+  if (angled?.[1]) text = angled[1].trim();
+  // A pasted link target, any case, with or without space after the scheme.
+  const hadMailtoScheme = /^\s*mailto:/i.test(text);
+  text = text.replace(/^\s*mailto:\s*/i, "").trim();
+  // A real mailto link usually carries parameters — `mailto:a@b.com?subject=RFP&body=...`. Stripping
+  // only the scheme leaves `a@b.com?subject=RFP`, which is NOT a mailbox; drop the query/fragment.
+  // Only for an actual mailto link: a bare address containing `?` or `#` is malformed, not decorated,
+  // and must fail validation below rather than be silently truncated into something plausible.
+  if (hadMailtoScheme) text = text.split(/[?#]/)[0]!.trim();
+  // A single trailing separator from a copied recipient list.
+  text = text.replace(/[,;]+$/, "").trim();
+  // Conservative allowlist rather than "anything without a space or @". The permissive version accepted
+  // `a@b.com?subject=RFP` — `?` and `=` are neither `@` nor whitespace — which would have forwarded an
+  // invalid mailbox and 422'd the RFP, the exact failure this exists to prevent. Anything not clearing
+  // this bar is omitted rather than sent as a guess.
+  // Dots may only SEPARATE segments, on both sides of the @. A character-class local part accepted
+  // `.casey@`, `casey.@` and `casey..jones@`, which standard validators reject — so forwarding one
+  // reproduces the same 422 this exists to prevent. Segment-and-separator spelling makes a leading,
+  // trailing or doubled dot unmatchable rather than relying on extra lookarounds.
+  // Domain labels may not START or END with a hyphen either, so each label is spelled
+  // alphanumeric-bounded rather than as a flat `[A-Za-z0-9-]+`, which accepted `@-example.com` and
+  // `@example-.com`. Same reasoning as the local part: make the invalid shape unmatchable.
+  const looksLikeEmail =
+    /^[A-Za-z0-9_%+'-]+(?:\.[A-Za-z0-9_%+'-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$/.test(
+      text
+    );
+  return looksLikeEmail ? text : null;
+}
+
 function cleanNumber(value: unknown): number | null {
   if (value == null || value === "") return null;
   const parsed = Number(value);
@@ -515,18 +565,45 @@ export function capRfpRequestBody(
  */
 export function withRfpRequestBodyIdentity(
   body: NormalizedRfpRequestBody,
-  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId">
+  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId"> & {
+    clientEmail?: string | null;
+    contactName?: string | null;
+    clientPhone?: string | null;
+  }
 ): NormalizedRfpRequestBody {
   // Same tolerance for a partial stored record as capRfpRequestBody, and the same cleanString the
   // builder uses — so a retried body states an absent id exactly the way a first-attempt body does
   // (an explicit null, never an omitted key).
   const storedDeal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
+  // The retry spreads the DEAD job's body, so the contact it carries is whatever was frozen at the
+  // failed attempt. Six RFPs died 422 on a `mailto:`-prefixed address; correcting the contact record
+  // alone would NOT have rescued them, because the retry never rebuilds these fields from the deal.
+  //
+  // A caller that knows the current primary contact passes it and it wins; a caller that does not
+  // OMITS the keys and the stored tuple stands. The distinction is by KEY PRESENCE, not nullishness:
+  // an explicit null means "this contact genuinely has no email", which is authoritative — treating it
+  // as "not supplied" would resurrect the very address the retry is trying to escape.
+  const suppliesContact = "clientEmail" in deal || "contactName" in deal || "clientPhone" in deal;
+  // Refresh the tuple TOGETHER. Injecting only the new email onto a stored body would ship SyncHub a
+  // hybrid person — one contact's address beside another's name and phone.
+  const contact = suppliesContact
+    ? {
+        clientEmail: cleanEmail(deal.clientEmail ?? null),
+        contactName: cleanString(deal.contactName ?? null),
+        clientPhone: cleanString(deal.clientPhone ?? null),
+      }
+    : {
+        // Normalize what was stored even with no current contact to hand: the stored value is exactly
+        // what failed, so re-sending it unexamined repeats the failure.
+        clientEmail: cleanEmail(storedDeal?.clientEmail ?? null),
+      };
   return {
     ...body,
     deal: {
       ...storedDeal,
       companyId: cleanString(deal.companyId),
       propertyId: cleanString(deal.propertyId),
+      ...contact,
     },
   };
 }
@@ -574,7 +651,7 @@ export function buildNormalizedRfpRequestBody(input: {
       scopeTitle: cleanString(deal.scopeTitle),
       companyName: cleanString(deal.companyName),
       contactName: cleanString(deal.contactName),
-      clientEmail: cleanString(deal.clientEmail),
+      clientEmail: cleanEmail(deal.clientEmail),
       clientPhone: cleanString(deal.clientPhone),
       address: buildAddress(deal),
       description: cleanString(deal.description)
