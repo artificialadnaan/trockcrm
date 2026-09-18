@@ -324,6 +324,30 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
     expect(lastDealsCall()).toMatchObject({ sortBy: "name", sortDir: "desc" });
   });
 
+  it("writes a namespaced bid-due-date header sort to the URL, earliest first, without touching board params", async () => {
+    await renderFB(
+      "/deals?scope=all&dl_sortBy=created_at&dl_sortDir=desc&dl_page=3",
+      {},
+      { ...FB_PROP, paramPrefix: "dl_" }
+    );
+    const bidDueHeader = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Bid due")
+    );
+    expect(bidDueHeader).toBeTruthy();
+
+    await act(async () => {
+      bidDueHeader?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(lastDealsCall()).toMatchObject({ sortBy: "bid_due_date", sortDir: "asc", page: 1 });
+    const params = new URLSearchParams(currentSearch);
+    expect(params.get("scope")).toBe("all");
+    expect(params.get("dl_sortBy")).toBe("bid_due_date");
+    expect(params.get("dl_sortDir")).toBe("asc");
+    expect(params.get("dl_page")).toBeNull();
+    expect(params.get("sortBy")).toBeNull();
+  });
+
   it("Q1: mirrors the board — with no Status chosen, sends mixed visibility so terminal deals show", async () => {
     await renderFB("/deals", {}, FB_PROP_BOARD);
     const call = lastDealsCall();

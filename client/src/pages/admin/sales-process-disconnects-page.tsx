@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 const severityClasses: Record<string, string> = {
   critical: "bg-red-100 text-red-800 border-red-200",
@@ -567,7 +567,9 @@ export function SalesProcessDisconnectsPage() {
                         className="text-sm font-semibold text-brand-red hover:underline inline-flex items-center gap-1"
                       >
                         {formatDealDisplayNumber(row).label === "Pending" ? "" : `${formatDealDisplayNumber(row).label} `}
-                        {row.dealName}
+                        {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
+                            label so it isn't read as its parent. Display-only, stored name unchanged. */}
+                        {formatDealDisplayName(row.dealName, row.dealIsChangeOrder)}
                         <ArrowUpRight className="h-3.5 w-3.5" />
                       </Link>
                       <div className="text-base font-semibold text-foreground">{row.disconnectSummary}</div>

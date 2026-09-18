@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { usePortfolioLoadReport } from "@/hooks/use-reports";
 import { sheetsFromReport } from "@/lib/excel-export";
+import { useOfficeScopedHref } from "@/hooks/use-office-scope";
 import {
   ActiveWorkNote,
   EmptyState,
@@ -19,6 +20,9 @@ import {
 } from "./operations-report-common";
 
 export function PortfolioLoadPage() {
+  // Rows follow the URL office scope (useScopedReport), so their company/property links must carry it
+  // too — those detail pages get the scope via api()'s automatic x-office-id injection.
+  const scopedHref = useOfficeScopedHref();
   const { query } = useReportFilters();
   const { data, loading, error } = usePortfolioLoadReport(query);
 
@@ -87,7 +91,7 @@ export function PortfolioLoadPage() {
                       <tr key={company.companyId ?? company.companyName}>
                         <td className="px-3 py-3">
                           {company.companyId ? (
-                            <Link to={`/companies/${company.companyId}`} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
+                            <Link to={scopedHref(`/companies/${company.companyId}`)} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
                               {company.companyName}
                             </Link>
                           ) : (
@@ -128,7 +132,7 @@ export function PortfolioLoadPage() {
                       <tr key={property.propertyId ?? `${property.companyName}:${property.propertyName}`}>
                         <td className="px-3 py-3">
                           {property.propertyId ? (
-                            <Link to={`/properties/${property.propertyId}`} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
+                            <Link to={scopedHref(`/properties/${property.propertyId}`)} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
                               {property.propertyName}
                             </Link>
                           ) : (

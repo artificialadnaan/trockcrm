@@ -291,6 +291,131 @@ describe("POST /api/deals/:id/rfp-retry", () => {
     ]);
   });
 
+  it("re-resolves the identity uuids from the deal instead of inheriting the dead payload's pre-uuid shape", async () => {
+    getDealByIdMock.mockResolvedValueOnce({
+      id: "deal-1",
+      rfpApprovalStatus: "send_failed",
+      companyId: "11111111-1111-1111-1111-111111111111",
+      propertyId: "22222222-2222-2222-2222-222222222222",
+    });
+    const inserted: any[] = [];
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: vi.fn(async () => ({
+          rows: [
+            {
+              id: 10,
+              payload: {
+                dealId: "deal-1",
+                syncHubUrl: "https://old.example.com/api/rfp-requests",
+                // A job enqueued BEFORE the uuids shipped: its stored deal carries the display name and
+                // no identity key at all. capRfpRequestBody's shallow spread would carry that gap through.
+                body: { sourceDealId: "deal-1", deal: { name: "Palm Group HQ", companyName: "Palm Group" } },
+              },
+            },
+          ],
+        })),
+        insert: vi.fn(() => ({
+          values: vi.fn(async (value) => {
+            inserted.push(value);
+            return {};
+          }),
+        })),
+        update: vi.fn(() => ({
+          set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) })),
+        })),
+      },
+      user: { id: "user-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200,
+      body: undefined as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: any) {
+        this.body = payload;
+        return this;
+      },
+    } as any;
+    const next = vi.fn((err?: unknown) => {
+      if (err) throw err;
+    });
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(res.statusCode).toBe(202);
+    expect(inserted[0].payload.body.deal.companyId).toBe("11111111-1111-1111-1111-111111111111");
+    expect(inserted[0].payload.body.deal.propertyId).toBe("22222222-2222-2222-2222-222222222222");
+    // The rest of the stored deal is untouched — this refreshes identity, it does not rebuild the body.
+    expect(inserted[0].payload.body.deal.companyName).toBe("Palm Group");
+  });
+
+  it("emits null identity uuids (never an absent key) when the deal itself has none", async () => {
+    getDealByIdMock.mockResolvedValueOnce({
+      id: "deal-1",
+      rfpApprovalStatus: "send_failed",
+      companyId: null,
+      propertyId: null,
+    });
+    const inserted: any[] = [];
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: vi.fn(async () => ({
+          rows: [
+            {
+              id: 10,
+              payload: {
+                dealId: "deal-1",
+                syncHubUrl: "https://old.example.com/api/rfp-requests",
+                body: { sourceDealId: "deal-1", deal: { name: "Unidentified" } },
+              },
+            },
+          ],
+        })),
+        insert: vi.fn(() => ({
+          values: vi.fn(async (value) => {
+            inserted.push(value);
+            return {};
+          }),
+        })),
+        update: vi.fn(() => ({
+          set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) })),
+        })),
+      },
+      user: { id: "user-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200,
+      body: undefined as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: any) {
+        this.body = payload;
+        return this;
+      },
+    } as any;
+    const next = vi.fn((err?: unknown) => {
+      if (err) throw err;
+    });
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(res.statusCode).toBe(202);
+    // Same distinction the builder draws: only an explicit null says "the CRM looked and there is
+    // nothing there", and a retried body must say it the same way a first-attempt body does.
+    const onTheWire = JSON.parse(JSON.stringify(inserted[0].payload.body)).deal;
+    expect(onTheWire).toHaveProperty("companyId", null);
+    expect(onTheWire).toHaveProperty("propertyId", null);
+  });
+
   it("rejects retries when owner/admin access is denied before loading the deal", async () => {
     accessMocks.assertDealOwnerAccess.mockRejectedValueOnce({ statusCode: 403, message: "forbidden" });
     const req = {

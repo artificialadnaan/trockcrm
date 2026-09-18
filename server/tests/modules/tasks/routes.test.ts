@@ -175,7 +175,9 @@ async function invokeRoute({
           ? "/:id"
         : url.endsWith("/complete")
           ? "/:id/complete"
-          : "/:id/transition";
+          : url.endsWith("/dismiss")
+            ? "/:id/dismiss"
+            : "/:id/transition";
   const handler = findRouteHandler(method, routePath);
   const resolvedTenantDb = tenantDb ?? createTenantDbMock();
   const req: Record<string, any> = {
@@ -198,7 +200,7 @@ async function invokeRoute({
     res._resolve = resolve;
     res._reject = reject;
     req.params = routePath === "/:id/transition" ? { id: url.split("/")[1] } : {};
-    if (routePath === "/:id/complete" || routePath === "/:id") {
+    if (routePath === "/:id/complete" || routePath === "/:id/dismiss" || routePath === "/:id") {
       req.params = { id: url.split("/")[1] };
     }
     Promise.resolve(handler(req as any, res as any, (err?: any) => {
@@ -722,6 +724,31 @@ describe("task routes", () => {
     expect(res.body.task).toMatchObject({ id: "task-1", status: nextStatus });
   });
 
+  it("passes a terminal transition explanation to the service", async () => {
+    taskServiceMocks.transitionTaskStatus.mockImplementation(async (_db, taskId, input) => ({
+      id: taskId,
+      status: input.nextStatus,
+    }));
+
+    await invokeRoute({
+      method: "post",
+      url: "/task-1/transition",
+      user: makeDirectorUser(),
+      body: { nextStatus: "dismissed", resolutionNote: "Customer cancelled the request." },
+    });
+
+    expect(taskServiceMocks.transitionTaskStatus).toHaveBeenCalledWith(
+      expect.any(Object),
+      "task-1",
+      expect.objectContaining({
+        nextStatus: "dismissed",
+        resolutionNote: "Customer cancelled the request.",
+      }),
+      "director",
+      "director-1"
+    );
+  });
+
   it("attaches close-loop provenance to task completion events", async () => {
     const completedTask = {
       id: "task-1",
@@ -739,13 +766,15 @@ describe("task routes", () => {
       method: "post",
       url: "/task-1/complete",
       user: makeDirectorUser(),
+      body: { resolutionNote: "Sent the requested pricing details." },
     });
 
     expect(taskServiceMocks.completeTask).toHaveBeenCalledWith(
       expect.any(Object),
       "task-1",
       "director",
-      "director-1"
+      "director-1",
+      { resolutionNote: "Sent the requested pricing details." }
     );
     expect((req.tenantDb as any).insert).toHaveBeenCalled();
     expect((req.tenantDb as any).insertValues).toHaveBeenCalledWith(
@@ -780,6 +809,25 @@ describe("task routes", () => {
     );
   });
 
+  it("passes the dismissal explanation to the service", async () => {
+    taskServiceMocks.dismissTask.mockResolvedValue({ id: "task-1", status: "dismissed" });
+
+    await invokeRoute({
+      method: "post",
+      url: "/task-1/dismiss",
+      user: makeDirectorUser(),
+      body: { resolutionNote: "The customer withdrew the request." },
+    });
+
+    expect(taskServiceMocks.dismissTask).toHaveBeenCalledWith(
+      expect.any(Object),
+      "task-1",
+      "director",
+      "director-1",
+      { resolutionNote: "The customer withdrew the request." }
+    );
+  });
+
   it("fails fast when a rule-backed task has no rule config for close-loop persistence", async () => {
     taskServiceMocks.completeTask.mockResolvedValue({
       id: "task-1",
@@ -798,6 +846,7 @@ describe("task routes", () => {
         method: "post",
         url: "/task-1/complete",
         user: makeDirectorUser(),
+        body: { resolutionNote: "Tried to close the task." },
       })
     ).rejects.toMatchObject({
       statusCode: 500,

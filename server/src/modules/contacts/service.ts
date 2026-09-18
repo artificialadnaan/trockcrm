@@ -63,6 +63,10 @@ export interface CreateContactInput {
   // The user creating the contact becomes its owner ("whoever creates it owns it"). Optional +
   // null-safe so non-interactive callers (imports/sync) can omit it and leave the contact unowned.
   ownerUserId?: string | null;
+  // Who keyed the record in. Kept SEPARATE from ownerUserId even though the two start equal here:
+  // ownership moves as accounts are reassigned, authorship does not, and the canvassing report counts
+  // what a person entered. Null for machine callers, which the report reads as unattributed.
+  createdByUserId?: string | null;
 }
 
 function validateEmailInput(email: string | null | undefined): void {
@@ -163,7 +167,23 @@ export function buildContactLastTouchAtSql(): SQL<Date | null> {
     COALESCE(${contactLastContactedAtSql}, '-infinity'::timestamptz),
     COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
     COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contactIdSql}), '-infinity'::timestamptz)
+    -- A task's ROW-MODIFICATION time is not a touch; a task COMPLETED is. set_tasks_updated_at is an
+    -- unconditional BEFORE UPDATE row trigger, so every write to a task bumps updated_at, including bulk
+    -- system writes that involve no human and no contact. Two in this release alone would have moved this
+    -- expression: the terminal-deal drain (~2,400 contact-linked tasks dismissed) and the is_overdue
+    -- correction (measured on prod: 432 tasks across 84 contacts). Either would have made those contacts
+    -- read as "touched just now", emptied them out of the Untouched 30d+ card and reordered last_touch_at,
+    -- silently, which is exactly the hazard migration 0233 documents.
+    --
+    -- Reading completed_at off COMPLETED tasks fixes the class rather than the two instances: nothing that
+    -- fails to complete work can move it. The effect on the card is to be MORE correct, since a contact
+    -- whose only task is still open now reads as untouched, which it is. Changed in the ONE shared builder
+    -- so the card, the ?card=untouched drill and the sort keep agreeing.
+    COALESCE((
+      SELECT MAX(t.completed_at) FROM tasks t
+      WHERE t.contact_id = ${contactIdSql}
+        AND t.status = 'completed'
+    ), '-infinity'::timestamptz)
   ), '-infinity'::timestamptz)`;
 }
 
@@ -751,6 +771,7 @@ export async function createContact(
         procoreContactId: input.procoreContactId ?? null,
         hubspotContactId: input.hubspotContactId ?? null,
         ownerId: input.ownerUserId ?? null,
+        createdByUserId: input.createdByUserId ?? null,
       })
       .returning();
   } catch (err: any) {

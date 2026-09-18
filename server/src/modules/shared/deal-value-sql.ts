@@ -1,5 +1,22 @@
 import { sql, type SQL } from "drizzle-orm";
-import { reportableDealSqlPredicate, closeTargetFarOutSqlPredicate } from "@trock-crm/shared/types";
+import {
+  reportableDealSqlPredicate,
+  bidBoardTerminalSqlPredicate,
+  closeTargetFarOutSqlPredicate,
+  // The chain ORDER and its SQL-TEXT rendering now live in shared, so a worker raw-SQL caller can reach the
+  // same definition. Re-exported below under the names this module has always used.
+  DEAL_VALUE_PRIORITY_CHAIN,
+  ESTIMATING_VALUE_CHAIN,
+  FORECAST_FIRST_VALUE_CHAIN,
+  aliasedDealBestEstimateSqlText,
+  aliasedDealEstimatingValueSqlText,
+  aliasedPositiveDealValueCandidateSqlText,
+  type DealValueColumn,
+  PROJECT_TYPE_CODE_BY_VALUE,
+  PROJECT_TYPE_VALUES,
+  SHOWCASE_ROUTE_BUCKETS,
+  type ShowcaseRouteBucket,
+} from "@trock-crm/shared/types";
 import { TERMINAL_STAGE_SLUGS } from "./pipeline-terminal-stages.js";
 
 type DealValueTable = {
@@ -18,66 +35,17 @@ type DealValueTable = {
   isChangeOrder: unknown;
 };
 
-type DealValueColumn =
-  | "forecast_revenue"
-  | "bid_board_total_sales"
-  | "bid_estimate"
-  | "dd_estimate"
-  | "awarded_amount";
-
-// DEFAULT deal-value priority chain (awarded-first): awarded_amount > bid_board_total_sales > bid_estimate
-// > dd_estimate. Used by every stage EXCEPT the single 'estimating' stage, which overrides DD ABOVE bid
-// (ESTIMATING_VALUE_CHAIN below; 2026-06-18). Won and every other open stage share THIS one chain (no
-// parallel won-vs-open logic). Each candidate is gated `> 0` (positiveDealValueCandidateSql), so BOTH 0
-// and NULL fall through to the next candidate; the chain's final fallback is 0.
-//
-// CONVENTION SHIFT (2026-06-18, "editable DD + awarded-highest" decision): the open/estimating basis was
-// formerly bid-first with awarded LAST (and distinct from the Won basis). It was flipped to awarded-first
-// after verifying the change is INERT on prod REPORTABLE totals ($0 delta — only 2 open deals carry an
-// awarded amount and both already equal their bid). The flip also makes lost/terminal deals awarded-first;
-// that touches only 13 non-reportable lost/inactive CARD displays (never summed in any bucket total).
-// dealBestEstimateSql and dealAwardedFirstWithFallbackSql are retained as separate names (many call sites)
-// but now both resolve through this one chain.
-const DEAL_VALUE_PRIORITY_CHAIN = [
-  "awarded_amount",
-  "bid_board_total_sales",
-  "bid_estimate",
-  "dd_estimate",
-] as const satisfies readonly DealValueColumn[];
-
-const FORECAST_FIRST_VALUE_CHAIN = [
-  "forecast_revenue",
-  ...DEAL_VALUE_PRIORITY_CHAIN,
-] as const satisfies readonly DealValueColumn[];
-
-// STAGE-AWARE override for the single 'estimating' stage (2026-06-18, Adnaan): during estimating the
-// bid is in-progress/incomplete, so DD outranks bid — awarded > dd_estimate > bid_board_total_sales >
-// bid_estimate. Awarded still wins; bid is NOT skipped, just outranked when DD exists (a bid-only
-// estimating deal keeps its bid, never $0). Applies ONLY to the canonical 'estimating' stage (route-aware:
-// includes the legacy estimate_in_progress alias, excludes service_estimating). Same `> 0` gating +
-// on-hold-zeroing as the default chain.
-//
-// SCOPE (Adnaan, 2026-06-19, re Codex P2): this DD-over-bid rule is applied ONLY on the DEALS pipeline value
-// paths — the kanban/stage-workspace per-column totals (pipelineValueSourceForStageSlug) and the deals-list
-// filter/sort/total + stage drill (aliasedStageAwareEffectiveDealValueSql), mirrored by the TS card resolvers
-// (getRawDealValue / resolveBestEstimate). Dashboard + reports value aggregates DELIBERATELY keep the default
-// open chain (deal-value-sql default + reports foundations bases), so an estimating deal can read DD-first on
-// the deals board and bid-first in a report. Verified ~inert on prod (only ~2 estimating deals have bid != DD).
-// Extending platform-wide is a deliberate follow-up, NOT an accidental gap.
-const ESTIMATING_VALUE_CHAIN = [
-  "awarded_amount",
-  "dd_estimate",
-  "bid_board_total_sales",
-  "bid_estimate",
-] as const satisfies readonly DealValueColumn[];
+// The three value chains and the DealValueColumn union moved to shared/src/types/deal-value-sql-text.ts.
+// They are imported above and re-exported at the bottom of this file, so every call site here is unchanged
+// and there is exactly ONE definition of the candidate order. The long-form rationale for each chain — the
+// awarded-first convention shift, and the estimating-stage DD-over-bid override with its scope note — went
+// with them; this module keeps the drizzle builders that compose them.
 
 export function positiveDealValueCandidateSql(value: unknown): SQL {
   return sql`CASE WHEN ${value} > 0 THEN ${value} END`;
 }
 
-function aliasedPositiveDealValueCandidateSql(alias: string, column: string): string {
-  return `CASE WHEN ${alias}.${column} > 0 THEN ${alias}.${column} END`;
-}
+const aliasedPositiveDealValueCandidateSql = aliasedPositiveDealValueCandidateSqlText;
 
 function tableColumnSql(table: DealValueTable, column: DealValueColumn): unknown {
   switch (column) {
@@ -300,6 +268,12 @@ export function aliasedDealBestEstimateSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
+// The plain-SQL-TEXT twins, for callers that build query strings rather than drizzle fragments — the
+// tenant-sweeping internal routes and the worker crons. RE-EXPORTED from shared rather than defined here:
+// the string form existed so "worker raw-SQL callers can reuse it" and they could not, because nothing under
+// worker/src can import server/src. Same output, same chain constants, one definition.
+export { aliasedDealBestEstimateSqlText, aliasedDealEstimatingValueSqlText };
+
 // 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
 export function aliasedDealEstimatingValueSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, ESTIMATING_VALUE_CHAIN);
@@ -396,11 +370,14 @@ export function aliasedTerminalDealBySlugSql(dealAlias: string, stageSlugColumn:
 // The Bid Board MIRROR terminal signal alone: true when a deal is won/lost in bid_board_stage_slug. Use on a
 // population already constrained to a single OPEN CRM stage (a stage page) or filtered CRM-non-terminal,
 // where the only remaining terminal exposure is a BB-owned deal whose mirror is terminal while its CRM stage
-// is still open. Returns a raw SQL string fragment so worker raw-SQL callers can reuse it.
-export function bidBoardTerminalSqlPredicate(dealAlias: string): string {
-  const slugs = TERMINAL_STAGE_SLUGS.map((slug) => `'${slug.replace(/'/g, "''")}'`).join(", ");
-  return `COALESCE(${dealAlias}.bid_board_stage_slug, '') IN (${slugs})`;
-}
+// is still open.
+//
+// RE-EXPORTED FROM `shared`, not defined here. The string form existed "so worker raw-SQL callers can reuse
+// it" and they could not: nothing under worker/src can import server/src. It now lives beside the other two
+// standard-exclusion string twins in shared/src/types/deal-reporting.ts, where a worker cron can actually
+// reach it, and this name is kept so the server's call sites are untouched. Same output, plus the shared
+// identifier validation.
+export { bidBoardTerminalSqlPredicate };
 
 export function aliasedBidBoardTerminalSql(dealAlias: string): SQL {
   return sql.raw(`(${bidBoardTerminalSqlPredicate(dealAlias)})`);
@@ -530,3 +507,144 @@ export function aliasedActiveNonZeroDealSortTierSql(alias: string, valueSql: SQL
 export function aliasedWonHsClosedWonDateSql(alias: string): SQL {
   return sql`${sql.raw(alias)}.won_closed_date`;
 }
+
+/**
+ * The two buckets of the Service / Other split. "service" is deals.workflow_route = 'service'; "other" is
+ * EVERYTHING else. Same meaning as the deals dashboard's Service / Non-service At Risk cards (#1035) —
+ * one definition of "service" across the platform, so a director comparing the two surfaces is comparing
+ * the same population.
+ *
+ * RE-EXPORTED, not redeclared: the vocabulary lives in shared/ so the client's URL codec and this SQL layer
+ * cannot drift to different bucket names. The alias keeps this module's existing SQL-side naming.
+ */
+export const WORKFLOW_ROUTE_BUCKETS = SHOWCASE_ROUTE_BUCKETS;
+export type WorkflowRouteBucket = ShowcaseRouteBucket;
+
+/**
+ * JS `String.prototype.trim()` expressed as an explicit character set for Postgres `btrim`.
+ *
+ * NOT `btrim(x)` and NOT `[[:space:]]`. The one-argument btrim strips ASCII SPACE ONLY, so a tab-wrapped
+ * value survives it; the POSIX class is evaluated per the server's collation, so it is
+ * correct-under-the-locale-we-tested rather than correct, and no behavioural test can catch that (both
+ * sides of a parity test run on the same backend and agree in CI while diverging in production).
+ * Migration 0216 learned both of these the expensive way — see its suite. Pinned character-for-character
+ * against JS \s by a test, so a well-meaning simplification fails there rather than in a report.
+ *
+ * Built from CODE POINTS, never a written-out string literal. btrim's second argument is a SET of
+ * characters, not a range, so the tempting "\t-\r" spelling does not mean "tab through carriage
+ * return" — it means {tab, HYPHEN, carriage return}, and would quietly strip hyphens off real values.
+ */
+const JS_TRIM_CHARS = [
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, // tab, LF, VT, FF, CR
+  0x20, 0xa0, 0x1680, // space, NBSP, ogham space mark
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, // quad block
+  0x2028, 0x2029, // line separator, paragraph separator
+  0x202f, 0x205f, 0x3000, // narrow NBSP, medium mathematical space, ideographic space
+  0xfeff, // zero-width NBSP / BOM
+].map((code) => String.fromCodePoint(code)).join("");
+
+/** `normalizeProjectType` (shared/types) in SQL: JS-trim, then lower-case. */
+function normalizedProjectTypeSql(alias: string): SQL {
+  return sql`lower(btrim(COALESCE(${sql.raw(alias)}.project_type, ''), ${JS_TRIM_CHARS}))`;
+}
+
+/**
+ * THE CANONICAL "IS THIS SERVICE?" TEST, and the reason the Monday Showcase was reporting ~$490k of
+ * service against a single service rep's $1.1M.
+ *
+ * `resolveProjectTypeCode` (server/src/services/projectNumber.ts) is the platform's definition of a
+ * deal's project type, and it is emphatic about precedence: **project_type WINS, and workflow_route is
+ * only consulted when nothing else answers.** The `4` in a deal number like `DFW-4-04126-AE` is DERIVED
+ * from project_type at creation, which is why deals whose number says service were sitting in the
+ * "Normal" bucket: every reader here tested `workflow_route` ALONE, the one input the canonical function
+ * consults LAST, and nothing on the write side ever derives it from the type. So a correctly-typed
+ * service deal reads as "confidently not service" — `workflow_route` is NOT NULL DEFAULT 'normal', so an
+ * unset route is indistinguishable from a deliberate one.
+ *
+ * The three tiers below mirror resolveProjectTypeCode exactly, in its order:
+ *   1. a VALID `deals.project_type` -> its code (nothing else consulted);
+ *   2. else the configured digit on `project_type_config.code` via `deals.project_type_id` — the SQL
+ *      analogue of the function's `projectTypes` digit tier, and what actually stamps the deal number;
+ *   3. else, and only else, `workflow_route`.
+ * COALESCE over three nullable booleans expresses that fall-through directly: a tier that cannot answer
+ * yields NULL and the next one is consulted.
+ *
+ * The value list and the '4' are generated FROM `PROJECT_TYPE_VALUES` / `PROJECT_TYPE_CODE_BY_VALUE`, not
+ * retyped, because SQL cannot import the constant and a hand-copied list is how this drifts back apart.
+ *
+ * KEEPING THIS AS A SAFETY NET IS THE POINT. Deriving workflow_route on write (and backfilling it) makes
+ * the column correct TODAY; reading the canonical definition here is what stops ONE missed write path
+ * from silently recreating the undercount. Do not "simplify" this back to the raw column on the grounds
+ * that the data is now clean.
+ *
+ * `alias` is always a trusted developer literal ("d"/"deals"), never user input.
+ */
+export function aliasedIsServiceProjectSql(alias: string): SQL {
+  const normalized = normalizedProjectTypeSql(alias);
+  const knownValues = sql.join(
+    PROJECT_TYPE_VALUES.map((value) => sql`${value}`),
+    sql`, `
+  );
+  const serviceCode = PROJECT_TYPE_CODE_BY_VALUE.service;
+
+  return sql`COALESCE(
+    CASE WHEN ${normalized} IN (${knownValues}) THEN ${normalized} = 'service' END,
+    (
+      SELECT CASE WHEN btrim(COALESCE(ptc.code, ''), ${JS_TRIM_CHARS}) ~ '^[1-9]$'
+                  THEN btrim(ptc.code, ${JS_TRIM_CHARS}) = ${serviceCode} END
+        FROM public.project_type_config ptc
+       WHERE ptc.id = ${sql.raw(alias)}.project_type_id
+    ),
+    ${sql.raw(alias)}.workflow_route = 'service',
+    false
+  )`;
+}
+
+/**
+ * Service-vs-Other narrowing, as a LEADING-` AND ` fragment (the same composition idiom as the
+ * showcase's repScopeSql / regionScopeSql) or EMPTY when nothing should be narrowed.
+ *
+ * NOW ASKS `aliasedIsServiceProjectSql`, NOT the raw `workflow_route` column. That change is the fix for
+ * the Monday Showcase under-reporting service: this fragment is the single definition behind BOTH the
+ * showcase's Service / Other chips and the deals dashboard's Service / Non-service At Risk cards (#1035),
+ * so both surfaces were narrowing on the one field the canonical definition consults LAST. Deals whose
+ * number literally reads `DFW-4-…` were counted as normal work.
+ *
+ * "other" remains the exact complement — `NOT (is service)` — rather than a re-derived rule, which is
+ * what keeps the partition total. The old spelling needed an explicit `IS NULL OR <> 'service'` because a
+ * bare inequality is UNKNOWN for a NULL row and would drop it from BOTH buckets; the canonical predicate
+ * COALESCEs to `false` instead, so it is never NULL and a plain NOT is total by construction.
+ *
+ * TOTALITY IS THE POINT: service ∪ other = every row and service ∩ other = ∅, so a bucket's figure plus its
+ * complement's always re-sums to the unfiltered figure. Callers depend on that additivity to prove a split
+ * lost nothing.
+ *
+ * `undefined` (caller passed no selection) and BOTH buckets selected return the SAME empty fragment — no
+ * predicate at all. So a surface that ships this filter defaulted to "everything" emits SQL byte-identical
+ * to the surface before the filter existed, and cannot move a number on first load. That property is why
+ * this fix moves the SPLIT without moving any unfiltered total.
+ *
+ * `alias` is always a trusted developer literal ("d"/"deals"), never user input.
+ */
+export function aliasedWorkflowRouteFilterSql(
+  alias: string,
+  buckets?: readonly WorkflowRouteBucket[]
+): SQL {
+  if (buckets === undefined) return sql``;
+  const service = buckets.includes("service");
+  const other = buckets.includes("other");
+  if (service && other) return sql``;
+  if (service) return sql` AND ${aliasedIsServiceProjectSql(alias)}`;
+  if (other) {
+    return sql` AND NOT ${aliasedIsServiceProjectSql(alias)}`;
+  }
+  // Neither bucket. There is no honest row set for "no selection at all", and emitting a `false` predicate
+  // would return zeros that read like real measurements — the exact failure this split exists to avoid. The
+  // request layer rejects an empty selection with a 400 long before this; the throw is the invariant backstop.
+  throw new Error("workflow-route filter needs at least one bucket: service and/or other");
+}
+
+// Re-exported so the chain order stays importable under the names this module established, while the
+// definition itself lives in shared where the worker can reach it too.
+export { DEAL_VALUE_PRIORITY_CHAIN, ESTIMATING_VALUE_CHAIN, FORECAST_FIRST_VALUE_CHAIN };
+export type { DealValueColumn };

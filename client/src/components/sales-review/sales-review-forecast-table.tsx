@@ -1,5 +1,6 @@
 import type { SalesReviewForecastRow } from "@/hooks/use-sales-review";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 function money(value: number | null) {
   if (value == null) return "Unknown";
@@ -32,7 +33,12 @@ export function SalesReviewForecastTable({ rows }: { rows: SalesReviewForecastRo
               {rows.map((row) => (
                 <tr key={`${row.entityType}-${row.id}`} className="border-t">
                   <td className="py-3 pr-4">
-                    <div className="font-medium">{row.name}</div>
+                    {/* A change-order child deal is STORED as "<Parent> — Change Order N"; lead with the
+                        label. Display-only, and GATED on entityType — these rows mix deals and LEADS, and
+                        only a deal can be a generated change-order child. */}
+                    <div className="font-medium">
+                      {row.entityType === "deal" ? formatDealDisplayName(row.name, row.isChangeOrder) : row.name}
+                    </div>
                     <div className="text-xs text-muted-foreground">
                       {[row.companyName, row.propertyName].filter(Boolean).join(" • ") || row.stageId}
                     </div>

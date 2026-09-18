@@ -4,8 +4,12 @@ import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
 import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
 import { RequireRole, RequireGlobalAdmin } from "@/components/auth/require-role";
+import { REPORT_VIEWER_ROLES } from "@/lib/roles";
 import { AppShell } from "@/components/layout/app-shell";
 import { BoardAliasRedirect } from "@/components/shared/board-alias-redirect";
+// Statically imported on purpose. A lazy() modal cannot render until its own chunk arrives, which
+// defeats the point of surfacing an assignment on the recipient's next interaction.
+import { TaskAssignmentModal } from "@/components/tasks/task-assignment-modal";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { PendingRfpPage } from "@/pages/deals/pending-rfp-page";
 import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
@@ -31,6 +35,9 @@ import { PropertyEditPage } from "@/pages/properties/property-edit-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { DirectoryMergeQueuePage } from "@/pages/admin/directory-merge-queue-page";
 import { LeadDueDiligenceQueuePage } from "@/pages/admin/lead-due-diligence-queue-page";
+import { MarketingExpenseQueuePage } from "@/pages/admin/marketing-expense-queue-page";
+import { MyMarketingExpenseRequestsPage } from "@/pages/marketing-expense/my-marketing-expense-requests-page";
+import { MarketingExpenseRequestFormPage } from "@/pages/marketing-expense/marketing-expense-request-form-page";
 import { NotificationRecipientsPage } from "@/pages/admin/notification-recipients-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
@@ -45,7 +52,10 @@ import { ForecastAccuracyPage } from "@/pages/reports/forecast-accuracy-page";
 import { LeadConversionPage } from "@/pages/reports/lead-conversion-page";
 import { MarketMixPage } from "@/pages/reports/market-mix-page";
 import { PipelineVelocityPage } from "@/pages/reports/pipeline-velocity-page";
+import { ServiceRfpPage } from "@/pages/reports/service-rfp-page";
 import { RepActivityPage } from "@/pages/reports/rep-activity-page";
+import { DailyActivityLogPage } from "@/pages/reports/daily-activity-log-page";
+import { CanvassingActivityPage } from "@/pages/reports/canvassing-activity-page";
 import { PlatformUsagePage } from "@/pages/reports/platform-usage-page";
 import { PlatformUsageRepDetailPage } from "@/pages/reports/platform-usage-rep-detail-page";
 import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
@@ -59,6 +69,7 @@ import { RepPackPage } from "@/pages/reports/rep-pack-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import QcReportsPage from "@/pages/reports/qc-reports-page";
+import WeeklyReportsPage from "@/pages/projects/weekly-reports-page";
 import FieldTeamPage from "@/pages/reports/field-team-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
@@ -90,6 +101,7 @@ import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { PublicPhotoViewerPage } from "@/pages/public/photo-viewer-page";
 import { DailySummaryPage } from "@/pages/public/daily-summary-page";
 import CorrectiveActionResponderPage from "@/pages/scorecards/corrective-action-responder";
+import { ResetPasswordPage } from "@/pages/auth/reset-password-page";
 import { Toaster } from "@/components/ui/sonner";
 
 const HomeDashboardPage = lazy(() =>
@@ -150,6 +162,10 @@ function AuthGate({ children }: { children: ReactNode }) {
   // Public tokenized corrective-action responder (email-only super/PM, no login) — the recipient-bound
   // ?token authorizes the flow, so this path must bypass the auth gate. Matches /scorecards/:id/corrective-action.
   if (/^\/scorecards\/[^/]+\/corrective-action$/.test(location.pathname)) return <>{children}</>;
+  // Self-service password reset: the emailed link is for someone who CANNOT sign in, so the gate has to
+  // let it through — otherwise it renders the login screen and the one-time token is burned unread. The
+  // page's own fragment token is what authorizes it.
+  if (location.pathname === "/reset-password") return <>{children}</>;
 
   if (loading) {
     return (
@@ -164,7 +180,27 @@ function AuthGate({ children }: { children: ReactNode }) {
   if (user.requiresOnboarding && location.pathname !== "/onboarding-required") {
     return <Navigate to="/onboarding-required" replace />;
   }
-  return <>{children}</>;
+  // The new-assignment modal mounts HERE, and both halves of that are deliberate.
+  //
+  // Inside AuthGate, in the FINAL return: every public/tokenized path above has already returned, so
+  // the modal is a structural no-op on /p/, /daily-summary/, /scorecards/:id/corrective-action and
+  // /reset-password. Those are deliberately unauthenticated pages — a signed-in person opening a client
+  // photo link must not get an interrupting task dialog over one — and doing it structurally beats a
+  // second copy of that path list living inside the component.
+  //
+  // A SIBLING of `children`, not inside it: `children` is the <Suspense> boundary that wraps <Routes>,
+  // and the post-login landing route is lazy(). A modal declared inside that boundary cannot render
+  // until the dashboard chunk resolves, which can lag behind the recipient's next interaction.
+  // <Toaster/> is the precedent for a route-independent global, not for the boundary it sits in.
+  //
+  // Declaration position is otherwise irrelevant to DOM and focus order: DialogContent portals to
+  // document.body, so nothing here competes with the app shell's skip link.
+  return (
+    <>
+      {children}
+      <TaskAssignmentModal />
+    </>
+  );
 }
 
 function OnboardingRequiredPage() {
@@ -222,6 +258,7 @@ export function App() {
             <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
             <Route path="/daily-summary/:date" element={<DailySummaryPage />} />
             <Route path="/scorecards/:id/corrective-action" element={<CorrectiveActionResponderPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route path="/onboarding-required" element={<OnboardingRequiredPage />} />
             <Route element={<AppShell />}>
@@ -234,6 +271,24 @@ export function App() {
               <Route path="/deals/service-opportunity/new" element={<ServiceOpportunityNewPage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/pending-rfp" element={<PendingRfpPage />} />
+              {/* Submitting an expense request is an every-CRM-user action, so these two live in the
+                  main nav and NOT under /admin — only the approver queue is admin-gated. */}
+              <Route
+                path="/marketing-expense-requests"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep", "construction"]}>
+                    <MyMarketingExpenseRequestsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/marketing-expense-requests/new"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep", "construction"]}>
+                    <MarketingExpenseRequestFormPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/deals/:id/photos" element={<DealDetailPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
@@ -272,6 +327,14 @@ export function App() {
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/reports/sales/pipeline-velocity" element={<PipelineVelocityPage />} />
+              <Route
+                path="/reports/sales/service-rfps"
+                element={(
+                  <RequireRole allowedRoles={REPORT_VIEWER_ROLES}>
+                    <ServiceRfpPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/reports/sales/closed-won-revenue" element={<ClosedWonRevenuePage />} />
               <Route path="/reports/sales/lead-conversion" element={<LeadConversionPage />} />
               <Route
@@ -293,10 +356,15 @@ export function App() {
               {/* Open to all authenticated users (no RequireRole) — matches the analytics report
                   routes; server /api/reports/region is likewise no longer director-gated. */}
               <Route path="/reports/region" element={<RegionReportPage />} />
+              {/* Widened from admin+director to the report-capable CRM roles. The reports index lists
+                  the At-Risk Watchlist card to reps too, so the old gate did not hide the report — it
+                  turned the click into a 403. `rep` is added and nothing else: this mirrors the server
+                  guard (requireAnyRole) exactly, so the page can never render for a role the API will
+                  refuse. */}
               <Route
                 path="/reports/at-risk"
                 element={(
-                  <RequireRole allowedRoles={["admin", "director"]}>
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <AtRiskPage />
                   </RequireRole>
                 )}
@@ -322,6 +390,22 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <RepActivityPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/performance/canvassing-activity"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <CanvassingActivityPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/performance/daily-activity-log"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <DailyActivityLogPage />
                   </RequireRole>
                 )}
               />
@@ -395,7 +479,17 @@ export function App() {
                   </RequireRole>
                 )}
               />
-              <Route path="/sales-review" element={<SalesReviewPage />} />
+              {/* Gated to match the report index card and the server's GET /sales-review, which returns
+                  team-wide forecast and hygiene data. It self-scopes for a rep and for nobody else, so an
+                  ungated route handed every other role the whole team's numbers. */}
+              <Route
+                path="/sales-review"
+                element={(
+                  <RequireRole allowedRoles={REPORT_VIEWER_ROLES}>
+                    <SalesReviewPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/pipeline/hygiene" element={<PipelineHygienePage />} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route
@@ -403,6 +497,14 @@ export function App() {
                 element={
                   <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <QcReportsPage />
+                  </RequireRole>
+                }
+              />
+              <Route
+                path="/projects/weekly-reports"
+                element={
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <WeeklyReportsPage />
                   </RequireRole>
                 }
               />
@@ -549,6 +651,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director"]}>
                     <LeadDueDiligenceQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/marketing-expense-requests"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <MarketingExpenseQueuePage />
                   </RequireRole>
                 )}
               />

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -17,10 +17,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ChevronsUpDown, Loader2, Plus } from "lucide-react";
-import { createProjectTask, createTask } from "@/hooks/use-tasks";
+import {
+  createProjectTask,
+  createTask,
+  TASK_PRIORITY_SELECT_ITEMS as PRIORITY_SELECT_ITEMS,
+} from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 interface Assignee {
   id: string;
@@ -32,15 +36,20 @@ interface DealOption {
   dealNumber: string;
   projectNumber?: string | null;
   name: string;
+  /** `deals.is_change_order` — present on the /deals list payload. */
+  isChangeOrder?: boolean | null;
 }
 
 const PROJECT_SEARCH_DEBOUNCE_MS = 150;
 /** The deals API ignores a search term shorter than this, so don't fire a request for one. */
 const PROJECT_SEARCH_MIN_CHARS = 2;
 
+// A change-order child deal is STORED as "<Parent> — Change Order N", which this option label
+// truncates away. formatDealDisplayName moves the label to the front; DISPLAY-ONLY, never persisted.
 function dealOptionLabel(deal: DealOption) {
   const display = formatDealDisplayNumber(deal);
-  return display.isPending ? deal.name : `${display.label} - ${deal.name}`;
+  const name = formatDealDisplayName(deal.name, deal.isChangeOrder);
+  return display.isPending ? name : `${display.label} - ${name}`;
 }
 
 interface TaskCreateDialogProps {
@@ -67,6 +76,12 @@ export function TaskCreateDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
+  // Memoized rather than built inline: Base UI's SelectRoot lists `items` in a context useMemo's
+  // dependency array, so a fresh array identity on every render invalidates it for nothing.
+  const assigneeSelectItems = useMemo(
+    () => assignees.map((u) => ({ value: u.id, label: u.displayName })),
+    [assignees]
+  );
   const [deals, setDeals] = useState<DealOption[]>([]);
   const [selectedDeal, setSelectedDeal] = useState<DealOption | null>(null);
   const [dealPickerOpen, setDealPickerOpen] = useState(false);
@@ -229,15 +244,18 @@ export function TaskCreateDialog({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Priority</label>
-              <Select value={priority} onValueChange={(v) => setPriority(v ?? "normal")}>
+              {/* `items` is what Base UI reads for the trigger label — without it this showed the
+                  raw enum value, `urgent`, beside an item labelled `Urgent`. */}
+              <Select items={PRIORITY_SELECT_ITEMS} value={priority} onValueChange={(v) => setPriority(v ?? "normal")}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="urgent">Urgent</SelectItem>
-                  <SelectItem value="high">High</SelectItem>
-                  <SelectItem value="normal">Normal</SelectItem>
-                  <SelectItem value="low">Low</SelectItem>
+                  {PRIORITY_SELECT_ITEMS.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -253,7 +271,13 @@ export function TaskCreateDialog({
           {canAssign && assignees.length > 0 && (
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Assignee</label>
-              <Select value={assignedTo} onValueChange={(v) => setAssignedTo(v ?? "")}>
+              {/* Same rule: no `items`, and the trigger renders the assignee's raw uuid the moment
+                  one is chosen. */}
+              <Select
+                items={assigneeSelectItems}
+                value={assignedTo}
+                onValueChange={(v) => setAssignedTo(v ?? "")}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder={isProjectScoped ? "Choose assignee" : "Assign to teammate"} />
                 </SelectTrigger>

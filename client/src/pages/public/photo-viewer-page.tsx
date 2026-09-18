@@ -15,6 +15,11 @@ interface PublicPhoto {
 
 interface PublicViewerResponse {
   deal: {
+    /**
+     * Already through formatDealDisplayName server-side (public-photo-tokens/service.ts). The flag that
+     * decides the change-order relabel is deliberately NOT on this payload — see the exposure lock there
+     * — so this is the one deal name the client must render verbatim rather than re-format.
+     */
     name: string;
     propertyAddress: string | null;
   };
@@ -78,6 +83,8 @@ export function PublicPhotoViewerPage() {
     <main className="min-h-screen bg-slate-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white px-4 py-4 sm:px-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-red-700">T Rock Photos</p>
+        {/* Rendered verbatim: the server already front-loaded "Change Order N" using the flag, which it
+            does not send. Re-formatting here would guess from syntax and could relabel an ordinary deal. */}
         <h1 className="mt-1 text-2xl font-semibold">{data.deal.name}</h1>
         {data.deal.propertyAddress && (
           <p className="mt-1 flex items-center gap-1 text-sm text-slate-600">
@@ -119,7 +126,7 @@ export function PublicPhotoViewerPage() {
 
       <Dialog open={Boolean(selectedPhoto)} onOpenChange={(open) => !open && setSelectedId(null)}>
         {selectedPhoto && (
-          <DialogContent className="max-w-5xl overflow-hidden bg-black p-0">
+          <DialogContent className="sm:max-w-5xl overflow-hidden bg-black p-0">
             <div className="relative flex max-h-[90vh] min-h-[60vh] items-center justify-center">
               <button
                 type="button"
@@ -140,6 +147,7 @@ export function PublicPhotoViewerPage() {
                 className="absolute left-3 top-1/2"
                 variant="secondary"
                 size="icon"
+                aria-label="Previous photo"
                 disabled={selectedIndex <= 0}
                 onClick={() => setSelectedId(photos[selectedIndex - 1]?.id)}
               >
@@ -149,6 +157,7 @@ export function PublicPhotoViewerPage() {
                 className="absolute right-3 top-1/2"
                 variant="secondary"
                 size="icon"
+                aria-label="Next photo"
                 disabled={selectedIndex >= photos.length - 1}
                 onClick={() => setSelectedId(photos[selectedIndex + 1]?.id)}
               >

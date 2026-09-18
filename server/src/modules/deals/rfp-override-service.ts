@@ -49,6 +49,8 @@ export type RfpReconfirmResult =
 export interface RfpReviewDetail {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string | null;
   projectNumber: string | null;
   rfpApprovalStatus: string | null;
@@ -486,6 +488,7 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
   const result = await tenantDb.execute(sql`
     SELECT d.id AS "dealId",
            d.name AS "dealName",
+           d.is_change_order AS "dealIsChangeOrder",
            d.deal_number AS "dealNumber",
            d.project_number AS "projectNumber",
            d.rfp_approval_status AS "rfpApprovalStatus",
@@ -520,6 +523,9 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
   return {
     dealId: row.dealId,
     dealName: row.dealName,
+    // Three-state: `?? undefined` rather than `?? false`, so an unreadable flag falls back to the name's
+    // shape instead of asserting "not a change order".
+    dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
     dealNumber: row.dealNumber ?? null,
     projectNumber: row.projectNumber ?? null,
     rfpApprovalStatus: row.rfpApprovalStatus ?? null,

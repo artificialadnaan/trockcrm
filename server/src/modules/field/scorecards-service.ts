@@ -26,10 +26,12 @@ import {
   isScorecardPdfObjectMetadataValid,
   needsScorecardPdfRegeneration,
   scorecardEvidenceFingerprint,
+  scorecardGenerationColumn,
   type ScorecardArtifactRecheck,
   type ScorecardPdfArtifactState,
 } from "./scorecard-pdf-artifact.js";
 import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from "./scorecard-evidence-image.js";
+import { scorecardGenerationsMatch } from "@trock-crm/shared/lib/scorecardGeneration";
 import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
   getCorrectiveActionEventsByItem,
@@ -197,6 +199,7 @@ interface ScorecardSummarySource {
   superintendentName: string | null;
   pmName: string | null;
   projectName?: string | null;
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencies: string[] | null;
   status?: string;
@@ -258,7 +261,7 @@ export async function createFieldScorecard(
   // Idempotency runs FIRST so a retry of an already-submitted card still succeeds even if the deal has
   // since dropped off the field surface (e.g. moved to Lost after the original submit).
   const priorCard = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-  if (priorCard) return { scorecard: toSummary(priorCard, priorCard.projectName, input.userId), created: false };
+  if (priorCard) return { scorecard: toSummary(priorCard, { name: priorCard.projectName, isChangeOrder: priorCard.isChangeOrder }, input.userId), created: false };
 
   // Only browsable field projects (active pipeline OR Won-family, never Lost/terminal/inactive) may be
   // scored — same gate the field project reads use. Runs in the resolved office; an off-office deal isn't
@@ -379,7 +382,7 @@ export async function createFieldScorecard(
 
   if (inserted.length === 0) {
     const raced = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-    if (raced) return { scorecard: toSummary(raced, raced.projectName, input.userId), created: false };
+    if (raced) return { scorecard: toSummary(raced, { name: raced.projectName, isChangeOrder: raced.isChangeOrder }, input.userId), created: false };
     throw new AppError(409, "Could not save the scorecard — please try again.");
   }
   const card = inserted[0];
@@ -476,7 +479,7 @@ export async function createFieldScorecard(
     maxAttempts: 6,
   });
 
-  return { scorecard: toSummary(reconciledCard ?? card, project.name, input.userId), created: true };
+  return { scorecard: toSummary(reconciledCard ?? card, project, input.userId), created: true };
 }
 
 /**
@@ -681,7 +684,7 @@ export async function updateFieldScorecard(
       userId: input.userId,
       fileIds: photos.flatMap((photo) => (photo.linkId ? [photo.fileId] : [])),
     });
-    return { scorecard: toSummary(card, project.name, input.userId) };
+    return { scorecard: toSummary(card, project, input.userId) };
   }
 
   // Item identity is internal (the API addresses sections by their canonical keys), so a two-statement
@@ -885,7 +888,7 @@ export async function updateFieldScorecard(
     .where(eq(fieldScorecards.id, card.id))
     .limit(1);
 
-  return { scorecard: toSummary(reconciledCard ?? updatedCard, project.name, input.userId) };
+  return { scorecard: toSummary(reconciledCard ?? updatedCard, project, input.userId) };
 }
 
 export async function listFieldScorecardsForProject(
@@ -910,7 +913,7 @@ export async function listFieldScorecardsForProject(
   });
   return {
     scorecards: rows.map((row) =>
-      toSummary(row, project.name, access.userId, canRespondToCorrectiveAction),
+      toSummary(row, project, access.userId, canRespondToCorrectiveAction),
     ),
   };
 }
@@ -935,6 +938,7 @@ export async function listRecentFieldScorecards(
       sc.superintendent_name AS "superintendentName",
       sc.pm_name AS "pmName",
       d.name AS "projectName",
+      d.is_change_order AS "isChangeOrder",
       sc.project_number AS "projectNumber",
       sc.critical_deficiencies AS "criticalDeficiencies",
       sc.status AS "status",
@@ -1034,7 +1038,7 @@ export async function getFieldScorecardDetail(
   );
 
   return {
-    ...toSummary(card, project.name, access.userId),
+    ...toSummary(card, project, access.userId),
     items,
     criticalDeficiencies: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
@@ -1063,13 +1067,18 @@ export async function finalizeFieldScorecardArtifacts(
 ): Promise<string | null> {
   // Include the editable-content generation in the process-local single-flight key. An edit that commits
   // while an older render is running must start a fresh render instead of coalescing onto the stale promise.
+  //
+  // The THIRD use of a content generation, and the one with no database behind it to catch a mistake. Read
+  // at microsecond resolution like the other two: rounded to the millisecond, a change and the render that
+  // preceded it produce the SAME key and the second request silently joins — and is handed — the render of
+  // the older content.
   const contentGeneration = await runInOffice(office, async (db) => {
     const [card] = await db
-      .select({ updatedAt: fieldScorecards.updatedAt })
+      .select({ generation: scorecardGenerationColumn(fieldScorecards.updatedAt) })
       .from(fieldScorecards)
       .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
       .limit(1);
-    return card ? toIso(card.updatedAt) : null;
+    return card?.generation ?? null;
   });
   if (!contentGeneration) return null;
   return coalesceScorecardPdfFinalization(
@@ -1089,7 +1098,14 @@ export async function renderAndStoreFieldScorecardArtifacts(
 ): Promise<string | null> {
   // 1. READ the scorecard + items + deal on a read-only connection.
   const loaded = await runInOffice(office, async (db) => {
-    const [card] = await db.select().from(fieldScorecards).where(eq(fieldScorecards.id, scorecardId)).limit(1);
+    // Every column, PLUS the row's content generation as canonical microsecond text — in the SAME statement,
+    // because runInOffice is a plain connection rather than a transaction and a second read could observe a
+    // different `updated_at` than the one the render is about to claim it rendered from.
+    const [card] = await db
+      .select({ ...getTableColumns(fieldScorecards), contentGeneration: scorecardGenerationColumn(fieldScorecards.updatedAt) })
+      .from(fieldScorecards)
+      .where(eq(fieldScorecards.id, scorecardId))
+      .limit(1);
     if (!card) return null;
     const itemRows = await db
       .select()
@@ -1415,11 +1431,14 @@ export async function renderAndStoreFieldScorecardArtifacts(
     // finalizers that publish the same generation; it also inverts the file-metadata path's file -> card
     // lock order. A plain read lets us fail fast while the CAS still closes a change after this statement.
     const [currentCardGeneration] = await db
-      .select({ updatedAt: fieldScorecards.updatedAt })
+      .select({ generation: scorecardGenerationColumn(fieldScorecards.updatedAt) })
       .from(fieldScorecards)
       .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
       .limit(1);
-    if (!currentCardGeneration || toIso(currentCardGeneration.updatedAt) !== toIso(card.updatedAt)) {
+    if (
+      !currentCardGeneration ||
+      !scorecardGenerationsMatch(currentCardGeneration.generation, card.contentGeneration)
+    ) {
       throw scorecardContentChangedError();
     }
 
@@ -1465,7 +1484,12 @@ export async function renderAndStoreFieldScorecardArtifacts(
         // Stamp the generation this render READ (migration 0200). The guarded WHERE below already proves
         // updated_at has not moved since, so this is exactly the content the stored bytes represent.
         // needsScorecardPdfRegeneration compares it against the live updated_at on the next download.
-        pdfContentGeneration: card.updatedAt as Date,
+        //
+        // The SAME STRING the CAS binds, cast back with `::timestamptz` — so the column ends up holding
+        // `updated_at` to the microsecond, which is what its documentation has always claimed. Written as a
+        // JS `Date` it landed as `.mmm000` on every row, discarding whatever Postgres held below the
+        // millisecond and leaving the comparison no choice but to round the live value to match.
+        pdfContentGeneration: sql`${card.contentGeneration}::timestamptz`,
       })
       // Monotonic revision write: an older server finishing late during a rolling deploy must never point
       // the row back at its older version-specific object. <= permits repairing a missing v2 object.
@@ -1473,9 +1497,12 @@ export async function renderAndStoreFieldScorecardArtifacts(
         and(
           eq(fieldScorecards.id, scorecardId),
           eq(fieldScorecards.isActive, true),
-          // node-postgres timestamps are millisecond Date objects while Postgres may retain microseconds.
-          // Compare at the API token's precision inside this atomic guarded UPDATE.
-          sql`date_trunc('milliseconds', ${fieldScorecards.updatedAt}) = ${toIso(card.updatedAt)}::timestamptz`,
+          // EXACT, at Postgres's own microsecond resolution — the bound carries every digit the render read
+          // (scorecardGenerationColumn). This was `date_trunc('milliseconds', updated_at) = <read generation>`, which
+          // matches ANY value inside the millisecond the render read: a change landing 400µs later compared
+          // equal, so the CAS admitted a PDF of the PREVIOUS content and stamped it as current. Truncating
+          // either side again reopens exactly that.
+          sql`${fieldScorecards.updatedAt} = ${card.contentGeneration}::timestamptz`,
           lte(fieldScorecards.pdfRenderVersion, CURRENT_SCORECARD_PDF_RENDER_VERSION),
         ),
       )
@@ -1485,11 +1512,14 @@ export async function renderAndStoreFieldScorecardArtifacts(
     // Distinguish a content edit that won the race from a newer renderer revision. The former must never
     // return a stale/currently-unrelated key; the latter may safely return its authoritative artifact.
     const [current] = await db
-      .select({ updatedAt: fieldScorecards.updatedAt, pdfR2Key: fieldScorecards.pdfR2Key })
+      .select({ generation: scorecardGenerationColumn(fieldScorecards.updatedAt), pdfR2Key: fieldScorecards.pdfR2Key })
       .from(fieldScorecards)
       .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
       .limit(1);
-    if (!current || toIso(current.updatedAt) !== toIso(card.updatedAt)) {
+    // Microsecond-exact, like the CAS above. At millisecond resolution a change that beat the CAS by less
+    // than a millisecond read as "unmoved" here, so this returned the row's EXISTING key — an artifact of
+    // neither this render's content nor the caller's — instead of the retryable content-changed error.
+    if (!current || !scorecardGenerationsMatch(current.generation, card.contentGeneration)) {
       throw scorecardContentChangedError();
     }
     return current?.pdfR2Key ?? null;
@@ -1511,8 +1541,11 @@ export async function getFieldScorecardPdfArtifactState(
       dealId: fieldScorecards.dealId,
       pdfR2Key: fieldScorecards.pdfR2Key,
       pdfRenderVersion: fieldScorecards.pdfRenderVersion,
-      pdfContentGeneration: fieldScorecards.pdfContentGeneration,
-      currentGeneration: fieldScorecards.updatedAt,
+      // BOTH generations as canonical microsecond text, never as Drizzle timestamps: a `Date` on either
+      // side of the staleness comparison rounds it back to milliseconds and reopens the sub-millisecond
+      // collision the whole representation exists to close. See scorecardGenerationColumn.
+      pdfContentGeneration: scorecardGenerationColumn(fieldScorecards.pdfContentGeneration),
+      currentGeneration: scorecardGenerationColumn(fieldScorecards.updatedAt),
       linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
     })
     .from(fieldScorecards)
@@ -1575,8 +1608,9 @@ export async function recheckScorecardArtifactCurrency(
       .select({
         pdfR2Key: fieldScorecards.pdfR2Key,
         pdfRenderVersion: fieldScorecards.pdfRenderVersion,
-        pdfContentGeneration: fieldScorecards.pdfContentGeneration,
-        currentGeneration: fieldScorecards.updatedAt,
+        // Canonical microsecond text on both sides — see scorecardGenerationColumn.
+        pdfContentGeneration: scorecardGenerationColumn(fieldScorecards.pdfContentGeneration),
+        currentGeneration: scorecardGenerationColumn(fieldScorecards.updatedAt),
       })
       .from(fieldScorecards)
       .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
@@ -1624,11 +1658,12 @@ export async function presignFieldScorecardPdf(
 async function findByClientSubmissionId(
   tenantDb: TenantDb,
   clientSubmissionId: string,
-): Promise<(ScorecardRow & { projectName: string }) | null> {
+): Promise<(ScorecardRow & { projectName: string; isChangeOrder: boolean }) | null> {
   const rows = await tenantDb
     .select({
       ...getTableColumns(fieldScorecards),
       projectName: deals.name,
+      isChangeOrder: deals.isChangeOrder,
     })
     .from(fieldScorecards)
     .innerJoin(deals, eq(deals.id, fieldScorecards.dealId))
@@ -2007,12 +2042,24 @@ function scorecardEditableContentEquals(input: {
 // scorecard-evidence-upload.ts (the evidence-presign guard reuses the same set) and re-imported here to keep a
 // single source of truth for the editable lifecycle.
 
+/**
+ * `project` carries BOTH the resolved name and `deals.is_change_order`, together, on purpose.
+ *
+ * Several callers hand in a plain `field_scorecards` row and resolve the deal separately, so `row` has
+ * no `isChangeOrder` at all. Serializing that absence as `false` would be worse than omitting it: on the
+ * client `false` is AUTHORITATIVE and suppresses the change-order relabel outright, so a real CO project's
+ * scorecard would keep its raw "<Parent> — Change Order N" name on exactly the endpoints users hit most.
+ * `undefined` instead means "not stated", which falls back to reading the name. Never coerce here.
+ */
 function toSummary(
   row: ScorecardSummarySource,
-  projectName = row.projectName ?? null,
+  project?: { name: string | null; isChangeOrder?: boolean | null },
   viewerUserId?: string,
   canRespondToCorrectiveAction?: boolean,
 ): FieldScorecardSummary {
+  const projectName = project?.name ?? row.projectName ?? null;
+  // `??` (not `||`) so a genuine `false` from either source is preserved rather than falling through.
+  const isChangeOrder = project?.isChangeOrder ?? row.isChangeOrder ?? undefined;
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
   const rating = row.rating as ScorecardRating;
@@ -2029,6 +2076,7 @@ function toSummary(
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
     projectName,
+    isChangeOrder,
     projectNumber: row.projectNumber ?? null,
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,

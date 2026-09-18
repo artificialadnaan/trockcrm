@@ -48,8 +48,8 @@ const STATUS_BADGE: Record<string, string> = {
   needs_review: "bg-amber-100 text-amber-800",
   invalid: "bg-red-100 text-red-800",
   duplicate: "bg-orange-100 text-orange-800",
-  merged: "bg-gray-100 text-gray-500",
-  rejected: "bg-gray-100 text-gray-500",
+  merged: "bg-gray-100 text-gray-600",
+  rejected: "bg-gray-100 text-gray-600",
   pending: "bg-gray-100 text-gray-600",
 };
 

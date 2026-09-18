@@ -8,6 +8,13 @@ ENV NODE_ENV=development
 RUN npm ci || (echo "npm ci failed (transient esbuild ETXTBSY) — retry 1" && sleep 5 && npm ci) || (echo "retry 2" && sleep 10 && npm ci)
 RUN npm run build --workspace=shared
 RUN npm run build --workspace=server
+# The client is built HERE, and Vite inlines `import.meta.env` at build time — it does not read the
+# container's environment at runtime. So a variable set on the deployed service reaches the browser
+# bundle only if it is declared as a build ARG and present when this line runs. Without it,
+# `resolveTrockScopeBaseUrl` is null in every shipped image and the AI-walk panel silently drops its
+# "Review in TROCK Scope" link, with nothing anywhere reporting that it was configured and ignored.
+ARG VITE_TROCK_SCOPE_URL
+ENV VITE_TROCK_SCOPE_URL=$VITE_TROCK_SCOPE_URL
 RUN npm run build --workspace=client
 
 FROM node:20-alpine

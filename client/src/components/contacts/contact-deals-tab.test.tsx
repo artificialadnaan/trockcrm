@@ -90,4 +90,52 @@ describe("ContactDealsTab", () => {
     expect(location.searchParams.get("companyId")).toBe("company-1");
     expect(location.searchParams.get("source")).toBe("Contact relationship");
   });
+
+  // The third of the three "entity detail → deals" lists; Company and Property both render the title.
+  // A contact is typically attached to several jobs at ONE property, so the deal names repeat and the
+  // scope title is the only thing on the row that says which job it is (Codex #1051 sweep).
+  function associationWith(scopeTitle: string | null) {
+    return {
+      id: "assoc-1",
+      contactId: "contact-1",
+      dealId: "deal-1",
+      role: null,
+      isPrimary: false,
+      createdAt: "2026-05-01T10:00:00.000Z",
+      deal: {
+        id: "deal-1",
+        dealNumber: "DFW-1-12826-aa",
+        name: "Palm Villas",
+        stageId: "stage-estimating",
+        isActive: true,
+        scopeTitle,
+      },
+    };
+  }
+
+  it("renders an associated deal's scope title", () => {
+    mocks.useContactDealsMock.mockReturnValue({
+      associations: [associationWith("Balcony Repair")],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    renderTab();
+
+    expect(container.querySelector('[data-testid="contact-deal-scope-title"]')).not.toBeNull();
+    expect(container.textContent).toContain("Balcony Repair");
+  });
+
+  it("omits the scope-title line for an associated deal without one", () => {
+    mocks.useContactDealsMock.mockReturnValue({
+      associations: [associationWith(null)],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    renderTab();
+
+    expect(container.querySelector('[data-testid="contact-deal-scope-title"]')).toBeNull();
+    expect(container.textContent).toContain("Palm Villas"); // the row still renders
+  });
 });

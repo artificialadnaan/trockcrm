@@ -22,6 +22,11 @@ export const DEAL_SEARCH_FIELDS = [
   "deals.name",
   "deals.deal_number",
   "deals.project_number",
+  // The short accounting title. It is frequently the ONLY place a deal's actual scope is written in
+  // title form — a change-order child reads "Panel Relocation" while its name is
+  // "<Parent> — Change Order 1" and its description may be blank — so omitting it here means the one
+  // phrase a user remembers about a deal does not find it.
+  "deals.scope_title",
   "deals.description",
   "deals.property_address",
   "deals.property_city",
@@ -53,6 +58,19 @@ export function escapeLikePattern(value: string): string {
  *
  * Caller must guard min length (>= 2 chars); the term is trimmed + escaped here.
  */
+/**
+ * Does this term actually narrow a query?
+ *
+ * ONE definition, in the module that owns the predicate itself, because three call sites depend on
+ * agreeing exactly: the board applies the search predicate when this is true, the Pending RFP queue
+ * applies it when this is true, and the Won YTD definition snapshot refuses to publish when it is true.
+ * If any copy drifted, a term in the gap would narrow a surface AND still be written to
+ * `deals_dashboard.won_ytd` as the all-deals baseline. Mirrors getDeals' own >= 2 guard.
+ */
+export function hasEffectiveDealSearch(search: string | undefined | null): boolean {
+  return typeof search === "string" && search.trim().length >= 2;
+}
+
 export function buildDealSearchCondition(search: string, dealsTable: typeof deals = deals): SQL {
   // `dealsTable` lets a caller that aliases the deals table (e.g. the stage-page summary's raw
   // `from deals d`) reuse the EXACT same predicate via `alias(deals, "d")`, so the drill-down header
@@ -62,6 +80,7 @@ export function buildDealSearchCondition(search: string, dealsTable: typeof deal
     ${dealsTable.name} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.dealNumber} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.projectNumber} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.scopeTitle} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.description} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.propertyAddress} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.propertyCity} ILIKE ${searchTerm} ESCAPE '\\'

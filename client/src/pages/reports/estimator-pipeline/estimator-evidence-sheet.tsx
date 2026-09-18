@@ -14,6 +14,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { useEstimatorPipelineEvidence } from "@/hooks/use-estimator-pipeline-report";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { formatNumber, formatUsd } from "../operations-report-common";
 import type { EstimatorDrillSelection } from "./types";
 
@@ -91,12 +92,14 @@ function ProjectLink({
   heading?: boolean;
 }) {
   const identifier = record.projectNumber ?? record.dealNumber;
+  // A change-order child is STORED "<Parent> — Change Order N", so the suffix is the first thing a
+  // narrow sheet drops. Move the label to the front for DISPLAY only — the stored name is unchanged.
   const link = (
     <Link
       to={{ pathname: `/deals/${record.dealId}`, search }}
       className="break-words font-black leading-5 text-slate-950 underline decoration-slate-300 underline-offset-2 hover:text-brand-red hover:decoration-brand-red focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
     >
-      {record.dealName}
+      {formatDealDisplayName(record.dealName, false)}
     </Link>
   );
   return (

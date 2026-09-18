@@ -3,9 +3,18 @@ import {
   buildNormalizedRfpRequestBody,
   buildRfpAttachmentsFromFiles,
   buildRfpRequestDeliveryPayload,
+  resolveRfpDealAmount,
 } from "../../../src/modules/deals/rfp-payload.js";
 
 describe("RFP normalized payload builder", () => {
+  it.each(["service", "roofing"])("preserves property and opportunity context for every CRM RFP type: %s", (projectType) => {
+    const payload = buildNormalizedRfpRequestBody({
+      deal: { id: "deal-1", dealNumber: "TR-1", name: "North wing repair", propertyName: "Park Villas", projectType },
+      sourceEventId: "project-name-contract",
+    });
+    expect(payload.deal.name).toBe("Park Villas - North wing repair");
+    expect(payload.deal.projectType).toBe(projectType === "service" ? "4" : "3");
+  });
   it("maps CRM deal fields to the SyncHub RFP request contract", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-1",
@@ -131,6 +140,90 @@ describe("RFP normalized payload builder", () => {
     expect(payload.deal.ownerEmail).toBeNull();
   });
 
+  describe("crmActivityLog (the Bid Board project Note)", () => {
+    it("carries the pre-rendered activity block through to SyncHub", () => {
+      const note =
+        "CRM Activity Log — TR-26-0412 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Owner confirmed scope.";
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-activity",
+        deal: { id: "deal-activity", name: "Has History", dealNumber: "dfw-3-12345-aa", crmActivityLog: note },
+      });
+
+      expect(payload.deal.crmActivityLog).toBe(note);
+      // It must NOT leak into the description — Procore renders that as Project Description, which stays
+      // the deal's scope only.
+      expect(payload.deal.description).toBeNull();
+    });
+
+    it("emits null (not undefined) when the deal has no activity", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-noactivity",
+        deal: { id: "deal-noactivity", name: "No History", dealNumber: "dfw-3-12346-aa" },
+      });
+
+      expect(payload.deal.crmActivityLog).toBeNull();
+      expect(JSON.parse(JSON.stringify(payload)).deal).toHaveProperty("crmActivityLog", null);
+    });
+
+    it("treats a whitespace-only render as absent", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-blankactivity",
+        deal: { id: "deal-blank", name: "Blank", dealNumber: "dfw-3-12347-aa", crmActivityLog: "   \n  " },
+      });
+
+      expect(payload.deal.crmActivityLog).toBeNull();
+    });
+  });
+
+  describe("identity uuids (company / property)", () => {
+    it("carries the deal's company and property uuids alongside the display names", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-ids",
+        deal: {
+          id: "deal-ids",
+          name: "Identified",
+          dealNumber: "dfw-4-12345-aa",
+          companyId: "11111111-1111-1111-1111-111111111111",
+          propertyId: "22222222-2222-2222-2222-222222222222",
+          companyName: "Palm Group",
+        },
+      });
+
+      expect(payload.deal.companyId).toBe("11111111-1111-1111-1111-111111111111");
+      expect(payload.deal.propertyId).toBe("22222222-2222-2222-2222-222222222222");
+      // The names still ship — the ids are additive, not a replacement.
+      expect(payload.deal.companyName).toBe("Palm Group");
+    });
+
+    it("emits null (not undefined) for an id the deal does not have", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-noids",
+        deal: {
+          id: "deal-noids",
+          name: "Unidentified",
+          dealNumber: "dfw-4-12346-aa",
+          companyId: "11111111-1111-1111-1111-111111111111",
+        },
+      });
+
+      expect(payload.deal.propertyId).toBeNull();
+      // On the wire: an omitted key and a null are different things downstream, and only null says
+      // "the CRM looked and there is nothing there".
+      const onTheWire = JSON.parse(JSON.stringify(payload)).deal;
+      expect(onTheWire).toHaveProperty("propertyId", null);
+      expect(onTheWire).toHaveProperty("companyId", "11111111-1111-1111-1111-111111111111");
+    });
+
+    it("treats a blank id as absent", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-blankids",
+        deal: { id: "deal-blankids", name: "Blank", dealNumber: "dfw-4-12347-aa", companyId: "  " },
+      });
+
+      expect(payload.deal.companyId).toBeNull();
+    });
+  });
+
   it("falls back from CRM-native fields to Bid Board mirror fields", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-2",
@@ -240,5 +333,49 @@ describe("RFP normalized payload builder", () => {
     expect(payload.dealId).toBe("deal-3");
     expect(payload.syncHubUrl).toBe("https://synchub.example.com/api/rfp-requests");
     expect(payload.body.sourceSystem).toBe("trock_crm");
+  });
+});
+
+describe("resolveRfpDealAmount", () => {
+  it("walks awarded > bid > dd > forecast", () => {
+    expect(
+      resolveRfpDealAmount({
+        awardedAmount: "925000",
+        bidEstimate: "800000",
+        ddEstimate: "700000",
+        forecastRevenue: "600000",
+      })
+    ).toBe(925000);
+    expect(
+      resolveRfpDealAmount({ awardedAmount: null, bidEstimate: "800000", ddEstimate: "700000" })
+    ).toBe(800000);
+    expect(resolveRfpDealAmount({ ddEstimate: "700000", forecastRevenue: "600000" })).toBe(700000);
+    expect(resolveRfpDealAmount({ forecastRevenue: "600000" })).toBe(600000);
+  });
+
+  it("treats blank, absent and non-numeric columns as no value", () => {
+    expect(resolveRfpDealAmount({})).toBeNull();
+    expect(resolveRfpDealAmount({ awardedAmount: "", bidEstimate: null, ddEstimate: undefined })).toBeNull();
+    expect(resolveRfpDealAmount({ awardedAmount: "not a number" })).toBeNull();
+    // 0 is a real answer, not "missing" — it must not fall through to the next column.
+    expect(resolveRfpDealAmount({ awardedAmount: 0, bidEstimate: "800000" })).toBe(0);
+  });
+
+  it("is the SAME precedence the send-time payload uses", () => {
+    const deal = {
+      id: "deal-precedence",
+      name: "Precedence",
+      dealNumber: "dfw-4-12345-aa",
+      awardedAmount: null,
+      bidEstimate: "248500",
+      ddEstimate: "100000",
+      forecastRevenue: "95000",
+    };
+
+    // If these two ever diverge, the number in the RFP email and the number on the RFP report
+    // are computed by different rules for the same deal.
+    expect(buildNormalizedRfpRequestBody({ deal, sourceEventId: "e" }).deal.amount).toBe(
+      resolveRfpDealAmount(deal)
+    );
   });
 });

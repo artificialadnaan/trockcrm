@@ -229,6 +229,8 @@ export function buildUsersInsert(input: {
         role,
         office_id,
         is_active,
+        -- Stated, not inherited from the column default (migration 0219). See seed-new-real-users.
+        generates_sales,
         notification_prefs,
         created_by_user_id,
         updated_at
@@ -241,6 +243,7 @@ export function buildUsersInsert(input: {
         $5,
         'rep'::user_role,
         $6::uuid,
+        true,
         true,
         '{}'::jsonb,
         $7::uuid,

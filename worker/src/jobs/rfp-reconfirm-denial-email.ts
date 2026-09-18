@@ -2,7 +2,7 @@ import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 // Reuse #611's frontend-URL + branded-template primitives so the link points at trockcrm.com and the email
 // matches the RFP-decline / project-number look.
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 // Leadership recipients ("the denier"/go-no-go authority) derive from the SAME config as the decline email +
 // the server's reviewer allowlist (RFP_REJECTION_EMAIL_RECIPIENTS), so they can never drift apart.
 import { resolveRfpReviewerEmails } from "@trock-crm/shared/lib/rfpReviewerEmails";

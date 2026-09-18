@@ -14,6 +14,8 @@ export interface AtRiskRecord {
   id: string;
   dealNumber: string | null;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   repId: string | null;
   repName: string;
   stageLabel: string;

@@ -64,6 +64,7 @@ beforeAll(async () => {
       company_verification_rejected_at timestamptz,
       company_verification_rejected_by uuid,
       assigned_approver_user_id uuid,
+      created_by_user_id uuid,
       is_test_data boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true,
       created_at timestamptz NOT NULL DEFAULT now(),

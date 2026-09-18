@@ -516,6 +516,8 @@ export interface FieldScorecardSummary {
   pmName: string | null;
   /** Current canonical deal/job name. Optional while older API deployments roll out. */
   projectName?: string | null;
+  /** `deals.is_change_order` for `projectName` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencyCount: number;
   submittedByName: string | null;
@@ -622,6 +624,12 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
    * reads that do not carry a session (the field app).
    */
   canApproveCorrectiveActions?: boolean;
+  /**
+   * Whether THIS caller may manually queue a fresh responder corrective-action email cycle for this OPEN
+   * card. This is a UI capability only; the nested deal route remains authoritative, including deal access
+   * and the active-card/deal guards. Optional so a web client can safely read an older server response.
+   */
+  canRetriggerCorrectiveAction?: boolean;
   /**
    * Thread entries whose flagged item a later edit removed. They have no item to thread under, but a
    * rejection and the answer to it are things that happened — omitting them would make the record one of the

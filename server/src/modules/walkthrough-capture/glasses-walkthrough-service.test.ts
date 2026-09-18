@@ -185,6 +185,48 @@ describe("validateGlassesWalkthroughArtifactUploadUrlInput", () => {
 });
 
 describe("validateGlassesWalkthroughCompleteInput", () => {
+  it("reads null when the client states no job type, rather than guessing one here", () => {
+    // This validator answers only "did the client say", because a client that says something WRONG and a
+    // client that says NOTHING need different answers — a 400 and a fall-through respectively. The
+    // fall-through is settled one layer out, against the deal
+    // (`resolveGlassesWalkthroughJobTypeForDeal`), which is the layer that has a deal to consult.
+    expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput()).jobType).toBeNull();
+  });
+
+  it.each(["interior_finish_out", "roofing_envelope", "commercial_ti", "service_repair"])(
+    "accepts %s",
+    (jobType) => {
+      expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType })).jobType).toBe(
+        jobType
+      );
+    }
+  );
+
+  it("refuses a job type TROCK Scope does not have", () => {
+    // A 400 to a caller who can still fix it, instead of a 422 discovered three hops later inside a
+    // retrying background job — where the walk is filed, the bytes are in R2, and the only symptom is a
+    // deal panel stuck on "processing".
+    expect(() =>
+      validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: "exterior" }))
+    ).toThrow(AppError);
+  });
+
+  it("names the types it will accept, so the caller can correct it without reading our source", () => {
+    expect(() =>
+      validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: "exterior" }))
+    ).toThrow(/interior_finish_out/);
+  });
+
+  it("treats an empty string as absent rather than as a bad value", () => {
+    expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: "" })).jobType).toBeNull();
+  });
+
+  it("refuses a non-string job type instead of stringifying it", () => {
+    expect(() =>
+      validateGlassesWalkthroughCompleteInput(baseCompleteInput({ jobType: 7 }))
+    ).toThrow(AppError);
+  });
+
   it("accepts a well-formed single-artifact payload", () => {
     const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput());
     expect(result.walkId).toBe(WALK);
@@ -200,6 +242,64 @@ describe("validateGlassesWalkthroughCompleteInput", () => {
     const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput({ siteLabel: null, projectId: null }));
     expect(result.siteLabel).toBeNull();
     expect(result.projectId).toBeNull();
+  });
+
+  describe("captureCensus", () => {
+    /** The census of a walk that went badly, shaped exactly as the phone sends it. */
+    const census = () => ({
+      walkMs: 1_800_000,
+      video: { framesReceived: 54_000, framesAppended: 1_800, framesDropped: 52_200, secondsSinceLastFrameArrived: 1_740.5 },
+      audio: {
+        buffersReceived: 90_000,
+        buffersAppended: 78_600,
+        buffersDropped: 11_400,
+        longestDropRun: 11_400,
+        secondsAppended: 1_572,
+        engineRestarts: 2,
+        standaloneSecondsRecorded: 1_500,
+        events: [{ atMs: 60_000, kind: "video-stalled" }],
+      },
+    });
+
+    it("carries a well-formed census through verbatim", () => {
+      const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: census() }));
+      expect(result.captureCensus).toEqual(census());
+    });
+
+    it("normalises an ABSENT or null census to null — an app build that does not count is not a walk that recorded nothing", () => {
+      expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput()).captureCensus).toBeNull();
+      expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: null })).captureCensus).toBeNull();
+    });
+
+    it("rejects a malformed census with the SAME 400 a bad title gets, naming the field", () => {
+      let caught: unknown;
+      try {
+        validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: "lots of frames" }));
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(AppError);
+      expect((caught as AppError).statusCode).toBe(400);
+      expect((caught as AppError).message).toBe("captureCensus must be an object.");
+    });
+
+    it("names the offending nested field, so the phone's author can read the 400 and fix it", () => {
+      const bad = census();
+      bad.audio.secondsAppended = -1;
+      expect(() => validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: bad }))).toThrow(
+        /captureCensus\.audio\.secondsAppended must be a non-negative number/
+      );
+      expect(() =>
+        validateGlassesWalkthroughCompleteInput(baseCompleteInput({ captureCensus: { ...census(), video: undefined } }))
+      ).toThrow(/captureCensus\.video must be an object/);
+    });
+
+    it("KEEPS unknown keys — the census is the phone's testimony, recorded rather than curated", () => {
+      const result = validateGlassesWalkthroughCompleteInput(
+        baseCompleteInput({ captureCensus: { ...census(), recorderBuild: "2.14.0" } })
+      );
+      expect(result.captureCensus).toMatchObject({ recorderBuild: "2.14.0" });
+    });
   });
 
   it("rejects a non-ISO capturedAt", () => {

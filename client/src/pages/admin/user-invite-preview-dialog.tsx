@@ -19,7 +19,7 @@ type UserInvitePreviewDialogProps = {
 export function UserInvitePreviewDialog(props: UserInvitePreviewDialogProps) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Invite Preview</DialogTitle>
           <DialogDescription>

@@ -1238,10 +1238,15 @@ describe("buildCanonicalDealBoardColumns", () => {
     expect(columns[oppIndex]!.totalValue).toBe(80000);
   });
 
-  it("does not carry totalCount on canonical columns, so the visibleCount rollup uses the adjusted active count", () => {
-    // buildCanonicalDealBoardColumns rebuilds columns and intentionally omits totalCount (the backend
-    // aggregate is dropped), so the Active Pipeline visibleCount rollup falls back to `count`. The split
-    // must therefore reconcile on the COUNT axis alone: opp.count + synthetic.count == pre-split active.
+  it("CARRIES totalCount onto canonical columns and partitions it across the Pending RFP split", () => {
+    // This used to assert the opposite — that buildCanonicalDealBoardColumns DROPS the backend
+    // totalCount — which is the defect itself, written down as an expectation. With it dropped, every
+    // consumer fell back to `count`, the ACTIVE figure, while `cards` includes on-hold rows: the
+    // truncation notice then compared a card count against an active count and could conclude a
+    // truncated column was complete, hiding its "view all" and with it every deal past the slice.
+    //
+    // Both axes must reconcile now: active counts partition the pre-split active total, and totalCount
+    // partitions the pre-split ALL-ROWS total.
     const columns = buildCanonicalDealBoardColumns(
       [
         {
@@ -1261,12 +1266,289 @@ describe("buildCanonicalDealBoardColumns", () => {
     const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
     const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
 
-    // totalCount is dropped on BOTH columns → the rollup uses `totalCount ?? count` == count.
-    expect(columns[oppIndex]!.totalCount).toBeUndefined();
-    expect(columns[prfpIndex]!.totalCount).toBeUndefined();
     // Count axis reconciles: opp loses the active pending (2→1), synthetic gets it (1), sum == pre-split.
     expect(columns[oppIndex]!.count).toBe(1);
     expect(columns[prfpIndex]!.count).toBe(1);
     expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(2);
+    // Row axis reconciles too: 4 rows in the stage, 2 of them pending (p1 active + p2 on hold).
+    expect(columns[prfpIndex]!.totalCount).toBe(2);
+    expect(columns[oppIndex]!.totalCount).toBe(2);
+    expect(columns[oppIndex]!.totalCount! + columns[prfpIndex]!.totalCount!).toBe(4);
+    // The DRILL-DOWN count is deliberately NOT partitioned: Opportunity's "view all" opens the stage
+    // page, which filters by stage id and still lists the pending-RFP deals.
+    expect(columns[oppIndex]!.drilldownTotalCount).toBe(4);
+    // ...and the synthetic column names no drill-down count at all: its target is the cross-rep queue.
+    expect(columns[prfpIndex]!.drilldownTotalCount).toBeUndefined();
+  });
+});
+
+describe("Pending RFP column — server aggregate over ALL rows beats the (capped) card slice", () => {
+  // The board fetches a SLICE of each column's cards. Splitting the synthetic Pending RFP column out of
+  // Opportunity by counting those cards therefore under-reports BOTH columns the moment the Opportunity
+  // column holds more deals than the slice. These pin that the server's count/$ win when supplied.
+  function oppCard(id: string, options: { pending?: boolean; value?: string } = {}) {
+    return {
+      id,
+      stageId: "opp-stage",
+      workflowRoute: "normal",
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      readOnlySyncedAt: null,
+      rfpApprovalStatus: options.pending ? "pending" : null,
+      rfpOverrideDecision: null,
+      rfpOverrideState: null,
+      bidEstimate: options.value ?? "10000",
+      ddEstimate: null,
+      awardedAmount: null,
+      onHold: false,
+    };
+  }
+
+  const rawColumns = () =>
+    [
+      {
+        stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+        // The column really holds 300 active deals worth $3,000,000 — this response carries 3 cards.
+        count: 300,
+        totalValue: 3_000_000,
+        cards: [oppCard("p1", { pending: true }), oppCard("p2", { pending: true }), oppCard("o1")],
+      },
+    ] as any;
+  const stages = [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any;
+
+  it("uses the server's Pending RFP count/$ and subtracts exactly that from Opportunity", () => {
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, {
+      atRiskByStageSlug: {},
+      pendingRfp: { count: 42, totalCount: 42, totalValue: 420_000 },
+    });
+
+    const opp = columns.find((col) => col.stage.slug === "opportunity")!;
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+
+    expect(pending.count).toBe(42);
+    expect(pending.totalValue).toBe(420_000);
+    // Opportunity's backend aggregate minus the SAME server number, so the split still reconciles.
+    expect(opp.count).toBe(258);
+    expect(opp.totalValue).toBe(2_580_000);
+    expect(opp.count + pending.count).toBe(300);
+    expect(opp.totalValue + pending.totalValue).toBe(3_000_000);
+    // The cards still render where they belong; only the NUMBERS come from the server.
+    expect(pending.cards.map((d) => d.id)).toEqual(["p1", "p2"]);
+    expect(opp.cards.map((d) => d.id)).toEqual(["o1"]);
+  });
+
+  it("would under-report from the cards alone — which is exactly what the summary replaces", () => {
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    // Only the 2 pending cards that fit in the slice, not the 42 the column really holds.
+    expect(pending.count).toBe(2);
+  });
+
+  it("falls back to the card-derived split when the payload carries no summary", () => {
+    const withNull = buildCanonicalDealBoardColumns(rawColumns(), stages, null);
+    const withUndefined = buildCanonicalDealBoardColumns(rawColumns(), stages);
+    const pendingFromNull = withNull.find((col) => col.stage.slug === "pending_rfp")!;
+    const pendingFromUndefined = withUndefined.find((col) => col.stage.slug === "pending_rfp")!;
+    expect(pendingFromNull.count).toBe(pendingFromUndefined.count);
+    expect(pendingFromNull.totalValue).toBe(pendingFromUndefined.totalValue);
+  });
+});
+
+describe("Pending RFP preview — ABSENT is not EMPTY (the rolling-deploy window)", () => {
+  /**
+   * A client and a server ship in one PR but deploy as two services at different moments. During a
+   * rolling deploy — or if the frontend rolls first — this bundle talks to an API that predates
+   * `pendingRfpDeals`. Collapsing that absence to `[]` makes the documented carve-out fallback
+   * unreachable and renders an EMPTY Pending RFP column under a non-zero header count.
+   */
+  const pendingCard = (id: string) => ({
+    id,
+    stageId: "opp-stage",
+    workflowRoute: "normal",
+    isBidBoardOwned: false,
+    bidBoardStageSlug: null,
+    readOnlySyncedAt: null,
+    rfpApprovalStatus: "pending",
+    rfpOverrideDecision: null,
+    rfpOverrideState: null,
+    bidEstimate: "10000",
+    ddEstimate: null,
+    awardedAmount: null,
+    onHold: false,
+  });
+  const rawColumns = () =>
+    [
+      {
+        stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+        count: 3,
+        totalCount: 3,
+        totalValue: 30000,
+        cards: [pendingCard("p1"), pendingCard("p2"), { ...pendingCard("o1"), rfpApprovalStatus: null }],
+      },
+    ] as any;
+  const stages = [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any;
+
+  it("ABSENT (undefined) falls back to carving the cards out of Opportunity — the OLD-CLIENT shape", () => {
+    // This is also the shape a NEW client gets from an OLD API, and the shape an OLD client gets from a
+    // NEW API: without the `boardAggregates` opt-in the server leaves the pending rows in the ordinary
+    // Opportunity cards precisely so this carve-out has something to find.
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, null, undefined);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    // The pre-field API sends nothing, so the client reconstructs the column from what it does have.
+    expect(pending.cards.map((d) => d.id)).toEqual(["p1", "p2"]);
+    expect(pending.count).toBe(2);
+  });
+
+  it("EXPLICITLY EMPTY ([]) renders an empty column and does NOT fall back", () => {
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, null, []);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    // The server looked and found nothing. Carving cards out of Opportunity here would resurrect deals
+    // the server has already excluded from the bucket.
+    expect(pending.cards).toEqual([]);
+  });
+
+  it("a supplied preview WINS over the carve-out, even when both are non-empty", () => {
+    const serverCards = [{ ...pendingCard("server-1") }, { ...pendingCard("server-2") }] as any;
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, null, serverCards);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    expect(pending.cards.map((d) => d.id)).toEqual(["server-1", "server-2"]);
+  });
+});
+
+describe("column totalCount — ABSENT is not ZERO and not the ACTIVE count", () => {
+  it("leaves totalCount undefined when the payload carried none, rather than substituting count", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 45, // the ACTIVE figure — substituting it is the denominator bug this PR fixed
+          totalValue: 10000,
+          cards: [],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const opp = columns.find((col) => col.stage.slug === "opportunity")!;
+    expect(opp.totalCount).toBeUndefined();
+    expect(opp.drilldownTotalCount).toBeUndefined();
+    // The ACTIVE aggregate is still carried — it is a real server number, just not a row total.
+    expect(opp.count).toBe(45);
+  });
+})
+
+describe("the card cap lives on the CANONICAL column, not the raw stage", () => {
+  /**
+   * The server caps per RAW stage, but a rendered column is a canonical FAMILY. On this stage config
+   * four of the six non-terminal columns merge two raw stages each, so a "50-card" column could render
+   * 100 and the "Showing N of M" notice described something the cap never did.
+   */
+  const card = (id: string, stageId: string, createdAt: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    stageId,
+    workflowRoute: "normal",
+    isBidBoardOwned: false,
+    bidBoardStageSlug: null,
+    readOnlySyncedAt: null,
+    rfpApprovalStatus: null,
+    rfpOverrideDecision: null,
+    rfpOverrideState: null,
+    bidEstimate: "10000",
+    ddEstimate: null,
+    awardedAmount: null,
+    onHold: false,
+    createdAt,
+    ...extra,
+  });
+
+  // estimating <- estimating + estimate_in_progress: two raw stages, one rendered column.
+  const mergedStages = [
+    { id: "est", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", isTerminal: false },
+    { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", isTerminal: false },
+  ] as any;
+
+  const mergedRawColumns = () =>
+    [
+      {
+        stage: mergedStages[0],
+        count: 40,
+        totalCount: 45,
+        totalValue: 400000,
+        cards: Array.from({ length: 30 }, (_, i) =>
+          card(`est-${i}`, "est", `2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`)
+        ),
+      },
+      {
+        stage: mergedStages[1],
+        count: 20,
+        totalCount: 25,
+        totalValue: 200000,
+        cards: Array.from({ length: 30 }, (_, i) =>
+          card(`eip-${i}`, "eip", `2026-04-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`)
+        ),
+      },
+    ] as any;
+
+  it("caps the MERGED column at the limit, not each raw stage separately", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    // 30 + 30 raw cards merge into one rendered column; without a canonical cap it rendered 60.
+    expect(estimating.cards).toHaveLength(50);
+  });
+
+  it("keeps the newest live deals when it caps, matching the server's own card order", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    // Server order is tier, then created_at DESC — so May (est-*) outranks April (eip-*).
+    expect(estimating.cards[0]!.id).toBe("est-29");
+    expect(estimating.cards.filter((d) => d.id.startsWith("est-"))).toHaveLength(30);
+    expect(estimating.cards.filter((d) => d.id.startsWith("eip-"))).toHaveLength(20);
+  });
+
+  it("sinks on-hold / zero-value cards below live ones when capping, like the server's liveness tier", () => {
+    const raw = mergedRawColumns();
+    // Make the whole NEWER raw stage parked: it must lose to the older-but-live one.
+    raw[0].cards = raw[0].cards.map((c: any) => ({ ...c, onHold: true }));
+    const columns = buildCanonicalDealBoardColumns(raw, mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    expect(estimating.cards).toHaveLength(50);
+    // All 30 live (April) cards survive; only 20 of the parked (May) ones do.
+    expect(estimating.cards.filter((d) => d.id.startsWith("eip-"))).toHaveLength(30);
+    expect(estimating.cards.filter((d) => d.id.startsWith("est-"))).toHaveLength(20);
+    expect(estimating.cards[0]!.onHold).toBe(false);
+  });
+
+  it("uses the MERGED total as the affordance denominator, so it describes the capped column", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    // 45 + 25 across the two raw stages — not one stage's 45, which would understate the column.
+    expect(estimating.totalCount).toBe(70);
+    expect(estimating.drilldownTotalCount).toBe(70);
+    expect(estimating.count).toBe(60);
+  });
+
+  it("leaves a single-source column's server ordering untouched (no re-sort, no divergence)", () => {
+    const single = [
+      {
+        stage: mergedStages[0],
+        count: 3,
+        totalCount: 3,
+        totalValue: 30000,
+        // Deliberately NOT in the server's order; an under-cap column must be passed through verbatim.
+        cards: [
+          card("a", "est", "2026-01-01T00:00:00.000Z"),
+          card("b", "est", "2026-06-01T00:00:00.000Z"),
+          card("c", "est", "2026-03-01T00:00:00.000Z"),
+        ],
+      },
+    ] as any;
+    const columns = buildCanonicalDealBoardColumns(single, [mergedStages[0]] as any, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    expect(estimating.cards.map((d) => d.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("does not cap at all when no limit is supplied", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    expect(estimating.cards).toHaveLength(60);
   });
 });

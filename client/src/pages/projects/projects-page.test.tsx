@@ -17,22 +17,56 @@ vi.mock("@/lib/api", () => ({
 
 const stageNames = [
   "bidding",
+  "estimating",
+  "pre-construction",
   "buyout",
+  "contract executed",
+  "in production",
   "close out",
   "close out - final invoice",
   "closed",
-  "contract executed",
-  "in production",
+  "service - estimating",
+  "service - in production",
+  "service - close out",
+  "service - close out final invoice",
+  "service - lost",
 ];
 
-function boardResponse(projects: Array<Record<string, unknown>> = []) {
+const emptyRollup = {
+  totalValue: 0,
+  projectCount: 0,
+  construction: {
+    stages: ["buyout", "pre-construction", "in production"],
+    projectCount: 0,
+    totalValue: 0,
+    staleValueCount: 0,
+    unsyncedValueCount: 0,
+  },
+  service: {
+    stages: ["service - in production"],
+    projectCount: 0,
+    totalValue: 0,
+    staleValueCount: 0,
+    unsyncedValueCount: 0,
+  },
+  staleValueCount: 0,
+  unsyncedValueCount: 0,
+  staleAfterDays: 7,
+};
+
+function boardResponse(
+  projects: Array<Record<string, unknown>> = [],
+  overrides: { stages?: Array<Record<string, unknown>>; productionRollup?: unknown } = {},
+) {
   return {
-    stages: stageNames.map((stage) => ({
+    stages: overrides.stages ?? stageNames.map((stage) => ({
       stage,
       label: stage.replace(/\b\w/g, (char) => char.toUpperCase()),
+      totalValue: 0,
       projects: projects.filter((project) => project.currentStageNormalized === stage),
     })),
     projects,
+    productionRollup: overrides.productionRollup ?? emptyRollup,
   };
 }
 
@@ -113,6 +147,271 @@ describe("ProjectsPage", () => {
     expect(container.querySelector("[draggable]")).toBeNull();
   });
 
+  it("renders the production roll-up card with service split out from construction", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 915000,
+          projectCount: 6,
+          construction: {
+            stages: ["buyout", "pre-construction", "in production"],
+            projectCount: 4,
+            totalValue: 875000,
+            staleValueCount: 0,
+            unsyncedValueCount: 1,
+          },
+          service: {
+            stages: ["service - in production"],
+            projectCount: 2,
+            totalValue: 40000,
+            staleValueCount: 1,
+            unsyncedValueCount: 1,
+          },
+          staleValueCount: 1,
+          unsyncedValueCount: 2,
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+    expect(card).not.toBeNull();
+
+    // Combined headline...
+    expect(card!.textContent).toContain("$915,000");
+    expect(card!.textContent).toContain("6 projects");
+    // ...with both tracks still individually readable, not merged into the one number.
+    expect(card!.textContent).toContain("Construction");
+    expect(card!.textContent).toContain("$875,000");
+    expect(card!.textContent).toContain("Service");
+    expect(card!.textContent).toContain("$40,000");
+    expect(card!.textContent).toContain("Service - In Production");
+  });
+
+  it("does not describe the headline count as construction-only when it includes service", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 915000,
+          projectCount: 6,
+          construction: { ...emptyRollup.construction, projectCount: 4, totalValue: 875000 },
+          service: { ...emptyRollup.service, projectCount: 2, totalValue: 40000 },
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]')!;
+
+    // 6 = 4 construction + 2 service, so the sentence next to it must not name only the
+    // construction stages — that reads the service projects as construction-stage work.
+    expect(card.textContent).toContain("6 projects across the construction and service production stages");
+    expect(card.textContent).not.toContain("6 projects in Buy Out, Pre-Construction and In Production");
+  });
+
+  it("states the stale and not-synced caveat on the roll-up card", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 915000,
+          projectCount: 6,
+          construction: { ...emptyRollup.construction, projectCount: 4, totalValue: 875000, unsyncedValueCount: 1 },
+          service: { ...emptyRollup.service, projectCount: 2, totalValue: 40000, staleValueCount: 1, unsyncedValueCount: 1 },
+          staleValueCount: 1,
+          unsyncedValueCount: 2,
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+
+    // The card must NOT present the total as complete when it isn't.
+    expect(card!.textContent).toContain("Total is a floor, not a final number");
+    expect(card!.textContent).toContain("2 projects have no synced value");
+    expect(card!.textContent).toContain("count as $0");
+    expect(card!.textContent).toContain("a further 1 value was last synced");
+    expect(card!.textContent).toContain("more than 7 days ago");
+  });
+
+  /**
+   * The four caveat combinations. "The total is a floor" is only true when something is MISSING
+   * from it: a stale value IS counted, and Procore may since have revised it up OR down, so the
+   * stale-only case is complete-but-possibly-out-of-date — a different claim entirely. Saying
+   * "floor" there, alongside "0 projects have no synced value", asserted two false things at once.
+   */
+  async function renderCaveat(missing: number, stale: number) {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 875000,
+          projectCount: 6,
+          construction: { ...emptyRollup.construction, projectCount: 6, totalValue: 875000 },
+          unsyncedValueCount: missing,
+          staleValueCount: stale,
+        },
+      }),
+    );
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    return container.querySelector('[aria-label="Production revenue roll-up"]')!.textContent ?? "";
+  }
+
+  it("caveat — neither stale nor unsynced: claims completeness, no floor language", async () => {
+    const text = await renderCaveat(0, 0);
+    expect(text).toContain("All 6 projects have a value synced from Procore within the last 7 days");
+    expect(text).not.toContain("floor");
+    expect(text).not.toContain("no synced value");
+  });
+
+  it("caveat — stale only: says the value is included but may have moved EITHER WAY, never 'floor'", async () => {
+    const text = await renderCaveat(0, 3);
+    expect(text).toContain("Every project's value is included");
+    expect(text).toContain("3 values were last synced from Procore more than 7 days ago");
+    expect(text).toContain("may have moved in either direction");
+    // The two false claims the old single-branch message made:
+    expect(text).not.toContain("floor");
+    expect(text).not.toContain("0 projects have no synced value");
+  });
+
+  it("caveat — unsynced only: floor language, and no stale sentence invented", async () => {
+    const text = await renderCaveat(2, 0);
+    expect(text).toContain("Total is a floor, not a final number");
+    expect(text).toContain("2 projects have no synced value and count as $0");
+    expect(text).not.toContain("0 values were last synced");
+    expect(text).not.toContain("either direction");
+  });
+
+  it("caveat — both: floor language AND the staleness qualifier, singular forms correct", async () => {
+    const text = await renderCaveat(1, 1);
+    expect(text).toContain("Total is a floor, not a final number");
+    expect(text).toContain("1 project has no synced value and counts as $0");
+    expect(text).toContain("a further 1 value was last synced from Procore more than 7 days ago");
+  });
+
+  it("does not claim 'all 0 projects are synced' when the roll-up stages are empty", async () => {
+    mocks.api.mockResolvedValue(boardResponse());
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+    expect(card!.textContent).toContain("No projects are in a construction or service production stage");
+    expect(card!.textContent).not.toContain("All 0 projects");
+  });
+
+  it("says so plainly when nothing is stale or unsynced", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 875000,
+          projectCount: 4,
+          construction: { ...emptyRollup.construction, projectCount: 4, totalValue: 875000 },
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+    expect(card!.textContent).toContain("have a value synced from Procore within the last 7 days");
+    expect(card!.textContent).not.toContain("Total is a floor");
+  });
+
+  it("renders the Other / No Column bucket so unmapped projects stay visible", async () => {
+    const surprise = {
+      id: "00000000-0000-4000-8000-000000000009",
+      procoreProjectId: "9",
+      procoreCompanyId: "co",
+      projectNumber: "PN-9",
+      name: "Brand New Procore Stage",
+      currentStage: "Warranty - Punch List",
+      currentStageNormalized: "warranty - punch list",
+      currentStageEnteredAt: null,
+      totalValue: 777,
+      valueSyncedAt: null,
+      firstSeenAt: "2026-05-18T12:00:00.000Z",
+      updatedAt: "2026-05-21T12:00:00.000Z",
+    };
+    mocks.api.mockResolvedValue(
+      boardResponse([surprise], {
+        stages: [
+          ...stageNames.map((stage) => ({
+            stage,
+            label: stage.replace(/\b\w/g, (char) => char.toUpperCase()),
+            totalValue: 0,
+            projects: [],
+          })),
+          { stage: "unmapped", label: "Other / No Column", totalValue: 777, projects: [surprise] },
+        ],
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Brand New Procore Stage"));
+    const column = container.querySelector('[aria-label="Other / No Column projects"]');
+    expect(column).not.toBeNull();
+    expect(column!.textContent).toContain("Unmapped");
+    expect(column!.textContent).toContain("Stages with no board column of their own");
+    // Counted in the board header total too, not just shown.
+    expect(container.textContent).toContain("1 project");
+  });
+
   it("renders project value absence without showing a fake zero", async () => {
     mocks.api.mockResolvedValue(
       boardResponse([
@@ -142,7 +441,11 @@ describe("ProjectsPage", () => {
     });
 
     await vi.waitFor(() => expect(container.textContent).toContain("Portfolio Roof Replacement"));
-    expect(container.textContent).toContain("Value not synced");
-    expect(container.textContent).not.toContain("$0");
+    // Scoped to the project CARD: empty stage columns and the roll-up card legitimately render
+    // "$0" totals, but a project whose value never synced must never be dressed up as a real $0.
+    const card = container.querySelector('a[href="/projects/00000000-0000-4000-8000-000000000001"]');
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain("Value not synced");
+    expect(card!.textContent).not.toContain("$0");
   });
 });

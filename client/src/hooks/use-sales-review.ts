@@ -12,6 +12,8 @@ export interface SalesReviewForecastRow {
   entityType: "lead" | "deal";
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   companyId: string | null;
   companyName: string | null;
   propertyId: string | null;
@@ -60,6 +62,8 @@ export interface SalesHygieneIssueRow {
   entityType: "lead" | "deal";
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   assignedRepId: string | null;
   assignedRepName: string | null;
   issueTypes: string[];

@@ -1,0 +1,309 @@
+# TROCK Scope → CRM estimating exporter
+
+**Status:** design, not approved. Nothing on the **Scope** side is built. The CRM-side prerequisite
+that was blocked — a way for a machine to call the receiver at all — has since been **decided and
+implemented**: `POST /api/integrations/scope/walkthrough-extractions`, an HMAC-signed integration
+route outside `tenantRouter` (PR #1033). The section below is kept because it records why the obvious
+shapes were rejected, but it is no longer a blocker.
+**Date:** 2026-08-04 · **Blocker resolved:** 2026-08-06
+
+## The gap in one sentence
+
+`POST /api/deals/:id/estimating/walkthrough-extractions` is finished, tested and deployed on the CRM
+side, and **nothing anywhere calls it** — TROCK Scope has no CRM client, no CRM base URL, and no code
+that mentions the endpoint. The receiving door was built anticipating Scope as the sender
+(`encodeWalkthroughIdKeySegment` says so outright: *"trock-scope computes the same path and uploads to
+it before it posts"*), and the sender was never written. Scope extracts the line items and they stay in
+Scope.
+
+This spec covers the sender, plus the one CRM-side change the quantity decision requires.
+
+## What the receiver already guarantees
+
+Worth stating, because it removes most of the hard problems from this design:
+
+- **Idempotent on `(dealId, projectId, contentHash)`**, where `contentHash` is the namespaced
+  walkthrough id — NOT on `walkthroughId` alone. A retry after a lost response replays the ids of the
+  chain the first call committed rather than building a second one, so the sender needs no dedup of its
+  own. The distinction is load-bearing: the same walkthrough ingested onto two deals, or onto two
+  projects within one deal, is deliberately **two documents**. For the deal-level flow decided below,
+  `projectId` is always `null`, so the tuple degenerates to (deal, walkthrough) — but the sender must
+  not assume the walkthrough id alone identifies anything.
+- **One transaction.** The `files → estimate_source_documents → estimate_document_parse_runs →
+  estimate_extractions` chain either all lands or none of it does.
+- **Status codes are already meaningful** and the sender must distinguish them: `400` = "your upload
+  is not at the derived key, fix it", NOT retryable. `503` = "we could not reach object storage",
+  retryable. `409` = the stored object no longer matches what the `files` row recorded.
+
+## RESOLVED BLOCKER: there was no way for a machine to call this endpoint
+
+**This spec originally said "POST the payload with the service token". That was wrong, and it is the
+single biggest correction here.** There is no service token for this route, and nothing in the CRM
+issues one.
+
+`POST /api/deals/:id/estimating/walkthrough-extractions` is mounted on the CRM's `tenantRouter`
+(`app.ts`, `CRM_ONLY_TENANT_ROUTE_MOUNTS[0]`), which means it sits behind `authMiddleware`, per-user
+rate limiting, and tenant/office resolution from an authenticated user. Every one of those assumes a
+logged-in human.
+
+**CSRF is not among them, and an earlier draft of this section said it was.** The global middleware
+(`app.ts`, the `hasAuthCookie` guard) returns early unless a `token` COOKIE is present, so an
+`Authorization`-only bearer request never reaches a CSRF check at all. CSRF is a property of
+cookie-authenticated browser sessions here, not a universal constraint on unsafe methods — which
+matters, because "it inherits CSRF" was being used as an argument against a bearer credential and is
+simply not true of one.
+
+**Nor is `field-login` the CRM's only machine path**, which this section also claimed. `app.ts` mounts
+four HMAC-signed integration routers before `express.json()` precisely so raw bytes survive for
+signature verification — the Procore webhook, the SyncHub Procore relay, Bid Board sync, and the
+internal RFP callbacks — and `/api/integrations/synchub` authenticates on a shared-secret header. The
+accurate statement is narrower and still blocking: **no machine path reaches the tenant deal routes.**
+The distinction matters, because it means the CRM already has an established pattern for this problem
+rather than needing one invented.
+
+So the exporter is **not** Scope-side work plus configuration. It needs a CRM-side authentication path
+that does not exist. Three ways:
+
+1. **A service principal for this route** — a bearer credential plus an allow-list of the routes it may
+   reach. Workable, but it does NOT fall out of route allow-listing alone: `tenantMiddleware` selects
+   the tenant schema exclusively from `req.user.activeOfficeId`, and the existing auth middleware
+   derives that from the user's home office or an authorized `x-office-id` override. A principal with
+   one fixed active office would look up every out-of-office walkthrough in the wrong schema and answer
+   404. Choosing this shape therefore requires specifying how `officeSlug` maps to a permitted office
+   context and how that context is authorized — a design question this spec previously left silent.
+2. **Scope holds a CRM user's credentials** and logs in. Rejected: it puts a human's session in a
+   machine, inherits browser rate-limiting, and makes every row that machine files indistinguishable
+   from one that person typed.
+3. **A separate HMAC-signed integration route, outside `tenantRouter`** — the pattern the four existing
+   integration routers already use. No user, no session, no office resolution from a principal: the
+   payload names the office and the route resolves it explicitly.
+
+**Decided: (3), implemented in PR #1033** as `POST /api/integrations/scope/walkthrough-extractions`.
+It sidesteps the office problem in (1) by taking `officeSlug` on the payload and resolving the tenant
+itself, and it keeps the captured actor — see below.
+
+### What `userId` means, and why (3) preserves it
+
+An earlier draft said `capturedByExternalId` "stays correct as the actor even when the caller is a
+service". On the tenant deal route that is **false**: `deals/routes.ts` overwrites the body's `userId`
+with `req.user!.id` before validation, deliberately, so a caller cannot forge the uploader stamped on
+the contact-sheet file. Under a service principal the actor recorded on `files.uploadedBy` and
+`estimate_source_documents.uploadedByUserId` would therefore be the SERVICE, not the person who walked
+the site — the opposite of what the spec assumed.
+
+Option (3) is what makes the original intent achievable: with no `req.user` to overwrite it, the
+integration route takes the payload's `userId`, PROVES it against an active `users` row in the resolved
+office, and pins that proven value. The captured actor survives because it is verified rather than
+trusted — not because the field was left alone.
+
+### Provenance already exists
+
+The spec argued for a new provenance column so a machine-filed extraction is distinguishable from a
+human's. That distinction is **already recorded**: `insertWalkthroughExtractions` writes
+`extractionType: "scope_utterance"` and stamps `extractionProvider: "trock-scope"` and
+`extractionMethod: "walkthrough_grounding"` into `metadataJson`, and the source document carries the
+Scope parse provider and profile. A new field may still be justified to record which CREDENTIAL filed a
+row — that is an authentication fact, not an origin fact — but "there is no way to tell machine rows
+from human rows" was not true when this was written.
+
+## The three things that make this non-trivial
+
+### 1. The contact sheet must exist, at a key Scope does not choose
+
+The receiver **derives** the R2 key server-side and refuses to accept one on the wire — a
+caller-supplied key is a confused-deputy read primitive, since `files.r2_key` is presigned on the row's
+deal association rather than on the key. So the sender must compute the identical path and upload there
+*before* posting:
+
+```
+walkthroughs/{dealId}/{projectId ?? "_none"}/{encodeURIComponent(walkthroughId)}/contact-sheet{.jpg|.pdf}
+```
+
+Consequences the sender must honour:
+
+- `dealId` / `projectId` are **canonical lowercase UUIDs**; `walkthroughId` is **not** case-folded (it
+  is opaque, and folding it merged distinct walkthroughs onto one key).
+- `_none` is the sentinel for a deal-level walkthrough. Not an empty segment.
+- Percent-encoding is `encodeURIComponent`, reproducible on the sender in one call.
+- **A retry must not re-upload.** The key is derived from walkthrough identity, so every attempt targets
+  the same object; re-uploading overwrites evidence the deal has already committed. A true retry has
+  nothing to upload.
+
+Scope must therefore **write into the CRM's R2 bucket**, which it does not do today and has no
+credentials for. That is a new trust edge and the single biggest piece of this work.
+
+**The credential must be scoped, or "direct write" becomes "Scope can read the CRM's files".** The
+requirement is: write-only (no `list`, no `delete`, no `get`), confined to the `walkthroughs/` key
+prefix, with an object-size ceiling and the two accepted content types enforced at the boundary rather
+than trusted from the sender. Rotation on a fixed schedule, and the credential never reachable from
+Scope's request path — only its export worker. **If R2's token model cannot express prefix-scoped
+write-only access, this decision inverts** and the fallback is CRM-issued presigned upload URLs (or the
+upload-proxy endpoint), because an unscoped bucket credential held by a second service is a worse trade
+than the extra hop it was chosen to avoid.
+
+Nothing in Scope currently composes a contact sheet, and it has **no image library at all** — no sharp,
+no jimp, no canvas in any workspace. It has evidence frames (`frames`, `moment_frames`), so the inputs
+exist, but turning them into one `image/jpeg` means adding an image dependency to Scope, not just
+writing new code against an existing one.
+
+### 2. A null quantity is refused today, and that refusal is being removed
+
+`WalkthroughScopeRow.quantity` is nullable — *"only ever set when the quantity was spoken and
+human-confirmed"* — but `validateWalkthroughIngressPayload` currently **refuses** a null one, because
+downstream a null quantity is priced as one unit.
+
+Left as-is this would mean **no fully automatic walk → estimating path**: an extraction straight off the
+glasses has unconfirmed quantities on most rows, so somebody would have to confirm every one in Scope's
+review UI before any export could be accepted.
+
+That is why the refusal is being lifted instead — see *Accepting a null quantity* below, which is the
+decision taken and the one piece of CRM-side work this project requires. Dropping unconfirmed rows from
+the export was rejected as the third option: it silently ships a partial scope, and the estimator has no
+way to see what was withheld.
+
+### 3. Scope does not know the CRM's `projectId`
+
+The payload needs `dealId`, `projectId` and `userId` — and, on the integration route decided above,
+`officeSlug` too, since that route resolves the tenant from the payload rather than from a session.
+Scope's `walkthroughs` row carries `dealUuid`, `officeSlug`, `siteId` and `capturedByExternalId`.
+
+- `officeSlug` — held directly. It is what selects the tenant schema, so it is load-bearing rather than
+  informational.
+- `userId` — `capturedByExternalId` already holds the CRM user id. It is not merely passed through: the
+  receiver proves it against an **active** `users` row and refuses the request otherwise, because this
+  value is stamped on `files.uploadedBy` and the source document's uploader. A deactivated or unknown
+  id is a 404, not a row with a stranger's name on it.
+
+  **Not scoped to the deal's office, deliberately** — an earlier draft of this line said a "foreign"
+  user was refused, and that was wrong in a way worth correcting rather than deleting. `users` is a
+  PUBLIC table, and the office session runs with `search_path = office_<slug>,public`, so the lookup
+  finds any active user whatever their home office. That is the correct behaviour, not an oversight:
+  the field surface is explicitly office-agnostic (`field/cross-office.ts`) and the field walkthrough
+  route already resolves the DEAL's office while keeping `req.fieldUser.id` as the actor, so a capturer
+  whose home office differs from the deal's is an ordinary supported case. Refusing them would reject
+  real walks.
+- `dealId` — `dealUuid`. Fine.
+- `projectId` — **not held.** `siteId` is Scope's own notion. Either the forward starts carrying the
+  CRM project id (a change on the CRM's forward job, small), or every export goes in deal-level with
+  `_none`. Deal-level is the honest default until someone needs otherwise; note that the receiver
+  treats the same walkthrough on two projects as two legitimate documents, so this is a real choice and
+  not a formality.
+
+## Proposed shape
+
+A new `worker/src/jobs/estimating-export.ts` in **trock-scope**. Trigger is still open (see Remaining
+open decisions) — with null quantities accepted, firing automatically once extraction finishes becomes
+viable for the first time, because the export no longer waits on a human.
+
+Sequence:
+
+1. Read the walkthrough's scope items — ALL of them, confirmed quantity or not. Rows with no quantity
+   travel as null and arrive as rows needing input, which is the whole point of the CRM-side change.
+2. Compose the contact sheet from evidence frames → one `image/jpeg`.
+3. Upload the sheet with an **atomic create-if-absent** write (`If-None-Match: *`), not a HEAD followed
+   by a PUT. HEAD-then-PUT is a TOCTOU: two deliveries of the same walkthrough can both observe "absent"
+   and both write, and the loser overwrites evidence the deal has already committed — the exact damage
+   the no-re-upload rule exists to prevent. The conditional write makes "only if nobody got here first"
+   a property of the operation rather than of the gap between two operations.
+   On the precondition failure (`412`) the object already exists, which is the ordinary retry path: fetch
+   its size and checksum and compare them to what this attempt would have written. **Equal ⇒ reuse it**,
+   this is a true retry and there is nothing to do. **Unequal ⇒ abort the export and dead-letter** — the
+   key holds something this walkthrough did not produce, and posting would attach the deal's estimating
+   chain to a foreign object.
+4. `POST` the payload to **`/api/integrations/scope/walkthrough-extractions`** — not to the tenant deal
+   route, which has no machine path. Signed with an HMAC of the **exact request bytes** in
+   `x-trock-scope-signature`, sent uncompressed (the receiver refuses `Content-Encoding`, because
+   inflating before verification would mean the signature covers bytes that were never transmitted),
+   and carrying `officeSlug` alongside `dealId`, `userId` and `projectId` — that route resolves the
+   tenant from the payload rather than from a session. See PR #1033.
+5. Retry policy, per operation rather than one rule for all three:
+   - **Timeouts**: HEAD 5s, PUT 60s (it carries the sheet), POST 30s. Bounded attempts — 5 for HEAD/PUT,
+     5 for POST — with exponential backoff and full jitter, so a Scope-wide retry storm cannot
+     synchronise against the CRM.
+   - **Retryable**: connection errors, timeouts, `408`, `429` (honour `Retry-After` when present), and
+     `500`/`502`/`503`/`504`.
+   - **Never retryable**: `400`, `409`, and any `401`/`403`. Auth failures dead-letter immediately —
+     retrying a refused credential cannot succeed and only advances a lockout.
+   - **Never infer "absent" from a failed read.** The conditional write above removes the original form
+     of this hazard, but it survives on the `412` path: a `403` when fetching the existing object's
+     metadata is not "no object" and must not be treated as a mismatch OR as a match. Only an explicit
+     `404` means absent, and only a successful metadata read can justify reuse. Anything else aborts the
+     export and dead-letters.
+   - Every dead-letter carries the operation, the derived key, and the response body.
+6. Record the returned `documentId` / `parseRunId` on the Scope walkthrough so the review UI can say
+   "exported" and link back.
+
+## Decisions taken (2026-08-04)
+
+1. **Direct bucket write.** Scope gets write credentials to the CRM bucket and uploads the contact
+   sheet to the derived key itself. This is the shape the receiver's key derivation already assumes.
+2. **Deal-level.** Every export goes in with the `_none` project sentinel. Nothing new needed on the
+   CRM forward.
+3. **The CRM will accept rows with no quantity** — rather than blocking the export or silently
+   dropping those rows. See below, because the order of work matters.
+
+### Accepting a null quantity: what has to happen first
+
+The ingress refusal is not protecting the database. `estimate_extractions.quantity` is already
+nullable and the ingress **already writes SQL NULL** for a row that names no quantity
+(`walkthrough-ingress-service.ts:1111` — *"no quantity was spoken" must not collapse into "zero of
+it"*). The refusal at the door exists solely to guard a defect one layer further out:
+
+> `Number(extraction.quantity ?? 1)` — **three sites** in `worker/src/jobs/estimate-generation.ts`
+
+That coercion turns "nobody said how much" into "one of them", and prices it. There is a dedicated
+characterization test (`walkthrough-ingress-characterization.runtime.test.ts`) pinning this hazard,
+so it was found and deliberately fenced off rather than fixed.
+
+So relaxing the ingress guard **on its own would be a regression, not a feature**: today an
+unpriceable row is refused loudly at the door; afterwards it would be accepted silently and billed as
+one unit. The estimator would have no signal at all.
+
+Order of work, therefore:
+
+1. Fix the three `?? 1` sites so a null quantity is carried as *unknown* — excluded from the priced
+   total and surfaced as a row needing input, not defaulted. **These sites are shared**: they serve
+   OCR-parsed document extractions as well as walkthrough ones, so the change alters behaviour for a
+   path this project does not otherwise touch. Regression coverage is required for BOTH inputs, not
+   only the walkthrough one, or the parsed-document path silently inherits a pricing change nobody
+   reviewed.
+2. Give the estimating UI a visible "needs quantity" state for those rows.
+3. Only then relax `validateWalkthroughIngressPayload` to accept null, and delete the refusal's
+   now-obsolete error path.
+4. The exporter can then send every row, confirmed or not.
+
+### Re-export after the source changes
+
+The receiver is idempotent, so a SECOND export of a walkthrough whose scope was edited afterwards is
+deduplicated and the CRM keeps the FIRST export's rows. The edit silently does not arrive. Three ways
+to answer this, and the spec should not leave it undecided:
+
+- **Freeze the walkthrough on export** — simplest, and honest: the CRM document is a snapshot, and
+  Scope says so. Later corrections happen in estimating, which is where an estimator already works.
+- **Version the export** so a re-export lands as a new document rather than a duplicate. More faithful,
+  and it makes the deal accumulate documents the estimator must reconcile.
+- **Leave it** — the current implicit behaviour, and the one to avoid, because "your correction was
+  accepted and discarded" is indistinguishable from success at the sender.
+
+Recommended: **freeze on export**, with the review UI showing an exported walkthrough as read-only and
+naming where to make further changes.
+
+Done in that order this is strictly better than the original design: the walk's full scope reaches the
+estimator, unconfirmed lines are visibly unconfirmed, and nothing is priced off a guess. Done in the
+other order it ships a silent mispricing.
+
+## Remaining open decisions
+
+1. **Who creates the first Scope user.** The review UI needs a login and the Scope database had zero
+   users. This is a prerequisite for anyone confirming quantities there, and it does not depend on any
+   of the work above.
+
+2. **Whether the exporter is triggered by a review-UI button or automatically once extraction
+   finishes.** With null quantities accepted, automatic becomes viable for the first time — the export
+   no longer has to wait on human confirmation. Still worth a deliberate choice: automatic means an
+   estimator sees rows appear without asking.
+
+## What this does not cover
+
+The PDF report cited with images — the third piece of the original ask — is not in this spec. It
+depends on the extraction being in estimating first, so it follows this rather than accompanying it.

@@ -45,6 +45,8 @@ beforeAll(async () => {
     );
     CREATE TABLE public.users (
       id uuid PRIMARY KEY, display_name text NOT NULL, is_active boolean NOT NULL DEFAULT true,
+      -- migration 0222, read by the ingest's estimator-name resolution.
+      estimates_jobs boolean NOT NULL DEFAULT false,
       role text, office_id uuid
     );
     CREATE SCHEMA office_test;
@@ -61,6 +63,7 @@ beforeAll(async () => {
       lost_reason_id uuid, lost_notes text, lost_competitor text,
       won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       awarded_amount numeric, bid_estimate numeric,
+      bid_board_detached_at timestamptz,
       updated_at timestamptz DEFAULT now()
     );
     CREATE TABLE office_test.deal_stage_history (

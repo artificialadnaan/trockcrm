@@ -1,20 +1,30 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
+import { useRepRoster } from "@/hooks/use-rep-roster";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { buildCanonicalDealBoardColumns, buildCanonicalDealStageFamilies } from "@/lib/canonical-deal-board";
-import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
+import {
+  isBoardVisibleStage,
+  DEAL_LIST_SORT_OPTIONS,
+  DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+  PENDING_RFP_STAGE_FILTER_VALUE,
+} from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
-import { getEffectiveDealValue, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import { formatDealDisplayName } from "@/lib/deal-utils";
+import { getEffectiveDealValue, isServiceProjectDeal, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
   buildDealStageWorkspacePath,
   clampDateToToday,
@@ -23,6 +33,7 @@ import {
   isTerminalStage,
   isTerminalOutcomeSlug,
   resolveDatePreset,
+  terminalDateFiltersEqual,
   toDatePresetRange,
   type TerminalDateFilter,
   type TerminalOutcome,
@@ -54,13 +65,38 @@ const SCOPE_OPTIONS = [
   { value: "on_hold", label: "On Hold" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
+/**
+ * The AT-RISK DRILL-DOWN still asks for the server maximum, and has to.
+ *
+ * That view's LIST is built by flattening the board's cards and paginating them client-side
+ * (`drilldownDeals`), so unlike the board its rows genuinely are the card array. It is also a deliberate
+ * click-through rather than the default page load, so its cost is paid once, on purpose. If this ever
+ * needs to come down, the prerequisite is a server-side at-risk ROW feed, not a smaller number here.
+ */
 const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
-// Request the full per-stage card set (mirrors the server's
-// MAX_PIPELINE_CARDS_PER_STAGE_LIMIT) so each board column scrolls internally
-// through ALL its deals instead of an 8-card preview. Header counts/totals come
-// from independent backend aggregates, so this changes only how many cards are
-// fetched into the scroll list — not any displayed total.
-const BOARD_CARDS_PER_STAGE_LIMIT = 1000;
+/**
+ * How many cards the BOARD loads per column — deliberately a slice, not the whole column.
+ *
+ * It used to be 1000 (the server maximum). With includeDd the board answers 12 columns, each selecting
+ * all 153 deal columns, so a single load could ship several thousand full deal rows — measured at
+ * 1.6–2.5s per request in production, and the page issues this request more than once.
+ *
+ * ORDERING — read this before assuming the slice is "the top 50". buildPipelineStageCardsOrder sorts by
+ * [billing-attention on Won], then the active/non-zero liveness TIER, then `created_at DESC`, then
+ * `id DESC`. Effective value enters only as that 0/1 tier, never as a magnitude. So the slice is the 50
+ * NEWEST live deals, and a column's largest-value deals can be entirely absent from it while the header
+ * total still counts them. Keeping that order was a deliberate product call — it is the order reps see
+ * every day — which makes the "view all" escape hatch load-bearing rather than decorative: it is the
+ * only route to the deals the slice hides. It must therefore render whenever the column has more rows
+ * than cards, and its denominator must describe the same population the cards came from.
+ *
+ * What does NOT change: every NUMBER on the page. Column count/total come from backend aggregates and
+ * always did; the At-Risk KPI counts and the Pending RFP column now come from `boardSummary`, computed
+ * server-side over every matching row. The one honest trade-off is the board's client-side text search,
+ * which filters the cards in memory and therefore searches this slice — the list below the board
+ * searches server-side over everything.
+ */
+const BOARD_CARDS_PER_STAGE_LIMIT = 50;
 // Initial row-height estimate for the virtualized board column; the real height
 // of each variable-height DecoratedKanbanCard is measured after mount.
 const DEALS_KANBAN_CARD_ESTIMATE_HEIGHT = 132;
@@ -72,9 +108,99 @@ export type DashboardDealListFilter =
   | "closing_soon"
   | "stale"
   | "at_risk"
+  | "at_risk_service"
+  | "at_risk_non_service"
   | "opportunities"
   | "bid_board"
   | null;
+
+/**
+ * The workflow-route split of the at-risk cohort, shared by the three At-Risk KPI cards and by the
+ * drill-down each one links to.
+ *
+ * "service" is `deals.workflow_route === "service"`. "non_service" is its exact complement — which
+ * DELIBERATELY includes a deal whose route is null/absent. The column is `.default("normal").notNull()`
+ * so a real row always has a route, but the client `Deal` type still declares `workflowRoute` as
+ * `WorkflowRoute | null` (a payload could omit it). A route-less deal is NOT service, so it belongs on
+ * the non-service side; putting it in neither bucket would silently break Service + Non-service === All.
+ */
+export type AtRiskRouteBucket = "all" | "service" | "non_service";
+
+/** The three at-risk cohorts. Service + Non-service partition All exactly. */
+export const AT_RISK_ROUTE_BUCKETS = ["service", "non_service", "all"] as const satisfies readonly AtRiskRouteBucket[];
+
+/** The two ROUTE cohorts, in the order they read as sub-links under the At Risk headline. */
+export const AT_RISK_ROUTE_SUBLINK_BUCKETS = ["service", "non_service"] as const satisfies readonly AtRiskRouteBucket[];
+
+/**
+ * A deal is on the SERVICE side when the PLATFORM's definition says so — project type first, the route
+ * only as a fallback. Delegates to the shared `isServiceProjectDeal` so this page and the reports cannot
+ * answer the same question differently.
+ *
+ * This used to test `workflowRoute === "service"` alone. That column is NOT NULL DEFAULT 'normal' and
+ * nothing derived it from the project type, so it put deals whose own numbers read DFW-4-… (4 IS the
+ * service code) on the non-service side of this split — while the Monday Showcase, fixed first, counted
+ * them as service. Two surfaces, same words, different answers.
+ */
+export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute" | "projectType" | "projectTypeCode">): boolean {
+  return isServiceProjectDeal(deal);
+}
+
+/**
+ * The ONE route predicate every at-risk surface uses — the card counts, the kanban narrowing, and the
+ * drill-down list all call this, so a card can never count a deal the list it links to would drop.
+ * Total partition: every deal matches exactly one of "service" / "non_service", and always "all".
+ */
+export function matchesAtRiskRouteBucket(
+  deal: Pick<Deal, "workflowRoute" | "projectType" | "projectTypeCode">,
+  bucket: AtRiskRouteBucket
+): boolean {
+  if (bucket === "all") return true;
+  return isServiceRouteDeal(deal) === (bucket === "service");
+}
+
+/**
+ * The two halves of the card↔list contract, and inverses of each other: a card links to
+ * `atRiskFilterForRouteBucket(bucket)`, and the destination re-derives the SAME bucket from that
+ * ?filter via `atRiskRouteBucketForFilter`. Keeping the mapping in one round-trippable pair is what
+ * makes "the number on the card" and "the rows on the page it opens" the same set by construction.
+ */
+export function atRiskFilterForRouteBucket(
+  bucket: AtRiskRouteBucket
+): "at_risk" | "at_risk_service" | "at_risk_non_service" {
+  if (bucket === "service") return "at_risk_service";
+  if (bucket === "non_service") return "at_risk_non_service";
+  return "at_risk";
+}
+
+export function atRiskRouteBucketForFilter(filter: DashboardDealListFilter): AtRiskRouteBucket {
+  if (filter === "at_risk_service") return "service";
+  if (filter === "at_risk_non_service") return "non_service";
+  return "all";
+}
+
+/**
+ * Copy per cohort — one source so the visible sub-link text and the accessible name agree.
+ *
+ * `shortLabel` is what the reader sees ("Service 3"); `ariaLabel` is the accessible name and must name
+ * the COHORT, never just the number, so a screen-reader user hears which drill-down a link opens rather
+ * than a bare "3". The three names are distinct for the same reason.
+ */
+export const AT_RISK_CARD_LABELS: Record<AtRiskRouteBucket, { shortLabel: string; ariaLabel: string }> = {
+  service: { shortLabel: "Service", ariaLabel: "View service at-risk deals" },
+  non_service: { shortLabel: "Non-service", ariaLabel: "View non-service at-risk deals" },
+  all: { shortLabel: "All", ariaLabel: "View at-risk deals" },
+};
+
+/**
+ * The SLA drill-downs are CURRENT-STATE views where ?period is a deliberate no-op (see
+ * getDashboardDealListView / buildDealsPageKpiDrilldownPath). All three at-risk routes share that
+ * property with "stale" — splitting the card by workflow route changes WHICH deals are shown, never
+ * the date axis.
+ */
+export function isCurrentStateDrilldownFilter(filter: DashboardDealListFilter): boolean {
+  return filter === "stale" || filter === "at_risk" || filter === "at_risk_service" || filter === "at_risk_non_service";
+}
 
 type DashboardPeriod = "today" | "week" | "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
 type DashboardPeriodSelection = DashboardPeriod | null;
@@ -120,6 +246,16 @@ export function formatDateInput(date: Date) {
 const LIST_PARAM_PREFIXES = ["dl_", "fb_"] as const;
 
 /**
+ * Board params the key deliberately IGNORES.
+ *
+ * `search` is written to the URL by this page (so a drill-down inherits it and a reload survives), but
+ * the board does NOT read it from there — it reads the debounced component state, which is already a
+ * dependency of the board request. Counting it here would re-key the board on the very write that its
+ * own state change is about to refetch for, i.e. the duplicate /deals/pipeline request #1074 removed.
+ */
+const BOARD_KEY_IGNORED_PARAMS = ["search"] as const;
+
+/**
  * A canonical key over only the BOARD-relevant URL params (scope/period/assignedRepId/terminal/estimate).
  * The kanban + KPI cards read these; the under-kanban lists own the dl_* (base) and fb_* (drill-down)
  * namespaces. The board sync effect keys on this so a list-only filter edit (either namespace) does NOT
@@ -130,6 +266,9 @@ export function boardRelevantParamKey(search: string): string {
   const params = new URLSearchParams(search);
   for (const key of [...params.keys()]) {
     if (LIST_PARAM_PREFIXES.some((prefix) => key.startsWith(prefix))) params.delete(key);
+    if (BOARD_KEY_IGNORED_PARAMS.includes(key as (typeof BOARD_KEY_IGNORED_PARAMS)[number])) {
+      params.delete(key);
+    }
   }
   params.sort();
   return params.toString();
@@ -271,6 +410,12 @@ function normalizeDashboardDealFilter(filterParam: string | null | undefined): D
     case "at_risk":
     case "at-risk":
       return "at_risk";
+    case "at_risk_service":
+    case "at-risk-service":
+      return "at_risk_service";
+    case "at_risk_non_service":
+    case "at-risk-non-service":
+      return "at_risk_non_service";
     case "opportunities":
     case "opportunity":
       return "opportunities";
@@ -409,19 +554,33 @@ export function getDashboardDealListView(input: {
     };
   }
 
-  if (filter === "stale" || filter === "at_risk") {
+  if (isCurrentStateDrilldownFilter(filter)) {
+    // The three at-risk routes are the SAME cohort narrowed by workflow route, so they share one branch:
+    // identical boardMode / base filters / sort, differing only in title+subtitle and in the route bucket
+    // the page re-derives from `filter` (atRiskRouteBucketForFilter). Sharing the branch is what keeps the
+    // route split from accidentally acquiring a second date axis or a second at-risk predicate.
+    const atRiskTitle =
+      filter === "at_risk_service"
+        ? "Service Deals At Risk"
+        : filter === "at_risk_non_service"
+          ? "Non-service Deals At Risk"
+          : "Deals At Risk";
+    const atRiskSubtitle =
+      filter === "at_risk_service"
+        ? "Service-route open-stage deals over SLA and needing attention."
+        : filter === "at_risk_non_service"
+          ? "Non-service-route open-stage deals over SLA and needing attention."
+          : "Open-stage deals over SLA and needing attention.";
     return {
       filter,
       eyebrow: "Dashboard drill-down",
-      title: filter === "stale" ? "Stale Deals" : "Deals At Risk",
+      title: filter === "stale" ? "Stale Deals" : atRiskTitle,
       // "Stale"/"Deals At Risk" are CURRENT-STATE views — ?period is a deliberate no-op here. Period-
       // windowing by updated_at would hide the stalest (least-recently-touched, i.e. MOST at-risk) deals,
       // which is backwards for an SLA surface. So the subtitle never claims a period, and listBaseFilters
       // carries no updated-at window — the card, kanban, list, and link all show the full current cohort.
-      subtitle:
-        filter === "stale"
-          ? "Open-stage deals past their stage SLA."
-          : "Open-stage deals over SLA and needing attention.",
+      // The route split inherits this unchanged: it narrows WHICH deals, never the date axis.
+      subtitle: filter === "stale" ? "Open-stage deals past their stage SLA." : atRiskSubtitle,
       boardMode: "at_risk",
       listBaseFilters: {},
       listInitialSort: { key: "stage_entered_at", dir: "asc" },
@@ -505,18 +664,53 @@ export function buildDealsPageKpiDrilldownPath(
       queryParams instanceof URLSearchParams
         ? Array.from(queryParams.entries())
         : Object.entries(queryParams);
+    // Same estimator-wins precedence the page applies when READING these two, so a drill-down link built
+    // from a URL carrying both cannot hand on the owner param the page suppressed.
+    const hasEstimator = entries.some(([key, value]) => key === "estimatorId" && Boolean(value));
     for (const [key, value] of entries) {
       if (!value) continue;
+      if (key === "assignedRepId" && hasEstimator) continue;
       if (
         key === "assignedRepId" ||
+        // The estimator dimension travels with the owner one. A card counted under "Sidney's estimated
+        // deals" must open a destination holding exactly those; forwarding only assignedRepId widens the
+        // drill-down back to every estimator and the destination stops reconciling with the card.
+        key === "estimatorId" ||
+        // The board's text search narrows the WHOLE payload — the column aggregates and the boardSummary
+        // these three KPI cards read, not just the kanban cards. So a searched Active Pipeline / Won /
+        // At Risk card displays a matching-subset number, and a destination without the term opens a
+        // materially wider cohort than the figure that was clicked. Every KPI destination is this same
+        // page, which seeds its search box from ?search on mount, so the term stays visible there rather
+        // than filtering invisibly.
+        key === "search" ||
+        // ...and the same term in the LIST's namespace. The destination's DealsListSection reads `fb_`
+        // via useFilterState, so forwarding only the bare param narrows the board and the KPI cards while
+        // the list beneath them stays wide with an empty search control.
+        key === `${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search` ||
+        // Office context is URL-driven: api() reads ?officeId from window.location.search and sends it as
+        // x-office-id. A KPI card that drops it silently returns a cross-office viewer to their ACTIVE
+        // office, so the drill-down lists a DIFFERENT office's deals than the card counted. Forward it on
+        // every drill-down (this was missing for all of them — Active Pipeline and Won too, not just the
+        // at-risk cards). Same-office users carry no ?officeId, so their links are unchanged.
+        key === "officeId" ||
         // Keep the header period scope through outcome-aware drill-downs (active pipeline / Won), but NOT
-        // the SLA drill-downs (at_risk / stale): those are CURRENT-STATE views where ?period is a deliberate
-        // no-op (getDashboardDealListView gives them no updated-at window — period-filtering an SLA surface
-        // by updated_at would hide the stalest, most at-risk deals). So the link must NOT carry a period
-        // either — omitting it keeps the destination on the full current at-risk cohort, matching the card.
+        // the SLA drill-downs (at_risk / at_risk_service / at_risk_non_service / stale): those are
+        // CURRENT-STATE views where ?period is a deliberate no-op (getDashboardDealListView gives them no
+        // updated-at window — period-filtering an SLA surface by updated_at would hide the stalest, most
+        // at-risk deals). So the link must NOT carry a period either. All THREE at-risk route cards share
+        // this.
+        //
+        // KNOWN GAP (not fixed here): "omitting it keeps the destination matching the card" holds only
+        // while ENABLE_STAGE_ENTRY_DATE_FILTER is OFF (its default). With that flag ON *and* a ?period
+        // selected, getDealsForPipeline additionally bounds the OPEN columns by stage_entered_at, so the
+        // board this page counts from is period-scoped while the destination it links to is not — the
+        // destination can then hold MORE rows than the card shows. That affects the pre-existing "All at
+        // risk" card exactly as it affects the two new route cards. Closing it needs an unwindowed count
+        // source (a second board fetch, or dropping the board period), which changes what "All at risk"
+        // displays — a product decision, deliberately left out of this change.
         // won_*/lost_* are NOT forwarded — the Won drill-down inherits the single shared ?period (already
         // set above), not a collapsed per-column override.
-        (key === "period" && filter !== "at_risk" && filter !== "stale")
+        (key === "period" && !isCurrentStateDrilldownFilter(filter))
       ) {
         params.set(key, value);
       }
@@ -565,22 +759,78 @@ export function recountColumnFromCards(column: DealBoardColumn, cards: Deal[]): 
  * deals (the least-recently-touched, i.e. the most at-risk), which is backwards for this surface. So
  * ?period is a no-op here, and the card/kanban/list/link all show the same full current at-risk cohort.
  *
- * The at-risk count/value are derived from the column's CARDS (there is no server-side at-risk
- * aggregate — the board only ships a full-column aggregate + a preview card slice). That is shared by
- * all three at-risk surfaces, so they stay reconciled; it also means the totals are bounded by the
- * board's per-stage preview cap (SLA_DRILLDOWN_PREVIEW_LIMIT, 1000), far above the real at-risk volume.
- * A stage with >1000 at-risk deals would under-count uniformly across all three — if that ever becomes
- * reachable, the fix is a server at-risk aggregate feeding all three, not a per-card divergence here.
+ * These columns' count/value are recomputed from the column's CARDS, and that is now a DIFFERENT source
+ * from the At-Risk KPI cards, which read the server's `boardSummary` (a count over every matching row).
+ * The two agree only because this drill-down raises the request to SLA_DRILLDOWN_PREVIEW_LIMIT (1000),
+ * so nothing is truncated at the volumes this board sees. The invariant is therefore NO LONGER
+ * "reconciled by construction" — it RESTS ON that limit, and a stage that ever exceeded it would make
+ * the kanban and the list under-count while the KPI above them stayed correct. The real fix, if that
+ * becomes reachable, is a server-side at-risk ROW feed for this view, not a smaller number here.
+ *
+ * `routeBucket` narrows the SAME set by workflow route for the Service / Non-service drill-downs. The
+ * at-risk predicate is untouched — this composes isEngineAtRiskDeal with matchesAtRiskRouteBucket, the
+ * one route predicate the KPI counts also use, so a route drill-down can never show a different cohort
+ * than the card that linked to it. The default "all" is byte-identical to the pre-split behaviour.
  */
-export function getAtRiskBoardColumns(boardColumns: DealBoardColumn[]): DealBoardColumn[] {
+export function getAtRiskBoardColumns(
+  boardColumns: DealBoardColumn[],
+  routeBucket: AtRiskRouteBucket = "all"
+): DealBoardColumn[] {
   return boardColumns
     .filter((column) => !isTerminalStage(column.stage.slug))
     .map((column) =>
       recountColumnFromCards(
         column,
-        column.cards.filter((deal) => isEngineAtRiskDeal(deal))
+        column.cards.filter((deal) => isEngineAtRiskDeal(deal) && matchesAtRiskRouteBucket(deal, routeBucket))
       )
     );
+}
+
+/**
+ * The At-Risk KPI card count for one route bucket, over whatever columns the current view shows.
+ *
+ * This is the ONE counter behind all three cards, and it applies exactly the pair of predicates
+ * getAtRiskBoardColumns applies (terminal-column exclusion + isEngineAtRiskDeal + matchesAtRiskRouteBucket).
+ * That is the reconciliation guarantee: the number rendered on a card and the rows on the drill-down the
+ * card links to come from the same two predicates, not from two hand-rolled copies that can drift.
+ *
+ * Because matchesAtRiskRouteBucket is a total partition of the deals,
+ *   count(cols,"service") + count(cols,"non_service") === count(cols,"all")
+ * holds for ANY column set, by construction (asserted in at-risk-summary.runtime.test.ts).
+ */
+export function countAtRiskDeals(
+  columns: DealBoardColumn[],
+  routeBucket: AtRiskRouteBucket,
+  /**
+   * The server's per-canonical-column at-risk counts, computed over EVERY matching row. When present it
+   * is authoritative: the card array is a capped slice, so counting it would under-report the moment a
+   * column holds more deals than the board fetches. Omitted (older payload / unit tests without a
+   * summary) falls back to the original card count, which is exact whenever nothing was truncated.
+   */
+  atRiskByStageSlug?: Record<string, { service: number; nonService: number }> | null
+): number {
+  return columns.reduce((sum, column) => {
+    if (isTerminalStage(column.stage.slug)) return sum;
+    const serverBucket = atRiskByStageSlug?.[column.stage.slug];
+    if (serverBucket) {
+      return (
+        sum +
+        (routeBucket === "service"
+          ? serverBucket.service
+          : routeBucket === "non_service"
+            ? serverBucket.nonService
+            : serverBucket.service + serverBucket.nonService)
+      );
+    }
+    // A canonical column with no server entry has no at-risk rows at all (the server only emits a bucket
+    // when it counted one) — EXCEPT when there is no summary, where this is the original card count.
+    if (atRiskByStageSlug) return sum;
+    return (
+      sum +
+      column.cards.filter((deal) => isEngineAtRiskDeal(deal) && matchesAtRiskRouteBucket(deal, routeBucket))
+        .length
+    );
+  }, 0);
 }
 
 /**
@@ -600,11 +850,16 @@ export function getActivePipelineSummary(columns: DealBoardColumn[]) {
 /**
  * The Active Pipeline KPI card drills into the cohort it DISPLAYS: the at-risk set on the at-risk
  * drill-down (so the click-through matches the number on the card), the full active pipeline otherwise.
+ *
+ * On a ROUTE drill-down the card displays the route-narrowed at-risk set (the page feeds it the same
+ * route-filtered columns the kanban renders), so it must link back to that same route — linking to the
+ * unsplit `at_risk` would open a strictly larger set than the number printed on the card.
  */
 export function activePipelineDrilldownFilter(
-  boardMode: "all" | "active" | "won" | "at_risk"
-): "at_risk" | "active_pipeline" {
-  return boardMode === "at_risk" ? "at_risk" : "active_pipeline";
+  boardMode: "all" | "active" | "won" | "at_risk",
+  atRiskRouteBucket: AtRiskRouteBucket = "all"
+): "at_risk" | "at_risk_service" | "at_risk_non_service" | "active_pipeline" {
+  return boardMode === "at_risk" ? atRiskFilterForRouteBucket(atRiskRouteBucket) : "active_pipeline";
 }
 
 function stageAgeDaysLabel(deal: Deal) {
@@ -767,6 +1022,29 @@ function DealsBoardColumn({
 }) {
   const totalValue =
     column.totalValue ?? sumNonOnHoldDealValues(column.cards);
+  const visibleCardCount = column.cards.length;
+  /**
+   * The population the CARDS were drawn from — every matching row, on-hold included.
+   *
+   * NOT `count`: that is the ACTIVE figure (the server filters `COALESCE(on_hold,false)=false`) while
+   * the card query applies no on-hold filter. Comparing cards against `count` made a truncated column
+   * look complete whenever enough of it was on hold — 70 rows with 25 held gives count=45 against 50
+   * cards, `50 < 45` is false, no "view all", 20 deals unreachable. Falling back to `count` at all is a
+   * last resort for a payload without a total; `Math.max` keeps the notice from ever claiming fewer
+   * rows than it is visibly rendering.
+   */
+  const cardPopulationCount =
+    column.totalCount === undefined ? undefined : Math.max(column.totalCount, visibleCardCount);
+  /** What the "view all" target will list; undefined when that target's size is unknowable (Pending RFP). */
+  const drilldownTotalCount = column.drilldownTotalCount;
+  /**
+   * Only claim truncation when the row total is KNOWN. An API that does not send totalCount leaves this
+   * undefined, and inventing a denominator from `count` is the exact bug the notice exists to fix — so
+   * the notice stays hidden rather than quoting a number that might be wrong. That window is also the
+   * one where the board stops truncating at all (see the preview-limit latch on DealListPageContent),
+   * so there is nothing to escape from.
+   */
+  const isTruncated = cardPopulationCount !== undefined && visibleCardCount < cardPopulationCount;
   const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
   const hasBoardDate = periodValue != null && periodValue !== "__all__";
   const emptyText = terminalOutcome && hasBoardDate ? "No deals in selected range" : "No deals";
@@ -810,6 +1088,30 @@ function DealsBoardColumn({
       <p className="mt-1 text-xl font-semibold tabular-nums text-gray-900">
         {USD_COMPACT(totalValue)}
       </p>
+      {/*
+        The board loads a SLICE of each column (BOARD_CARDS_PER_STAGE_LIMIT), so a column holding more
+        has to say so rather than look complete at N cards. The header count above already shows the true
+        total; this names the gap and opens the stage drill-down, which is paginated, sortable and
+        filterable over the full set. Mirrors the same affordance on the shared pipeline board column.
+      */}
+      {isTruncated ? (
+        <button
+          type="button"
+          className="mt-1 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900"
+          onClick={() => onOpenStage(column)}
+        >
+          {/*
+            Two shapes, because the destination is not always countable. A stage drill-down lists
+            `drilldownTotalCount` rows, so the link may name it. The Pending RFP column instead opens the
+            CROSS-REP queue while this column is scope-filtered (PR #834) — naming a number there would
+            promise a set size the board cannot know, so it names none. That queue DOES now inherit the
+            estimator filter (#1067 forwards ?estimatorId to /deals/pending-rfp, and openStage passes the
+            whole query string), but not the rep/scope narrowing, so the two still differ.
+          */}
+          Showing {visibleCardCount} of {cardPopulationCount}
+          {drilldownTotalCount != null ? ` — view all ${drilldownTotalCount}` : " — open full queue"}
+        </button>
+      ) : null}
     </>
   );
 
@@ -877,13 +1179,52 @@ function DealListPageContent({
   // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we actually render so
   // the toggle and board never reach the dead "team" placeholder state.
   const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
-  // Key the assignee list to the effective office so it reloads when the view switches offices (?officeId=)
+  // Key the rep list to the effective office so it reloads when the view switches offices (?officeId=)
   // — otherwise a rep is validated / the picker is populated against the previous office's users.
+  //
+  // The sales ROSTER, not every assignable account: this filter used to offer all 32 active users in the
+  // office because it read the task-assignee feed. See useRepRoster.
   const {
-    assignees,
-    loading: assigneesLoading,
-    loadedOfficeId: assigneesOfficeId,
-  } = useTaskAssignees({ officeId: effectiveOfficeId });
+    reps: repOptions,
+    loading: repOptionsLoading,
+    loadedOfficeId: repOptionsOfficeId,
+  } = useRepRoster({ officeId: effectiveOfficeId });
+  // Name resolution only — never the dropdown's contents. An off-roster owner can still be pinned by a
+  // URL or a bookmark, and the shared FilterSelect labels an unmatched value with its allLabel, i.e. it
+  // renders "All reps" over a list that IS filtered (Codex P2). Naming them is what stops that.
+  const { assignees, error: assigneesError } = useTaskAssignees({ officeId: effectiveOfficeId });
+  const assigneeNameById = useMemo(
+    () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
+    [assignees]
+  );
+
+  /**
+   * Whether the saved-view restore below has DECIDED — either it had nothing to apply, or it applied it.
+   *
+   * The board fetch waits on this. Restoring a stored Rep/timeframe rewrites the URL, which changes the
+   * board's own query parameters, so fetching first meant every cold load of /deals issued the
+   * 1.6–2.5s pipeline query TWICE: once for the default view and once for the restored one, with the
+   * first response thrown away by useDealBoard's latest-wins guard. This does not change WHAT the board
+   * shows; it stops the page from asking for the wrong thing first.
+   */
+  const [storedViewResolved, setStoredViewResolved] = useState(false);
+  /**
+   * Latched true once a board response comes back WITHOUT a usable `boardSummary`.
+   *
+   * A client and a server ship in one PR but deploy as two services at different moments. During a
+   * rolling deploy — or if the frontend rolls first — this bundle talks to an API that predates
+   * `boardSummary`, and then EVERY aggregate on this page falls back to counting the card array: the
+   * three At-Risk KPI counts, the Pending RFP column, and the Opportunity total it is subtracted from.
+   * Those fallbacks are correct, but only over an UNTRUNCATED card set — which is what they had before
+   * this PR shrank the slice to 50. Left alone they would quietly under-report for the length of the
+   * deploy, and an under-reported KPI is displayed to someone as if it were true.
+   *
+   * So when the server cannot supply the aggregates, the board stops truncating and asks for the full
+   * per-stage set again, exactly as it did before this PR. One extra request, once, inside the deploy
+   * window; the latch is monotonic so a failed refetch (which nulls `board`) cannot oscillate the limit,
+   * and it never engages against an API that sends the summary.
+   */
+  const [serverOmitsBoardSummary, setServerOmitsBoardSummary] = useState(false);
 
   // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
   // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
@@ -892,31 +1233,67 @@ function DealListPageContent({
   // signal of an intentional change. Only a BARE view (no query beyond scope/officeId) hydrates; a `?filter=`
   // drill-down, a `dl_*` base-list link, or an explicit period/rep is authoritative.
   useEffect(() => {
-    if (searchParams.has("filter")) return;
-    if (!isBareDealsView(searchParams.toString())) return;
+    if (searchParams.has("filter")) return void setStoredViewResolved(true);
+    if (!isBareDealsView(searchParams.toString())) return void setStoredViewResolved(true);
     const stored = readStoredDealView(userId, effectiveOfficeId);
     // A saved Rep is only meaningful under scopes that narrow by rep. Under Mine (which the shared scope
     // preference can flip to from another page) it intersects the viewer's own deals and empties the board,
     // so drop it there; Watched/On Hold/All keep it. The timeframe is always restored.
     if (scope === "mine") delete stored.assignedRepId;
+    // The estimator sibling is dropped under Mine too. The owner rationale (an intersection that EMPTIES
+    // the board) is admittedly weaker here — "my deals that Sidney estimates" is a coherent, often
+    // non-empty question — but a bare /deals return should show the viewer's board, not a silently
+    // narrowed slice of it, and having the two header dimensions behave identically under scope coercion
+    // is far easier to reason about than a split rule. Re-picking is one click.
+    if (scope === "mine") delete stored.estimatorId;
     if (stored.assignedRepId) {
-      // Don't inject a rep who is no longer a selectable assignee (deactivated, or not in this office) — it
-      // would show an unresolved "Selected rep" and silently narrow the board. Defer the WHOLE hydration
-      // until the assignee list has settled FOR THE CURRENT office: while loading, and while the loaded list
-      // still belongs to a previous office (on an office switch the hook briefly reports the old list with
-      // loading=false before its reload effect fires). Once settled — even to an empty or errored list —
-      // drop just the rep and still restore the office-independent timeframe.
-      if (assigneesLoading || assigneesOfficeId !== effectiveOfficeId) return;
-      if (!assignees.some((assignee) => assignee.id === stored.assignedRepId)) delete stored.assignedRepId;
+      // Don't inject a rep who is no longer selectable (deactivated, not in this office, or unticked from
+      // the sales roster) — it would show an unresolved "Selected rep" and silently narrow the board. That
+      // last case is how unticking "Generates Sales" takes effect for someone who still owns deals: their
+      // deals stay on the board, but a saved filter pinned to them is released rather than left stuck.
+      // Defer the WHOLE hydration until the rep list has settled FOR THE CURRENT office: while loading, and
+      // while the loaded list still belongs to a previous office (on an office switch the hook briefly
+      // reports the old list with loading=false before its reload effect fires). Once settled — even to an
+      // empty or errored list — drop just the rep and still restore the office-independent timeframe.
+      // One of the TWO paths that leave the view unresolved (the estimator block below is the other), and
+      // deliberately so: a saved rep still has to be validated against this office's roster. Every other
+      // exit settles immediately, so the board fetch waits on a pending roster request ONLY for a user who
+      // actually has one of the two header filters saved — and it MUST wait, or it issues a request for the
+      // unfiltered board and then a second one for the restored view.
+      if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
+      // GROUP-AWARE, not just id membership. Plain id membership was sufficient while this roster was
+      // sales-only — the two were the same test. Adding the Estimators group broke that equivalence: a
+      // saved owner who has since been reclassified (generates_sales off, estimates_jobs on) is still IN
+      // the roster, so an id check passes and restores ?assignedRepId, while their only menu value is now
+      // `est:<id>`. The board ends up narrowed by an owner filter the dropdown cannot display or clear.
+      // A missing group counts as sales (RepFilterOption.group), so appended off-roster ids still pass.
+      if (!repOptions.some((rep) => rep.id === stored.assignedRepId && rep.group !== "estimator")) {
+        delete stored.assignedRepId;
+      }
+    }
+    if (stored.estimatorId) {
+      // The same settle-then-validate discipline, but against the ESTIMATOR group specifically. Persisting
+      // this param without the check would re-apply a saved estimator after they are deactivated, moved out
+      // of the office, or simply have "Estimates Jobs" unticked — leaving the board narrowed to someone the
+      // dropdown no longer offers, with no visible control to clear it. Checking the GROUP (not just id
+      // membership) also releases the pick when Sales-wins moves them: ticking "Generates Sales" makes them
+      // a Sales entry, and a saved `?estimatorId` for them would otherwise still ask the estimator question.
+      // Same deal: leaving the view unresolved here is what keeps the board from fetching under an
+      // estimator filter that is about to be validated away (see setStoredViewResolved below).
+      if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
+      if (!repOptions.some((rep) => rep.id === stored.estimatorId && rep.group === "estimator")) {
+        delete stored.estimatorId;
+      }
     }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees, assigneesLoading, assigneesOfficeId]);
+    setStoredViewResolved(true);
+  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, repOptions, repOptionsLoading, repOptionsOfficeId]);
 
   // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
   // changing one control never drops the other — important on a drill-down whose URL omits ?period.
   const persistDealViewParam = useCallback(
-    (key: "period" | "assignedRepId", value: string | null) => {
+    (key: "period" | "assignedRepId" | "estimatorId", value: string | null) => {
       const stored = readStoredDealView(userId, effectiveOfficeId);
       if (value) stored[key] = value;
       else delete stored[key];
@@ -925,7 +1302,31 @@ function DealListPageContent({
     [userId, effectiveOfficeId],
   );
 
-  const [search, setSearch] = useState("");
+  /**
+   * The box, seeded from `?search` and kept in agreement with it in BOTH directions.
+   *
+   * A drill-down inherits the term that produced the number clicked — every KPI destination is this same
+   * page, and landing with an empty box would open a materially wider cohort than the figure clicked.
+   *
+   * `searchUrlTermRef` is what makes two-way agreement possible without a loop: it records the term this
+   * component last put in the URL, so the sync effect below can tell an EXTERNAL change (Back/Forward, a
+   * link, another control) from the echo of its own write. Without that distinction the two effects
+   * fight — and a one-shot initializer alone is worse, because React Router keeps this component mounted
+   * across `/deals` query-only navigations: search "foo", drill down, change it to "bar", press Back, and
+   * the URL returns to "foo" while state stays "bar" and the mirror promptly rewrites the URL to "bar".
+   * Back would simply not work.
+   */
+  const [search, setSearch] = useState(() => searchParams.get("search") ?? "");
+  const searchUrlTermRef = useRef<string | null>(searchParams.get("search"));
+  /**
+   * The term the BOARD REQUEST is keyed on. The input stays on the raw `search` state so typing is
+   * instant; only this settled value reaches the server, because the pipeline query materializes the
+   * open pipeline and firing it per keystroke would undo the load-time work of #1074.
+   *
+   * The board asks the server rather than filtering the cards it holds: the slice is 50 per column, so a
+   * client-side filter searched the top 50 and reported 0/0 for anything below it.
+   */
+  const debouncedSearch = useDebouncedValue(search);
   const [drilldownPage, setDrilldownPage] = useState(1);
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     resolveDrilldownTerminalDateFilters(searchParams)
@@ -941,13 +1342,78 @@ function DealListPageContent({
   // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
   // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
   // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
+  // Read the estimator FIRST, because it takes precedence over the owner param — see below.
+  const requestedEstimatorId =
+    requestedScope === "team" ? undefined : searchParams.get("estimatorId") || undefined;
+  // ESTIMATOR WINS when a URL somehow carries both. The control cannot produce that state
+  // (updateSelectedRep always clears the sibling), but a hand-edited, shared or half-migrated bookmark
+  // can. Left alone, both params reach the board and the list, the server ANDs them, and the trigger
+  // reads "Sidney Gibson (estimating)" over deals Sidney estimated AND some hidden rep owns — usually
+  // empty, and lying about why. Matching the precedence the label already uses keeps the control and the
+  // result telling the same story. Normalized at READ so no extra history entry is written; the next
+  // interaction rewrites the URL cleanly anyway.
   const selectedRepId =
-    requestedScope === "team" ? "__all__" : searchParams.get("assignedRepId") || "__all__";
+    requestedScope === "team" || requestedEstimatorId
+      ? "__all__"
+      : searchParams.get("assignedRepId") || "__all__";
   const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
-  const selectedRepLabel =
-    selectedRepId === "__all__"
+  // The ESTIMATOR dimension, a sibling of the rep one rather than a mode of it.
+  //
+  // Two params, mutually exclusive, because they ask different questions: ?assignedRepId means "deals this
+  // person OWNS" and ?estimatorId means "deals this person is ESTIMATING". Keeping them separate is what
+  // lets an estimator who owns nothing be reachable at all — a rep filter means OWNS (see
+  // buildOwnedRepCondition), so Sidney Gibson, owner of 0 deals and estimator on 137, returned an empty
+  // board from the only control that existed.
+  //
+  // The dropdown carries the group in its VALUE (`est:<id>`) rather than looking the id up in the roster,
+  // so the reader of the URL never has to re-derive which question was asked. Sales values stay bare ids,
+  // so every existing link, bookmark and saved preference keeps working untouched.
+  const selectedEstimatorFilter = requestedEstimatorId;
+  const ESTIMATOR_VALUE_PREFIX = "est:";
+  const selectedRosterValue = selectedEstimatorFilter
+    ? `${ESTIMATOR_VALUE_PREFIX}${selectedEstimatorFilter}`
+    : selectedRepId;
+  // The roster plus the current selection when that falls outside it, so the control can name and clear a
+  // pinned off-roster owner instead of pretending nothing is selected.
+  const headerRepOptions = useMemo(
+    () => buildRepFilterOptions(repOptions, selectedRepFilter, (id) => assigneeNameById.get(id)),
+    [repOptions, selectedRepFilter, assigneeNameById]
+  );
+  // The nested FilterBar keys off its OWN dl_-prefixed param, not the header's, so it needs its own
+  // reconciliation — a bookmarked dl_assignedRepId is exactly where the "All reps" mislabel showed up.
+  const listRepFilterId = searchParams.get("dl_assignedRepId") || undefined;
+  // SALES ONLY, like every other control whose value maps to the OWNER dimension. This bar writes
+  // `dl_assignedRepId`, so offering a pure estimator here would search for deals they OWN and hand back an
+  // empty list — the very bug the Estimators group exists to fix, reintroduced one control over. The
+  // header dropdown is the only place the estimator dimension is selectable.
+  const salesOnlyRoster = useMemo(
+    () => repOptions.filter((rep) => rep.group !== "estimator"),
+    [repOptions]
+  );
+  const listRepOptions = useMemo(
+    () => buildRepFilterOptions(salesOnlyRoster, listRepFilterId, (id) => assigneeNameById.get(id)),
+    [salesOnlyRoster, listRepFilterId, assigneeNameById]
+  );
+  // Split once, rendered as two labelled groups. The server already orders sales-then-estimator and puts
+  // each person in exactly one group, so this only partitions — it never decides membership.
+  const salesRepOptions = useMemo(
+    () => headerRepOptions.filter((rep) => rep.group !== "estimator"),
+    [headerRepOptions]
+  );
+  const estimatorOptions = useMemo(
+    () => headerRepOptions.filter((rep) => rep.group === "estimator"),
+    [headerRepOptions]
+  );
+  // Named for what was actually selected, so the trigger cannot read "All reps" while an estimator narrows
+  // the board. The estimator branch is checked FIRST because a person could in principle appear under both
+  // if the server rule is ever relaxed, and the URL param is the authoritative statement of intent.
+  const selectedRepLabel = selectedEstimatorFilter
+    ? `${estimatorOptions.find((rep) => rep.id === selectedEstimatorFilter)?.displayName
+        ?? assigneeNameById.get(selectedEstimatorFilter)
+        ?? "Selected estimator"} (estimating)`
+    : selectedRepId === "__all__"
       ? "All reps"
-      : assignees.find((assignee) => assignee.id === selectedRepId)?.displayName ?? "Selected rep";
+      : headerRepOptions.find((rep) => rep.id === selectedRepId)?.displayName ?? "Selected rep";
   const dashboardView = useMemo(
     () =>
       getDashboardDealListView({
@@ -956,27 +1422,59 @@ function DealListPageContent({
       }),
     [searchParams]
   );
-  const isAtRiskDrilldown = dashboardView.filter === "stale" || dashboardView.filter === "at_risk";
-  const { board, loading, error } = useDealBoard(
+  const isAtRiskDrilldown = isCurrentStateDrilldownFilter(dashboardView.filter);
+  // The route bucket THIS view is scoped to, re-derived from ?filter. It is the same value the card that
+  // linked here passed to atRiskFilterForRouteBucket, so the board, the drill-down list, and that card's
+  // number are all narrowed by one route predicate. "all" on every non-route view (incl. plain at_risk).
+  const atRiskRouteBucket = atRiskRouteBucketForFilter(dashboardView.filter);
+  const { board, appliedSearch, loading, error } = useDealBoard(
     scope,
     true,
     terminalDateFilters,
-    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : BOARD_CARDS_PER_STAGE_LIMIT,
+    isAtRiskDrilldown || serverOmitsBoardSummary
+      ? SLA_DRILLDOWN_PREVIEW_LIMIT
+      : BOARD_CARDS_PER_STAGE_LIMIT,
     // Deals-at-Risk is a CURRENT-STATE view: ?period is a no-op. The board period serializes as
     // won_period_from/to, which the server applies to OPEN columns as a stage-entry-date window
     // (getDealsForPipeline) — so sending it here would still drop at-risk deals outside the window at the
     // SOURCE, even though the client no longer filters by it. Send no board period on this drill-down so
     // the at-risk cohort (card/kanban/list) is the full current set. (Won columns are hidden here anyway.)
     isAtRiskDrilldown ? null : selectedPeriodRange,
-    selectedRepFilter
+    selectedRepFilter,
+    // estimateSentDateRange is a board control this page does not drive; passed through as undefined so
+    // the estimator argument lands in the right position.
+    undefined,
+    selectedEstimatorFilter,
+    // The URL is the SETTLED term's single source of truth, so the board's search changes atomically
+    // with its other params. Reading component state here instead put the term one effect BEHIND: a
+    // single history navigation that moved `search` *and* `scope`/`period`/`assignedRepId` re-keyed this
+    // hook with the new filters but the OLD term, firing a pipeline request for a cohort that was never
+    // asked for — and briefly rendering it — before the adopted term fired a second, correct one.
+    //
+    // Typing still flows box -> debounce -> mirror effect -> URL -> here, which is one request per
+    // settled term, not one per keystroke.
+    { enabled: storedViewResolved, search: searchParams.get("search") ?? "" }
   );
+
+  useEffect(() => {
+    // `summary === null` covers both "field absent" and "field malformed" — either way the client cannot
+    // trust a truncated card set, so widen the request. Monotonic: never set back to false.
+    if (board !== null && board.summary === null) setServerOmitsBoardSummary(true);
+  }, [board]);
 
   // Sync the board's terminal (Won/Lost) date state from the URL — but key on the BOARD params only, so a
   // list-namespaced (dl_/fb_) FilterBar edit never churns this state and refetches the kanban above it
   // (Codex #589). searchParams is read live inside; it is current whenever the key changes.
   const boardParamKey = boardRelevantParamKey(searchParams.toString());
   useEffect(() => {
-    setTerminalDateFilters(resolveDrilldownTerminalDateFilters(searchParams));
+    // Set only on a REAL change. This resolver returns a fresh object every call, and that object is a
+    // dependency of useDealBoard's fetch callback — so re-setting a structurally identical value fired a
+    // second /deals/pipeline request on every mount, and again on any board-param edit that did not
+    // touch the terminal dates. Same value in, same identity out, no refetch.
+    setTerminalDateFilters((current) => {
+      const next = resolveDrilldownTerminalDateFilters(searchParams);
+      return terminalDateFiltersEqual(current, next) ? current : next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on board params only.
   }, [boardParamKey]);
 
@@ -988,6 +1486,11 @@ function DealListPageContent({
     const next = new URLSearchParams(searchParams);
     next.set("scope", "mine");
     next.delete("assignedRepId");
+    // The estimator sibling must go with it. selectedEstimatorFilter suppresses it while the URL still
+    // says scope=team, but this rewrite flips scope to mine — so a retained estimatorId springs back to
+    // life on the next render and silently narrows the Mine board, the exact stale-filter behaviour the
+    // owner half of this coercion exists to prevent.
+    next.delete("estimatorId");
     setSearchParams(next, { replace: true });
   }, [requestedScope, searchParams, setSearchParams]);
 
@@ -1008,13 +1511,25 @@ function DealListPageContent({
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  const updateSelectedRep = useCallback((repId: string) => {
-    const repValue = !repId || repId === "__all__" ? null : repId;
+  const updateSelectedRep = useCallback((rosterValue: string) => {
+    // One control, two params. An "est:"-prefixed value came from the Estimators group and writes
+    // ?estimatorId; anything else is a sales rep and writes ?assignedRepId exactly as before.
+    const raw = !rosterValue || rosterValue === "__all__" ? null : rosterValue;
+    const isEstimator = raw?.startsWith(ESTIMATOR_VALUE_PREFIX) ?? false;
+    const repValue = raw && !isEstimator ? raw : null;
+    const estimatorValue = raw && isEstimator ? raw.slice(ESTIMATOR_VALUE_PREFIX.length) : null;
+
     persistDealViewParam("assignedRepId", repValue); // remember the selection (incl. from a drill-down)
+    persistDealViewParam("estimatorId", estimatorValue);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
+      // ALWAYS clear the sibling. The two are mutually exclusive, and leaving a stale one behind would
+      // AND them server-side — "deals Sidney estimates that Colby also owns" — which is a question the
+      // control cannot express and the user never asked.
       if (repValue) next.set("assignedRepId", repValue);
       else next.delete("assignedRepId");
+      if (estimatorValue) next.set("estimatorId", estimatorValue);
+      else next.delete("estimatorId");
       return next;
     });
   }, [persistDealViewParam, setSearchParams]);
@@ -1042,13 +1557,38 @@ function DealListPageContent({
     // useDealBoard does not cancel or order responses, so that stale fetch could win and leave the
     // board/cards on a blended date range (Codex #600 P2).
     setSearchParams(next);
-    setTerminalDateFilters(resolveDrilldownTerminalDateFilters(next));
+    setTerminalDateFilters((current) => {
+      const resolved = resolveDrilldownTerminalDateFilters(next);
+      return terminalDateFiltersEqual(current, resolved) ? current : resolved;
+    });
   }, [searchParams, setSearchParams, persistDealViewParam]);
 
+  // The SAME limit the request asked for, re-imposed after alias merging: the server caps per raw stage,
+  // and four of the six non-terminal columns merge two raw stages each, so a "50-card" column could
+  // otherwise render 100.
+  const boardCardsPerColumnLimit = isAtRiskDrilldown || serverOmitsBoardSummary
+    ? SLA_DRILLDOWN_PREVIEW_LIMIT
+    : BOARD_CARDS_PER_STAGE_LIMIT;
   const boardColumns = useMemo(
-    () => buildCanonicalDealBoardColumns(board?.columns, stages),
-    [board?.columns, stages]
+    () =>
+      buildCanonicalDealBoardColumns(
+        board?.columns,
+        stages,
+        board?.summary,
+        board?.pendingRfpCards,
+        boardCardsPerColumnLimit
+      ),
+    [board?.columns, board?.pendingRfpCards, board?.summary, boardCardsPerColumnLimit, stages]
   );
+  /**
+   * Server-side at-risk counts, keyed by canonical column slug and counted over EVERY matching row.
+   *
+   * The three At-Risk KPI cards used to be counted from `column.cards`, which is a capped slice — the
+   * board asks for BOARD_CARDS_PER_STAGE_LIMIT per column, so any column holding more than that would
+   * have silently under-reported all three numbers. Null on a payload without a summary, which puts
+   * countAtRiskDeals back on the card count.
+   */
+  const boardAtRiskByStageSlug = board?.summary?.atRiskByStageSlug ?? null;
   // Base-list board-mirror scope: the /deals board always includes DD (useDealBoard includeDd=true),
   // so showDd=true — the list defaults to the full visible-column set and lets terminal deals through,
   // exactly like the board it sits under (mirrors the /pipeline mount).
@@ -1074,43 +1614,22 @@ function DealListPageContent({
       stageIdFamilies: families.map((family) => family.ids),
     };
   }, [stages]);
-  const columns = useMemo(
-    () => {
-      const searchTerm = search.trim().toLowerCase();
-      const sourceColumns =
-        dashboardView.boardStageSlugs.length > 0
-          ? boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug))
-          : dashboardView.boardMode === "active"
-          ? boardColumns.filter((column) => !isTerminalStage(column.stage.slug))
-          : dashboardView.boardMode === "won"
-            ? boardColumns.filter((column) => column.stage.slug === "won")
-            : dashboardView.boardMode === "at_risk"
-              ? getAtRiskBoardColumns(boardColumns)
-          : boardColumns;
-      return sourceColumns
-        .map((column) => {
-          if (!searchTerm) return column;
-          const cards = column.cards.filter((deal) => {
-            const haystack = [
-              deal.name,
-              deal.dealNumber,
-              deal.projectNumber,
-              deal.companyName,
-              deal.propertyCity,
-              deal.propertyState,
-              deal.assignedRepName,
-            ]
-              .filter(Boolean)
-              .join(" ")
-              .toLowerCase();
-            return haystack.includes(searchTerm);
-          });
-          return recountColumnFromCards(column, cards);
-        });
-    },
-    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, search]
-  );
-  const unsearchedColumns = useMemo(() => {
+  /**
+   * The kanban's columns: the board payload narrowed to the stage / at-risk / route set this view shows.
+   *
+   * NO TEXT SEARCH IS APPLIED HERE, deliberately, and there is no longer a separate "searched" copy of
+   * this set. The search used to be layered on top of it client-side, over `column.cards`, which stopped
+   * being a whole-column search when #1074 cut the slice to 50 per column: the board answered 0/0 for a
+   * deal that plainly existed. The term now travels with the board REQUEST, so these columns arrive
+   * already narrowed — cards and header counts alike.
+   *
+   * Re-filtering them here would not be a harmless belt-and-braces. The server matches a WIDER field set
+   * than any client haystack (scope title, description, property address, company and contact names,
+   * owner), so a second client pass would hide rows the column's own count still counts — the "right
+   * number, wrong board" divergence, reintroduced from the client side. It would also recount from a
+   * capped array and so cap the displayed total at the slice size.
+   */
+  const columns = useMemo(() => {
     if (dashboardView.boardStageSlugs.length > 0) {
       return boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug));
     }
@@ -1121,15 +1640,40 @@ function DealListPageContent({
       return boardColumns.filter((column) => column.stage.slug === "won");
     }
     if (dashboardView.boardMode === "at_risk") {
-      return getAtRiskBoardColumns(boardColumns);
+      return getAtRiskBoardColumns(boardColumns, atRiskRouteBucket);
     }
     return boardColumns;
-  }, [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs]);
+  }, [atRiskRouteBucket, boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs]);
+  /**
+   * The column set the three At-Risk KPI cards count over: `columns` with the view's ROUTE
+   * narrowing removed. Each card then applies its OWN bucket to this one set, which is what makes
+   * Service + Non-service === All hold on every view — including while standing on a route drill-down,
+   * where narrowing the counters too would zero the other card while its link still opened a non-empty
+   * list (exactly the card/list divergence this split has to avoid).
+   *
+   * On every non-route view the bucket is "all", so this IS `columns` and the "All at risk"
+   * number is byte-identical to the single pre-split card's.
+   *
+   * KNOWN GAP (not fixed here): on a STAGE-SCOPED view — Won, Opportunities, Bid Board —
+   * `columns` is only that view's columns, while every at-risk link opens the ALL-STAGE
+   * cohort. On the Won drill-down the visible columns are terminal, so all three cards read 0 while
+   * their destinations hold rows. This is pre-existing behaviour of the single "At risk" card (it read 0
+   * there before this split too), not something the route split introduced. The fix is to count from
+   * `getAtRiskBoardColumns(boardColumns, "all")` unconditionally — one line — but that CHANGES the
+   * number "All at risk" displays on those three views (0 -> the real cohort size), so it is a product
+   * decision rather than a bug fix and is deliberately not taken here.
+   */
+  const kpiAtRiskColumns = useMemo(
+    () => (atRiskRouteBucket === "all" ? columns : getAtRiskBoardColumns(boardColumns, "all")),
+    [atRiskRouteBucket, boardColumns, columns]
+  );
   // On the at-risk drill-down the Active Pipeline KPI card aggregates the SAME at-risk-filtered set that
-  // feeds the At-Risk card and the kanban (unsearchedColumns), so the three reconcile by construction —
-  // not the whole open board. Everywhere else it stays the full active (non-terminal) pipeline.
+  // feeds the kanban (columns) — not the whole open board. Those columns are recounted from
+  // CARDS, so this card's reconciliation with the At-Risk KPI (which reads the server summary) holds
+  // because this route requests SLA_DRILLDOWN_PREVIEW_LIMIT cards, not because the two share a source.
+  // See getAtRiskBoardColumns. Everywhere else it stays the full active (non-terminal) pipeline.
   const activePipelineColumns =
-    dashboardView.boardMode === "at_risk" ? unsearchedColumns : getActivePipelineColumns(boardColumns);
+    dashboardView.boardMode === "at_risk" ? columns : getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(
     () =>
       dashboardView.boardStageSlugs.length > 0
@@ -1172,29 +1716,138 @@ function DealListPageContent({
     getActivePipelineSummary(activePipelineColumns);
   const wonMetric = getCanonicalTerminalMetric(boardColumns, "won");
   const wonValue = wonMetric.totalValue;
-  const unsearchedOverSlaCount = unsearchedColumns.reduce(
-    (sum, column) =>
-      sum +
-      (isTerminalStage(column.stage.slug)
-        ? 0
-        : column.cards.filter(isEngineAtRiskDeal).length),
-    0
-  );
+  // The three At-Risk KPI numbers, all from ONE counter over ONE column set. countAtRiskDeals("all") is
+  // the exact reduce the single pre-split card used, so "All at risk" keeps today's number verbatim; the
+  // other two are that same count with the route partition applied, so they sum back to it.
+  const atRiskCounts: Record<AtRiskRouteBucket, number> = {
+    service: countAtRiskDeals(kpiAtRiskColumns, "service", boardAtRiskByStageSlug),
+    non_service: countAtRiskDeals(kpiAtRiskColumns, "non_service", boardAtRiskByStageSlug),
+    all: countAtRiskDeals(kpiAtRiskColumns, "all", boardAtRiskByStageSlug),
+  };
+  /**
+   * The page's URL params PLUS the active board search — the query context every drill-down inherits.
+   *
+   * The term lives in component state rather than the URL (see the `search` useState for why it is not
+   * synced back), so it does not ride along in `searchParams` the way rep/estimator/office do. Every
+   * destination below is built from a number the SEARCHED board produced, so all of them have to carry
+   * it or they open a wider cohort than the figure that was clicked.
+   *
+   * ONE merge, used by the KPI cards and the stage drill-down alike. Doing it per call site is how five
+   * of the six ended up forwarding it and the sixth silently not.
+   *
+   * `debouncedSearch`, not `search`: the displayed numbers were computed from the debounced term, and the
+   * destination has to match what was clicked. Guarded at >= 2 characters because that is the term that
+   * actually narrowed the board — see hasEffectiveDealSearch on the server, which is the same rule.
+   */
+  /**
+   * The settled term is mirrored into `search` — and into NOTHING ELSE.
+   *
+   * ONE WRITER PER PARAM. `fb_search` belongs to the list's FilterBar (useFilterState owns it); `search`
+   * belongs to this page. An earlier cut of this PR had the page write both, and three review rounds
+   * found three different failures from that single mistake — the page restoring the term the list had
+   * just edited, deleting the list's term whenever the page box was empty, and erasing an `fb_search`-only
+   * bookmark on mount. None of those were fixable by tuning this effect, because the defect was two
+   * owners of one value, not the timing of the write. The list's term now travels only in an OUTBOUND
+   * drill-down LINK (see drilldownQueryParams), which is a navigation, not a competing write.
+   *
+   * Mirroring `search` at all is what keeps the box and the URL honest: without it, clearing the box
+   * leaves `search=foo` behind and a reload silently restores a filter the user just cleared.
+   *
+   * Keyed on `debouncedSearch`, so this writes ONCE per settled term rather than per keystroke, and
+   * `replace` so typing never grows the history stack. `search` is in BOARD_KEY_IGNORED_PARAMS, so the
+   * write cannot re-key the board and duplicate the request its own state change already triggers.
+   */
+  useEffect(() => {
+    const term = debouncedSearch.trim();
+    const desired = term.length >= 2 ? term : null;
+    // Gated on the REF, not on searchParams — and deliberately not keyed on searchParams either. Keyed on
+    // the URL, this effect re-ran on every external change and immediately wrote the box's term back over
+    // it, which is what broke Back. It now fires only when the BOX produces something new.
+    if (searchUrlTermRef.current === desired) return;
+    searchUrlTermRef.current = desired;
+    // Decided BEFORE the call, and the call skipped entirely when nothing needs writing. Returning the
+    // same object from inside the updater is not enough: setSearchParams still performs a replace
+    // navigation, and on mount that raced the saved-view hydration and the stale-param strippers — which
+    // read searchParams, rewrite it, and were silently reverted by this effect's no-op replace.
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (desired) next.set("search", desired);
+        else next.delete("search");
+        return next;
+      },
+      { replace: true }
+    );
+  }, [debouncedSearch, setSearchParams]);
+
+  /**
+   * The other direction: an EXTERNAL `?search` change adopts into the box.
+   *
+   * Back/Forward across `/deals` query-only navigations keeps this component mounted, so without this the
+   * initializer's one-shot seed leaves the box (and the board) on the previous term. Both effects gate on
+   * the same ref, so neither can mistake the other's write for new input and no ping-pong is possible:
+   * this one adopts only what the mirror above did not write.
+   */
+  useEffect(() => {
+    const urlTerm = searchParams.get("search");
+    if (searchUrlTermRef.current === urlTerm) return;
+    searchUrlTermRef.current = urlTerm;
+    setSearch(urlTerm ?? "");
+  }, [searchParams]);
+  const drilldownQueryParams = useMemo(() => {
+    const params = new URLSearchParams(searchParams);
+    // `appliedSearch` — the term the board ON SCREEN was fetched with — not the one being typed. The
+    // pipeline request takes seconds and useDealBoard keeps the previous response visible meanwhile, so
+    // a link built from the pending term would send a user who clicked a displayed count to a different
+    // population. Destinations track the data, not the input.
+    //
+    // Until a response has been recorded (board === null: first load, or a failed request) there is no
+    // such term, and `appliedSearch` is "" — indistinguishable from "a board with no search". Falling
+    // back to the URL keeps an INHERITED term on the links during that window: the KPI cards render
+    // outside the loading branch, so on `/deals?search=bellemont` they are clickable for the whole
+    // 1.6-2.5s query, and dropping the term there would open a wider cohort than the page is showing.
+    const term = (board === null ? searchParams.get("search") ?? "" : appliedSearch).trim();
+    if (term.length >= 2) {
+      params.set("search", term);
+      // AND the list's own namespace. A KPI drill-down mounts DealsListSection with the drill-down
+      // FilterBar, whose useFilterState reads the `fb_` prefix — so the bare param narrows the board and
+      // the KPI cards while the list underneath them stays wide, with its own search control empty. That
+      // is the board/list divergence this page works hard to avoid, just re-created one layer down.
+      // Writing both keeps the term VISIBLE in the list's control too, so it stays clearable there.
+      // `fb_` is a LIST_PARAM_PREFIX, stripped from boardRelevantParamKey, so this cannot churn the board.
+      params.set(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`, term);
+    } else {
+      params.delete("search");
+      params.delete(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`);
+    }
+    return params;
+  }, [appliedSearch, board, searchParams]);
   // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
   // must land on that same cohort — not the full active pipeline (which would show a larger, different set
   // than the number on the card). Everywhere else it drills into the full active pipeline.
   const activePipelineDestination = buildDealsPageKpiDrilldownPath(
-    activePipelineDrilldownFilter(dashboardView.boardMode),
+    activePipelineDrilldownFilter(dashboardView.boardMode, atRiskRouteBucket),
     scope,
     undefined,
-    { queryParams: searchParams }
+    { queryParams: drilldownQueryParams }
   );
   const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod, {
-    queryParams: searchParams,
+    queryParams: drilldownQueryParams,
   });
-  const atRiskDestination = buildDealsPageKpiDrilldownPath("at_risk", scope, undefined, {
-    queryParams: searchParams,
-  });
+  // One destination per bucket, built through atRiskFilterForRouteBucket — the inverse of the
+  // atRiskRouteBucketForFilter the destination page uses to narrow its board and list. That round trip
+  // is the card↔list contract: whatever bucket produced the number also produces the rows.
+  const atRiskDestinations: Record<AtRiskRouteBucket, string> = {
+    service: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("service"), scope, undefined, {
+      queryParams: drilldownQueryParams,
+    }),
+    non_service: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("non_service"), scope, undefined, {
+      queryParams: drilldownQueryParams,
+    }),
+    all: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("all"), scope, undefined, {
+      queryParams: drilldownQueryParams,
+    }),
+  };
   const wonCaption =
     terminalDateFilters.won.preset !== "all"
       ? getWonMetricTerminalLabel(terminalDateFilters.won)
@@ -1264,11 +1917,19 @@ function DealListPageContent({
     () => ({
       ...layeredListBaseFilters,
       ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+      // The estimator dimension travels with the rep one, or the list below the board would ignore it
+      // and show a different population than the kanban above (the reconciliation rule this page keeps).
+      ...(selectedEstimatorFilter ? { estimatorId: selectedEstimatorFilter } : {}),
       // Won drill-down: exclude on-hold (migration parking-lot) deals so the list reconciles to the Won
       // KPI / board column, both of which drop on-hold from the Won count (Codex P2).
       ...(dashboardView.filter === "won" ? { excludeOnHold: true } : {}),
     }),
-    [layeredListBaseFilters, selectedRepFilter, dashboardView.filter]
+    // selectedEstimatorFilter is read in the body, so it belongs here for exhaustive-deps hygiene.
+    // It is NOT load-bearing today: the estimator lives in the URL, dashboardView memoizes on
+    // [searchParams], and searchParams takes a new identity on every URL change — so
+    // dashboardView.listBaseFilters -> drilldownBaseFilters -> layeredListBaseFilters all change identity
+    // and this memo re-runs anyway. Listed so it stays correct if any of those are ever stabilized.
+    [layeredListBaseFilters, selectedRepFilter, selectedEstimatorFilter, dashboardView.filter]
   );
 
   const updateScope = (nextScope: PipelineScope) => {
@@ -1289,12 +1950,20 @@ function DealListPageContent({
 
   const openStage = (column: DealBoardColumn) => {
     if (column.stage.slug === "pending_rfp") {
-      // Preserve office context (?officeId=…) so a cross-office viewer stays in the same office.
-      const qs = searchParams.toString();
+      // Preserve office context (?officeId=…) so a cross-office viewer stays in the same office, and the
+      // active search — this column's count is search-narrowed like every other, so the queue it opens
+      // has to be too (the /deals/pending-rfp route applies the same shared predicate).
+      const qs = drilldownQueryParams.toString();
       navigate(qs ? `/deals/pending-rfp?${qs}` : "/deals/pending-rfp");
       return;
     }
-    navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, searchParams));
+    /**
+     * `drilldownQueryParams`, not the raw `searchParams`: a searched column's affordance must keep its
+     * promise. "Showing 50 of 87 — view all 87" has to open those 87, not the stage's full 312, because
+     * the column count is search-narrowed. The stage page reads a bare `search` param and normalizes it
+     * into its FilterBar's fb_search, so the term stays visible and clearable there.
+     */
+    navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, drilldownQueryParams));
   };
 
   useEffect(() => {
@@ -1370,17 +2039,50 @@ function DealListPageContent({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <Select value={selectedRepId} onValueChange={(value) => updateSelectedRep(value ?? "__all__")}>
-            <SelectTrigger className="h-10 w-[13rem] bg-white">
+          <Select
+            value={selectedRosterValue}
+            onValueChange={(value) => updateSelectedRep(value ?? "__all__")}
+          >
+            {/* Named like its neighbours (Period, Won/Lost date range). Without this the control's only
+                accessible name is its current VALUE, so a screen reader announces "Brett Jones" with no
+                indication of what the control does — and now that it filters by two different questions,
+                the value alone is genuinely ambiguous. */}
+            <SelectTrigger className="h-10 w-[13rem] bg-white" aria-label="Rep filter">
               <SelectValue placeholder="All reps">{selectedRepLabel}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">All reps</SelectItem>
-              {assignees.map((assignee) => (
-                <SelectItem key={assignee.id} value={assignee.id}>
-                  {assignee.displayName}
-                </SelectItem>
-              ))}
+              {/* The group headings are only worth their space when there is something to distinguish —
+                  with no estimators ticked this renders exactly the flat list it always did. */}
+              {estimatorOptions.length === 0 ? (
+                salesRepOptions.map((rep) => (
+                  <SelectItem key={rep.id} value={rep.id}>
+                    {rep.displayName}
+                  </SelectItem>
+                ))
+              ) : (
+                <>
+                  <SelectGroup>
+                    <SelectLabel>Sales Reps</SelectLabel>
+                    {salesRepOptions.map((rep) => (
+                      <SelectItem key={rep.id} value={rep.id}>
+                        {rep.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                  <SelectGroup>
+                    <SelectLabel>Estimators</SelectLabel>
+                    {estimatorOptions.map((rep) => (
+                      // Prefixed so the handler knows which QUESTION was asked without re-deriving it
+                      // from the roster — picking someone here filters what they ESTIMATE, not what
+                      // they own.
+                      <SelectItem key={rep.id} value={`${ESTIMATOR_VALUE_PREFIX}${rep.id}`}>
+                        {rep.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </>
+              )}
             </SelectContent>
           </Select>
           <Select value={selectedPeriod ?? "__all__"} onValueChange={(value) => updatePeriod(value ?? "__all__")}>
@@ -1428,16 +2130,104 @@ function DealListPageContent({
             ariaLabel="View won deals"
           />
         ) : null}
-        <MetricCard
-          eyebrow="At risk"
-          value={String(unsearchedOverSlaCount)}
-          badge="Over SLA"
-          caption="Needs touch"
-          tone={unsearchedOverSlaCount > 0 ? "red" : "green"}
-          accent="red"
-          to={atRiskDestination}
-          ariaLabel="View at-risk deals"
-        />
+        {/*
+          ONE At Risk card carrying THREE destinations.
+
+          The headline is All at risk, and the card body opens the all-at-risk drill-down — exactly the
+          pre-split number, behaviour, and destination. Service / Non-service are small sub-links to
+          their own route drill-downs, with their counts shown beside the total so the reader can SEE
+          Service + Non-service adding up to the headline; that is the reconciliation made self-evident.
+
+          ANCHORS ARE SIBLINGS, NEVER NESTED. MetricCard wraps its whole body in a Link, so it cannot
+          host sub-links — hence this bespoke card (MetricCard is left untouched for its other callers).
+          The All link is a stretched overlay (absolute inset-0) that sits FIRST in the DOM, so tab order
+          is All -> Service -> Non-service, matching the reading order. The card body is
+          pointer-events-none so clicks over the text fall through to that overlay, and the two route
+          links re-enable pointer events and sit above it (relative z-10) — so all three are separately
+          focusable, separately named, and their hit targets never overlap.
+
+          Counts and destinations are both indexed by the SAME bucket key, so no sub-link can end up
+          paired with another cohort's number or href.
+        */}
+        <Card
+          className={`group relative overflow-hidden transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md ${
+            atRiskCounts.all > 0 ? "border-0 bg-brand-red text-white shadow-md" : "border-slate-200 bg-white shadow-none"
+          }`}
+        >
+          <Link
+            to={atRiskDestinations.all}
+            aria-label={AT_RISK_CARD_LABELS.all.ariaLabel}
+            // ring-INSET is load-bearing, not decoration. This link is `absolute inset-0`, so its box is
+            // exactly the card's box, and the Card is `overflow-hidden` — a default (outset) ring paints
+            // OUTSIDE that box and is clipped away entirely. Combined with `focus:outline-none` removing
+            // the browser fallback, a keyboard user tabbing to the first at-risk link would get NO visible
+            // focus state at all. Drawing the ring inside the box is what makes it survive the clip.
+            className={`absolute inset-0 z-0 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-inset ${
+              atRiskCounts.all > 0 ? "focus-visible:ring-white" : "focus-visible:ring-brand-red"
+            }`}
+          />
+          <CardContent className="pointer-events-none p-5">
+            <p
+              className={`text-[11px] font-bold uppercase tracking-[0.2em] ${
+                atRiskCounts.all > 0 ? "text-white/80" : "text-slate-500"
+              }`}
+            >
+              At risk
+            </p>
+            <p
+              data-testid="at-risk-total"
+              className={`mt-2 text-4xl font-black leading-none ${atRiskCounts.all > 0 ? "text-white" : "text-slate-950"}`}
+            >
+              {atRiskCounts.all}
+            </p>
+            <div className="mt-3 flex items-center gap-3">
+              <span
+                className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                  atRiskCounts.all > 0
+                    ? "bg-white/15 ring-1 ring-white/20"
+                    : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                }`}
+              >
+                Over SLA
+              </span>
+              <p
+                className={`text-[11px] font-semibold uppercase tracking-wide ${
+                  atRiskCounts.all > 0 ? "text-white/70" : "text-slate-500"
+                }`}
+              >
+                Needs touch
+              </p>
+            </div>
+            <div
+              className={`mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-semibold ${
+                atRiskCounts.all > 0 ? "text-white/90" : "text-slate-600"
+              }`}
+            >
+              {AT_RISK_ROUTE_SUBLINK_BUCKETS.map((bucket, index) => (
+                <Fragment key={bucket}>
+                  {index > 0 ? (
+                    <span aria-hidden="true" className={atRiskCounts.all > 0 ? "text-white/40" : "text-slate-300"}>
+                      ·
+                    </span>
+                  ) : null}
+                  <Link
+                    to={atRiskDestinations[bucket]}
+                    aria-label={AT_RISK_CARD_LABELS[bucket].ariaLabel}
+                    className={`pointer-events-auto relative z-10 rounded underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 ${
+                      atRiskCounts.all > 0 ? "focus-visible:ring-white" : "focus-visible:ring-brand-red"
+                    }`}
+                  >
+                    {AT_RISK_CARD_LABELS[bucket].shortLabel}{" "}
+                    <span className="font-black tabular-nums">{atRiskCounts[bucket]}</span>
+                  </Link>
+                </Fragment>
+              ))}
+            </div>
+          </CardContent>
+          {atRiskCounts.all > 0 ? null : (
+            <div className="absolute inset-x-0 bottom-0 h-1 bg-brand-red" aria-hidden="true" />
+          )}
+        </Card>
       </div>
 
       <label className="block">
@@ -1536,16 +2326,18 @@ function DealListPageContent({
                 <span className="text-right">Value</span>
               </div>
               <div className="divide-y divide-slate-100">
+                {/* A change-order child is STORED as "<Parent> — Change Order N", so this truncating row
+                    title reads as its parent. Display-only reorder; the stored name is untouched. */}
                 {paginatedDrilldownDeals.map((deal) => (
                   <button
                     key={deal.id}
                     type="button"
                     onClick={() => navigate(`/deals/${deal.id}`)}
-                    aria-label={`Open project ${deal.name}; stage ${deal.boardStageName}; project owner ${dealOwnerLabel(deal)}; time in stage ${stageAgeDaysLabel(deal)}; last updated ${formatDateInput(new Date(deal.updatedAt))}; value ${USD_COMPACT(moneyValue(deal))}`}
+                    aria-label={`Open project ${formatDealDisplayName(deal.name, deal.isChangeOrder)}; stage ${deal.boardStageName}; project owner ${dealOwnerLabel(deal)}; time in stage ${stageAgeDaysLabel(deal)}; last updated ${formatDateInput(new Date(deal.updatedAt))}; value ${USD_COMPACT(moneyValue(deal))}`}
                     className="grid w-full grid-cols-2 items-start gap-x-4 gap-y-3 px-1 py-4 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.65fr)_minmax(7rem,0.65fr)_minmax(5.5rem,0.55fr)] lg:items-center"
                   >
                     <div className="col-span-2 min-w-0 lg:col-span-1">
-                      <p className="truncate text-sm font-black text-slate-950">{deal.name}</p>
+                      <p className="truncate text-sm font-black text-slate-950">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
                     </div>
                     <div className="min-w-0">
                       <span className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500 lg:hidden">Stage</span>
@@ -1603,6 +2395,14 @@ function DealListPageContent({
             <DealsListSection
               workflowFamily="deal"
               scope={scope}
+              // Hand down the assignee list this page already loaded, so the section does not re-issue
+              // /tasks/assignees on every /deals load (it is name resolution + CSV only; the owner
+              // FILTER is the sales roster and is gated separately inside the section).
+              //
+              // UNDEFINED when our own load FAILED, which hands the fetch back to the section. Passing
+              // the empty array unconditionally would have removed its independent retry: owner names
+              // and the CSV export would degrade to "Unassigned" for every row with no way back.
+              assignees={assigneesError ? undefined : assignees}
               enableExport
               // Running-total card (#4): the summed effective value of the WHOLE filtered set across all
               // pages (server SUM over the list's exact WHERE), so it updates live as filters narrow and
@@ -1619,9 +2419,10 @@ function DealListPageContent({
               // laterDate/earlierDate (the merged date-floor), so the bar Date can't widen past ?period — the
               // same nesting model as Rep (period control).
               baseFilters={
-                selectedRepFilter || selectedPeriodRange?.from || selectedPeriodRange?.to
+                selectedRepFilter || selectedEstimatorFilter || selectedPeriodRange?.from || selectedPeriodRange?.to
                   ? {
                       ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+                      ...(selectedEstimatorFilter ? { estimatorId: selectedEstimatorFilter } : {}),
                       ...(selectedPeriodRange?.from ? { dateFrom: selectedPeriodRange.from } : {}),
                       ...(selectedPeriodRange?.to ? { dateTo: selectedPeriodRange.to } : {}),
                     }
@@ -1646,25 +2447,30 @@ function DealListPageContent({
                   : DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
                 paramPrefix: "dl_",
                 options: {
-                  reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+                  reps: listRepOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
                   regions: regions.map((region) => ({ value: region.id, label: region.name })),
                   projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
                   stages: boardColumns
-                    // Exclude the synthetic Pending RFP column: its id ("canonical-pending_rfp") is not a
-                    // real deals.stage_id, so offering it as a stage filter would send stageIds the server
-                    // matches against nothing and return an empty list. Its deals stay reachable via the
-                    // Opportunity option (they share that real stage_id) and the dedicated /deals/pending-rfp page.
-                    .filter(
-                      (column) =>
-                        column.stage.slug !== "pending_rfp" && isBoardVisibleStage(column.stage.slug, true)
-                    )
-                    .map((column) => ({ value: column.stage.id, label: column.stage.name })),
+                    .filter((column) => isBoardVisibleStage(column.stage.slug, true))
+                    .map((column) =>
+                      // Pending RFP is a synthetic board column, so its board id cannot be sent as a
+                      // deals.stage_id. The adapter recognizes this sentinel and asks the list API for
+                      // the canonical RFP bucket instead. Keeping it in the same ordered option set
+                      // makes the bottom list match the board users are scanning above it.
+                      column.stage.slug === "pending_rfp"
+                        ? { value: PENDING_RFP_STAGE_FILTER_VALUE, label: column.stage.name }
+                        : { value: column.stage.id, label: column.stage.name }
+                    ),
                   sortOptions: DEAL_LIST_SORT_OPTIONS,
                 },
                 // ENABLE_STAGE_ENTRY_DATE_FILTER is on in prod (matches /pipeline): open rows are
                 // date-windowed, so Stalled is offered and the date axis is labeled outcome-aware.
                 stageEntryDateEnabled: true,
                 defaultStageIds: dealsBaseListStageScope.defaultStageIds,
+                // Pending RFP is displayed as its own board column even though its rows retain an
+                // Opportunity stage id. Include it whenever this list falls back to all visible
+                // board columns; an explicit Opportunity pick intentionally excludes it.
+                includePendingRfpBucket: true,
                 terminalStageIds: dealsBaseListStageScope.terminalStageIds,
                 // Expand an explicit canonical stage pick to its full workflow-family (Codex #589 P1).
                 stageIdFamilies: dealsBaseListStageScope.stageIdFamilies,
@@ -1677,6 +2483,14 @@ function DealListPageContent({
             <DealsListSection
               workflowFamily="deal"
               scope={scope}
+              // Hand down the assignee list this page already loaded, so the section does not re-issue
+              // /tasks/assignees on every /deals load (it is name resolution + CSV only; the owner
+              // FILTER is the sales roster and is gated separately inside the section).
+              //
+              // UNDEFINED when our own load FAILED, which hands the fetch back to the section. Passing
+              // the empty array unconditionally would have removed its independent retry: owner names
+              // and the CSV export would degrade to "Unassigned" for every row with no way back.
+              assignees={assigneesError ? undefined : assignees}
               enableExport
               // Running-total card (#4) on the dashboard drill-down lists (Won / Active / Bid Board …) too.
               showValueTotal

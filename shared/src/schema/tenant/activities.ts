@@ -52,6 +52,7 @@ export const activities = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    index("activities_type_occurred_at_idx").on(table.type, table.occurredAt),
     index("activities_responsible_user_idx").on(table.responsibleUserId, table.occurredAt),
     index("activities_company_idx").on(table.companyId, table.occurredAt),
     index("activities_property_idx").on(table.propertyId, table.occurredAt),

@@ -259,6 +259,59 @@ describe("public photo token service", () => {
     expect(releaseMock).toHaveBeenCalled();
   });
 
+  // The change-order relabel needs `deals.is_change_order` to decide. The owner's call was that the
+  // exposure lock is ABSOLUTE, so the flag is read server-side and consumed here — the payload still
+  // carries exactly two fields. These two cases are a pair on purpose: the `false` case alone would pass
+  // against a server that just echoed `deal.name`, and the `true` case alone would pass against one that
+  // guessed from the name's syntax. Only both together pin "formatted, using the flag, server-side".
+  async function publicViewerDealFor(name: string, isChangeOrder: boolean) {
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{ id: "deal-1", name, is_change_order: isChangeOrder, property_address: "100 Main St" }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+    getDealPhotoTimelineMock.mockResolvedValue({ photos: [] });
+    return (await getPublicPhotoViewer("raw-token")).deal;
+  }
+
+  it("formats the change-order name server-side and does NOT put the flag on the public payload", async () => {
+    // An ordinary deal a customer happened to name like a change order. The authoritative false must win,
+    // so the name survives untouched — this is the case a syntax guess gets wrong, on the one page
+    // visible outside the company.
+    const deal = await publicViewerDealFor("Lobby — Change Order 1", false);
+
+    expect(deal).toEqual({
+      name: "Lobby — Change Order 1",
+      propertyAddress: "100 Main St",
+    });
+    // toEqual ignores an `undefined` property, so it cannot by itself prove the flag is absent.
+    expect(deal).not.toHaveProperty("isChangeOrder");
+    for (const leaked of ["id", "dealNumber", "contractAmount", "tenantId"]) {
+      expect(deal).not.toHaveProperty(leaked);
+    }
+    // The payload assertion cannot prove the SELECT projects the column — the mock hands back the row
+    // either way — so pin the query TEXT too. Drizzle passes an SQL object, not a string.
+    const dealSql = tenantQueryMock.mock.calls
+      .map((c: unknown[]) => JSON.stringify(c[0] ?? ""))
+      .join("\n");
+    expect(dealSql).toContain("is_change_order");
+  });
+
+  it("front-loads the change-order label for a real child deal, still without the flag", async () => {
+    const deal = await publicViewerDealFor("Lobby — Change Order 1", true);
+
+    expect(deal).toEqual({
+      name: "Change Order 1 — Lobby",
+      propertyAddress: "100 Main St",
+    });
+    expect(deal).not.toHaveProperty("isChangeOrder");
+  });
+
   it("does not sign non-image records for public viewer image URLs", async () => {
     const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });

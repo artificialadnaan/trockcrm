@@ -37,5 +37,9 @@ export interface FieldResponder {
 export interface FieldResponderAssignment {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the authority for the change-order display relabel. Optional because the
+   *  column is nullable and the endpoint sends `undefined` for "unknown"; pass it straight to
+   *  formatDealDisplayName, which treats absent as "fall back to the name's shape". */
+  dealIsChangeOrder?: boolean | null;
   role: FieldResponderRole;
 }

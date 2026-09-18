@@ -23,9 +23,28 @@ export interface PortfolioProjectBoardColumn {
   projects: PortfolioProjectSummary[];
 }
 
+export interface PortfolioProductionRollupGroup {
+  stages: string[];
+  projectCount: number;
+  totalValue: number;
+  staleValueCount: number;
+  unsyncedValueCount: number;
+}
+
+export interface PortfolioProductionRollup {
+  totalValue: number;
+  projectCount: number;
+  construction: PortfolioProductionRollupGroup;
+  service: PortfolioProductionRollupGroup;
+  staleValueCount: number;
+  unsyncedValueCount: number;
+  staleAfterDays: number;
+}
+
 export interface PortfolioProjectBoardResponse {
   stages: PortfolioProjectBoardColumn[];
   projects: PortfolioProjectSummary[];
+  productionRollup: PortfolioProductionRollup;
 }
 
 export interface PortfolioProjectStageEntry {
@@ -78,6 +97,7 @@ export function usePortfolioProjectBoard() {
   return {
     stages: data?.stages ?? [],
     projects: data?.projects ?? [],
+    productionRollup: data?.productionRollup ?? null,
     loading,
     error,
     refetch: fetchBoard,

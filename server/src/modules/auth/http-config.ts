@@ -413,7 +413,14 @@ export function isPublicAuthCsrfExempt(input: {
     // before the credentials are ever read. The mobile client is Bearer-only and sets no cookie of its
     // own, but it can still carry one (RN's fetch shares the system cookie store, and anything that
     // opened a webview against this host leaves one behind).
-    input.path === "/api/auth/mobile-login"
+    input.path === "/api/auth/mobile-login" ||
+    // Self-service password reset. Same reasoning as the login endpoints above, and more acutely: this
+    // flow's entire audience is people holding a STALE token cookie who cannot sign in. The CSRF gate
+    // engages whenever an unsafe request arrives with that cookie, so without these the reset would
+    // 403 before the request body was ever read -- for exactly the users who need it.
+    input.path === "/api/auth/password-reset/request" ||
+    input.path === "/api/auth/password-reset/validate" ||
+    input.path === "/api/auth/password-reset/complete"
   ) {
     return true;
   }

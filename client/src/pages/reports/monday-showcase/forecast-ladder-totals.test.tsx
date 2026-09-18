@@ -4,7 +4,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VariantB4ForecastLadder } from "./variants";
 import { DrillProvider } from "./drill";
+import { UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, EvidenceRequest, ProjectionBandCell } from "./types";
+import { emptyEstimatingReport } from "./test-fixtures";
 
 // Office ladder = the per-rep ladders summed (server officeProjection). 0–30d $ total (9999) is
 // globally unique so it can only come from the totals row, not any rep cell.
@@ -53,6 +55,8 @@ const fixture: MondayShowcaseData = {
   },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  estimatingReport: emptyEstimatingReport(),
+  routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 };
 

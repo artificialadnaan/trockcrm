@@ -1,6 +1,11 @@
 import type { PoolClient } from "pg";
 import {
+  PORTFOLIO_PRODUCTION_ROLLUP_CONSTRUCTION_STAGES,
+  PORTFOLIO_PRODUCTION_ROLLUP_SERVICE_STAGES,
   PORTFOLIO_PROJECT_BOARD_STAGES,
+  PORTFOLIO_UNMAPPED_BOARD_STAGE,
+  PORTFOLIO_VALUE_STALE_AFTER_DAYS,
+  isPortfolioProjectBoardRelevantStage,
   normalizePortfolioProjectStage,
   type PortfolioProjectBoardStage,
 } from "@trock-crm/shared/types";
@@ -86,7 +91,13 @@ export interface PortfolioProjectSummary {
   projectNumber: string | null;
   name: string;
   currentStage: string;
-  currentStageNormalized: PortfolioProjectBoardStage;
+  /**
+   * The normalized stage. Usually a `PortfolioProjectBoardStage`, but deliberately typed
+   * as a plain string: a project whose Procore stage matches no board column is still
+   * returned (grouped under "Other / No Column") rather than dropped, so this can hold a
+   * stage nobody has written an alias for yet.
+   */
+  currentStageNormalized: string;
   currentStageEnteredAt: string | null;
   totalValue: number | null;
   valueSyncedAt: string | null;
@@ -108,12 +119,40 @@ export interface PortfolioProjectStageEntry {
   createdAt: string;
 }
 
+export type PortfolioProjectBoardColumnStage =
+  | PortfolioProjectBoardStage
+  | typeof PORTFOLIO_UNMAPPED_BOARD_STAGE;
+
 export interface PortfolioProjectBoardColumn {
-  stage: PortfolioProjectBoardStage;
+  stage: PortfolioProjectBoardColumnStage;
   label: string;
   /** Sum of every project's contract value (total_value) in this stage column. */
   totalValue: number;
   projects: PortfolioProjectSummary[];
+}
+
+/** One track's slice of the production roll-up (construction or service). */
+export interface PortfolioProductionRollupGroup {
+  /** The board columns this group sums — the card and those columns must reconcile. */
+  stages: PortfolioProjectBoardStage[];
+  projectCount: number;
+  totalValue: number;
+  /** Projects whose value IS included but was last synced > 7 days ago. */
+  staleValueCount: number;
+  /** Projects with no usable synced value; they contribute $0 and understate the total. */
+  unsyncedValueCount: number;
+}
+
+export interface PortfolioProductionRollup {
+  /** construction.totalValue + service.totalValue. */
+  totalValue: number;
+  projectCount: number;
+  construction: PortfolioProductionRollupGroup;
+  service: PortfolioProductionRollupGroup;
+  /** Whole-rollup caveat counts (construction + service). */
+  staleValueCount: number;
+  unsyncedValueCount: number;
+  staleAfterDays: number;
 }
 
 export interface PortfolioProjectDetail extends PortfolioProjectSummary {
@@ -134,15 +173,9 @@ const SORT_COLUMNS: Record<string, string> = {
   lastSyncedAt: "p.last_synced_at",
 };
 
-function stageLabel(stage: PortfolioProjectBoardStage): string {
+function stageLabel(stage: PortfolioProjectBoardColumnStage): string {
+  if (stage === PORTFOLIO_UNMAPPED_BOARD_STAGE) return "Other / No Column";
   return stage.replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function normalizeBoardStage(value: string | null | undefined): PortfolioProjectBoardStage | null {
-  const normalized = normalizePortfolioProjectStage(value);
-  return PORTFOLIO_PROJECT_BOARD_STAGES.includes(normalized as PortfolioProjectBoardStage)
-    ? normalized as PortfolioProjectBoardStage
-    : null;
 }
 
 export function quoteIdent(identifier: string): string {
@@ -610,9 +643,23 @@ function toApiProject(row: any) {
   };
 }
 
-function toPortfolioProjectSummary(row: any): PortfolioProjectSummary | null {
-  const stage = normalizeBoardStage(row.current_stage_normalized ?? row.current_stage);
-  if (!stage) return null;
+/**
+ * Build a summary for EVERY row. Deliberately total (never null): a stage that matches no
+ * board column used to make this return null, which dropped the project from the board's
+ * columns AND from its `projects` array — the project simply ceased to exist as far as the
+ * UI was concerned. Now an unrecognised stage keeps its normalized value and the grouping
+ * puts it in the "Other / No Column" column.
+ */
+function toPortfolioProjectSummary(row: any): PortfolioProjectSummary {
+  // The ONE intentional re-normalization of an already-normalized value, and it is safe where the
+  // relevance predicates are not, because this asks a different question. It decides COLUMN
+  // PLACEMENT, and every canonical stage is a fixed point of the normalizer (asserted by the
+  // double-normalization test), so a second pass can only move a stale stored value TOWARD its
+  // canonical form — which is exactly the self-healing that lets "pre - construction" rows written
+  // before this release land in the Pre-Construction column with no data migration. Contrast
+  // is_board_relevant, which must be classified from RAW text: there a second pass can change the
+  // answer (`_Hold` -> " hold" -> "hold" -> legacy) and make a project vanish.
+  const stage = normalizePortfolioProjectStage(row.current_stage_normalized ?? row.current_stage);
   return {
     id: row.id,
     procoreProjectId: row.procore_project_id,
@@ -637,7 +684,25 @@ function toPortfolioStageEntry(row: any): PortfolioProjectStageEntry {
     previousStageNormalized: row.previous_stage_normalized,
     stage: row.stage,
     stageNormalized: row.stage_normalized,
-    isBoardRelevant: row.is_board_relevant,
+    // DERIVED, not read from `is_board_relevant` on the row.
+    //
+    // That column is a cached classification stamped by whatever the classifier said the day the
+    // event was relayed. The detail page renders it as "Board stage" / "Legacy stage", so after this
+    // release a backfilled Pre-Construction or Service project was reachable but its whole history
+    // still read "Legacy stage" — until some unrelated future stage event happened to rewrite it.
+    //
+    // Chosen over updating the rows in migration 0216 because a stage entry's flag is DISPLAY-ONLY:
+    // nothing filters or indexes on it (unlike portfolio_projects.is_board_relevant, which both read
+    // paths do filter on and which therefore genuinely needs the backfill). Deriving costs a function
+    // call and leaves nothing to keep in step with the alias map — which is exactly the class of bug
+    // that made 0216 necessary in the first place. The stored column is left alone deliberately: it
+    // remains an honest audit record of what the relay believed at the time.
+    // RAW `stage` first, not `stage_normalized`. The predicate normalizes internally, and
+    // normalizePortfolioProjectStage is not idempotent for every input (`_Hold` -> " hold" ->
+    // "hold" -> legacy), so feeding it an already-normalized value can flip the answer. Raw is
+    // what the seed, the relay and migration 0216 all classify from; `stage_normalized` is only
+    // the fallback for a row whose raw text is somehow absent.
+    isBoardRelevant: isPortfolioProjectBoardRelevantStage(row.stage ?? row.stage_normalized),
     enteredAt: new Date(row.entered_at).toISOString(),
     relayDetectedAt: row.relay_detected_at ? new Date(row.relay_detected_at).toISOString() : null,
     webhookTimestamp: row.webhook_timestamp ? new Date(row.webhook_timestamp).toISOString() : null,
@@ -655,37 +720,120 @@ function coercePortfolioContractValue(value: unknown): number {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-export function groupPortfolioProjectsForBoard(rows: any[]) {
+/**
+ * A project has no usable synced value when Procore never gave us one (`value_synced_at`
+ * is null) or the value itself is not a finite number. These are exactly the projects that
+ * `coercePortfolioContractValue` turns into $0 — i.e. the ones that make a total understate.
+ */
+function hasUnsyncedPortfolioValue(project: PortfolioProjectSummary): boolean {
+  if (!project.valueSyncedAt) return true;
+  // Checked BEFORE the numeric coercion on purpose: Number(null) is 0, which is finite, so a
+  // null value would otherwise read as a real $0 and quietly drop out of the caveat count —
+  // the same coercion trap that makes the headline total understate in the first place.
+  if (project.totalValue == null) return true;
+  const numeric = typeof project.totalValue === "number" ? project.totalValue : Number(project.totalValue);
+  return !Number.isFinite(numeric);
+}
+
+/**
+ * Stale = we DO have a value, but Procore last synced it more than 7 days ago. The value is
+ * still counted (at its last-known number); the card just has to admit it might have moved.
+ * Deliberately disjoint from "unsynced" so the two caveat counts never double-count a project.
+ */
+function hasStalePortfolioValue(project: PortfolioProjectSummary, now: number): boolean {
+  if (hasUnsyncedPortfolioValue(project)) return false;
+  const syncedAt = new Date(project.valueSyncedAt as string).getTime();
+  if (Number.isNaN(syncedAt)) return true;
+  return now - syncedAt > PORTFOLIO_VALUE_STALE_AFTER_DAYS * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * Roll a set of board columns up into one production-revenue group.
+ *
+ * Sums `column.totalValue` — the SAME subtotals rendered on the columns underneath — rather
+ * than re-summing the rows. There is therefore exactly one summation path, and the card can
+ * never disagree with the columns it claims to summarise.
+ */
+function rollupGroup(
+  columnByStage: Map<PortfolioProjectBoardColumnStage, PortfolioProjectBoardColumn>,
+  stages: readonly PortfolioProjectBoardStage[],
+  now: number,
+): PortfolioProductionRollupGroup {
+  const columns = stages
+    .map((stage) => columnByStage.get(stage))
+    .filter((column): column is PortfolioProjectBoardColumn => Boolean(column));
+  const projects = columns.flatMap((column) => column.projects);
+
+  return {
+    stages: [...stages],
+    projectCount: projects.length,
+    totalValue: columns.reduce((sum, column) => sum + column.totalValue, 0),
+    staleValueCount: projects.filter((project) => hasStalePortfolioValue(project, now)).length,
+    unsyncedValueCount: projects.filter(hasUnsyncedPortfolioValue).length,
+  };
+}
+
+export function groupPortfolioProjectsForBoard(rows: any[], now: Date = new Date()) {
   const columns: PortfolioProjectBoardColumn[] = PORTFOLIO_PROJECT_BOARD_STAGES.map((stage) => ({
     stage,
     label: stageLabel(stage),
     totalValue: 0,
     projects: [],
   }));
-  const columnByStage = new Map(columns.map((column) => [column.stage, column]));
+  // Catch-all for stages nobody anticipated. Appended to the board only when it actually has
+  // projects, so the normal board does not carry a permanently-empty column — but a project
+  // with an unknown stage is now visible and counted instead of vanishing.
+  const unmapped: PortfolioProjectBoardColumn = {
+    stage: PORTFOLIO_UNMAPPED_BOARD_STAGE,
+    label: stageLabel(PORTFOLIO_UNMAPPED_BOARD_STAGE),
+    totalValue: 0,
+    projects: [],
+  };
+  const columnByStage = new Map<PortfolioProjectBoardColumnStage, PortfolioProjectBoardColumn>(
+    columns.map((column) => [column.stage, column]),
+  );
   const projects: PortfolioProjectSummary[] = [];
 
   for (const row of rows) {
     const project = toPortfolioProjectSummary(row);
-    if (!project) continue;
     projects.push(project);
-    columnByStage.get(project.currentStageNormalized)?.projects.push(project);
+    // The cast is the whole point: currentStageNormalized may be a stage with no column, and
+    // the Map miss is what routes it to the unmapped bucket instead of dropping it.
+    const column = columnByStage.get(project.currentStageNormalized as PortfolioProjectBoardColumnStage);
+    (column ?? unmapped).projects.push(project);
   }
+
+  const allColumns = unmapped.projects.length > 0 ? [...columns, unmapped] : columns;
 
   // Subtotal each column from its own projects so the dollar total and the project
   // count always describe the exact same set (stale/unsynced values still included;
   // null / non-numeric values count as 0).
-  for (const column of columns) {
+  for (const column of allColumns) {
     column.totalValue = column.projects.reduce(
       (sum, project) => sum + coercePortfolioContractValue(project.totalValue),
       0,
     );
   }
+  columnByStage.set(unmapped.stage, unmapped);
 
-  return { stages: columns, projects };
+  const nowMs = now.getTime();
+  const construction = rollupGroup(columnByStage, PORTFOLIO_PRODUCTION_ROLLUP_CONSTRUCTION_STAGES, nowMs);
+  const service = rollupGroup(columnByStage, PORTFOLIO_PRODUCTION_ROLLUP_SERVICE_STAGES, nowMs);
+  const productionRollup: PortfolioProductionRollup = {
+    totalValue: construction.totalValue + service.totalValue,
+    projectCount: construction.projectCount + service.projectCount,
+    construction,
+    service,
+    staleValueCount: construction.staleValueCount + service.staleValueCount,
+    unsyncedValueCount: construction.unsyncedValueCount + service.unsyncedValueCount,
+    staleAfterDays: PORTFOLIO_VALUE_STALE_AFTER_DAYS,
+  };
+
+  return { stages: allColumns, projects, productionRollup };
 }
 
-export async function listPortfolioProjectBoard(client: QueryExecutor) {
+/** `now` is injectable so the roll-up's staleness cutoff is deterministic under test. */
+export async function listPortfolioProjectBoard(client: QueryExecutor, now: Date = new Date()) {
   const result = await client.query(
     `SELECT id, procore_company_id, procore_project_id, project_number, name,
             current_stage, current_stage_normalized, current_stage_entered_at,
@@ -694,7 +842,7 @@ export async function listPortfolioProjectBoard(client: QueryExecutor) {
       WHERE is_board_relevant = true
       ORDER BY current_stage_entered_at DESC NULLS LAST, name ASC`
   );
-  return groupPortfolioProjectsForBoard(result.rows);
+  return groupPortfolioProjectsForBoard(result.rows, now);
 }
 
 export async function getPortfolioProjectDetail(client: QueryExecutor, projectId: string): Promise<PortfolioProjectDetail | null> {
@@ -712,8 +860,9 @@ export async function getPortfolioProjectDetail(client: QueryExecutor, projectId
   const row = projectResult.rows[0];
   if (!row) return null;
 
+  // No stage-based null here: a board-relevant project whose stage has no column is still a
+  // real project, so its detail page must open rather than 404 the way it used to.
   const summary = toPortfolioProjectSummary(row);
-  if (!summary) return null;
 
   const historyResult = await client.query(
     `SELECT id, event_key, previous_stage, previous_stage_normalized,

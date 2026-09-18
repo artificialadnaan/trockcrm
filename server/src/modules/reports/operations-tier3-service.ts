@@ -46,6 +46,8 @@ export interface WorkflowBottleneckStage {
 export interface WorkflowBottleneckDeal {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   ownerName: string;
   stageName: string;
   daysInStage: number;
@@ -71,6 +73,8 @@ export interface WorkflowBottlenecksReport {
 export interface ProjectReadinessMissingDeal {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   ownerName: string;
   stageName: string;
   daysInStage: number;
@@ -153,6 +157,7 @@ interface StageAgingSqlRow extends Record<string, unknown> {
 interface WorkflowDealSqlRow extends Record<string, unknown> {
   deal_id: string;
   deal_name: string;
+  deal_is_change_order?: boolean | null;
   owner_name: string | null;
   stage_name: string | null;
   stage_slug: string | null;
@@ -335,6 +340,7 @@ function mapWorkflowDeal(row: WorkflowDealSqlRow): WorkflowBottleneckDeal {
   return {
     dealId: row.deal_id,
     dealName: row.deal_name,
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     ownerName: row.owner_name ?? "Unassigned",
     stageName: row.stage_name ?? "Unknown Stage",
     daysInStage: Math.round(numberFrom(row.days_in_stage)),
@@ -371,6 +377,7 @@ export async function getWorkflowBottlenecksReport(
       SELECT
         d.id::text AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         COALESCE(u.display_name, 'Unassigned') AS owner_name,
         psc.name AS stage_name,
         psc.slug AS stage_slug,
@@ -391,6 +398,7 @@ export async function getWorkflowBottlenecksReport(
       SELECT
         d.id::text AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         COALESCE(u.display_name, 'Unassigned') AS owner_name,
         psc.name AS stage_name,
         psc.slug AS stage_slug,
@@ -535,6 +543,7 @@ export async function getProjectReadinessReport(
       SELECT
         d.id::text AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         COALESCE(u.display_name, 'Unassigned') AS owner_name,
         psc.name AS stage_name,
         psc.slug AS stage_slug,
@@ -589,6 +598,7 @@ export async function getProjectReadinessReport(
         missingReadiness.push({
           dealId: row.deal_id,
           dealName: row.deal_name,
+          dealIsChangeOrder: row.deal_is_change_order ?? undefined,
           ownerName: row.owner_name ?? "Unassigned",
           stageName: row.stage_name ?? "Unknown Stage",
           daysInStage: numberFrom(row.days_in_stage),

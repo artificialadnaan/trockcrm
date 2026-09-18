@@ -47,6 +47,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { getLiveGps } from "../capture/metadata";
 import { useCaptureTargets, useNearbyCaptureTargets } from "../query/hooks";
 import type { FieldCaptureTarget } from "../api/types";
+import { captureTargetDisplayName } from "../projects/field-projects";
 import { EmptyState, LoadingState, TextInput } from "./ui";
 
 const NEARBY_LIMIT = 3;
@@ -189,12 +190,15 @@ export function RecoveryProjectPicker({
           <Pressable
             onPress={() => onSelect(item)}
             accessibilityRole="button"
-            accessibilityLabel={`File this walk to ${item.name} — ${dealSubtitle(item)}`}
+            accessibilityLabel={`File this walk to ${captureTargetDisplayName(item)} — ${dealSubtitle(item)}`}
             style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
           >
             <View style={styles.rowText}>
+              {/* A change-order child is stored "<Parent> — Change Order N"; on a one-line row the suffix
+                  is the first thing lost. Gated on the target's type. Display-only — `onSelect` still hands
+                  back the raw target, which is what the recovered walk's title is built from. */}
               <Text style={styles.rowTitle} numberOfLines={1}>
-                {item.name}
+                {captureTargetDisplayName(item)}
               </Text>
               <Text style={styles.rowSub} numberOfLines={1}>
                 {dealSubtitle(item)}

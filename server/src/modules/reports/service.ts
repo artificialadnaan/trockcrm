@@ -24,6 +24,7 @@ import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shar
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateSql,
+  aliasedIsServiceProjectSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
@@ -323,6 +324,8 @@ export interface ForecastVarianceRepRollup {
 export interface ForecastVarianceDealRow {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   repName: string;
   workflowRoute: WorkflowRoute;
   initialForecast: number;
@@ -522,6 +525,7 @@ export async function getForecastVarianceOverview(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
@@ -552,6 +556,9 @@ export async function getForecastVarianceOverview(
     SELECT
       deal_id,
       deal_name,
+      -- Projected out of forecast_base explicitly: the CTE selected it and this outer SELECT dropped it,
+      -- so the mapper below was reading a column that never reached it.
+      deal_is_change_order,
       rep_name,
       workflow_route,
       initial_forecast,
@@ -595,6 +602,7 @@ export async function getForecastVarianceOverview(
     deals: dealRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order === true ? true : row.deal_is_change_order === false ? false : undefined,
       repName: row.rep_name,
       workflowRoute: row.workflow_route,
       initialForecast: Number(row.initial_forecast ?? 0),
@@ -949,6 +957,22 @@ export interface StaleDealRow {
   dealId: string;
   dealNumber: string;
   dealName: string;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel.
+   *
+   * Optional because this row has TWO producers and only one can answer: the dashboard's
+   * buildDashboardAtRiskStaleDeals carries the column out of its query, while this module's
+   * staleDealRowsFromEngine reads a candidate row that does not select it. `undefined` there is the
+   * honest answer — it degrades to the name-shape fallback rather than asserting "not a change order".
+   */
+  dealIsChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title` — travels with the flag above, and optional for the SAME reason: only the
+   * dashboard producer selects it. Once the relabel fires, this is the only field distinguishing one
+   * change order from another, so a surface that carries the flag and drops this renders siblings
+   * identically.
+   */
+  dealScopeTitle?: string | null;
   stageId: string;
   stageName: string;
   assignedRepId: string;
@@ -1854,6 +1878,22 @@ export async function getFollowUpCompliance(
       AND t.created_at >= ${from}::timestamptz
       AND t.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
       AND t.status IN ('completed', 'dismissed')
+      -- A dismissal nobody decided is not a rep's missed follow-up. The denominator counts every
+      -- completed-or-dismissed follow-up while the numerator counts only completions, so an automatic
+      -- sweep is scored as a miss: the terminal-deal drain retires hundreds at once, over a window that
+      -- defaults to the whole calendar year, and the rep who reported the phantom follow-ups would have
+      -- watched his own compliance get worse the morning after the fix.
+      --
+      -- Reads the IMMUTABLE marker stamped at dismissal time (migration 0246). Two derived tests were
+      -- tried on this branch and both were wrong: task_resolution_state.resolution_reason is re-pointed by
+      -- a later same-key task, and the deal's current stage moves under the task in BOTH directions —
+      -- erasing a genuine miss when a live deal later closes, and re-admitting a swept task when a closed
+      -- deal is reopened. Neither could express "what happened when this task was closed".
+      --
+      -- A completed follow-up always counts, whatever later happens to its deal, so closing or reopening
+      -- can never erase a rep's credit for work they did. A dismissal a PERSON made still counts, because
+      -- that column is NULL for it.
+      AND t.auto_dismissed_reason IS NULL
   `);
 
   const rows = (result as any).rows ?? result;
@@ -2300,12 +2340,15 @@ export async function getUnifiedWorkflowOverview(
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS active_deal_count,
         COUNT(*) FILTER (
-          WHERE d.workflow_route = 'normal'
+          -- Canonical service test, not the raw route: project_type decides, workflow_route is the
+          -- fallback. Also NOT(service) rather than = 'normal', so the two counts partition the rows
+          -- instead of both dropping a NULL route.
+          WHERE NOT ${aliasedIsServiceProjectSql("d")}
             AND ${nonTerminalDealStageSql()}
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS standard_deal_count,
         COUNT(*) FILTER (
-          WHERE d.workflow_route = 'service'
+          WHERE ${aliasedIsServiceProjectSql("d")}
             AND ${nonTerminalDealStageSql()}
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS service_deal_count,
@@ -2577,6 +2620,10 @@ export async function getUnifiedWorkflowOverview(
       dealId: row.dealId,
       dealNumber: row.dealNumber,
       dealName: row.dealName,
+      // Carried rather than dropped. staleDealRowsFromEngine's candidate query does not select the
+      // column today, so this forwards `undefined` — the documented "unknown" state, not a false
+      // claim — and the chain is already complete the day that query starts projecting it.
+      dealIsChangeOrder: row.dealIsChangeOrder,
       stageName: row.stageName,
       workflowRoute: row.workflowRoute ?? "normal",
       repName: row.repName,

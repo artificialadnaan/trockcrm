@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { bestEstimate, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { bestEstimate, formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { DealValue } from "@/components/deals/deal-value";
 import { cn } from "@/lib/utils";
 import type { Deal } from "@/hooks/use-deals";
@@ -52,6 +52,9 @@ export function KanbanDealCard({
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue);
   const value = effectivelyHeld ? 0 : bestEstimate(dealForValue);
   const displayNumber = getDealDisplayNumber(deal);
+  // A change-order child is STORED as "<Parent> — Change Order N", so this truncating title reads as its
+  // parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched.
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
 
   const metaParts: string[] = [];
   if (deal.propertyCity) metaParts.push(deal.propertyCity);
@@ -75,7 +78,7 @@ export function KanbanDealCard({
           handleClick();
         }
       }}
-      aria-label={`Open deal ${deal.name}`}
+      aria-label={`Open deal ${displayName}`}
     >
       {dragHandle}
       <div className={cn("px-3 py-2.5", dragHandle ? "pl-5" : "")}>
@@ -91,7 +94,7 @@ export function KanbanDealCard({
           </p>
         ) : null}
         <div className="flex items-start justify-between gap-2">
-          <p className="truncate text-sm font-medium text-gray-900" title={deal.name}>{deal.name}</p>
+          <p className="truncate text-sm font-medium text-gray-900" title={displayName}>{displayName}</p>
           <DealValue
             deal={dealForValue}
             value={value}

@@ -92,4 +92,29 @@ describe("createAssignmentTaskIfNeeded", () => {
     expect(result).toBeNull();
     expect(spies.insert).not.toHaveBeenCalled();
   });
+
+  // These rows are the reason tasks.source had to exist. They carry type 'manual' and a real person on
+  // created_by, so nothing about the row distinguishes them from a task somebody typed -- and they are
+  // the bulk of what people are asking to filter away. Written explicitly here, never left to the
+  // column default.
+  it("records the task as automated — nothing else on the row could say so", async () => {
+    const { db, spies } = createMockDb();
+
+    await createAssignmentTaskIfNeeded(db as any, {
+      entityType: "deal",
+      entityId: "deal-1",
+      entityName: "Oakwood Roof",
+      previousAssignedRepId: "rep-old",
+      nextAssignedRepId: "rep-new",
+      actorUserId: "director-1",
+      officeId: "office-1",
+      now: new Date("2026-04-20T10:00:00.000Z"),
+    });
+
+    const written = spies.values.mock.calls[0][0] as Record<string, unknown>;
+    expect(written.source).toBe("automated");
+    // The two columns that look like a human wrote it, pinned so the reason stays visible.
+    expect(written.type).toBe("manual");
+    expect(written.createdBy).toBe("director-1");
+  });
 });

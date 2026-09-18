@@ -4,7 +4,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VariantB2Leaderboard } from "./variants";
 import { DrillProvider } from "./drill";
+import { UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData } from "./types";
+import { emptyEstimatingReport } from "./test-fixtures";
 
 // Minimal showcase payload — one rep + office aggregates — enough to render the B2 leaderboard table.
 const data: MondayShowcaseData = {
@@ -46,6 +48,8 @@ const data: MondayShowcaseData = {
   },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  estimatingReport: emptyEstimatingReport(),
+  routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 };
 

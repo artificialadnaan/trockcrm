@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BlindSpotCard } from "@/components/ai/blind-spot-card";
 import { useCompanyCopilot } from "@/hooks/use-ai-copilot";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 interface CompanyCopilotPanelProps {
   companyId: string;
@@ -98,7 +99,9 @@ export function CompanyCopilotPanel({ companyId }: CompanyCopilotPanelProps) {
                   <div className="flex items-start justify-between gap-3">
                     <div className="space-y-1">
                       <Link to={`/deals/${deal.id}`} className="text-sm font-medium text-brand-red hover:underline">
-                        {deal.dealNumber} {deal.name}
+                        {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
+                            label so it isn't read as its parent. Display-only, stored name unchanged. */}
+                        {deal.dealNumber} {formatDealDisplayName(deal.name, deal.isChangeOrder)}
                       </Link>
                       {deal.latestPacketSummary && (
                         <p className="text-sm text-muted-foreground line-clamp-2">{deal.latestPacketSummary}</p>

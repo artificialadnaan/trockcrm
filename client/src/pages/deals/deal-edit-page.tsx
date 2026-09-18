@@ -3,7 +3,7 @@ import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DealForm } from "@/components/deals/deal-form";
 import { useDealDetail } from "@/hooks/use-deals";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 export function DealEditPage() {
   const { id } = useParams<{ id: string }>();
@@ -42,7 +42,9 @@ export function DealEditPage() {
           Back to Deal
         </Button>
         <h2 className="text-2xl font-bold">Edit Deal</h2>
-        <p className="text-sm text-muted-foreground">{formatDealDisplayNumber(deal).label} - {deal.name}</p>
+        {/* A change-order child is STORED as "<Parent> — Change Order N"; lead the subtitle with the
+            label. Display-only — the form below still edits the stored name. */}
+        <p className="text-sm text-muted-foreground">{formatDealDisplayNumber(deal).label} - {formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
       </div>
       <DealForm deal={deal} />
     </div>

@@ -34,6 +34,10 @@ const getFieldProjectMock = vi.hoisted(() => vi.fn());
 const assertCaptureTargetMock = vi.hoisted(() => vi.fn());
 const ingestMock = vi.hoisted(() => vi.fn());
 const presignMock = vi.hoisted(() => vi.fn());
+/** The completion route's third service call: it resolves the walk's TROCK Scope job type from the deal,
+ *  and it READS the db this file deliberately does not stand up. Stubbed for the same reason the other
+ *  two are — these cases are about which gate the route asserts with, not about what SQL ran. */
+const resolveJobTypeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/middleware/field-auth.js", () => ({
   requireFieldContractor: (req: any, _res: any, next: () => void) => {
@@ -76,6 +80,7 @@ vi.mock("../src/modules/walkthrough-capture/glasses-walkthrough-service.js", asy
     ...actual,
     ingestGlassesWalkthrough: ingestMock,
     requestGlassesWalkthroughArtifactUploadUrl: presignMock,
+    resolveGlassesWalkthroughJobTypeForDeal: resolveJobTypeMock,
   };
 });
 
@@ -128,6 +133,8 @@ beforeEach(() => {
   assertCaptureTargetMock.mockReset();
   ingestMock.mockReset();
   presignMock.mockReset();
+  resolveJobTypeMock.mockReset();
+  resolveJobTypeMock.mockResolvedValue("interior_finish_out");
   // What the deal looks like AFTER it moved to a terminal stage: still a real, active record the office
   // resolver finds, but no longer inside the field's browsable set — so the browsing gate 404s it.
   getFieldProjectMock.mockRejectedValue(new AppError(404, "Project not found"));
@@ -188,6 +195,10 @@ describe("glasses-walkthrough routes against a deal that has since gone terminal
 
       expect(res.status).toBe(404);
       expect(serviceMock).not.toHaveBeenCalled();
+      // NOR THE JOB-TYPE RESOLVER, which READS the deal. "Never reaches the service" has to mean every
+      // service call on the route, not the one the case is named after: a lookup that ran before the gate
+      // would read a deal this user was just refused.
+      expect(resolveJobTypeMock).not.toHaveBeenCalled();
     },
   );
 

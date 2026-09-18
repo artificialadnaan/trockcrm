@@ -1,0 +1,1173 @@
+import PDFDocument from "pdfkit";
+import {
+  WEEKLY_REPORT_MAX_PHOTOS,
+  WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS,
+  WEEKLY_REPORT_SECTION_MAX_CHARS,
+} from "@trock-crm/shared/types";
+import { isHeicOrHeif } from "../../lib/image-thumbnail.js";
+import { TROCK_LOGO_PNG_BASE64 } from "../field/pdf-logo.js";
+import {
+  loadPhotoBuffer,
+  openImageForLayout,
+  paginateTextByHeight,
+  registerReportFonts,
+  type ReportFontSet,
+} from "../field/pdf-layout.js";
+
+// The client-facing weekly progress report, reproducing the spreadsheet artifact PMs produced by hand:
+// page 1 is the one-page summary, page 2+ the photo sheets.
+//
+// LANDSCAPE, and that is not a style choice. Page 1 is a two-column body over a three-box footer row, and
+// page 2 is a three-across photo grid; both come from the reference document and neither fits a portrait
+// column without shrinking the photographs to thumbnails. Every coordinate below is absolute (doc margin 0)
+// for the same reason pdf-layout.ts is: a non-zero bottom margin makes pdfkit auto-break the moment a draw
+// lands near the page foot, which is how the field report grew blank pages.
+//
+// Fonts and photo loading come from field/pdf-layout.ts rather than being re-derived here. The Geist OTF
+// paths resolve relative to THAT file, so a local copy would quietly degrade to Helvetica; loadPhotoBuffer
+// carries the R2 size cap, the HEIC/WebP transcode and the "don't fetch arbitrary URLs" rule that this
+// surface needs just as much.
+
+const PAGE_WIDTH = 792;
+const PAGE_HEIGHT = 612;
+const MARGIN = 36;
+const CONTENT_LEFT = MARGIN;
+const CONTENT_RIGHT = PAGE_WIDTH - MARGIN;
+const CONTENT_WIDTH = CONTENT_RIGHT - CONTENT_LEFT;
+
+const BRAND_RED = "#C1272D";
+const BRAND_BLACK = "#111111";
+const BRAND_BORDER = "#B7BCC4";
+const BRAND_INNER_BORDER = "#9AA3B0";
+const BRAND_MUTED = "#7589A3";
+const LOGO_BUFFER = Buffer.from(TROCK_LOGO_PNG_BASE64, "base64");
+
+// --- Header band ---------------------------------------------------------------------------------
+const HEADER_TOP = 30;
+const HEADER_HEIGHT = 54;
+const PROPERTY_BOX_WIDTH = 192;
+const PROPERTY_BOX_LEFT = CONTENT_RIGHT - PROPERTY_BOX_WIDTH;
+const BAND_LEFT = CONTENT_LEFT;
+const BAND_WIDTH = PROPERTY_BOX_LEFT - 12 - BAND_LEFT;
+const LOGO_PLATE_WIDTH = 62;
+const WEEK_OF_WIDTH = 108;
+
+// --- Page 1 body ---------------------------------------------------------------------------------
+const BODY_TOP = 96;
+const BODY_BOTTOM = 424;
+const PANEL_PAD = 14;
+const LEFT_PANEL_LEFT = CONTENT_LEFT;
+const LEFT_PANEL_WIDTH = PROPERTY_BOX_LEFT - 12 - CONTENT_LEFT;
+const RIGHT_PANEL_LEFT = PROPERTY_BOX_LEFT;
+const RIGHT_PANEL_WIDTH = PROPERTY_BOX_WIDTH;
+
+/** Below the T-Rock team rows, above the revision line — the free strip at the foot of the right panel. */
+const SUPERSEDED_NOTICE_TOP = 344;
+
+const WORK_BOX_TOP = 132;
+const WORK_BOX_HEIGHT = 126;
+const LOOKAHEAD_BOX_TOP = 294;
+const LOOKAHEAD_BOX_HEIGHT = 116;
+
+// --- Page 1 footer row ---------------------------------------------------------------------------
+const FOOTER_ROW_TOP = 436;
+const FOOTER_ROW_BOTTOM = 566;
+const ISSUES_PANEL_WIDTH = 228;
+const ISSUES_BOX_TOP = 470;
+const ISSUES_BOX_HEIGHT = 84;
+const SCHEDULE_PANEL_LEFT = CONTENT_LEFT + ISSUES_PANEL_WIDTH + 12;
+const SCHEDULE_ROW_PITCH = 20;
+const DURATION_COLUMN_LEFT = 550;
+const DURATION_BAR_LEFT = 616;
+const DURATION_BAR_MAX_WIDTH = CONTENT_RIGHT - 12 - DURATION_BAR_LEFT;
+const DURATION_BAR_HEIGHT = 20;
+const DURATION_ARROW_HEAD = 14;
+/** Short enough to read as "almost none left", long enough that the number inside is still legible. */
+const DURATION_BAR_MIN_WIDTH = 46;
+
+const PAGE_NUMBER_Y = 578;
+
+// --- Photo sheet ---------------------------------------------------------------------------------
+// Three across, two down. Both numbers come from the reference document; PHOTOS_PER_PAGE is derived from
+// them rather than written twice, so re-flowing the grid cannot desynchronise the chunking.
+const PHOTO_COLUMNS = 3;
+const PHOTO_ROWS_PER_PAGE = 2;
+export const WEEKLY_REPORT_PHOTOS_PER_PAGE = PHOTO_COLUMNS * PHOTO_ROWS_PER_PAGE;
+const PHOTO_GRID_TOP = 96;
+const PHOTO_GRID_BOTTOM = 566;
+const PHOTO_COLUMN_GAP = 14;
+const PHOTO_ROW_GAP = 14;
+const PHOTO_CELL_WIDTH = (CONTENT_WIDTH - PHOTO_COLUMN_GAP * (PHOTO_COLUMNS - 1)) / PHOTO_COLUMNS;
+const PHOTO_CELL_HEIGHT =
+  (PHOTO_GRID_BOTTOM - PHOTO_GRID_TOP - PHOTO_ROW_GAP * (PHOTO_ROWS_PER_PAGE - 1)) / PHOTO_ROWS_PER_PAGE;
+const PHOTO_CELL_PAD = 6;
+/**
+ * The width a caption is MEASURED at and DRAWN at — one constant, because those two being different is a
+ * silent truncation.
+ *
+ * The cell minus its padding, i.e. the same box the photograph gets. Measuring at the full cell width makes
+ * the band one line short for roughly a third of ordinary 250-character captions, and `ellipsis: true` then
+ * eats the last line of each of them.
+ */
+export const PHOTO_CAPTION_TEXT_WIDTH = PHOTO_CELL_WIDTH - PHOTO_CELL_PAD * 2;
+/** Sizes the caption is tried at, largest first. See photoCaptionLayout for why there is more than one. */
+const PHOTO_CAPTION_FONT_SIZES = [8, 7, 6] as const;
+const PHOTO_CAPTION_LINE_GAP = 1;
+/**
+ * Ceiling on the caption band, in points — and, unlike its predecessor, one the layout can always meet.
+ *
+ * The band is MEASURED per cell (see photoCaptionLayout) rather than fixed, so the photograph gets whatever
+ * the caption does not need. It used to be a flat 24pt with `ellipsis: true`, which is what made the PDF
+ * print less of a caption than the web page did.
+ *
+ * 108 is half the cell: the photograph is the point of a progress-photo sheet and never gets less than the
+ * other half. Measured in the shipped Geist at 8pt across the 218.67pt text box, an ordinary
+ * WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS-character caption is ~57pt and a normal one-line caption 11.4pt,
+ * so the ceiling is nowhere near for anything a superintendent actually writes.
+ *
+ * It IS reachable at 8pt, which the previous revision claimed it was not: 250 characters of eight-wide
+ * words ("mmmmmmmm mmmmmmmm …") measure 114pt, and a wall of 15-character "W" words 171pt — every line
+ * ending early because the next word cannot fit. Rather than clamp and ellipsise those (the divergence this
+ * whole helper exists to remove), the caption is stepped down through PHOTO_CAPTION_FONT_SIZES until it
+ * fits: the worst of those word-wall captions measures 105.6pt at 6pt, and the suite sweeps that whole
+ * family plus 400 deterministic prose captions to hold the property. The clamp stays underneath as the
+ * structural backstop for anything that still defeats every step.
+ */
+export const PHOTO_CAPTION_MAX_HEIGHT = 108;
+
+/**
+ * Filler for the ReportRenderablePhoto fields the loader does not read.
+ *
+ * A CONSTANT rather than `new Date().toISOString()`: the render is content-addressed, so nothing inside it
+ * may come from the clock. This particular field never reaches the document — loadPhotoBuffer only looks at
+ * the storage keys and the mime type — but the rule is worth keeping unbroken.
+ */
+const EPOCH_ISO = new Date(0).toISOString();
+
+const BODY_FONT_SIZE = 8.5;
+const BODY_LINE_GAP = 1.5;
+
+/**
+ * Ceiling on ONE section's text — the API's own limit, deliberately not a tighter one.
+ *
+ * A previous revision stopped at 6,000 characters and printed a marker. The client's web page has no such
+ * cap, so a superintendent who wrote 8,000 characters produced a PDF that silently said less than the page
+ * it is attached to, on two surfaces report-view.ts requires to agree absolutely. Everything the API
+ * accepts now flows onto continuation pages instead; 20,000 characters is about 30 sheets of 8.5pt text,
+ * which is a lot of paper but is the superintendent's account of the week and the client's to read.
+ *
+ * The marker below is therefore unreachable for anything written through the API, and remains only as a
+ * backstop for a row written some other way. Its wording does NOT point at the CRM: the reader is a client
+ * with no account there, and telling them to go somewhere they cannot go is worse than saying nothing.
+ */
+const MAX_SECTION_RENDER_CHARS = WEEKLY_REPORT_SECTION_MAX_CHARS;
+const TRUNCATION_NOTICE = "… (this section was too long to print in full)";
+
+/**
+ * What a reader on a superseded link is told — ONE sentence, printed by both renderers.
+ *
+ * A correction clones the report to a new version and stamps `superseded_by_id` on the original. The
+ * original link keeps resolving, because a client who bookmarked it must never hit a 404, but neither the
+ * page NOR the attached PDF may present superseded content as current.
+ */
+export const WEEKLY_REPORT_SUPERSEDED_NOTICE =
+  "A newer version of this report has since been issued. Please refer to the most recent email.";
+
+export interface WeeklyReportPdfPhoto {
+  fileId: string;
+  caption: string | null;
+  r2Key: string | null;
+  externalUrl: string | null;
+  externalThumbnailUrl: string | null;
+  mimeType: string | null;
+}
+
+/** One labelled person on the report — the value may legitimately be blank (RM and CM usually are). */
+export interface WeeklyReportPdfContact {
+  label: string;
+  name: string | null;
+}
+
+export interface WeeklyReportPdfData {
+  propertyName: string;
+  /** Already formatted for print, e.g. "8/13/26". */
+  weekOfLabel: string;
+  clientName: string | null;
+  clientTeam: WeeklyReportPdfContact[];
+  trockTeam: WeeklyReportPdfContact[];
+  workCompleted: string | null;
+  nextWeekLookAhead: string | null;
+  issuesConcerns: string | null;
+  schedule: {
+    contractDate: string;
+    projectStartDate: string;
+    projectCompletionDate: string;
+    completionPercent: string;
+    weatherDelayDays: string;
+  };
+  duration: { projectedWeeks: number | null; remainingWeeks: number | null };
+  photos: WeeklyReportPdfPhoto[];
+  /** Printed as a revision banner when > 1. A client who kept the first link must see which one this is. */
+  version: number;
+  /**
+   * True once a correction has replaced this version.
+   *
+   * Part of the render input rather than something stamped on afterwards: the artifact is immutable and
+   * content-addressed, so a stored PDF can never be annotated in place. See WeeklyReportPdfArtifactState —
+   * the stored key records which of the two documents it holds, so a report that becomes superseded after
+   * publication re-renders exactly once and then stays cached.
+   */
+  superseded: boolean;
+  /**
+   * The PDF's `/CreationDate`, pinned to the report's content generation rather than to the wall clock.
+   *
+   * Required rather than optional, so a caller has to decide. pdfkit stamps `new Date()` by default, which
+   * puts "whenever somebody happened to click download" inside a document that is supposed to be an
+   * immutable record of one week — and makes the artifact's bytes depend on when it was produced rather
+   * than on what it says.
+   *
+   * NOTE: this does NOT make the render byte-reproducible, and the object key is derived from the bytes.
+   * pdfkit finalises PNG images (the logo carries an alpha channel, hence an SMask) through an ASYNCHRONOUS
+   * zlib inflate, so the order in which those objects are allocated varies with process load — two renders
+   * of identical content come out the same length, with the same content, and with different object
+   * numbering. A regeneration can therefore still land on a new key and leave the previous object behind.
+   * The scorecard artifact has the same property; removing it means shipping the logo without alpha.
+   */
+  creationDate: Date;
+}
+
+// --- Value formatting ----------------------------------------------------------------------------
+
+/**
+ * "8/13/26" — the reference report's date format.
+ *
+ * Parsed at UTC NOON, the convention used everywhere else in this feature (shared/types/weekly-report.ts
+ * explains it): `new Date("2026-08-13")` is UTC midnight read back in local time, which prints 8/12/26 for
+ * every reader west of Greenwich — on a document whose entire subject is which week it covers.
+ */
+export function formatWeeklyReportDate(isoDate: string | null | undefined): string | null {
+  if (!isoDate) return null;
+  const parsed = new Date(`${String(isoDate).slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return `${parsed.getUTCMonth() + 1}/${parsed.getUTCDate()}/${String(parsed.getUTCFullYear()).slice(-2)}`;
+}
+
+/**
+ * A schedule cell: the date when there is one, otherwise the note the PM typed in its place.
+ *
+ * The reference prints "TBD Permit" where a date belongs, which is why the schema carries a nullable date
+ * AND a note. Preferring the date keeps the printed value consistent with the arithmetic the rest of the
+ * report does; falling back to the note is what makes the blank cell say something.
+ */
+export function weeklyReportScheduleValue(
+  isoDate: string | null | undefined,
+  note: string | null | undefined,
+): string {
+  return formatWeeklyReportDate(isoDate) ?? (note?.trim() || "—");
+}
+
+function displayOrDash(value: string | null | undefined): string {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed || "—";
+}
+
+// --- Text flow -----------------------------------------------------------------------------------
+
+/** Must match paginateTextByHeight's own normalisation, or `head` stops being a prefix of the result. */
+function normalizeForFlow(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").trim();
+}
+
+/**
+ * Split free-form section text into the part that fits a fixed box and the part that does not.
+ *
+ * Page 1 has boxes of a fixed size — that IS the report's format, and growing them would stop it being the
+ * one-pager the client recognises. But a section that overflows must not be silently ellipsised away
+ * either: it is the superintendent's account of the week, and the client is the person it is written for.
+ * So the overflow flows onto a continuation page instead.
+ *
+ * The split is derived from paginateTextByHeight rather than reimplemented: it packs from the SAME
+ * normalised token stream, so its first chunk is always a prefix of the normalised text and the remainder
+ * is recovered by slicing — line structure and bullet markers intact. The join fallback exists only in
+ * case that ever stops holding; losing paragraph breaks is bad, losing the text is worse.
+ */
+export function splitTextAtHeight(
+  text: string,
+  maxHeight: number,
+  measure: (chunk: string) => number,
+): { head: string; rest: string } {
+  const pages = paginateTextByHeight(text, maxHeight, measure);
+  if (pages.length <= 1) return { head: pages[0] ?? "", rest: "" };
+  const normalized = normalizeForFlow(text);
+  const head = pages[0]!;
+  if (!normalized.startsWith(head)) return { head, rest: pages.slice(1).join("\n") };
+  return { head, rest: normalized.slice(head.length).replace(/^[ \n]/, "") };
+}
+
+/**
+ * A height measurer bound to one box's text width.
+ *
+ * The font is set INSIDE the returned function, not once by the caller. Between two measurements the
+ * renderer draws headings and labels, each of which mutates the document's current font — a measurer that
+ * trusted ambient state would size the last section against whatever was drawn just before it.
+ */
+function bodyMeasurer(doc: PDFKit.PDFDocument, fonts: ReportFontSet, width: number) {
+  return (chunk: string) => {
+    doc.font(fonts.regular).fontSize(BODY_FONT_SIZE);
+    return doc.heightOfString(chunk, { width, lineGap: BODY_LINE_GAP });
+  };
+}
+
+/**
+ * The exact text BOTH surfaces print for one section.
+ *
+ * Exported and used by the public web page too, so the PDF and the page can never disagree about how much
+ * of a section a client is shown. See MAX_SECTION_RENDER_CHARS: for anything the API accepted this is the
+ * trimmed value unchanged.
+ */
+export function boundWeeklyReportSectionText(value: string | null | undefined): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (text.length <= MAX_SECTION_RENDER_CHARS) return text;
+  return `${text.slice(0, MAX_SECTION_RENDER_CHARS).trimEnd()}\n${TRUNCATION_NOTICE}`;
+}
+
+/**
+ * The exact caption BOTH surfaces print for one photo.
+ *
+ * The section helper's twin, and it should have been written at the same time. The API's own limit, so for
+ * anything written through it this is the trimmed caption unchanged; the slice only ever fires for a row
+ * that predates the limit or was written some other way, and when it does the PDF and the page truncate at
+ * the same character. Returns null, not "", so callers can tell "no caption" from "a caption" — the page
+ * omits the <figcaption> entirely rather than emitting an empty one.
+ *
+ * WHITESPACE IS COLLAPSED, newlines included, and that is the second half of making the two surfaces agree.
+ * The caption comes from a multiline field (mobile's PhotoCaptionEditor) and the API only trims and
+ * length-checks it, so "a\n" 125 times is an accepted 250-character caption. The client's page shows it as
+ * one wrapped paragraph whatever it contains — `.photo figcaption` has no `white-space: pre-wrap`, unlike
+ * `.prose` — while pdfkit honours every newline: 125 lines, 1,427pt of them, inside a 108pt band that then
+ * ellipsised away 116 of them. Collapsing here gives both surfaces the paragraph the browser was already
+ * rendering, and keeps the caption's height a function of its length rather than of its line breaks.
+ * Collapsing can only shorten the string, so it happens BEFORE the character bound.
+ */
+export function boundWeeklyReportPhotoCaption(value: string | null | undefined): string | null {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  if (!text) return null;
+  if (text.length <= WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS) return text;
+  return `${text.slice(0, WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS).trimEnd()}…`;
+}
+
+// --- Primitives ----------------------------------------------------------------------------------
+
+function drawPanel(doc: PDFKit.PDFDocument, x: number, y: number, w: number, h: number) {
+  doc.save();
+  doc.roundedRect(x, y, w, h, 3).lineWidth(1).strokeColor(BRAND_BORDER).stroke();
+  doc.restore();
+}
+
+/**
+ * A section heading: bold, with the rule under it that the reference draws. pdfkit has no underline that
+ * stops at the text, so the rule is measured off the string and drawn explicitly.
+ */
+function drawUnderlinedHeading(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  text: string,
+  x: number,
+  y: number,
+  size: number,
+  maxWidth: number,
+) {
+  doc.save();
+  doc.font(fonts.bold).fontSize(size).fillColor(BRAND_BLACK);
+  const width = Math.min(doc.widthOfString(text), maxWidth);
+  doc.text(text, x, y, { width: maxWidth, lineBreak: false, height: size + 4, ellipsis: true });
+  doc
+    .moveTo(x, y + size + 3)
+    .lineTo(x + width, y + size + 3)
+    .lineWidth(0.8)
+    .strokeColor(BRAND_BLACK)
+    .stroke();
+  doc.restore();
+}
+
+/**
+ * A bordered text box with the section's prose inside it, height-capped.
+ *
+ * The `height` option is a hard backstop, not the flow control: splitTextAtHeight has already sized the
+ * chunk. Without it pdfkit would auto-create a continuation page outside this renderer's page accounting,
+ * which is how the field report grew blank pages with mis-numbered footers.
+ */
+function drawTextBox(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  text: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+) {
+  doc.save();
+  doc.rect(x, y, w, h).lineWidth(0.8).strokeColor(BRAND_INNER_BORDER).stroke();
+  if (text) {
+    doc.font(fonts.regular).fontSize(BODY_FONT_SIZE).fillColor(BRAND_BLACK);
+    doc.text(text, x + 6, y + 6, { width: w - 12, height: h - 12, lineGap: BODY_LINE_GAP });
+  }
+  doc.restore();
+}
+
+/** The Projected / Remaining bars: a rectangle with a chevron point, the count printed inside it. */
+function drawDurationArrow(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  x: number,
+  y: number,
+  width: number,
+  color: string,
+  value: number | null,
+) {
+  const w = Math.max(DURATION_BAR_MIN_WIDTH, width);
+  const h = DURATION_BAR_HEIGHT;
+  doc.save();
+  doc
+    .moveTo(x, y)
+    .lineTo(x + w - DURATION_ARROW_HEAD, y)
+    .lineTo(x + w, y + h / 2)
+    .lineTo(x + w - DURATION_ARROW_HEAD, y + h)
+    .lineTo(x, y + h)
+    .closePath()
+    .fillColor(color)
+    .fill();
+  doc.font(fonts.regular).fontSize(10).fillColor("#FFFFFF");
+  doc.text(value == null ? "—" : String(value), x + 8, y + 5, {
+    width: w - DURATION_ARROW_HEAD - 10,
+    lineBreak: false,
+    height: 12,
+    ellipsis: true,
+  });
+  doc.restore();
+}
+
+/**
+ * The header every page carries: red band with the logo and the title, "Week of" and the date on its right
+ * end, then the black Property Name box. `title` differs between the summary page and the photo sheets,
+ * which is the only thing that changes between them.
+ */
+function drawHeaderBand(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  title: string,
+  data: WeeklyReportPdfData,
+) {
+  doc.save();
+  doc.rect(BAND_LEFT, HEADER_TOP, BAND_WIDTH, HEADER_HEIGHT).fillColor(BRAND_RED).fill();
+
+  // The mark is drawn on its own white plate, as the reference does — the logo's grey/black strokes
+  // disappear into the red otherwise.
+  doc.rect(BAND_LEFT, HEADER_TOP, LOGO_PLATE_WIDTH, HEADER_HEIGHT).fillColor("#FFFFFF").fill();
+  try {
+    doc.image(LOGO_BUFFER, BAND_LEFT + 7, HEADER_TOP + 7, {
+      fit: [LOGO_PLATE_WIDTH - 14, HEADER_HEIGHT - 14],
+      align: "center",
+      valign: "center",
+    });
+  } catch (error) {
+    // A missing/corrupt logo must not cost the client their report — print the wordmark instead.
+    console.error("[weekly-report-pdf] failed to embed the T-Rock logo", error);
+    doc.fillColor(BRAND_RED).font(fonts.bold).fontSize(12).text("T ROCK", BAND_LEFT + 4, HEADER_TOP + 20, {
+      width: LOGO_PLATE_WIDTH - 8,
+      align: "center",
+      lineBreak: false,
+      height: 14,
+      ellipsis: true,
+    });
+  }
+
+  const titleLeft = BAND_LEFT + LOGO_PLATE_WIDTH + 10;
+  const titleWidth = BAND_WIDTH - LOGO_PLATE_WIDTH - 10 - WEEK_OF_WIDTH;
+  doc.font(fonts.bold).fontSize(19).fillColor("#FFFFFF");
+  doc.text(title, titleLeft, HEADER_TOP + 17, {
+    width: titleWidth,
+    align: "center",
+    lineBreak: false,
+    height: 24,
+    ellipsis: true,
+  });
+
+  const weekOfLeft = BAND_LEFT + BAND_WIDTH - WEEK_OF_WIDTH;
+  doc.font(fonts.bold).fontSize(12).fillColor("#FFFFFF");
+  doc.text("Week of", weekOfLeft, HEADER_TOP + 10, { width: WEEK_OF_WIDTH - 10, align: "center", lineBreak: false, height: 15 });
+  doc.font(fonts.regular).fontSize(10).fillColor("#FFFFFF");
+  doc.text(data.weekOfLabel, weekOfLeft, HEADER_TOP + 30, {
+    width: WEEK_OF_WIDTH - 10,
+    align: "center",
+    lineBreak: false,
+    height: 13,
+    ellipsis: true,
+  });
+
+  doc.rect(PROPERTY_BOX_LEFT, HEADER_TOP, PROPERTY_BOX_WIDTH, HEADER_HEIGHT).fillColor(BRAND_BLACK).fill();
+  doc.font(fonts.bold).fontSize(11).fillColor("#FFFFFF");
+  doc.text("Property Name", PROPERTY_BOX_LEFT, HEADER_TOP + 8, {
+    width: PROPERTY_BOX_WIDTH,
+    align: "center",
+    lineBreak: false,
+    height: 14,
+    ellipsis: true,
+  });
+  doc.font(fonts.regular).fontSize(11).fillColor("#FFFFFF");
+  // Single line, ellipsised: a property display name is free text and a wrap here would push the value out
+  // of the black box and onto the white page below it.
+  doc.text(displayOrDash(data.propertyName), PROPERTY_BOX_LEFT + 8, HEADER_TOP + 30, {
+    width: PROPERTY_BOX_WIDTH - 16,
+    lineBreak: false,
+    height: 14,
+    ellipsis: true,
+  });
+  doc.restore();
+}
+
+function drawPageNumber(doc: PDFKit.PDFDocument, fonts: ReportFontSet, page: number, total: number) {
+  doc.save();
+  doc.font(fonts.regular).fontSize(9).fillColor(BRAND_MUTED);
+  doc.text(`${page} / ${total}`, CONTENT_RIGHT - 80, PAGE_NUMBER_Y, {
+    width: 80,
+    align: "right",
+    lineBreak: false,
+    height: 12,
+  });
+  doc.restore();
+}
+
+function drawContactRows(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  contacts: WeeklyReportPdfContact[],
+  x: number,
+  top: number,
+  width: number,
+  pitch: number,
+) {
+  const labelWidth = 40;
+  contacts.forEach((contact, index) => {
+    const y = top + index * pitch;
+    doc.font(fonts.bold).fontSize(8).fillColor(BRAND_BLACK);
+    doc.text(`${contact.label}:`, x, y + 1, { width: labelWidth, lineBreak: false, height: 11, ellipsis: true });
+    doc.font(fonts.regular).fontSize(9.5).fillColor(BRAND_BLACK);
+    // Blank rather than a dash: RM and CM are routinely unfilled on a real project, and printing "—" four
+    // times reads as missing data instead of as roles this client simply does not staff.
+    doc.text(contact.name?.trim() ?? "", x + labelWidth + 4, y, {
+      width: width - labelWidth - 4,
+      lineBreak: false,
+      height: 12,
+      ellipsis: true,
+    });
+  });
+}
+
+// --- Page 1 --------------------------------------------------------------------------------------
+
+function drawSummaryPage(doc: PDFKit.PDFDocument, fonts: ReportFontSet, data: WeeklyReportPdfData) {
+  drawHeaderBand(doc, fonts, "Weekly Progress Summary", data);
+
+  const textLeft = LEFT_PANEL_LEFT + PANEL_PAD;
+  const textWidth = LEFT_PANEL_WIDTH - PANEL_PAD * 2;
+  const issuesBoxWidth = ISSUES_PANEL_WIDTH - PANEL_PAD * 2 + 4;
+
+  const work = splitTextAtHeight(
+    boundWeeklyReportSectionText(data.workCompleted),
+    WORK_BOX_HEIGHT - 12,
+    bodyMeasurer(doc, fonts, textWidth - 12),
+  );
+  const lookAhead = splitTextAtHeight(
+    boundWeeklyReportSectionText(data.nextWeekLookAhead),
+    LOOKAHEAD_BOX_HEIGHT - 12,
+    bodyMeasurer(doc, fonts, textWidth - 12),
+  );
+  // Measured against the ISSUES box's own width, which is less than half the width of the two boxes above
+  // it. A shared measurer sized on the wide column reported a paragraph as fitting, drew it into the narrow
+  // box, and the client silently lost the tail of the concerns section — the exact failure the overflow
+  // pages exist to prevent, reintroduced by measuring the wrong rectangle.
+  const issues = splitTextAtHeight(
+    boundWeeklyReportSectionText(data.issuesConcerns),
+    ISSUES_BOX_HEIGHT - 12,
+    bodyMeasurer(doc, fonts, issuesBoxWidth - 12),
+  );
+
+  drawPanel(doc, LEFT_PANEL_LEFT, BODY_TOP, LEFT_PANEL_WIDTH, BODY_BOTTOM - BODY_TOP);
+  drawUnderlinedHeading(doc, fonts, "Work Completed / In-Progress", textLeft, BODY_TOP + 14, 13, textWidth);
+  drawTextBox(doc, fonts, work.head, textLeft, WORK_BOX_TOP, textWidth, WORK_BOX_HEIGHT);
+  drawUnderlinedHeading(doc, fonts, "Next Week Look Ahead:", textLeft, 272, 13, textWidth);
+  drawTextBox(doc, fonts, lookAhead.head, textLeft, LOOKAHEAD_BOX_TOP, textWidth, LOOKAHEAD_BOX_HEIGHT);
+
+  // --- Right column: client, client team, T-Rock team --------------------------------------------
+  drawPanel(doc, RIGHT_PANEL_LEFT, BODY_TOP, RIGHT_PANEL_WIDTH, BODY_BOTTOM - BODY_TOP);
+  const rightLeft = RIGHT_PANEL_LEFT + PANEL_PAD;
+  const rightWidth = RIGHT_PANEL_WIDTH - PANEL_PAD * 2;
+  drawUnderlinedHeading(doc, fonts, "Client:", rightLeft, BODY_TOP + 14, 12, rightWidth);
+  doc.font(fonts.regular).fontSize(10).fillColor(BRAND_BLACK);
+  doc.text(displayOrDash(data.clientName), rightLeft + 10, BODY_TOP + 36, {
+    width: rightWidth - 10,
+    height: 26,
+    ellipsis: true,
+  });
+
+  drawUnderlinedHeading(doc, fonts, "Client Team:", rightLeft, BODY_TOP + 70, 12, rightWidth);
+  drawContactRows(doc, fonts, data.clientTeam, rightLeft, BODY_TOP + 94, rightWidth, 18);
+
+  drawUnderlinedHeading(doc, fonts, "T-Rock Project Team:", rightLeft, BODY_TOP + 176, 12, rightWidth);
+  drawContactRows(doc, fonts, data.trockTeam, rightLeft, BODY_TOP + 200, rightWidth, 18);
+
+  // The superseded stamp goes IN THE DOCUMENT, not only on the web page it is downloaded from. A PDF is
+  // the half of this report that gets forwarded, printed and filed, and a client reading a detached copy
+  // has nothing else to tell them a corrected version was issued after it. Same sentence as the page's
+  // banner, so the two do not become two different claims about the same fact.
+  if (data.superseded) {
+    doc.save();
+    doc.font(fonts.bold).fontSize(8).fillColor(BRAND_RED);
+    doc.text(WEEKLY_REPORT_SUPERSEDED_NOTICE, rightLeft, SUPERSEDED_NOTICE_TOP, {
+      width: rightWidth,
+      height: BODY_BOTTOM - 24 - SUPERSEDED_NOTICE_TOP,
+      lineGap: 1,
+      ellipsis: true,
+    });
+    doc.restore();
+  }
+
+  if (data.version > 1) {
+    doc.save();
+    doc.font(fonts.bold).fontSize(8.5).fillColor(BRAND_RED);
+    doc.text(`Revision ${data.version}`, rightLeft, BODY_BOTTOM - 22, {
+      width: rightWidth,
+      lineBreak: false,
+      height: 12,
+      ellipsis: true,
+    });
+    doc.restore();
+  }
+
+  // --- Footer row: issues, schedule, duration ----------------------------------------------------
+  drawPanel(doc, CONTENT_LEFT, FOOTER_ROW_TOP, ISSUES_PANEL_WIDTH, FOOTER_ROW_BOTTOM - FOOTER_ROW_TOP);
+  drawUnderlinedHeading(
+    doc,
+    fonts,
+    "Issues/Concerns:",
+    CONTENT_LEFT + PANEL_PAD,
+    FOOTER_ROW_TOP + 12,
+    12,
+    ISSUES_PANEL_WIDTH - PANEL_PAD * 2,
+  );
+  drawTextBox(doc, fonts, issues.head, CONTENT_LEFT + PANEL_PAD - 2, ISSUES_BOX_TOP, issuesBoxWidth, ISSUES_BOX_HEIGHT);
+
+  drawPanel(
+    doc,
+    SCHEDULE_PANEL_LEFT,
+    FOOTER_ROW_TOP,
+    CONTENT_RIGHT - SCHEDULE_PANEL_LEFT,
+    FOOTER_ROW_BOTTOM - FOOTER_ROW_TOP,
+  );
+  const scheduleLeft = SCHEDULE_PANEL_LEFT + PANEL_PAD;
+  drawUnderlinedHeading(doc, fonts, "Project Schedule", scheduleLeft, FOOTER_ROW_TOP + 12, 12, 200);
+  const scheduleRows: Array<[string, string]> = [
+    ["Contract Date", data.schedule.contractDate],
+    ["Project Start Date", data.schedule.projectStartDate],
+    ["Project Completion Date", data.schedule.projectCompletionDate],
+    ["Current Project Completion %", data.schedule.completionPercent],
+    ["Total Project Weather Delays", data.schedule.weatherDelayDays],
+  ];
+  scheduleRows.forEach(([label, value], index) => {
+    const y = FOOTER_ROW_TOP + 38 + index * SCHEDULE_ROW_PITCH;
+    doc.font(fonts.regular).fontSize(9.5).fillColor(BRAND_BLACK);
+    doc.text(label, scheduleLeft, y, { width: 168, lineBreak: false, height: 12, ellipsis: true });
+    doc.font(fonts.bold).fontSize(9.5).fillColor(BRAND_BLACK);
+    doc.text(value, scheduleLeft + 172, y, { width: 92, lineBreak: false, height: 12, ellipsis: true });
+  });
+
+  drawUnderlinedHeading(
+    doc,
+    fonts,
+    "Project Duration (weeks)",
+    DURATION_COLUMN_LEFT,
+    FOOTER_ROW_TOP + 12,
+    12,
+    CONTENT_RIGHT - 12 - DURATION_COLUMN_LEFT,
+  );
+  const projected = data.duration.projectedWeeks;
+  const remaining = data.duration.remainingWeeks;
+  doc.font(fonts.regular).fontSize(10).fillColor(BRAND_BLACK);
+  doc.text("Projected", DURATION_COLUMN_LEFT, FOOTER_ROW_TOP + 44, { width: 62, lineBreak: false, height: 12 });
+  drawDurationArrow(doc, fonts, DURATION_BAR_LEFT, FOOTER_ROW_TOP + 40, DURATION_BAR_MAX_WIDTH, BRAND_BLACK, projected);
+  doc.font(fonts.regular).fontSize(10).fillColor(BRAND_BLACK);
+  doc.text("Remaining", DURATION_COLUMN_LEFT, FOOTER_ROW_TOP + 74, { width: 62, lineBreak: false, height: 12 });
+  // Scaled against the projected duration, so the two bars are readable side by side as a fraction of the
+  // job. With no projected duration to scale against, the remaining bar is drawn at full width rather than
+  // at the minimum — a minimum-width bar would read as "nearly finished" when the truth is "unknown".
+  const remainingWidth =
+    projected && projected > 0 && remaining != null
+      ? (Math.min(remaining, projected) / projected) * DURATION_BAR_MAX_WIDTH
+      : DURATION_BAR_MAX_WIDTH;
+  drawDurationArrow(doc, fonts, DURATION_BAR_LEFT, FOOTER_ROW_TOP + 70, remainingWidth, BRAND_RED, remaining);
+
+  return {
+    workCompleted: work.rest,
+    nextWeekLookAhead: lookAhead.rest,
+    issuesConcerns: issues.rest,
+  };
+}
+
+// --- Continuation page(s) ------------------------------------------------------------------------
+
+const CONTINUATION_TOP = 96;
+const CONTINUATION_BOTTOM = 560;
+/** Heading height plus the gap under its rule, reserved above every continued section's text. */
+const HEADING_BLOCK = 26;
+const SECTION_GAP = 18;
+
+/**
+ * Whatever did not fit page 1's fixed boxes, under its own heading.
+ *
+ * Returns the number of pages drawn so the caller's page accounting stays exact — every addPage() here is
+ * counted by the same loop that numbers the footers.
+ */
+function drawOverflowPages(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  data: WeeklyReportPdfData,
+  overflow: { workCompleted: string; nextWeekLookAhead: string; issuesConcerns: string },
+): number {
+  const sections: Array<[string, string]> = [
+    ["Work Completed / In-Progress (continued)", overflow.workCompleted],
+    ["Next Week Look Ahead (continued)", overflow.nextWeekLookAhead],
+    ["Issues/Concerns (continued)", overflow.issuesConcerns],
+  ];
+  const pending = sections.filter(([, text]) => text.trim().length > 0);
+  if (pending.length === 0) return 0;
+
+  const measure = bodyMeasurer(doc, fonts, CONTENT_WIDTH - 24);
+
+  let pages = 0;
+  let cursor = CONTINUATION_BOTTOM; // > the bottom, so the first section always opens a page
+  const startPage = () => {
+    doc.addPage();
+    pages += 1;
+    drawHeaderBand(doc, fonts, "Weekly Progress Summary", data);
+    cursor = CONTINUATION_TOP;
+  };
+
+  for (const [heading, text] of pending) {
+    // Chunked against the height a section gets on a FRESH page, so no chunk can be too tall to place.
+    for (const chunk of paginateTextByHeight(text, CONTINUATION_BOTTOM - CONTINUATION_TOP - HEADING_BLOCK, measure)) {
+      const needed = HEADING_BLOCK + measure(chunk);
+      // Sections are PACKED down the page rather than each taking one of their own. Three short overflows
+      // would otherwise produce three near-empty sheets, and a client counting "1 / 6" on a weekly update
+      // reasonably concludes something has gone wrong with it.
+      if (cursor + needed > CONTINUATION_BOTTOM) startPage();
+      drawUnderlinedHeading(doc, fonts, heading, CONTENT_LEFT + 12, cursor, 12, CONTENT_WIDTH - 24);
+      doc.font(fonts.regular).fontSize(BODY_FONT_SIZE).fillColor(BRAND_BLACK);
+      // The height cap is a backstop: paginateTextByHeight already sized the chunk, and without it pdfkit
+      // could auto-create a page outside this function's own page count.
+      doc.text(chunk, CONTENT_LEFT + 12, cursor + HEADING_BLOCK, {
+        width: CONTENT_WIDTH - 24,
+        height: CONTINUATION_BOTTOM - cursor - HEADING_BLOCK,
+        lineGap: BODY_LINE_GAP,
+      });
+      cursor += needed + SECTION_GAP;
+    }
+  }
+  return pages;
+}
+
+// --- Photo sheets --------------------------------------------------------------------------------
+
+/** How a caption will be drawn: the band it occupies, and the size it has to be set in to fit. */
+export interface PhotoCaptionLayout {
+  height: number;
+  fontSize: number;
+}
+
+/**
+ * How much of the cell this caption needs, measured in the font it will actually be drawn in.
+ *
+ * Measured, not assumed, because the alternative is the defect this replaces: a fixed band plus
+ * `ellipsis: true` silently prints less than the web page does, and neither the superintendent who wrote
+ * the caption nor the client reading both surfaces can see that it happened. A photo with no caption gives
+ * the whole cell to the photograph.
+ *
+ * STEPPED DOWN through PHOTO_CAPTION_FONT_SIZES rather than clamped. A bounded caption is bounded in
+ * CHARACTERS, and characters do not bound height: 250 characters of eight-wide words need 114pt at 8pt and
+ * a wall of 15-character words 171pt, because every line breaks early. Clamping those to
+ * PHOTO_CAPTION_MAX_HEIGHT and letting `ellipsis` fire is exactly the divergence this helper exists to
+ * remove — the web page has no such box and prints the whole caption. Setting such a caption a point or two
+ * smaller prints all of it and still leaves the photograph half the cell. The clamp remains underneath as a
+ * structural backstop: whatever a caller hands this function, the band cannot push the caption through the
+ * bottom of the cell.
+ *
+ * Exported for test: that a BOUNDED caption always fits inside PHOTO_CAPTION_MAX_HEIGHT is the property
+ * that makes the PDF and the page agree, it depends on the shipped font's real metrics, and it cannot be
+ * read off the rendered bytes — the fonts are embedded as subsets, so the drawn text is glyph indices.
+ */
+export function photoCaptionLayout(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  caption: string | null,
+): PhotoCaptionLayout {
+  if (!caption) return { height: 0, fontSize: PHOTO_CAPTION_FONT_SIZES[0] };
+  doc.save();
+  let chosen: number = PHOTO_CAPTION_FONT_SIZES[0];
+  let needed = Number.POSITIVE_INFINITY;
+  for (const fontSize of PHOTO_CAPTION_FONT_SIZES) {
+    doc.font(fonts.regular).fontSize(fontSize);
+    // The SAME width the text is drawn at, and the same options: a measurement taken against a different
+    // box is a truncation nobody can see. See PHOTO_CAPTION_TEXT_WIDTH.
+    needed =
+      doc.heightOfString(caption, {
+        width: PHOTO_CAPTION_TEXT_WIDTH,
+        lineGap: PHOTO_CAPTION_LINE_GAP,
+        align: "center",
+      }) + 2;
+    chosen = fontSize;
+    if (needed <= PHOTO_CAPTION_MAX_HEIGHT) break;
+  }
+  doc.restore();
+  return { height: Math.min(needed, PHOTO_CAPTION_MAX_HEIGHT), fontSize: chosen };
+}
+
+/**
+ * One photo cell, drawn from bytes that have ALREADY been fetched.
+ *
+ * The load moved out to loadPhotoBuffers so the fetches can overlap; the draw stays serial because pdfkit
+ * has one cursor. `buffer` being null means the photo is unusable in a way no retry repairs and no
+ * document should be refused over — there is no R2 copy at all (an external-only import), or the original
+ * is gone, or it is too large to read — and draws the placeholder. A storage failure that MIGHT clear, and
+ * any decode that cannot produce embeddable bytes, never reach here: loadPhotoBuffers asks for
+ * "storage-and-transcode" strictness and the whole render fails instead.
+ *
+ * Why that strictness on this surface: the artifact is content-addressed and, for a sent report, treated as
+ * frozen — so an R2 timeout or a HEIC decode that fell over under memory pressure would be PUBLISHED as
+ * that report's PDF, served for every later download and attached to the client's email, permanently. The
+ * photos are most of what a client reads a progress report for. Failing loudly means the next download
+ * simply re-renders once the process recovers. The cost, taken knowingly: an original that NOTHING can
+ * decode fails every attempt too, because nothing inside the transcode catch can tell the two apart, so
+ * such a photo has to be swapped out of the report before its PDF can be produced at all.
+ */
+function drawPhotoCell(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  photo: WeeklyReportPdfPhoto,
+  x: number,
+  y: number,
+  buffer: Buffer | null,
+) {
+  doc.save();
+  doc.rect(x, y, PHOTO_CELL_WIDTH, PHOTO_CELL_HEIGHT).lineWidth(0.8).strokeColor(BRAND_BORDER).stroke();
+  doc.restore();
+
+  // Bounded through the SAME helper the web page uses, and measured before the image is placed so the
+  // photograph gets exactly the room the caption leaves.
+  const caption = boundWeeklyReportPhotoCaption(photo.caption);
+  const captionLayout = photoCaptionLayout(doc, fonts, caption);
+  const captionHeight = captionLayout.height;
+  const imageWidth = PHOTO_CAPTION_TEXT_WIDTH;
+  const imageHeight = PHOTO_CELL_HEIGHT - captionHeight - PHOTO_CELL_PAD * 2;
+
+  const opened = buffer ? openImageForLayout(doc, buffer, { id: photo.fileId, displayName: photo.fileId }) : null;
+
+  let drew = false;
+  if (opened) {
+    // Contain, not cover. A progress photo cropped to fill the cell can lose the very thing it was taken
+    // to show, and the client has no way to tell that happened.
+    const scale = Math.min(imageWidth / opened.displayWidth, imageHeight / opened.displayHeight);
+    const drawWidth = opened.displayWidth * scale;
+    const drawHeight = opened.displayHeight * scale;
+    const drawLeft = x + PHOTO_CELL_PAD + (imageWidth - drawWidth) / 2;
+    const drawTop = y + PHOTO_CELL_PAD + (imageHeight - drawHeight) / 2;
+    // save/clip outside the try, restore in `finally`: a throw from doc.image would otherwise leave the
+    // clipping path on the graphics stack and crop everything drawn after it, on every following page.
+    doc.save();
+    doc.rect(x + PHOTO_CELL_PAD, y + PHOTO_CELL_PAD, imageWidth, imageHeight).clip();
+    try {
+      doc.image(opened.image as unknown as Buffer, drawLeft, drawTop, { width: drawWidth, height: drawHeight });
+      drew = true;
+    } catch (error) {
+      console.warn("[weekly-report-pdf] could not embed a photo; drawing the placeholder", {
+        fileId: photo.fileId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      doc.restore();
+    }
+  }
+  if (!drew) {
+    doc.save();
+    doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(9);
+    doc.text("Image unavailable", x + PHOTO_CELL_PAD, y + PHOTO_CELL_PAD + imageHeight / 2 - 6, {
+      width: imageWidth,
+      align: "center",
+      lineBreak: false,
+      height: 12,
+    });
+    doc.restore();
+  }
+
+  if (caption) {
+    doc.save();
+    doc.font(fonts.regular).fontSize(captionLayout.fontSize).fillColor(BRAND_BLACK);
+    doc.text(caption, x + PHOTO_CELL_PAD, y + PHOTO_CELL_HEIGHT - captionHeight - PHOTO_CELL_PAD, {
+      // Width, size and line gap all as photoCaptionLayout measured them — the band was measured FROM this
+      // string in this font, so `ellipsis` is unreachable for anything boundWeeklyReportPhotoCaption
+      // returns. It and the height stay as the structural backstop that keeps a caption inside its own
+      // cell whatever this function is handed.
+      width: PHOTO_CAPTION_TEXT_WIDTH,
+      align: "center",
+      height: captionHeight,
+      lineGap: PHOTO_CAPTION_LINE_GAP,
+      ellipsis: true,
+    });
+    doc.restore();
+  }
+}
+
+function chunkPhotos(photos: WeeklyReportPdfPhoto[]): WeeklyReportPdfPhoto[][] {
+  const pages: WeeklyReportPdfPhoto[][] = [];
+  for (let index = 0; index < photos.length; index += WEEKLY_REPORT_PHOTOS_PER_PAGE) {
+    pages.push(photos.slice(index, index + WEEKLY_REPORT_PHOTOS_PER_PAGE));
+  }
+  return pages;
+}
+
+/**
+ * How many pages a given report renders to, without rendering it.
+ *
+ * Exported because it is the one piece of the page count that is decided by DATA rather than by layout —
+ * the overflow pages are not, so this is a floor, not a promise.
+ */
+export function weeklyReportPhotoPageCount(photoCount: number): number {
+  return Math.ceil(photoCount / WEEKLY_REPORT_PHOTOS_PER_PAGE);
+}
+
+// --- Entry point ---------------------------------------------------------------------------------
+
+/**
+ * How long a whole render may spend waiting on R2 before it is abandoned.
+ *
+ * Not politeness — a hang here is self-amplifying. `pdf-service` coalesces concurrent downloads for a
+ * generation onto ONE promise, so a render that never settles means every later request for that report
+ * on this process joins the same permanent wait, while each stalled read holds its R2 socket open.
+ * A deadline turns "this process slowly stops serving PDFs" into "this download failed, try again".
+ *
+ * SCALED BY THE PHOTOS, because a render is all-or-nothing: the deadline firing on photo 50 throws away the
+ * 49 already fetched and transcoded, nothing is stored, and the next request starts again from zero. A
+ * report that cannot finish inside its budget is not slow, it is PERMANENTLY undownloadable — by the client
+ * link and by the CRM download alike — with only a log line to say so.
+ *
+ * PER MIME TYPE, because the two costs are an order of magnitude apart and a report of sixty HEICs is a
+ * perfectly ordinary iPhone week. Measured on Apple silicon, idle, through this render's exact settings
+ * (maxEdge 2000, q82):
+ *
+ *   • a 7.2 MB JPEG        — 0.37 s, sharp only;
+ *   • a 0.3 MB smooth HEIC — 0.46–0.57 s to decode, +0.12 s sharp;
+ *   • a 5.5 MB detailed HEIC — 2.4–3.7 s to decode, +0.38–0.55 s sharp, i.e. 2.8–4.3 s all in.
+ *
+ * HEIC decode cost tracks DETAIL, and jobsite photography — gravel, textured concrete, foliage — sits at
+ * the top of that range. Worse, PHOTO_PREFETCH_CONCURRENCY buys nothing for it: heic-convert is WASM and
+ * every decode serialises on the one process-wide permit, shared with the field-scorecard and AI-report
+ * renders. Sixty detailed HEICs is therefore ~4 minutes of strictly serial decode on hardware faster than
+ * the API container and with no contention, against the 3 s/photo the previous revision allowed — a ~1:1
+ * fit to the measured worst case, which is not a margin at all.
+ *
+ * 8 s for one of those is roughly twice the measured worst case, which is the margin a slower, shared
+ * container needs. It makes a sixty-HEIC report's budget long (8 minutes); that is the right trade here
+ * because the render is NOT cancelled when the reader gives up — nothing wires the request's abort into it
+ * — so a render that outlives its socket still finishes, still publishes, and the next click streams the
+ * stored artifact in milliseconds. An abandoned render, by contrast, stores nothing at all.
+ */
+export const WEEKLY_REPORT_RENDER_BASE_TIMEOUT_MS = 20_000;
+/** A JPEG/PNG original: one R2 GET, overlapped three ways, plus a sharp transcode. */
+export const WEEKLY_REPORT_RENDER_PER_PHOTO_MS = 3_000;
+/** A HEIC/HEIF original: the same, plus a WASM decode that the whole process takes in turn. */
+export const WEEKLY_REPORT_RENDER_PER_HEIC_PHOTO_MS = 8_000;
+/**
+ * Hard ceiling — the budget a report of the largest size the API accepts, entirely of the dearest kind of
+ * photo, is entitled to.
+ *
+ * DERIVED rather than picked, because a picked number is dead code: MAX_REPORT_PHOTOS is 60, so any ceiling
+ * above `base + 60 × per-photo` can never bind, and the previous flat 240 s could not (it first bit at 74
+ * photos). What it guards now is a caller that hands over more photos than the API would ever have
+ * accepted — a legacy row, a direct call — which gets no more time than a maximal report does.
+ */
+export const WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS =
+  WEEKLY_REPORT_RENDER_BASE_TIMEOUT_MS + WEEKLY_REPORT_MAX_PHOTOS * WEEKLY_REPORT_RENDER_PER_HEIC_PHOTO_MS;
+
+/**
+ * The budget for one render, from the photos it will actually fetch.
+ *
+ * Takes the PHOTOS, not a count: which of them need the serialised WASM decode is the difference between a
+ * comfortable budget and one a report cannot finish inside.
+ */
+export function weeklyReportRenderTimeoutMs(photos: ReadonlyArray<{ mimeType: string | null }>): number {
+  let budget = WEEKLY_REPORT_RENDER_BASE_TIMEOUT_MS;
+  for (const photo of photos) {
+    // The SAME predicate the decoder gates its permit on, imported rather than restated: a mime type this
+    // said was cheap and heic-convert then queued would be charged 3 s for 4 s of work, sixty times over.
+    budget += isHeicOrHeif(photo.mimeType) ? WEEKLY_REPORT_RENDER_PER_HEIC_PHOTO_MS : WEEKLY_REPORT_RENDER_PER_PHOTO_MS;
+  }
+  return Math.min(budget, WEEKLY_REPORT_RENDER_MAX_TIMEOUT_MS);
+}
+
+/**
+ * How many photo originals may be in flight at once.
+ *
+ * The loop below draws serially — pdfkit is a single cursor — but it used to FETCH serially too, so a
+ * 60-photo report paid 60 round trips to R2 end to end with nothing overlapping. Prefetching turns that
+ * into 60/CONCURRENCY, and lets sharp use the libvips thread pool it already has: measured on a 12MP
+ * JPEG, 370 ms/photo serial against ~125 ms/photo effective at this concurrency.
+ *
+ * THREE, not more, because each in-flight photo can hold an original up to MAX_RENDER_SOURCE_BYTES
+ * (40 MB) — and a HEIC one holds it while queuing on the process-wide decode permit, which is exactly the
+ * pile-up the public photo route takes the permit early to avoid. Three bounds it at 120 MB worst case
+ * while removing most of the serial latency.
+ */
+const PHOTO_PREFETCH_CONCURRENCY = 3;
+
+/**
+ * Load every photo's bytes with bounded concurrency, preserving order.
+ *
+ * A rejection propagates: `loadPhotoBuffer` in strict mode throws for a transient storage or transcode
+ * failure, and the render must fail rather than freeze a degraded artifact. Results are held as buffers
+ * only until the draw loop consumes them, which is the same peak pdfkit reaches anyway — it retains every
+ * embedded image for the life of the document.
+ *
+ * AND THE OTHER WORKERS ARE STOPPED WHEN ONE FAILS. `Promise.all` rejects on the first failure but does not
+ * cancel anything, and the render has no failure path that fires the deadline — so on a 60-photo report
+ * whose first photo is an undecodable HEIC the route answered 503 in milliseconds while two workers carried
+ * on pulling indices off the shared cursor and fetching the other 59 originals, up to 40 MB each, for a
+ * render that had already failed. `/wr/:token/pdf` is anonymous and allows 300 requests a minute per IP,
+ * and the coalescer entry is cleared on rejection while the backoff deliberately does not cover this class:
+ * one reader pressing reload could keep hundreds of overlapping fans of R2 GETs in flight for a report that
+ * can never succeed. The local controller below stops them at their next abort check, without touching the
+ * caller's signal — `pdf-service` asks the DEADLINE whether it fired, and a strict failure must not be
+ * reported as a timeout.
+ */
+async function loadPhotoBuffers(
+  photos: WeeklyReportPdfPhoto[],
+  signal: AbortSignal | undefined,
+): Promise<Array<Buffer | null>> {
+  const buffers = new Array<Buffer | null>(photos.length).fill(null);
+  const fanOut = new AbortController();
+  const photoSignal = signal ? AbortSignal.any([signal, fanOut.signal]) : fanOut.signal;
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= photos.length) return;
+      // Checked per photograph, the way the AI report checks its own budget. The deadline is otherwise only
+      // observed by the layers that accept a signal — an R2 read, a transcode race — so a report whose
+      // photos all resolve from something faster could run right past it and hand back a document nobody is
+      // waiting for any more. It is also what stops the siblings of a worker that has already failed.
+      photoSignal.throwIfAborted();
+      const photo = photos[index]!;
+      buffers[index] = await loadPhotoBuffer(
+        {
+          id: photo.fileId,
+          displayName: photo.fileId,
+          description: photo.caption,
+          takenAt: null,
+          createdAt: EPOCH_ISO,
+          uploaderName: "",
+          projectName: "",
+          tags: [],
+          r2Key: photo.r2Key,
+          externalUrl: photo.externalUrl,
+          externalThumbnailUrl: photo.externalThumbnailUrl,
+          mimeType: photo.mimeType,
+        },
+        photoSignal,
+        // See drawPhotoCell for why this artifact may not be allowed to degrade, and PhotoLoadStrictness
+        // for what taking the transcode half costs — this is the ONE caller that takes it.
+        "storage-and-transcode",
+      );
+    }
+  };
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(PHOTO_PREFETCH_CONCURRENCY, photos.length) }, () => worker()),
+    );
+  } finally {
+    // On the way out by EITHER door. On the failure path this is the cancellation; on the success path
+    // every worker has already returned, so it only releases the listener AbortSignal.any holds on the
+    // caller's signal.
+    fanOut.abort();
+  }
+  // And once at the end, for the last photo — which has no next iteration to be checked at the top of.
+  // Without it a render that spent its whole budget on a single slow original still went on to assemble and
+  // publish a document, and the caller could not tell the deadline had been missed at all. Asked of the
+  // CALLER's signal: `fanOut` is aborted by the `finally` above on every path, including the happy one.
+  signal?.throwIfAborted();
+  return buffers;
+}
+
+export async function renderWeeklyReportPdf(
+  data: WeeklyReportPdfData,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<Buffer> {
+  // A caller-supplied signal still applies; the deadline is an additional upper bound, not a replacement.
+  const deadline = AbortSignal.timeout(options.timeoutMs ?? weeklyReportRenderTimeoutMs(data.photos));
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+
+  const doc = new PDFDocument({
+    autoFirstPage: true,
+    bufferPages: true,
+    size: [PAGE_WIDTH, PAGE_HEIGHT],
+    // Zero margins: every coordinate here is absolute, and a non-zero bottom margin makes pdfkit
+    // auto-page-break on a draw near the page foot — the blank-page bug pdf-layout.ts documents.
+    margin: 0,
+    // See WeeklyReportPdfData.creationDate: this is what makes the render byte-reproducible, and therefore
+    // what makes the content-addressed key address content rather than the clock.
+    info: { CreationDate: data.creationDate },
+  });
+
+  const chunks: Buffer[] = [];
+  doc.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+  const fonts = registerReportFonts(doc);
+
+  doc.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT).fill("#FFFFFF");
+  const overflow = drawSummaryPage(doc, fonts, data);
+  drawOverflowPages(doc, fonts, data, overflow);
+
+  // Every original fetched and transcoded FIRST, with bounded concurrency, then drawn. Fetching inside the
+  // draw loop made the two serial together: 60 photos meant 60 round trips end to end, and the render
+  // deadline firing on the last of them threw away the other 59.
+  const photoBuffers = await loadPhotoBuffers(data.photos, signal);
+  let photoIndex = 0;
+  for (const pagePhotos of chunkPhotos(data.photos)) {
+    doc.addPage();
+    drawHeaderBand(doc, fonts, "Weekly Progress Photos", data);
+    for (const [cellIndex, photo] of pagePhotos.entries()) {
+      const column = cellIndex % PHOTO_COLUMNS;
+      const row = Math.floor(cellIndex / PHOTO_COLUMNS);
+      drawPhotoCell(
+        doc,
+        fonts,
+        photo,
+        CONTENT_LEFT + column * (PHOTO_CELL_WIDTH + PHOTO_COLUMN_GAP),
+        PHOTO_GRID_TOP + row * (PHOTO_CELL_HEIGHT + PHOTO_ROW_GAP),
+        photoBuffers[photoIndex] ?? null,
+      );
+      photoIndex += 1;
+    }
+  }
+
+  // Numbered in a second pass so "1 / 4" is right on page 1 — the total is not known until every photo
+  // sheet and overflow page has been drawn.
+  const range = doc.bufferedPageRange();
+  for (let pageIndex = 0; pageIndex < range.count; pageIndex += 1) {
+    doc.switchToPage(pageIndex);
+    drawPageNumber(doc, fonts, pageIndex + 1, range.count);
+  }
+
+  doc.end();
+  return await new Promise<Buffer>((resolve, reject) => {
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+  });
+}

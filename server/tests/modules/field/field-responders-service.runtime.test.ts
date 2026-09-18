@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { dealTeamMembers } from "@trock-crm/shared/schema";
+import { formatDealDisplayName } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import {
   listFieldResponders,
@@ -30,6 +31,10 @@ import { resolveCorrectiveActionRecipients } from "../../../src/modules/field/co
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const DEAL_TWO = "22222222-2222-2222-2222-222222222222";
 const INACTIVE_DEAL = "33333333-3333-3333-3333-333333333333";
+// A deal a HUMAN named with change-order-shaped text, stored is_change_order = FALSE.
+const HUMAN_NAMED_DEAL = "44444444-4444-4444-4444-444444444444";
+// A GENERATED change-order child: same name shape, is_change_order = TRUE.
+const GENERATED_CO_DEAL = "55555555-5555-5555-5555-555555555555";
 
 let pg: PGlite;
 let tdb: any;
@@ -52,12 +57,15 @@ const RESPONDERS_DDL = `
 `;
 
 // A minimal deals table — assignmentCount / listAssignments only need id, name, is_active (they JOIN deals and
-// filter d.is_active = TRUE). Standing up the full deals Drizzle def would drag in the whole enum graph.
+// filter d.is_active = TRUE) plus is_change_order, which listAssignments projects for the display relabel.
+// Standing up the full deals Drizzle def would drag in the whole enum graph. is_change_order is spelled exactly
+// as migration 0156 creates it (NOT NULL DEFAULT false) so the projection is exercised against the prod type.
 const DEALS_DDL = `
   CREATE TABLE IF NOT EXISTS public.deals (
     id uuid PRIMARY KEY,
     name text NOT NULL,
-    is_active boolean NOT NULL DEFAULT true
+    is_active boolean NOT NULL DEFAULT true,
+    is_change_order boolean NOT NULL DEFAULT false
   );
 `;
 
@@ -300,6 +308,48 @@ describe("assignmentCount + listFieldResponderAssignments", () => {
     await expect(
       listFieldResponderAssignments(tdb, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
     ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  // `deals.is_change_order` is the AUTHORITY for the change-order relabel the assignments sheet renders,
+  // and it has to survive SQL projection -> mapper -> shared type -> the call site. Break any link and the
+  // field arrives `undefined`, formatDealDisplayName falls back to parsing the NAME, and a deal a human
+  // named "Lobby — Change Order 1" is relabelled "Change Order 1 — Lobby" — the exact bug this closes.
+  //
+  // The is_change_order = FALSE row is the DISCRIMINATING case: with the flag missing, the true row still
+  // renders correctly by coincidence, so a test that only asserts `true` proves nothing about the wiring.
+  it("carries is_change_order, so a human-named 'Lobby — Change Order 1' is NOT relabelled", async () => {
+    const responder = await createFieldResponder(tdb, {
+      name: "CO Super",
+      email: "co-super@example.com",
+      role: "superintendent",
+    });
+
+    await tdb.execute(sql`
+      INSERT INTO deals (id, name, is_active, is_change_order) VALUES
+        (${HUMAN_NAMED_DEAL}, 'Lobby — Change Order 1', TRUE, FALSE),
+        (${GENERATED_CO_DEAL}, 'Tides Park Lane — Change Order 1', TRUE, TRUE)
+    `);
+    for (const dealId of [HUMAN_NAMED_DEAL, GENERATED_CO_DEAL]) {
+      await tdb.execute(sql`
+        INSERT INTO deal_team_members (deal_id, role, member_name, member_email, responder_id, is_active)
+        VALUES (${dealId}, 'superintendent', 'CO Super', 'co-super@example.com', ${responder.id}, TRUE)
+      `);
+    }
+
+    const { deals } = await listFieldResponderAssignments(tdb, responder.id);
+    const byDeal = Object.fromEntries(deals.map((d) => [d.dealId, d]));
+
+    // What the sheet actually renders (field-team-page.tsx AssignmentsSheet) from this payload.
+    expect(
+      formatDealDisplayName(byDeal[HUMAN_NAMED_DEAL]!.dealName, byDeal[HUMAN_NAMED_DEAL]!.dealIsChangeOrder),
+    ).toBe("Lobby — Change Order 1");
+    expect(
+      formatDealDisplayName(byDeal[GENERATED_CO_DEAL]!.dealName, byDeal[GENERATED_CO_DEAL]!.dealIsChangeOrder),
+    ).toBe("Change Order 1 — Tides Park Lane");
+
+    // And the flag itself reached the payload with its stored value — not `undefined`, not coerced to false.
+    expect(byDeal[HUMAN_NAMED_DEAL]?.dealIsChangeOrder).toBe(false);
+    expect(byDeal[GENERATED_CO_DEAL]?.dealIsChangeOrder).toBe(true);
   });
 });
 

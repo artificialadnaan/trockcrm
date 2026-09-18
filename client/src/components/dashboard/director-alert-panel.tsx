@@ -1,3 +1,5 @@
+import { formatDealDisplayName } from "@/lib/deal-utils";
+
 export function DirectorAlertPanel({
   staleDeals,
   staleLeads,
@@ -5,6 +7,7 @@ export function DirectorAlertPanel({
   staleDeals: Array<{
     dealId: string;
     dealName: string;
+    dealIsChangeOrder?: boolean | null;
     repName: string;
     daysInStage: number;
     stageName: string;
@@ -20,7 +23,9 @@ export function DirectorAlertPanel({
   const items = [
     ...staleDeals.slice(0, 2).map((row) => ({
       key: row.dealId,
-      title: row.dealName,
+      // A change-order child is STORED "<Parent> — Change Order N"; relabel for DISPLAY only. Safe to do
+      // in the mapping because `title` is consumed nowhere but the card heading rendered below.
+      title: formatDealDisplayName(row.dealName, row.dealIsChangeOrder),
       detail: `${row.repName} • ${row.daysInStage}d in ${row.stageName}`,
     })),
     ...staleLeads.slice(0, 1).map((row) => ({

@@ -92,13 +92,14 @@ beforeAll(async () => {
       bid_board_profit_margin_pct numeric,
       bid_board_total_sales numeric,
       bid_board_created_at timestamptz,
-      bid_board_due_date date,
+      bid_board_due_date date, bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text,
       bid_board_customer_name text,
       bid_board_customer_contact_raw text,
       bid_board_project_number text,
       estimator_user_id uuid,
       sales_source_user_id uuid,
       bid_board_last_updated_at timestamptz,
+      bid_board_detached_at timestamptz,
       updated_at timestamptz DEFAULT now()
     );
   `);

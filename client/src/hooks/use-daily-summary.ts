@@ -7,8 +7,8 @@ export interface RepBreakdown {
   activities: Record<string, number>;
 }
 export interface LeaderRow { rank: number; name: string; actions: number; activeMinutes: number | null; breakdown: RepBreakdown }
-export interface WonDeal { dealName: string; repName: string; value: number }
-export interface AdvancedMove { dealName: string; repName: string; fromStage: string | null; toStage: string | null }
+export interface WonDeal { dealName: string; dealIsChangeOrder?: boolean | null; repName: string; value: number }
+export interface AdvancedMove { dealName: string; dealIsChangeOrder?: boolean | null; repName: string; fromStage: string | null; toStage: string | null }
 export interface HourCount { hour: number; reps: number }
 export interface DailySummaryPayload {
   date: string;

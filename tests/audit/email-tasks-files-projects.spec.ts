@@ -84,6 +84,7 @@ async function dismissTaskById(taskId: string) {
   try {
     await fetchJsonWithRetry<{ task: AuditTask }>(apiRequest, `${apiBaseURL}/api/tasks/${taskId}/dismiss`, {
       method: "POST",
+      data: { resolutionNote: "The audit fixture is no longer needed." },
     });
   } finally {
     await apiRequest.dispose();

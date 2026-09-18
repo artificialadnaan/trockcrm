@@ -26,6 +26,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { generateDownloadUrl } from "../../lib/r2-client.js";
 import {
   needsScorecardPdfRegeneration,
+  scorecardGenerationColumn,
   type ScorecardPdfArtifactState,
 } from "../field/scorecard-pdf-artifact.js";
 import {
@@ -327,8 +328,11 @@ export async function getDealScorecardPdfArtifactState(
     .select({
       pdfR2Key: fieldScorecards.pdfR2Key,
       pdfRenderVersion: fieldScorecards.pdfRenderVersion,
-      pdfContentGeneration: fieldScorecards.pdfContentGeneration,
-      currentGeneration: fieldScorecards.updatedAt,
+      // BOTH generations as canonical microsecond text — the deal-tab download must classify an artifact
+      // exactly as the field surface and the email workers do, and a Drizzle timestamp on either side
+      // rounds the comparison back to milliseconds. See scorecardGenerationColumn.
+      pdfContentGeneration: scorecardGenerationColumn(fieldScorecards.pdfContentGeneration),
+      currentGeneration: scorecardGenerationColumn(fieldScorecards.updatedAt),
       linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
     })
     .from(fieldScorecards)

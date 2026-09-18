@@ -22,6 +22,8 @@ export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { syncHubWebhookOrphans } from "./public/synchub-webhook-orphans.js";
 export { portfolioProjectStageEventReceipts } from "./public/portfolio-project-stage-event-receipts.js";
 export { publicPhotoTokens } from "./public/public-photo-tokens.js";
+export { weeklyReportTokens } from "./public/weekly-report-tokens.js";
+export { weeklyReportSendDeliveries } from "./public/weekly-report-send-deliveries.js";
 export { hubspotOwnerMappings } from "./public/hubspot-owner-mappings.js";
 export { hubspotActivityBackfillLedger } from "./public/hubspot-activity-backfill-ledger.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
@@ -29,6 +31,7 @@ export { userExternalIdentities, externalUserSourceEnum } from "./public/user-ex
 export { userLocalAuth } from "./public/user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local-auth-events.js";
 export { fieldUserPasswordResets } from "./public/field-user-password-resets.js";
+export { userPasswordResets } from "./public/user-password-resets.js";
 export { userCommissionSettings } from "./public/user-commission-settings.js";
 export {
   notificationRecipientGroups,
@@ -77,6 +80,10 @@ export { dealSignedCommissions } from "./tenant/deal-signed-commissions.js";
 export { bidBoardSyncRuns } from "./tenant/bid-board-sync-runs.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
 export { rfpVotes } from "./tenant/rfp-votes.js";
+export {
+  marketingExpenseRequests,
+  marketingExpenseRequestApprovals,
+} from "./tenant/marketing-expense-requests.js";
 export {
   estimateMarkets,
   estimateMarketZipMappings,
@@ -147,6 +154,8 @@ export {
 } from "./tenant/estimate-pricing-recommendation-options.js";
 export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/tasks.js";
 export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-resolution-state.js";
+export { taskComments, TASK_COMMENT_KINDS, type TaskCommentKind } from "./tenant/task-comments.js";
+export { taskAssignmentAcknowledgements } from "./tenant/task-assignment-acknowledgements.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
 export { auditLog, auditActionEnum } from "./tenant/audit-log.js";
 export { dealTeamMembers, dealTeamRoleEnum } from "./tenant/deal-team-members.js";
@@ -168,6 +177,16 @@ export {
   fieldScorecardPhotos,
   fieldScorecardEditUploads,
 } from "./tenant/field-scorecards.js";
+export { glassesWalkthroughs } from "./tenant/glasses-walkthroughs.js";
+export {
+  weeklyReportProjects,
+  weeklyReports,
+  weeklyReportPhotos,
+  weeklyReportDismissals,
+  weeklyReportPauses,
+  weeklyReportRemindersSent,
+  weeklyReportSettings,
+} from "./tenant/weekly-reports.js";
 export { scorecardCorrectiveActions } from "./tenant/scorecard-corrective-actions.js";
 export { scorecardCorrectiveActionTokens } from "./tenant/scorecard-corrective-action-tokens.js";
 export { scorecardCorrectiveActionEvents } from "./tenant/scorecard-corrective-action-events.js";

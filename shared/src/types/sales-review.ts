@@ -9,6 +9,11 @@ export interface SalesReviewForecastRow {
   entityType: "lead" | "deal";
   id: string;
   name: string;
+  /**
+   * `deals.is_change_order`, on DEAL rows only (a lead can never be a change-order child). Absent means
+   * not stated — never coerce it to false, which would assert "not a change order" on the client.
+   */
+  isChangeOrder?: boolean | null;
   companyId: string | null;
   companyName: string | null;
   propertyId: string | null;
@@ -57,6 +62,11 @@ export interface SalesHygieneIssueRow {
   entityType: "lead" | "deal";
   id: string;
   name: string;
+  /**
+   * `deals.is_change_order`, on DEAL rows only (a lead can never be a change-order child). Absent means
+   * not stated — never coerce it to false, which would assert "not a change order" on the client.
+   */
+  isChangeOrder?: boolean | null;
   assignedRepId: string | null;
   assignedRepName: string | null;
   issueTypes: string[];

@@ -77,18 +77,24 @@ export function rejectLeadDueDiligenceApproval(id: string, reason: string) {
   });
 }
 
+export interface NotificationRecipientGroupResponse {
+  group: { id: string; key: string; name: string; description: string | null };
+  /** Who would be mailed today — the assignments, or the admin/director fallback when they are empty. */
+  recipients: NotificationRecipient[];
+  /**
+   * The rows genuinely assigned, which is what the admin page pre-ticks. Separate from `recipients` so a
+   * Save cannot silently write the fallback in as a static list and stop it ever firing again.
+   */
+  assignedUserIds: string[];
+  fallbackApplied: boolean;
+}
+
 export async function getNotificationRecipientGroup(key: string) {
-  return api<{
-    group: { id: string; key: string; name: string; description: string | null };
-    recipients: NotificationRecipient[];
-  }>(`/admin/notification-recipient-groups/${key}`);
+  return api<NotificationRecipientGroupResponse>(`/admin/notification-recipient-groups/${key}`);
 }
 
 export async function updateNotificationRecipientGroup(key: string, userIds: string[]) {
-  return api<{
-    group: { id: string; key: string; name: string; description: string | null };
-    recipients: NotificationRecipient[];
-  }>(`/admin/notification-recipient-groups/${key}/assignments`, {
+  return api<NotificationRecipientGroupResponse>(`/admin/notification-recipient-groups/${key}/assignments`, {
     method: "PUT",
     json: { userIds },
   });

@@ -49,7 +49,7 @@ import { useContacts } from "@/hooks/use-contacts";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
-import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
 import { getFileMediaKind, type FileMediaKind } from "@/lib/file-media";
 import {
   FILE_CATEGORIES,
@@ -246,7 +246,9 @@ function linkedLabel(file: FileRecord, dealMap: Map<string, Deal>) {
     const displayNumber = deal ? formatDealDisplayNumber(deal).label : "Deal";
     return {
       type: "deal" as const,
-      label: deal ? `${displayNumber} · ${deal.name}` : "Linked deal",
+      // A change-order child deal is STORED as "<Parent> — Change Order N" and this label is rendered
+      // truncated, so the suffix is what disappears. Display-only -- the stored name never changes.
+      label: deal ? `${displayNumber} · ${formatDealDisplayName(deal.name, deal.isChangeOrder)}` : "Linked deal",
       href: `/deals/${file.dealId}`,
     };
   }
@@ -788,7 +790,7 @@ export function FilesPage() {
                     <SelectItem value="none">No deal</SelectItem>
                     {deals.map((deal) => (
                       <SelectItem key={deal.id} value={deal.id}>
-                        {formatDealDisplayNumber(deal).label} · {deal.name}
+                        {formatDealDisplayNumber(deal).label} · {formatDealDisplayName(deal.name, deal.isChangeOrder)}
                       </SelectItem>
                     ))}
                   </SelectContent>

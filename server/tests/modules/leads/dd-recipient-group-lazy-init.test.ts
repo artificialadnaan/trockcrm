@@ -12,13 +12,20 @@ function buildMockTenantDb(initialState: MockState) {
   let selectedTable: unknown = null;
 
   function selectChain() {
+    let joined = false;
     const chain: Record<string, unknown> = {
       from: vi.fn((table: unknown) => {
         selectedTable = table;
         return chain;
       }),
-      innerJoin: vi.fn(() => chain),
+      innerJoin: vi.fn(() => {
+        joined = true;
+        return chain;
+      }),
       where: vi.fn(() => {
+        // A `where` that ends the chain resolves to ROWS. Returning the chain itself for the recipient
+        // join used to "work" only because `undefined > 0` is false — the caller now reads the rows.
+        if (joined) return Promise.resolve([]);
         if (selectedTable === notificationRecipientGroups) return chain;
         return Promise.resolve([]);
       }),

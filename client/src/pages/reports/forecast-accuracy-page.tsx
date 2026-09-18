@@ -78,7 +78,7 @@ export function ForecastAccuracyPage() {
                   <tbody className="divide-y divide-slate-100">
                     {data.pipelineAtRisk.map((deal) => (
                       <tr key={deal.dealId}>
-                        <td className="py-3"><DealLink dealId={deal.dealId}>{deal.dealName}</DealLink></td>
+                        <td className="py-3"><DealLink dealId={deal.dealId} dealName={deal.dealName} dealIsChangeOrder={deal.dealIsChangeOrder} /></td>
                         <td>{deal.ownerName}</td>
                         <td>{deal.stageName}</td>
                         <td>{formatCurrency(deal.value)}</td>

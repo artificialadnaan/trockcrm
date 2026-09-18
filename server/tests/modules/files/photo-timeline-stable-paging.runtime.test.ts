@@ -78,4 +78,41 @@ describe("getDealPhotoTimeline paging is stable across pages", () => {
     const second = await getDealPhotoTimeline(tdb, DEAL, 3, 7);
     expect(second.photos.map((p) => p.id)).toEqual(first.photos.map((p) => p.id));
   });
+
+  // `withTotal: false` exists so a client walking every page pays for the count once instead of N times.
+  // The rows it returns must be byte-identical to a counted request — only the total is withheld.
+  describe("withTotal", () => {
+    it("counts by default", async () => {
+      const result = await getDealPhotoTimeline(tdb, DEAL, 2, 7);
+      expect(result.pagination.total).toBe(TOTAL);
+      expect(result.pagination.totalPages).toBe(Math.ceil(TOTAL / 7));
+    });
+
+    it("withholds total/totalPages when the caller opts out, without changing the page", async () => {
+      const counted = await getDealPhotoTimeline(tdb, DEAL, 2, 7, {}, { withTotal: true });
+      const uncounted = await getDealPhotoTimeline(tdb, DEAL, 2, 7, {}, { withTotal: false });
+
+      expect(uncounted.pagination.total).toBeNull();
+      expect(uncounted.pagination.totalPages).toBeNull();
+      // page/limit still describe the slice, and the slice itself is unchanged.
+      expect(uncounted.pagination.page).toBe(2);
+      expect(uncounted.pagination.limit).toBe(7);
+      expect(uncounted.photos.map((p) => p.id)).toEqual(counted.photos.map((p) => p.id));
+      expect(uncounted.photos).toHaveLength(7);
+    });
+
+    it("still walks the whole gallery when every page after the first opts out", async () => {
+      // The shape the field clients use: count once on page 1, then page through on that totalPages.
+      const perPage = 7;
+      const first = await getDealPhotoTimeline(tdb, DEAL, 1, perPage, {}, { withTotal: true });
+      const totalPages = first.pagination.totalPages!;
+      const seen = [...first.photos.map((p) => p.id)];
+      for (let page = 2; page <= totalPages; page += 1) {
+        const next = await getDealPhotoTimeline(tdb, DEAL, page, perPage, {}, { withTotal: false });
+        seen.push(...next.photos.map((p) => p.id));
+      }
+      expect(seen).toHaveLength(TOTAL);
+      expect(new Set(seen).size).toBe(TOTAL);
+    });
+  });
 });

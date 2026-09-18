@@ -35,6 +35,7 @@ import {
   dispatchPendingDueDiligenceEmail,
   getLeadDueDiligenceApprovalForLead,
 } from "./due-diligence-service.js";
+import { validateDealScopeTitle } from "@trock-crm/shared/types";
 import { getAllStages } from "../pipeline/service.js";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import {
@@ -461,12 +462,17 @@ router.post("/", async (req, res, next) => {
       propertyId,
       stageId: undefined,
       assignedRepId: repId,
-      actorUserId: req.user!.id,
       salesRepId: leadSalesRepId,
-      officeId: req.user!.activeOfficeId,
       name: trimmedName,
       bidDueDate,
       ...rest,
+      // AFTER the spread, deliberately. These two are derived from the SESSION, and `rest` is whatever the
+      // caller posted minus the fields destructured above — so while they sat before it, a request could
+      // send `actorUserId` and have createLead persist somebody else as the lead's creator. Harmless-looking
+      // until this release, which starts counting `leads.created_by_user_id` on a per-person scoreboard:
+      // it would let anyone credit their own canvassing to a colleague, or bury it on someone else.
+      actorUserId: req.user!.id,
+      officeId: req.user!.activeOfficeId,
       officeCode: officeCodeResolution.officeCode,
       auditContext: buildRouteAuditContext(req),
     });
@@ -663,6 +669,18 @@ router.post("/:id/convert", async (req, res, next) => {
 
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
       delete rest.assignedRepId;
+    }
+
+    // The convert route builds a deal but does NOT run the deals module's validateDealPayload, so a
+    // field threaded through here would otherwise reach the column uncapped — an over-length title would
+    // surface as a Postgres 22001/500 instead of a 400. Validate + normalize the one field this route
+    // forwards, using the SAME shared rule the deal routes use.
+    if (Object.prototype.hasOwnProperty.call(rest, "scopeTitle")) {
+      const scopeTitle = validateDealScopeTitle(rest.scopeTitle);
+      if (!scopeTitle.ok) {
+        throw new AppError(400, scopeTitle.error, "SCOPE_TITLE_INVALID");
+      }
+      rest.scopeTitle = scopeTitle.value;
     }
 
     const result = await convertLead(req.tenantDb!, {

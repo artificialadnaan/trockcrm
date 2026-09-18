@@ -309,6 +309,77 @@ describe("CompanyDetailPage", () => {
     expect(mounted.container.textContent).not.toContain("Company Copilot");
   });
 
+  // A company's deals repeat the property name, so the scope title is what separates "which job is this"
+  // (Codex #1051 sweep — the deal-list surfaces, not just the ones that already showed `description`).
+  it("renders each company deal's scope title", () => {
+    mocks.useCompanyDealsMock.mockReturnValue({
+      deals: [
+        { id: "deal-1", dealNumber: "TR-1", name: "Dallas ISD Roof Replacement", stageId: "stage-1", isActive: true, companyId: "company-1", propertyId: null, sourceLeadId: null, scopeTitle: "Balcony Repair", propertyAddress: null, propertyCity: null, propertyState: null, propertyZip: null, stageEnteredAt: "2026-05-01T10:00:00.000Z", lastActivityAt: null, createdAt: "2026-05-01T10:00:00.000Z", updatedAt: "2026-05-01T10:00:00.000Z" },
+      ],
+      loading: false,
+      error: null,
+    });
+    mounted = mountPage();
+
+    act(() => {
+      mounted!.container
+        .querySelector('button[aria-label="Deals"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.querySelector('[data-testid="company-deal-scope-title"]')).not.toBeNull();
+    expect(mounted.container.textContent).toContain("Balcony Repair");
+  });
+
+  it("omits the scope-title line for a company deal that has none", () => {
+    mounted = mountPage(); // the default fixture carries no scopeTitle
+
+    act(() => {
+      mounted!.container
+        .querySelector('button[aria-label="Deals"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.querySelector('[data-testid="company-deal-scope-title"]')).toBeNull();
+    expect(mounted.container.textContent).toContain("Dallas ISD Roof Replacement"); // row still renders
+  });
+
+  // This page has TWO deal lists off the SAME useCompanyDeals hook — the Deals tab above and the
+  // Portfolio tab's "Related Deals". Showing the title on one and not the other is exactly the drift
+  // this sweep exists to close (Codex #1051).
+  it("renders the scope title on the Portfolio tab's Related Deals list too", () => {
+    mocks.useCompanyDealsMock.mockReturnValue({
+      deals: [
+        { id: "deal-1", dealNumber: "TR-1", name: "Dallas ISD Roof Replacement", stageId: "stage-1", isActive: true, companyId: "company-1", propertyId: null, sourceLeadId: null, scopeTitle: "Plumbing Renovations", propertyAddress: null, propertyCity: null, propertyState: null, propertyZip: null, stageEnteredAt: "2026-05-01T10:00:00.000Z", lastActivityAt: null, createdAt: "2026-05-01T10:00:00.000Z", updatedAt: "2026-05-01T10:00:00.000Z" },
+      ],
+      loading: false,
+      error: null,
+    });
+    mounted = mountPage();
+
+    act(() => {
+      mounted!.container
+        .querySelector('button[aria-label="Portfolio"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.querySelector('[data-testid="company-portfolio-deal-scope-title"]')).not.toBeNull();
+    expect(mounted.container.textContent).toContain("Plumbing Renovations");
+  });
+
+  it("omits it on the Portfolio tab for a deal with no scope title", () => {
+    mounted = mountPage(); // the default fixture carries no scopeTitle
+
+    act(() => {
+      mounted!.container
+        .querySelector('button[aria-label="Portfolio"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.querySelector('[data-testid="company-portfolio-deal-scope-title"]')).toBeNull();
+    expect(mounted.container.textContent).toContain("Dallas ISD Roof Replacement"); // row still renders
+  });
+
   it("routes the header New lead action to a company-seeded lead form", () => {
     const html = renderPage();
 

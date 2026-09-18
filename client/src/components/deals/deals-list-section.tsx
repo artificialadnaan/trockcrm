@@ -19,6 +19,8 @@ import { buildDealsQueryParams, useDeals, type Deal, type DealFilters } from "@/
 import { SearchInput } from "@/components/ui/search-input";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
+import { useRepRoster } from "@/hooks/use-rep-roster";
+import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { DealValue } from "@/components/deals/deal-value";
 import {
@@ -34,11 +36,12 @@ import {
   getOwnerInitialColor,
 } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
-import { formatCurrency, parseDisplayDate } from "@/lib/deal-utils";
+import { formatCurrency, formatDealDisplayName, parseDisplayDate } from "@/lib/deal-utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
+import { formatBidDueDate, toBidDueDateInputValue } from "@/pages/deals/bid-due-date-banner";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions, type FilterBarDateControl } from "@/components/filters/filter-bar";
 import {
@@ -64,7 +67,7 @@ const EXPORT_PAGE_SIZE = 500;
 const DEFAULT_SORT_STATE = { key: "created_at", dir: "desc" } satisfies DealListSortState;
 const EMPTY_STAGE_SLUGS: string[] = [];
 
-type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at";
+type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at" | "bid_due_date";
 export type DealListSortState = {
   key: SortKey | "expected_close_date" | "contract_signed_date" | "display_date";
   dir: "asc" | "desc";
@@ -73,6 +76,13 @@ type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
   scope?: "mine" | "team" | "all" | "watched" | "on_hold";
+  /**
+   * The assignable-account list, when the mounting page already loaded it. Used ONLY to resolve owner
+   * names for rows that arrive without `assignedRepName` and for the CSV export — never to populate the
+   * owner FILTER, which is the sales roster (see the two-feed note at the hook call below). Omit it and
+   * the section fetches its own copy.
+   */
+  assignees?: Array<{ id: string; displayName: string }>;
   workflowFamily?: Parameters<typeof usePipelineStages>[0];
   enableDateFilter?: boolean;
   enableExport?: boolean;
@@ -119,8 +129,12 @@ interface DealsListSectionProps {
      *  - terminalStageIds: the visible terminal subset — sent as inactiveStageIds with isActive
      *    "pipeline" (unless an explicit Status is chosen) so terminal deals show like the board's
      *    Won/Lost columns, overriding the contract's active-only default at THIS mount (Q1).
+     *  - includePendingRfpBucket: include the board's synthetic Pending RFP column when this mount
+     *    falls back to every visible column, and make that mount's ordinary Opportunity selection
+     *    disjoint from it. It remains opt-in so other stage-id callers retain legacy behavior.
      */
     defaultStageIds?: string[];
+    includePendingRfpBucket?: boolean;
     terminalStageIds?: string[];
     /**
      * The visible stages grouped into workflow-family sibling-id sets. The stage OPTIONS carry one
@@ -223,6 +237,20 @@ function getDealPropertyLabel(deal: Deal) {
 
 export function getDealCloseDate(deal: Deal) {
   return deal.actualCloseDate ?? deal.expectedCloseDate ?? null;
+}
+
+/**
+ * List API responses include a resolved date whose explicit `null` means that a source-owned deadline
+ * was cleared. Older response shapes omit that additive field altogether, in which case the legacy deal
+ * value remains the best available fallback. Do not use `??` here: it would revive a stale snapshot after
+ * the authoritative resolver deliberately returned null.
+ */
+function getListBidDueDate(deal: Deal): string | null | undefined {
+  return deal.resolvedBidDueDate === undefined ? deal.bidDueDate : deal.resolvedBidDueDate;
+}
+
+function getListBidDueDateForCsv(deal: Deal): string {
+  return toBidDueDateInputValue(getListBidDueDate(deal));
 }
 
 /** Intersect two date bounds (YYYY-MM-DD, lexicographic = chronological). `laterDate` = the max-start
@@ -337,6 +365,40 @@ function DealsListPagination({
           <span aria-hidden="true">›</span>
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The Scope column: the short accounting title first, the long notes preview underneath.
+ *
+ * Both, not one: the CSV export carries `scopeTitle` in its own column, and a screen that showed only
+ * the description would disagree with the file a user just exported from it. Leading with the title is
+ * the point of the field — a truncated 2658-character description (the real maximum in this tenant)
+ * tells a scanner nothing, and "Balcony Repair" tells them everything.
+ *
+ * A deal with no scope title renders exactly as it did before: the description preview alone, or the
+ * muted em-dash. Nothing was taken away to make room.
+ */
+function renderScopeCell(deal: Pick<Deal, "scopeTitle" | "description">) {
+  const scopeTitle = deal.scopeTitle?.trim() ?? "";
+  const description = deal.description?.trim() ?? "";
+
+  if (!scopeTitle) {
+    return renderDescriptionPreview(deal.description);
+  }
+
+  return (
+    <div className="min-w-0 space-y-0.5">
+      <span
+        className="block max-w-[18rem] truncate text-xs font-bold text-slate-800"
+        aria-label={scopeTitle}
+        title={scopeTitle}
+        data-testid="deals-list-scope-title"
+      >
+        {scopeTitle}
+      </span>
+      {description ? renderDescriptionPreview(description) : null}
     </div>
   );
 }
@@ -637,22 +699,27 @@ export async function fetchAllDealsForFilters(input: { filters: DealFilters; api
   };
 }
 
-/** CSV rows for the FilterBar-mode export. The Date column is the canonical outcome-aware
- *  getDealDisplayDate (filter-axis == display-axis) — matching the list's Date column, not the legacy
- *  "Last Touch" (lastActivityAt) axis. */
+/** CSV rows for the FilterBar-mode export. Bid Due Date and Date use the same authoritative values as
+ *  their corresponding list columns; Date is the canonical outcome-aware getDealDisplayDate
+ *  (filter-axis == display-axis), not the legacy "Last Touch" (lastActivityAt) axis. */
 export function buildFilterBarCsvRows(
   deals: Deal[],
   maps: { stageNameById: Map<string, string>; assigneeNameById: Map<string, string> }
 ): (string | number)[][] {
   return [
-    ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Date"],
+    ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", "Bid Due Date", "Date"],
     ...deals.map((deal) => [
       deal.name,
+      // Accounting keys this into QuickBooks off the export, so a field they cannot export is half a
+      // field. Empty string (not "--") for an unset title: a CSV cell is data, and a placeholder glyph
+      // would have to be stripped again on the other side.
+      deal.scopeTitle ?? "",
       getDealDisplayNumber(deal).label,
       deal.assignedRepName ?? (deal.assignedRepId ? maps.assigneeNameById.get(deal.assignedRepId) : undefined) ?? "",
       deal.stageName ?? maps.stageNameById.get(deal.stageId) ?? "",
       effectiveStageAgeDays(deal),
       getEffectiveDealValue(deal),
+      getListBidDueDateForCsv(deal),
       getDealDisplayDate(deal) ?? "",
     ]),
   ];
@@ -660,6 +727,7 @@ export function buildFilterBarCsvRows(
 
 export function DealsListSection({
   scope,
+  assignees: assigneesFromParent,
   workflowFamily = "deal",
   enableDateFilter = false,
   enableExport = false,
@@ -708,7 +776,38 @@ export function DealsListSection({
   const effectiveAssignedRepId = lockedOwnerId ?? (hideOwnerFilter ? undefined : ownerId === "__all__" ? undefined : ownerId);
 
   const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages(workflowFamily);
-  const { assignees } = useTaskAssignees();
+  // TWO feeds, because there are two questions here and conflating them is a bug in either direction.
+  //
+  //   repOptions   — who the owner FILTER may offer: the sales roster, matching the deals dashboard's Rep
+  //                  filter directly above this list and the director dashboard's rosters.
+  //   assignees    — who a name can be resolved FOR: every assignable account. This map is the fallback
+  //                  when a deal row arrives without assignedRepName, and it feeds the CSV export. Narrowed
+  //                  to the roster it would render a real owner as "Unassigned" the moment that person was
+  //                  unticked — turning a filter-scope decision into wrong data on screen and in exports.
+  //
+  // The roster request is GATED on this section actually drawing the owner dropdown. It renders only
+  // outside FilterBar mode (see the `!filterBarMode &&` guard on the legacy controls) and only when the
+  // owner filter is not hidden — so on the stage page, the director rep detail and the base /deals view
+  // the roster was fetched and immediately discarded, once per mount, duplicating the request AND its
+  // deal_owners scan that the parent page had already made (Codex P3).
+  //
+  // `assignees` is NOT gated: its map resolves owner names for the rows and the CSV export, which every
+  // mode renders.
+  const { reps: rosterAllGroups } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
+  // SALES ONLY: this control writes an OWNER filter (effectiveAssignedRepId → assignedRepId), so an
+  // estimator picked here would filter by deals they own — nothing, for a pure estimator. The estimator
+  // dimension lives on the deals dashboard header, which writes ?estimatorId instead.
+  const repOptions = useMemo(
+    () => rosterAllGroups.filter((rep) => rep.group !== "estimator"),
+    [rosterAllGroups]
+  );
+  // The assignee feed is likewise GATED when the mounting page already has it: /deals loads
+  // /tasks/assignees for its own header Rep control and hands the result down, so the page no longer
+  // issues the same request twice on every load. Un-passed mounts fetch it themselves, unchanged — and
+  // that is also the FALLBACK path: /deals passes `undefined` when its own load errored, so a failed
+  // parent request hands the fetch back here instead of silently leaving every owner name unresolved.
+  const { assignees: fetchedAssignees } = useTaskAssignees({ enabled: assigneesFromParent == null });
+  const assignees = assigneesFromParent ?? fetchedAssignees;
 
   const stageFilterOptions = useMemo(() => {
     const sourceStages = visibleStages ?? stages.filter((stage) => stage.isActivePipeline !== false);
@@ -851,6 +950,7 @@ export function DealsListSection({
   const visibleUrlFilters = pickFilterBarValueForDimensions(urlFilters, filterBar?.dimensions ?? []);
   const barFilters = applyBoardVisibilityDefaults(filterBarValueToDealFilters(visibleUrlFilters), {
     defaultStageIds: filterBar?.defaultStageIds,
+    includePendingRfpBucket: filterBar?.includePendingRfpBucket,
     terminalStageIds: filterBar?.terminalStageIds,
     // Expand an explicit canonical stage pick to its full workflow-family so the list matches the board
     // column the option represents (Codex #589 P1). Opt-in; canonical-only mounts pass through unchanged.
@@ -914,8 +1014,25 @@ export function DealsListSection({
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
   );
+  // A drill-down or a locked owner can pin this list to someone outside the roster. Offering them as an
+  // extra option keeps the control able to name and clear that selection; the roster decides what the
+  // dropdown offers for every OTHER choice, which is the point of the change.
+  const ownerFilterOptions = useMemo(
+    () =>
+      buildRepFilterOptions(repOptions, ownerId === "__all__" ? undefined : ownerId, (id) =>
+        assigneeNameById.get(id)
+      ),
+    [repOptions, ownerId, assigneeNameById]
+  );
+  // Resolved from the OPTIONS, not from the assignee feed alone (Codex P2). getRepRosterOptions admits
+  // someone through its owner_rows branch — owns a deal in this tenant — even with no primary-office row
+  // or access grant, while listUsers(officeId) behind useTaskAssignees does not. Such a rep appears in
+  // this dropdown under their real name and would then render as "Selected rep" forever once picked,
+  // because the fallback feed has never heard of them. The options already carry the name; use it.
   const selectedOwnerLabel =
-    ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
+    ownerId === "__all__"
+      ? "All reps"
+      : ownerFilterOptions.find((rep) => rep.id === ownerId)?.displayName ?? "Selected rep";
   const derivedCountSummary =
     paginationCountSummary ??
     (typeof pagination.activeCount === "number"
@@ -943,15 +1060,18 @@ export function DealsListSection({
   const activeSort: { key: string | undefined; dir: "asc" | "desc" | undefined } = filterBarMode
     ? { key: urlFilters.sortBy, dir: urlFilters.sortDir }
     : { key: sort.key, dir: sort.dir };
-  const updateSort = (key: DealListSortState["key"]) => {
+  const updateSort = (key: DealListSortState["key"], initialDir: "asc" | "desc" = "desc") => {
     if (filterBarMode) {
-      const dir = urlFilters.sortBy === key && urlFilters.sortDir === "desc" ? "asc" : "desc";
+      const dir =
+        urlFilters.sortBy === key
+          ? urlFilters.sortDir === "desc" ? "asc" : "desc"
+          : initialDir;
       setFilters({ sortBy: key, sortDir: dir });
       return;
     }
     setSort((current) => ({
       key,
-      dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
+      dir: current.key === key ? (current.dir === "desc" ? "asc" : "desc") : initialDir,
     }));
   };
 
@@ -1032,16 +1152,30 @@ export function DealsListSection({
     // so the export's date column must match it (not the legacy "Last Touch"/updated axis),
     // or the CSV won't reconcile with the drill-down it was exported from.
     const rows = [
-      ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", showOutcomeDate ? "Date" : "Last Touch"],
+      [
+        "Deal",
+        "Scope Title",
+        "Project Number",
+        "Owner",
+        "Stage",
+        "Days",
+        "Value",
+        "Bid Due Date",
+        showOutcomeDate ? "Date" : "Last Touch",
+      ],
       ...exportResult.deals.map((deal) => {
         const displayNumber = getDealDisplayNumber(deal);
         return [
           deal.name,
+          // Same column, same position as buildFilterBarCsvRows — the two export paths must not diverge
+          // or the CSV a user gets depends on which surface they exported from.
+          deal.scopeTitle ?? "",
           displayNumber.label,
           deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "",
           deal.stageName ?? stageNameById.get(deal.stageId) ?? "",
           effectiveStageAgeDays(deal),
           getEffectiveDealValue(deal),
+          getListBidDueDateForCsv(deal),
           showOutcomeDate ? getDealDisplayDate(deal) ?? "" : deal.lastActivityAt ?? deal.updatedAt,
         ];
       }),
@@ -1049,11 +1183,15 @@ export function DealsListSection({
     triggerCsvDownload(rows, "deals-list.csv");
   };
 
-  const sortHeader = (key: DealListSortState["key"], label: string) => (
+  const sortHeader = (
+    key: DealListSortState["key"],
+    label: string,
+    initialDir: "asc" | "desc" = "desc"
+  ) => (
     <button
       type="button"
       className="inline-flex items-center gap-1 font-black uppercase tracking-[0.16em] text-slate-500 hover:text-brand-red"
-      onClick={() => updateSort(key)}
+      onClick={() => updateSort(key, initialDir)}
     >
       {label}
       {activeSort.key === key ? <span>{activeSort.dir === "asc" ? "↑" : "↓"}</span> : null}
@@ -1068,11 +1206,14 @@ export function DealsListSection({
       cellClassName: "md:w-[13.5rem] md:!px-2 lg:w-[15rem] lg:!px-3",
       render: (deal) => {
         const displayNumber = getDealDisplayNumber(deal);
+        // A change-order child is STORED as "<Parent> — Change Order N", so this truncating cell reads as
+        // its parent. Display-only reorder; the stored name still feeds sort/search/CSV untouched.
+        const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
         const propertyLabel = getDealPropertyLabel(deal);
         return (
           <div className="min-w-0 space-y-1">
-            <p className="truncate whitespace-nowrap font-black text-slate-950" aria-label={deal.name} title={deal.name}>
-              {deal.name}
+            <p className="truncate whitespace-nowrap font-black text-slate-950" aria-label={displayName} title={displayName}>
+              {displayName}
             </p>
             <p
               className={cn(
@@ -1098,11 +1239,13 @@ export function DealsListSection({
       },
     },
     {
+      // "Scope", not "Description": the column answers "what is this work?", and since #1051 the best
+      // available answer is scope_title with the description as the supporting line beneath it.
       key: "description",
-      header: "Description",
+      header: "Scope",
       headClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
       cellClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
-      render: (deal) => renderDescriptionPreview(deal.description),
+      render: (deal) => renderScopeCell(deal),
     },
     {
       key: "owner",
@@ -1157,6 +1300,20 @@ export function DealsListSection({
           compact
           className="inline-flex justify-end whitespace-nowrap font-black tabular-nums text-slate-950"
         />
+      ),
+    },
+    {
+      key: "bidDueDate",
+      // The bid deadline is distinct from the existing Date/Close (expected-execution or outcome) axis.
+      // It is intentionally a header sort too: the first click is earliest first, which matches the
+      // operational question this column answers (what needs a bid next?).
+      header: sortHeader("bid_due_date", "Bid due", "asc"),
+      headClassName: "md:w-[7rem] md:!px-2 md:text-right lg:w-[7.5rem] lg:!px-3",
+      cellClassName: "md:w-[7rem] md:!px-2 md:text-right lg:w-[7.5rem] lg:!px-3",
+      render: (deal) => (
+        <span className="inline-flex justify-end whitespace-nowrap text-sm font-medium text-slate-600">
+          {formatBidDueDate(getListBidDueDate(deal)) ?? "--"}
+        </span>
       ),
     },
     {
@@ -1272,9 +1429,9 @@ export function DealsListSection({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All reps</SelectItem>
-                {assignees.map((assignee) => (
-                  <SelectItem key={assignee.id} value={assignee.id}>
-                    {assignee.displayName}
+                {ownerFilterOptions.map((rep) => (
+                  <SelectItem key={rep.id} value={rep.id}>
+                    {rep.displayName}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -1400,22 +1557,31 @@ export function DealsListSection({
             <div className="space-y-3 md:hidden" aria-label="Deals list cards">
               {deals.map((deal) => {
                 const displayNumber = getDealDisplayNumber(deal);
+                const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
                 const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
                 const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
                 const propertyLabel = getDealPropertyLabel(deal);
                 const stageLabel = deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage";
+                const bidDueDate = formatBidDueDate(getListBidDueDate(deal));
+                // The Scope column is `hidden lg:table-cell`, so at phone width the table is not what
+                // renders — this card is. Without it a title-only deal ("Panel Relocation") is invisible
+                // on a phone until it is opened or exported, which is most of how the list is read in
+                // the field.
+                const cardScopeTitle = deal.scopeTitle?.trim() ?? "";
                 return (
                   <button
                     key={deal.id}
                     type="button"
                     className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-left transition hover:border-brand-red/30 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
                     onClick={() => navigate(`/deals/${deal.id}`)}
-                    aria-label={`Open deal ${deal.name}`}
+                    // The button's aria-label overrides its descendant text, so the title has to be
+                    // folded in or a screen-reader user loses the discriminator a sighted one just got.
+                    aria-label={cardScopeTitle ? `Open deal ${displayName}. ${cardScopeTitle}` : `Open deal ${displayName}`}
                   >
                     <div className="space-y-3">
                       <div className="space-y-1">
-                        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950" aria-label={deal.name} title={deal.name}>
-                          {deal.name}
+                        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950" aria-label={displayName} title={displayName}>
+                          {displayName}
                         </p>
                         <p
                           className={cn(
@@ -1427,6 +1593,16 @@ export function DealsListSection({
                         >
                           {displayNumber.label || "--"}
                         </p>
+                        {cardScopeTitle ? (
+                          <p
+                            className="line-clamp-2 text-xs font-bold leading-4 text-slate-700"
+                            aria-label={cardScopeTitle}
+                            title={cardScopeTitle}
+                            data-testid="deals-list-card-scope-title"
+                          >
+                            {cardScopeTitle}
+                          </p>
+                        ) : null}
                       </div>
 
                       <div className="space-y-3">
@@ -1463,11 +1639,16 @@ export function DealsListSection({
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
+                      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
                         <span className="inline-flex items-center gap-1 whitespace-nowrap">
                           <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
                           {formatShortDate(showOutcomeDate ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
                         </span>
+                        {bidDueDate ? (
+                          <span className="inline-flex items-center gap-1 whitespace-nowrap text-slate-600">
+                            Bid due: {bidDueDate}
+                          </span>
+                        ) : null}
                         <span className="inline-flex items-center gap-1 whitespace-nowrap text-right">
                           <Clock3 className="h-3.5 w-3.5 text-slate-400" />
                           {effectiveStageAgeDays(deal)}d SLA
@@ -1483,7 +1664,7 @@ export function DealsListSection({
               <PipelineStageTable
                 rows={deals}
                 columns={tableColumns}
-                tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[58rem] xl:min-w-0"
+                tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[66rem]"
                 showPagination={false}
                 pagination={{
                   page: pagination.page,

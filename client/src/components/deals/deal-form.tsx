@@ -14,7 +14,13 @@ import {
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
-import { LEAD_SOURCE_CATEGORIES } from "@trock-crm/shared/types";
+import { PointOfContactField } from "@/components/contacts/point-of-contact-field";
+import { isServiceProjectDeal } from "@trock-crm/shared/types";
+import {
+  DEAL_SCOPE_TITLE_EXAMPLES,
+  DEAL_SCOPE_TITLE_MAX_LENGTH,
+  LEAD_SOURCE_CATEGORIES,
+} from "@trock-crm/shared/types";
 import { Loader2, Lock } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
@@ -27,6 +33,7 @@ import {
   resolveDefaultOfficeCode,
 } from "@/lib/office-selection";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
+import { toBidDueDateInputValue } from "@/pages/deals/bid-due-date-banner";
 import { isDealScopeReadOnlyAfterRfp, isDealBidBoardHandoff } from "@/lib/deal-scope-lock";
 
 // Shown on scope-defining fields (Deal Name, Project Type) once a deal is locked — the server rejects
@@ -41,8 +48,10 @@ interface DealFormProps {
     name: string;
     companyId: string;
     propertyId: string;
+    scopeTitle: string;
     description: string;
     projectTypeId: string;
+    primaryContactId: string;
     source: string;
   }>;
 }
@@ -80,8 +89,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;
   const activeStages = getNewDealStages(stages);
   const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
-    { id: parent.id, name: parent.name },
-    ...parent.children.map((child) => ({ id: child.id, name: child.name })),
+    { id: parent.id, name: parent.name, code: parent.code ?? null },
+    ...parent.children.map((child) => ({ id: child.id, name: child.name, code: child.code ?? null })),
   ]);
   // The STABLE home office (primary office), NOT the switchable active office. The office picker is a
   // cosmetic project-number prefix, so pickers + create always operate on the rep's home data office —
@@ -103,6 +112,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     assignedRepId: deal?.assignedRepId ?? (user?.role === "rep" ? user.id : ""),
     companyId: deal?.companyId ?? initialValues?.companyId ?? "",
     propertyId: deal?.propertyId ?? initialValues?.propertyId ?? "",
+    scopeTitle: deal?.scopeTitle ?? initialValues?.scopeTitle ?? "",
     description: deal?.description ?? initialValues?.description ?? "",
     ddEstimate: deal?.ddEstimate ?? "",
     bidEstimate: deal?.bidEstimate ?? "",
@@ -113,12 +123,46 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     propertyZip: deal?.propertyZip ?? "",
     officeCode: initialOfficeCode,
     projectTypeId: deal?.projectTypeId ?? initialValues?.projectTypeId ?? "",
+    // DealNewPage threads ?primaryContactId through initialValues, so a create started FROM a contact
+    // already knows who the point of contact is. Ignoring it left that picker empty and blocked submission
+    // until the rep re-picked the contact they had just come from.
+    primaryContactId: deal?.primaryContactId ?? initialValues?.primaryContactId ?? "",
     regionId: deal?.regionId ?? "",
     source: initialSourceIsCategory || !initialSource ? initialSource : "Other",
     sourceDetail: initialSourceIsCategory ? "" : initialSource,
     winProbability: deal?.winProbability?.toString() ?? "",
     expectedCloseDate: deal?.expectedCloseDate ?? "",
+    bidDueDate: toBidDueDateInputValue(deal?.bidDueDate),
   });
+
+  // A Service-typed create lands on the SERVICE workflow route — the server derives that from the project
+  // type — and a service deal must name the person the crew calls, so POST /deals rejects one without a
+  // contact. This form is the other way to reach that route (the dedicated Service Opportunity form being
+  // the first), so it has to OFFER the contact rather than let the rep hit a 400 the form gives them no way
+  // to satisfy. Edits are untouched: the server guard is on create only.
+  const selectedProjectTypeOption = projectTypeOptions.find(
+    (option) => option.id === formData.projectTypeId
+  );
+  // A type id we hold but cannot resolve — /deals/new can arrive with ?projectTypeId while
+  // /pipeline/project-types is still loading or has failed. Neither "Service" nor "not Service" is
+  // knowable in that state, and guessing "not Service" hides the contact field while the id still goes to
+  // a server that classifies from it. Submit is blocked instead (see handleSubmit).
+  const projectTypeUnresolved = Boolean(formData.projectTypeId) && !selectedProjectTypeOption;
+  // A prefilled ?primaryContactId is a value this form did NOT pick, so it may be archived, reassigned or
+  // on another company. PointOfContactField reports while it still cannot say — submitting then sends an
+  // id the picker has not verified and earns a server 400 the rep cannot act on.
+  const [contactSelectionPending, setContactSelectionPending] = useState(false);
+  // Decided with the SHARED helper, not a name comparison, so the client asks the same question the server
+  // answers: a valid canonical name is decisive, otherwise the configured code. Comparing names alone would
+  // let a row named e.g. "Service Call" carrying code 4 route as service on the server while this form
+  // classified it as non-service, hid the field and sent no contact — reintroducing the exact
+  // 400-with-no-way-to-satisfy-it this field exists to prevent.
+  const isServiceCreate =
+    !isEdit &&
+    isServiceProjectDeal({
+      projectType: selectedProjectTypeOption?.name ?? null,
+      projectTypeCode: selectedProjectTypeOption?.code ?? null,
+    });
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -172,9 +216,19 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => {
       const next = { ...prev, [field]: value };
-      if (field === "companyId") {
+      // Guarded on an ACTUAL change. CompanySelector emits on every pick — including re-picking the
+      // company already selected, and an inline-create that dedups back to it — so an unguarded reset
+      // would silently discard a valid contact (or a prefilled one) for a company that never changed.
+      if (field === "companyId" && value !== prev.companyId) {
         next.propertyId = "";
+        // A contact belongs to exactly one company and the server rejects a mismatched pair, so it goes
+        // with the property.
+        next.primaryContactId = "";
       }
+      // Deliberately NOT cleared when the project type leaves Service. The payload is gated on the Service
+      // classification, so a held contact cannot reach the server from a non-Service create; keeping it
+      // means a rep who switches type and switches back still has their pick. Clearing it would only
+      // discard work, and would add a path this harness cannot drive (the type Select is portaled).
       // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
       // company/property/rep selections (the pickers stay on the home office regardless of the prefix).
       if (field === "source" && value !== "Other") {
@@ -236,6 +290,11 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       }
     }
 
+    // Mirrors the API's validateScopeTitlePayload, which trims before measuring — a client-side check
+    // on the RAW value would flag a title that the server would happily accept after trimming.
+    if (formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH) {
+      errs.scopeTitle = `Must be ${DEAL_SCOPE_TITLE_MAX_LENGTH} characters or fewer`;
+    }
     if (formData.description.length > 5000) {
       errs.description = "Must be 5000 characters or fewer";
     }
@@ -283,6 +342,26 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       setError("Stage is required");
       return;
     }
+    // Mirrors the server guard on POST /deals so the rep sees this before a round trip, and only for the
+    // Service type that actually triggers it — every other project type still creates without a contact.
+    // A project type we cannot resolve is a classification we cannot make. The id is sent regardless and
+    // the SERVER classifies from it, so submitting here risks a Service deal with no contact and a 400 the
+    // form gave no way to satisfy — the picker is hidden precisely because the type never resolved. Hold
+    // the door until it lands, the same way the Service Opportunity form holds it for a property whose
+    // record has not arrived. If /pipeline/project-types is down rather than slow, this message persists
+    // and tells the rep to reload rather than letting them submit into a rejection.
+    if (!isEdit && projectTypeUnresolved) {
+      setError("Loading project types — one moment, then Create. Reload the page if this persists.");
+      return;
+    }
+    if (isServiceCreate && contactSelectionPending) {
+      setError("Checking the point of contact — one moment, then Create.");
+      return;
+    }
+    if (isServiceCreate && !formData.primaryContactId) {
+      setError("Point of contact is required");
+      return;
+    }
 
     if (!validateDealForm()) return;
 
@@ -292,6 +371,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     try {
       const payload: Record<string, unknown> = {
         name: formData.name.trim(),
+        scopeTitle: formData.scopeTitle.trim() || null,
         description: formData.description.trim() || null,
         propertyAddress: formData.propertyAddress.trim() || null,
         propertyCity: formData.propertyCity.trim() || null,
@@ -315,6 +395,15 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       }
       if (formData.propertyId) {
         payload.propertyId = formData.propertyId;
+      }
+
+      // Sent only when it CHANGED. bidDueDate is lead-owned, so the server routes it to the source lead
+      // rather than the deal row; sending it on every save would rewrite the lead — and write an audit
+      // entry — each time anyone saved any unrelated field on the deal. An empty box is a deliberate
+      // clear (null), which the resolved writer honours, so it has to be distinguishable from "unchanged"
+      // rather than folded into it.
+      if (formData.bidDueDate !== toBidDueDateInputValue(deal?.bidDueDate)) {
+        payload.bidDueDate = formData.bidDueDate || null;
       }
 
       // DD estimate is editable on EVERY deal (incl. bid-board-owned) — always send it. A manual edit is
@@ -355,6 +444,16 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         payload.officeCode = formData.officeCode;
         if (selectedProjectType) {
           payload.projectType = selectedProjectType.name;
+        }
+        // Gated on the Service classification, and safe to gate BECAUSE submit is blocked while the type is
+        // unresolved — that block is what makes isServiceCreate a decided answer by the time we get here.
+        // (An earlier revision sent the contact unconditionally to cover the unresolved window; the block
+        // closed that window, leaving only the cost — a prefilled ?primaryContactId riding along on a
+        // non-Service create, which the server can reject for company mismatch on a form whose picker is
+        // hidden, giving the rep nothing to clear.) Still OMITTED when empty: an empty string in a uuid
+        // column raises Postgres 22P02.
+        if (isServiceCreate && formData.primaryContactId) {
+          payload.primaryContactId = formData.primaryContactId;
         }
         payload.creationContext = "direct";
         const resp = await createDeal(
@@ -497,6 +596,32 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
             </div>
           )}
 
+          {/* ABOVE Description on purpose: this is the primary, brief answer to "what is the work?", and
+              the long notes field is the overflow. Reversing the order is what produced the wall-of-text
+              values accounting cannot use. */}
+          <div className="space-y-2">
+            <Label htmlFor="scopeTitle">Scope Title</Label>
+            {/* No `maxLength` attribute, deliberately: it would silently truncate a pasted paragraph
+                mid-word and the user would save the mangled half of it without noticing. An explicit
+                over-limit error is the feedback this field wants — it says "this is a title, not a
+                description", which silent truncation does not. Matches the Description field below,
+                which is likewise counter + error rather than a hard input cap. */}
+            <Input
+              id="scopeTitle"
+              placeholder={`Short title for the scope of work — e.g. ${DEAL_SCOPE_TITLE_EXAMPLES.join(", ")}`}
+              value={formData.scopeTitle}
+              onChange={(e) => handleChange("scopeTitle", e.target.value)}
+              aria-describedby="scopeTitle-help"
+            />
+            <p id="scopeTitle-help" className="text-xs text-muted-foreground">
+              A few words naming the overall scope. Accounting uses this as the project title.{" "}
+              <span className={formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH ? "text-red-600" : undefined}>
+                {formData.scopeTitle.length}/{DEAL_SCOPE_TITLE_MAX_LENGTH}
+              </span>
+            </p>
+            {fieldErrors.scopeTitle && <p className="text-xs text-red-600">{fieldErrors.scopeTitle}</p>}
+          </div>
+
           <div className="space-y-2">
             <Label htmlFor="description">Description</Label>
             <textarea
@@ -616,6 +741,23 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 </SelectContent>
               </Select>
             </div>
+            {isServiceCreate ? (
+              <div className="space-y-2">
+                <Label htmlFor="primaryContactId">
+                  Point of Contact <span className="text-red-500">*</span>
+                </Label>
+                <PointOfContactField
+                  companyId={formData.companyId}
+                  value={formData.primaryContactId}
+                  onChange={(contactId) => handleChange("primaryContactId", contactId)}
+                  officeId={homeOfficeId}
+                  onSelectionPendingChange={setContactSelectionPending}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Required for Service work — who the crew should call about this job.
+                </p>
+              </div>
+            ) : null}
             <div className="space-y-2">
               <Label htmlFor="region">Region</Label>
               <Select
@@ -645,15 +787,32 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="expectedCloseDate">Expected Close Date</Label>
-            <Input
-              id="expectedCloseDate"
-              type="date"
-              value={formData.expectedCloseDate}
-              onChange={(e) => handleChange("expectedCloseDate", e.target.value)}
-            />
-            {closeDateWarning && <p className="text-xs text-amber-600">{closeDateWarning}</p>}
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="expectedCloseDate">Expected Close Date</Label>
+              <Input
+                id="expectedCloseDate"
+                type="date"
+                value={formData.expectedCloseDate}
+                onChange={(e) => handleChange("expectedCloseDate", e.target.value)}
+              />
+              {closeDateWarning && <p className="text-xs text-amber-600">{closeDateWarning}</p>}
+            </div>
+
+            {/* The date the banner on the deal shows. It was previously changeable ONLY from the Scoping
+                tab's Project Overview section, which is not where anyone looks for it. */}
+            <div className="space-y-2">
+              <Label htmlFor="bidDueDate">Bid Due Date</Label>
+              <Input
+                id="bidDueDate"
+                type="date"
+                value={formData.bidDueDate}
+                onChange={(e) => handleChange("bidDueDate", e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Shown on the deal banner. Clear the field to remove the banner.
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>

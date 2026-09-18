@@ -187,5 +187,27 @@ describe("R2 Client", () => {
       const { buffer } = await getObjectBuffer(KEY, { maxBytes: 1024 });
       expect(buffer.equals(Buffer.from([1, 2, 3]))).toBe(true);
     });
+
+    // The S3 client is constructed with no request timeout, so a GET that R2 accepts and never answers
+    // holds its socket for the life of the process. getObjectBuffer already took a signal; getObjectStream
+    // did not, which left the unauthenticated weekly-report PDF route with nothing able to abort a stall.
+    it("passes a caller's deadline to the GET that getObjectStream issues", async () => {
+      sendMock.mockResolvedValue({ Body: fakeBody([new Uint8Array([1])], vi.fn()) });
+      const { getObjectStream } = await import("../../src/lib/r2-client.js");
+
+      const signal = AbortSignal.timeout(1_000);
+      await getObjectStream(KEY, { signal });
+      expect(sendMock.mock.calls[0]?.[1]).toEqual({ abortSignal: signal });
+    });
+
+    it("leaves a caller that passes no options exactly as it was", async () => {
+      // Every historical caller of getObjectStream omits the argument, and none of them may start sending
+      // an options object to the SDK that they were not sending before.
+      sendMock.mockResolvedValue({ Body: fakeBody([new Uint8Array([1])], vi.fn()) });
+      const { getObjectStream } = await import("../../src/lib/r2-client.js");
+
+      await getObjectStream(KEY);
+      expect(sendMock.mock.calls[0]?.[1]).toBeUndefined();
+    });
   });
 });

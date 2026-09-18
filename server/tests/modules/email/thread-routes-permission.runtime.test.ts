@@ -214,6 +214,9 @@ beforeEach(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       name text,
+      -- Read by getEmailThread's binding lookup (the thread payload carries the change-order flag so the
+      -- assigned-deal label does not have to guess from the name). Same NOT NULL DEFAULT false as prod.
+      is_change_order boolean NOT NULL DEFAULT false,
       company_id uuid,
       property_id uuid,
       source_lead_id uuid,

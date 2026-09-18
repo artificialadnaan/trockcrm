@@ -138,6 +138,8 @@ function DealTable({
   rows: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -169,7 +171,7 @@ function DealTable({
             <tbody className="divide-y divide-slate-100">
               {rows.map((deal) => (
                 <tr key={deal.dealId}>
-                  <td className="px-3 py-3"><DealLink dealId={deal.dealId}>{deal.dealName}</DealLink></td>
+                  <td className="px-3 py-3"><DealLink dealId={deal.dealId} dealName={deal.dealName} dealIsChangeOrder={deal.dealIsChangeOrder} /></td>
                   <td className="px-3 py-3">{deal.ownerName}</td>
                   <td className="px-3 py-3">{deal.stageName}</td>
                   <td className="px-3 py-3 font-bold text-red-700">{formatDays(deal.daysInStage)}</td>

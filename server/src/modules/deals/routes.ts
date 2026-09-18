@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, eq, desc, getTableColumns, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
-import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
+import { requireDirector, requireRole, requireRfpReviewer , requireDealMoveBackApprover } from "../../middleware/rbac.js";
 import {
   addDealChangeOrder,
   deleteDealChangeOrder,
@@ -26,6 +26,7 @@ import {
   getRequiredEstimatingBoundaryStage,
   isBidBoardOwnedDownstreamStage,
   createDeal,
+  deriveWorkflowRouteForCreate,
   updateDeal,
   startProposalDraft,
   deleteDeal,
@@ -42,6 +43,10 @@ import { listDealDescriptionHistory } from "./deal-description-history.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
+import {
+  previewReturnToOpportunity,
+  returnDealToOpportunity,
+} from "./return-to-opportunity-service.js";
 import { validateOptionalExpectedCloseDateInput } from "./expected-close-date-input.js";
 import { stripBlankUuidPatchFields } from "./uuid-patch-coercion.js";
 import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
@@ -101,6 +106,7 @@ import {
   normalizeStagePageSort,
   pendingRfpSubStateForStatus,
   toCanonicalDealStageSlug,
+  validateDealScopeTitle,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
 } from "@trock-crm/shared/types";
@@ -135,6 +141,9 @@ import {
   presignDealScorecardPdf,
 } from "./scorecards-service.js";
 import {
+  retriggerCorrectiveActionNotification,
+} from "../field/corrective-actions-service.js";
+import {
   finalizeFieldScorecardArtifacts,
   recheckScorecardArtifactCurrency,
 } from "../field/scorecards-service.js";
@@ -160,6 +169,11 @@ import {
   validateWalkthroughIngressPayload,
 } from "../estimating/walkthrough-ingress-service.js";
 import { createWalkthroughContactSheetStore } from "../estimating/walkthrough-contact-sheet-store.js";
+import {
+  loadDealGlassesWalkthroughRows,
+  resolveGlassesWalkthroughScope,
+} from "../walkthrough-capture/glasses-walkthrough-scope-service.js";
+import { createGlassesWalkthroughScopeReader } from "../walkthrough-capture/glasses-walkthrough-scope-store.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -211,10 +225,16 @@ import {
   listEstimateMarkets,
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
-import { capRfpRequestBody, resolveSyncHubRfpRequestUrl, type NormalizedRfpRequestBody } from "./rfp-payload.js";
+import {
+  capRfpRequestBody,
+  resolveSyncHubRfpRequestUrl,
+  withRfpRequestBodyIdentity,
+  type NormalizedRfpRequestBody,
+} from "./rfp-payload.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
 import { allRfpVotersHaveOfficeAccess, authorizeAndCastRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
+import { getRepRosterOptions } from "../dashboard/service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -660,6 +680,9 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     sort: normalizeStagePageSort(req.query.sort as string | undefined),
     search: req.query.search as string | undefined,
     assignedRepId: req.query.assignedRepId as string | undefined,
+    // Carried from the board through buildDealStageWorkspacePath so the drill-down keeps the estimator
+    // filter the card was counted under.
+    estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
     estimateSentFrom: assertOptionalIsoDateQueryParam(
       (req.query.estimateSentFrom as string | undefined) ?? (req.query.estimate_sent_since as string | undefined),
       "estimateSentFrom"
@@ -723,9 +746,20 @@ async function loadDealStageSlug(tenantDb: any, stageId: string): Promise<string
 
 async function loadTriggerRfpDeal(tenantDb: any, dealId: string) {
   const [deal] = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      // isServiceRfp reads the CONFIGURED project-type digit, and it is the only tier that answers for a
+      // deal carrying no project_type text — the majority shape. A bare .select() here would leave the
+      // field undefined and silently route a service RFP into the CRM three-voter round instead of the
+      // SyncHub service-approval path, with nothing failing to show it.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
+    })
     .from(deals)
-    .where(eq(deals.id, dealId))
+    // A soft-deleted deal reads as NOT FOUND, the same convention authorizeAndCastRfpVote states and the
+    // vote-path reservation enforces with eq(deals.isActive, true). Without it a stale tab could trigger an
+    // RFP for a deleted deal: the loader returned the row, the handler only checked for null, and the
+    // direct SyncHub reservation had no active condition of its own — so the deal got stamped and enqueued.
+    .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
   return deal ?? null;
 }
@@ -780,6 +814,7 @@ async function buildTriggerRfpConflict(
     bidBoardMirrorSourceEnteredAt: latest.bidBoardMirrorSourceEnteredAt,
     isReadOnlyMirror: latest.isReadOnlyMirror,
     readOnlySyncedAt: latest.readOnlySyncedAt,
+    bidBoardDetachedAt: latest.bidBoardDetachedAt,
   });
   if (latest.isBidBoardOwned || inferredOwnership.isBidBoardOwned) {
     return new AppError(
@@ -804,12 +839,13 @@ async function buildTriggerRfpConflict(
   );
 }
 
-function buildScopeIncompleteError(readiness: Awaited<ReturnType<typeof evaluateDealScopingReadiness>>) {
+function buildScopeIncompleteError(readiness: Awaited<ReturnType<typeof evaluateDealScopingReadiness>>, service = false) {
   const missingSections = Object.keys(readiness.errors.sections ?? {});
   return new AppError(
     400,
     [
       "Complete Opportunity Scope before triggering RFP review.",
+      service && missingSections.includes("scopeSummary") ? "Provide either a Scope Title or Description for this service job." : null,
       missingSections.length > 0 ? `Missing sections: ${missingSections.join(", ")}` : null,
     ].filter(Boolean).join(" "),
     "RFP_SCOPE_INCOMPLETE"
@@ -927,10 +963,13 @@ router.get("/", async (req, res, next) => {
       stageIds: req.query.stageIds
         ? (req.query.stageIds as string).split(",")
         : undefined,
+      pendingRfpOnly: req.query.pendingRfpOnly === "true",
+      excludePendingRfpFromOpportunity: req.query.excludePendingRfpFromOpportunity === "true",
       inactiveStageIds: req.query.inactiveStageIds
         ? (req.query.inactiveStageIds as string).split(",")
         : undefined,
       assignedRepId: req.query.assignedRepId as string | undefined,
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
       projectTypeId: req.query.projectTypeId as string | undefined,
       regionId: req.query.regionId as string | undefined,
       source: req.query.source as string | undefined,
@@ -995,7 +1034,13 @@ router.get("/", async (req, res, next) => {
 // Sales-role gated: this is a cross-rep read, so keep non-sales CRM roles (e.g. construction) out.
 router.get("/pending-rfp", requireRole("admin", "director", "rep"), async (req, res, next) => {
   try {
-    const deals = await getPendingRfpDeals(req.tenantDb!);
+    const deals = await getPendingRfpDeals(req.tenantDb!, {
+      // Forwarded from the board's Pending RFP column so the destination matches the count that opened it.
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
+      // Same contract for the board's text search: that column's count is search-narrowed, so the queue
+      // it opens must be too, or the number and the list disagree.
+      search: readOptionalStringParam(req.query.search, "search"),
+    });
     await req.commitTransaction!();
     res.json({ deals });
   } catch (err) {
@@ -1027,12 +1072,27 @@ router.get("/pipeline", async (req, res, next) => {
     );
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
       estimateSentFrom,
       estimateSentTo,
       scope,
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       previewLimit: Number.isFinite(parsedPreviewLimit) ? parsedPreviewLimit : undefined,
+      // The board's text search. The service applies the shared predicate and the >= 2 character guard,
+      // so the kanban and the list below it on the /deals page agree on the term.
+      //
+      // Read through readOptionalStringParam, NOT a bare cast: Express aggregates a repeated key into an
+      // ARRAY (`?search=a&search=b` -> ["a","b"]), and the service's `.trim()` on that throws a
+      // TypeError surfacing as a 500. This is the same helper estimatorId above uses, and it answers a
+      // malformed request with a 400 that names the field.
+      search: readOptionalStringParam(req.query.search, "search"),
+      // Opt-in: `boardSummary` + `pendingRfpDeals`, and the Opportunity card exclusion that goes with
+      // them. Default OFF so an older web bundle (which builds its Pending RFP column by carving cards
+      // out of pipelineColumns, and cannot start sending a flag) and mobile-crm (which never reads the
+      // summary, and would otherwise pay to materialize the whole open pipeline for 15 cards) both get
+      // exactly the response they got before. See getDealsForPipeline's includeBoardAggregates.
+      includeBoardAggregates: req.query.boardAggregates === "true",
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,
       wonAllTime: req.query.won_all_time === "true",
@@ -1051,18 +1111,46 @@ router.get("/pipeline", async (req, res, next) => {
     );
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
-    res.json({
-      ...result,
+    /**
+     * Built by CONSTRUCTION, never by spreading the service result and subtracting.
+     *
+     * `...result` used to lead this object, and it copied `boardSummary: null` in for a caller that did
+     * not opt in — the conditional spread below only ADDS a key, it cannot remove one already present.
+     * So a legacy client received `"boardSummary": null` on the wire: a determination ("there is no
+     * at-risk data") where the contract promised an absence ("this response does not carry that"). The
+     * two are not interchangeable — the client's fallbacks branch on the field being missing.
+     *
+     * `pendingRfpDeals` survived only because `res.json` drops undefined-valued keys, which is luck
+     * rather than design. Listing the response keys explicitly means a field added to the service's
+     * return type in future cannot ride along into the payload unreviewed.
+     */
+    const redactDeal = (deal: unknown) =>
+      stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+        isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+      });
+    const body: Record<string, unknown> = {
       pipelineColumns: result.pipelineColumns.map((column) => ({
         ...column,
-        deals: redactDealList(column.deals, { includeHubspotId }).map((deal) =>
-          stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
-            isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
-          })
-        ),
+        deals: redactDealList(column.deals, { includeHubspotId }).map(redactDeal),
       })),
       terminalStages: result.terminalStages,
-    });
+    };
+    // Board-wide aggregates computed over EVERY matching row, not the per-column card slice: the three
+    // At-Risk KPI counts and the synthetic Pending RFP column's count/$. Present ONLY for a caller that
+    // opted in via ?boardAggregates=true — see getDealsForPipeline's includeBoardAggregates for why the
+    // default has to be off in both deploy directions.
+    if (result.boardSummary) {
+      body.boardSummary = result.boardSummary;
+    }
+    if (result.pendingRfpDeals) {
+      // The synthetic Pending RFP column's OWN cards. Carving them out of the Opportunity slice on the
+      // client silently lost every pending deal ranked below the cap. Redacted on the same path as the
+      // column cards — these are full deal rows.
+      body.pendingRfpDeals = redactDealList(result.pendingRfpDeals as never, { includeHubspotId }).map(
+        redactDeal
+      );
+    }
+    res.json(body);
   } catch (err) {
     next(err);
   }
@@ -1070,7 +1158,9 @@ router.get("/pipeline", async (req, res, next) => {
 
 router.get("/stages", async (req, res, next) => {
   try {
-    const stages = await getAllStages("deal");
+    // On the request's tenant client, not the global pool — see getAllStages. This route runs inside the
+    // tenant transaction, so reading through `db` made it hold two pool slots at once.
+    const stages = await getAllStages("deal", req.tenantDb);
     await req.commitTransaction!();
     res.json({ stages });
   } catch (err) {
@@ -1284,6 +1374,30 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       ? toCanonicalDealStageSlug(stageSlug, deal.workflowRoute)
       : null;
     if (canonicalStageSlug !== "opportunity") {
+      // A DETACHED deal past Opportunity is the one case where this rejection is genuinely confusing, so
+      // it gets told what to do rather than left to infer it.
+      //
+      // After a move back to Opportunity the deal is CRM-owned with no Bid Board project, and this route
+      // is the ONLY path that can create a replacement one (the callback it drives writes the new
+      // project's id in the same statement that clears the detach marker). Every Bid Board ingress skips
+      // detached rows, and changeDealStage deliberately no longer re-attaches on the estimating boundary.
+      // So if someone advances such a deal by hand, "trigger RFP" is unavailable until it comes back —
+      // recoverable (this feature is itself the way back), but not guessable from a bare stage error.
+      //
+      // Deliberately NOT blocking the forward stage move instead: a detached deal in estimating is
+      // CRM-owned and works fine, it simply has no Bid Board project. Blocking would remove a transition
+      // that is legitimate today and would strand deals that belong in estimating without one, to
+      // prevent a recoverable annoyance. The cheaper, non-destructive half of the fix is to make the
+      // failure legible — same 400, same RFP_WRONG_STAGE code (nothing keys on it), better sentence.
+      if (deal.bidBoardDetachedAt) {
+        throw new AppError(
+          400,
+          "RFP review can only be triggered from Opportunity stage. This deal was moved back to " +
+            "Opportunity and disconnected from Bid Board sync, so it has no Bid Board project — move it " +
+            "back to Opportunity again, then trigger RFP review to create a replacement project.",
+          "RFP_WRONG_STAGE"
+        );
+      }
       throw new AppError(400, "RFP review can only be triggered from Opportunity stage.", "RFP_WRONG_STAGE");
     }
 
@@ -1303,6 +1417,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
       isReadOnlyMirror: deal.isReadOnlyMirror,
       readOnlySyncedAt: deal.readOnlySyncedAt,
+      bidBoardDetachedAt: deal.bidBoardDetachedAt,
     });
     if (deal.isBidBoardOwned || inferredOwnership.isBidBoardOwned) {
       throw new AppError(
@@ -1318,7 +1433,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 
     const readiness = await evaluateDealScopingReadiness(req.tenantDb!, deal.id);
     if (hasBlockingScopingReadinessErrors(readiness)) {
-      throw buildScopeIncompleteError(readiness);
+      throw buildScopeIncompleteError(readiness, deal.workflowRoute === "service");
     }
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
@@ -1381,6 +1496,10 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     const updateConditions = [
       eq(deals.id, deal.id),
       eq(deals.stageId, deal.stageId),
+      // Bound atomically as well as at load, mirroring the vote-path reservation: the load and the reserve
+      // are separated by async work, so a delete landing in that gap must make this UPDATE match nothing
+      // rather than enqueue an RFP for a deal that no longer exists.
+      eq(deals.isActive, true),
       isNull(deals.rfpApprovalStatus),
       isNull(deals.rfpApprovalRequestedAt),
       eq(deals.isBidBoardOwned, false),
@@ -1389,6 +1508,17 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       isNull(deals.readOnlySyncedAt),
       isNull(deals.bidBoardStageEnteredAt),
       isNull(deals.bidBoardMirrorSourceEnteredAt),
+      // Bind the SERVICE VERDICT'S inputs, exactly as openRfpVoteRound does. isServiceRfp(deal) above was
+      // evaluated from a pre-reservation read; a concurrent edit in that gap could flip this deal from
+      // service to non-service, and this direct SyncHub send would still match and deliver an RFP that had
+      // just become vote-eligible. All three tiers are bound because all three decide the verdict:
+      // project_type, project_type_id (the configured code, which answers for most deals) and
+      // workflow_route. A re-typed deal 409s here instead of taking the wrong branch.
+      deal.projectType == null ? isNull(deals.projectType) : eq(deals.projectType, deal.projectType),
+      deal.projectTypeId == null
+        ? isNull(deals.projectTypeId)
+        : eq(deals.projectTypeId, deal.projectTypeId),
+      eq(deals.workflowRoute, deal.workflowRoute ?? "normal"),
     ];
     if (userRole === "rep") {
       updateConditions.push(eq(deals.assignedRepId, userId));
@@ -1415,7 +1545,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 
     const reservedReadiness = await evaluateDealScopingReadiness(req.tenantDb!, reservedDeal.id);
     if (hasBlockingScopingReadinessErrors(reservedReadiness)) {
-      throw buildScopeIncompleteError(reservedReadiness);
+      throw buildScopeIncompleteError(reservedReadiness, reservedDeal.workflowRoute === "service");
     }
 
     const { jobId } = await insertOpportunityRfpRequestJob({
@@ -1730,10 +1860,20 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       // otherwise re-enqueue an oversized body and be dead-lettered again with another 413.
       // capRfpRequestBody also recomputes attachmentsOmitted rather than inheriting the stale count.
       // The stored payload is typed as a loose record, so bridge it to the builder's shape here.
-      body: capRfpRequestBody({
-        ...(deadJob.payload.body as unknown as NormalizedRfpRequestBody),
-        attachments: freshAttachments,
-      }) as unknown as Record<string, unknown>,
+      // withRfpRequestBodyIdentity re-resolves companyId/propertyId from the deal FIRST: a dead job
+      // enqueued before those ids shipped carries no such key, and the cap's shallow spread would
+      // preserve that gap — leaving the one thing downstream resolves the customer and job site by
+      // absent on exactly the jobs a human is trying to rescue. Ordered before the cap so the
+      // limiter counts their bytes (they are not sacrificial, so it will not drop them).
+      body: capRfpRequestBody(
+        withRfpRequestBodyIdentity(
+          {
+            ...(deadJob.payload.body as unknown as NormalizedRfpRequestBody),
+            attachments: freshAttachments,
+          },
+          deal
+        )
+      ) as unknown as Record<string, unknown>,
     };
     delete payload.dealHandled;
     // Atomically re-claim the send-failed state BEFORE enqueuing, so a Return to Opportunity that lands
@@ -2151,7 +2291,30 @@ function validateDealPayload(body: Record<string, unknown>): void {
       throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
     }
   }
+  validateScopeTitlePayload(body);
   validateProjectNumberPayload(body);
+}
+
+/**
+ * scope_title is a SHORT title by definition — the field exists because `description` (5000 chars) is a
+ * notes field that keeps arriving as a wall of text. A cap the form alone enforces is not a cap: every
+ * non-form writer (a script, an importer, curl) would put the wall of text straight back, and the column
+ * would need widening within a release. So the length is rejected HERE, on the one validator all three
+ * write paths (POST /deals, POST /deals/service-opportunity, PATCH /deals/:id) already call.
+ *
+ * Normalizes in place as well as validates, mirroring validateProjectNumberPayload: trim, and blank ->
+ * null so a cleared form field clears the column instead of storing "". Only touches the body when the
+ * caller actually sent the key, so a partial PATCH that omits scopeTitle still omits it downstream
+ * (updateDeal keys on `!== undefined`) and cannot blank an existing title.
+ */
+function validateScopeTitlePayload(body: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(body, "scopeTitle")) return;
+
+  const result = validateDealScopeTitle(body.scopeTitle);
+  if (!result.ok) {
+    throw new AppError(400, result.error, "SCOPE_TITLE_INVALID");
+  }
+  body.scopeTitle = result.value;
 }
 
 function validateProjectNumberPayload(body: Record<string, unknown>): void {
@@ -2247,6 +2410,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       companyId,
       propertyId,
       primaryContactId,
+      scopeTitle,
       description,
       source,
       winProbability,
@@ -2265,6 +2429,14 @@ router.post("/service-opportunity", async (req, res, next) => {
     if (!companyId || !propertyId) {
       throw new AppError(400, "Company and property are required");
     }
+    // A Service Opportunity with no person on it leaves the service crew with a job, an address and nobody
+    // to call. Enforced HERE rather than on the column: every other deal path — Bid Board sync, RFP
+    // ingestion, imports, lead conversion — legitimately creates contact-less deals, so this is a property
+    // of this create flow, not of the record. validateDealPrimaryContact (called inside createDeal) still
+    // does the exists/active/belongs-to-company checks.
+    if (!primaryContactId) {
+      throw new AppError(400, "Point of contact is required");
+    }
     await assertServiceOpportunityHierarchy(req.tenantDb!, { companyId, propertyId });
 
     const serviceProjectType = await resolveServiceProjectType(projectTypeId, projectType);
@@ -2278,6 +2450,13 @@ router.post("/service-opportunity", async (req, res, next) => {
       repId = req.user!.id;
     } else {
       repId = assignedRepId || req.user!.id;
+    }
+
+    const assignmentOfficeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!assignmentOfficeId) throw new AppError(400, "Select an office before creating a service opportunity");
+    const eligibleSalesReps = await getRepRosterOptions(req.tenantDb!, assignmentOfficeId, { assignableOnly: true });
+    if (!eligibleSalesReps.some((rep) => rep.group === "sales" && rep.id === repId)) {
+      throw new AppError(400, "Assigned sales rep must be an active sales-generating user with access to this office", "SERVICE_SALES_REP_INELIGIBLE");
     }
 
     const officeCodeResolution = resolveDealCreateOfficeCode({
@@ -2322,6 +2501,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       primaryContactId,
       companyId,
       propertyId,
+      scopeTitle,
       description,
       source,
       winProbability,
@@ -2374,6 +2554,32 @@ router.post("/", async (req, res, next) => {
     } = body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
+    }
+
+    // /deals/new (the generic deal form) lets a rep pick project type Service + stage Opportunity and
+    // submit here, landing a Service Opportunity with nobody to call — the door the /service-opportunity
+    // guard above (bd81e938e) did not close, because this route is a second, independent way to create
+    // the same kind of deal. Guarded HERE, on the route, rather than inside createDeal: createDeal is
+    // also called directly by lead conversion, Bid Board sync, SyncHub ingest and the import scripts, all
+    // of which legitimately create contact-less service deals, and a check inside createDeal would reject
+    // every one of them.
+    //
+    // The question this asks is "is this SERVICE WORK", not "what will the workflow_route column end up
+    // saying". deriveWorkflowRouteForCreate mirrors createDeal's project-type precedence exactly (an
+    // explicit workflowRoute wins over a derived one), but createDeal can still downgrade the route to
+    // 'normal' later, when a Service-typed deal is started on a standard stage with no service-family
+    // equivalent (service.ts, "Only if no equivalent exists do we fall back to 'normal'"). Such a deal is
+    // STILL service work — it keeps project_type 'service', and isServiceProjectDeal's first tier (which
+    // the reports and the client both use) classifies it as service regardless of this column. So the
+    // crew still needs someone to call, and the guard deliberately fires on the project type rather than
+    // waiting for a column that is not what "is this a service deal" is answered from.
+    const { workflowRoute: derivedRoute } = await deriveWorkflowRouteForCreate({
+      workflowRoute: rest.workflowRoute,
+      projectType: rest.projectType,
+      projectTypeId: rest.projectTypeId,
+    });
+    if (derivedRoute === "service" && !rest.primaryContactId) {
+      throw new AppError(400, "Point of contact is required");
     }
 
     // Rep ownership enforcement:
@@ -2602,11 +2808,87 @@ router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
     // Whether to RENDER the approve/reject controls. A boolean, never the allowlist itself: that is
     // authorization config, and shipping it would tell every CRM user who can sign off. The client must not
     // re-derive the gate either — hiding the controls is UX, the route's 403 is the guarantee.
-    res.json({ scorecard: { ...scorecard, canApproveCorrectiveActions: canApproveCorrectiveActions(req) } });
+    res.json({
+      scorecard: {
+        ...scorecard,
+        canApproveCorrectiveActions: canApproveCorrectiveActions(req),
+        // UX only — requireDirector plus the nested deal route's access + active-record checks remain the
+        // authority. Keep this specific to OPEN cards so a stale drawer does not advertise a dead action.
+        canRetriggerCorrectiveAction:
+          (req.user!.role === "admin" || req.user!.role === "director") &&
+          scorecard.status === "corrective_action_open",
+      },
+    });
   } catch (err) {
     next(err);
   }
 });
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/retrigger — explicitly queue a fresh
+// responder "Document Corrective Action" email cycle. This is a repair control, not a delivery claim: 202
+// means the worker has a fresh job, while 200/alreadyQueued means the current cycle is already pending.
+router.post(
+  "/:id/scorecards/:scorecardId/corrective-actions/retrigger",
+  requireDirector,
+  async (req, res, next) => {
+    try {
+      const dealId = req.params.id as string;
+      const scorecardId = req.params.scorecardId as string;
+      assertValidUuid(dealId, "dealId");
+      assertValidUuid(scorecardId, "scorecardId");
+      await assertDealRouteAccess(req, dealId);
+      const officeId = req.user!.activeOfficeId;
+      if (!req.officeSlug || !officeId) throw new AppError(500, "Office context not available");
+
+      const result = await retriggerCorrectiveActionNotification(req.tenantDb!, {
+        dealId,
+        scorecardId,
+        office: { id: officeId, slug: req.officeSlug },
+      });
+
+      // Record the state-changing enqueue, not a double-click that observed an already pending current
+      // cycle. Keeping it inside the request transaction means a failed audit cannot silently create a
+      // re-send that leadership cannot explain later.
+      if (result.queued) {
+        const auditContext = buildRouteAuditContext(req);
+        await logActivity({
+          tenantDb: req.tenantDb!,
+          actor: auditContext.actor,
+          action: "update",
+          entity: {
+            tableName: "deals",
+            entityType: "deal",
+            recordId: dealId,
+            nameSnapshot: result.dealName,
+            secondaryIdSnapshot: result.projectNumber ?? result.dealNumber ?? null,
+          },
+          fieldChanges: {
+            correctiveActionEmailCycle: {
+              from: result.priorCycleNonce,
+              to: result.newCycleNonce,
+            },
+          },
+          metadata: {
+            operation: "corrective_action_email_retriggered",
+            scorecardId,
+            priorCycleNonce: result.priorCycleNonce,
+            newCycleNonce: result.newCycleNonce,
+          },
+          ipAddress: auditContext.ipAddress,
+          userAgent: auditContext.userAgent,
+        });
+      }
+
+      await req.commitTransaction!();
+      res.status(result.queued ? 202 : 200).json({
+        queued: result.queued,
+        alreadyQueued: result.alreadyQueued,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 // POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/approve — approve specific items, or
 // every item awaiting approval when `itemIds` is omitted (approve-all).
@@ -3110,6 +3392,32 @@ router.patch("/:id", async (req, res, next) => {
       removeDealLocationFields(body);
     }
 
+    // bidDueDate is LEAD-OWNED (DEAL_FIELD_OWNERSHIP), so it does not go through updateDeal.
+    //
+    // It was already being VALIDATED here by validateDealPayload — a malformed value 400s — but
+    // UpdateDealInput has no such member, so a well-formed one was accepted, answered 200, and silently
+    // discarded. That is the worst shape a field can have: the API looks like it supports it, and the only
+    // way to discover otherwise is to reload the page.
+    //
+    // Delegated to writeResolvedDealFields rather than adding a column write to updateDeal, because the
+    // ownership rule is not "write deals.bid_due_date". For a lead-backed deal the AUTHORITATIVE value is
+    // leads.bid_due_date — getDealById resolves the banner from the lead whenever one exists — so a deal-row
+    // write would have changed nothing visible and reintroduced the same silent no-op one layer down. The
+    // resolved writer already targets the source lead and mirrors the deal snapshot; keeping one writer means
+    // the two cannot drift. bidDueDate is not in SCOPE_LOCKED_RESOLVED_FIELDS, so no scope guard applies, and
+    // it is not a relationship field, so the lineage checks the /resolved-fields route runs do not either.
+    const bidDueDatePatch = Object.prototype.hasOwnProperty.call(body, "bidDueDate")
+      ? { bidDueDate: body.bidDueDate === "" ? null : body.bidDueDate }
+      : null;
+    delete body.bidDueDate;
+    if (bidDueDatePatch) {
+      await writeResolvedDealFields(req.tenantDb!, req.params.id, bidDueDatePatch, {
+        userId: req.user!.id,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        role: req.user!.role,
+      });
+    }
+
     const patchToApply = {
       ...body,
       ...propertyAddressSync,
@@ -3498,7 +3806,7 @@ router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) =>
 });
 
 /*
- * The glasses-walkthrough routes used to live here. They are now on the FIELD router
+ * The glasses-walkthrough WRITE routes used to live here. They are now on the FIELD router
  * (`/api/field/projects/:dealId/glasses-walkthroughs...`, server/src/modules/field/routes.ts).
  *
  * They had to move: TrockCam is their only caller and it authenticates through `/auth/field-login`,
@@ -3507,7 +3815,53 @@ router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) =>
  * reading that as a dead session, signed the user out. A single undeliverable walk therefore locked
  * the crew out of the app. Deliberately NOT left behind as a second CRM-side copy: one auth boundary
  * for this path is the point.
+ *
+ * The READ below is the mirror image and belongs here for the same reason the writes do not: its caller
+ * is the CRM web app's deal page, held open by estimators with an ordinary CRM session. It shares no
+ * handler, no gate and no client with the field routes — only the feature.
  */
+
+/**
+ * GET /api/deals/:id/glasses-walkthroughs — the deal page's AI-walk panel.
+ *
+ * Every glasses walk filed against this deal, each carrying whatever scope TROCK Scope has extracted from
+ * it, or the reason it cannot be shown. See glasses-walkthrough-scope-service.ts for what each `state`
+ * claims; the short version is that NO TROCK Scope failure may degrade this page, so an outage, a refused
+ * credential and a slow answer are all per-walk states rather than a non-200 from here.
+ *
+ * AUTHORISATION is `assertDealRouteAccess` — the same gate the neighbouring `GET /:id/estimating` reads
+ * use, and deliberately not a new rule. It resolves the deal through the caller's own tenant `search_path`
+ * and refuses a deal outside their office; a deal they cannot see is a 404 before any row is read.
+ *
+ * THE COMMIT SITS BETWEEN THE TWO CALLS, and that placement is the reason they are two calls.
+ * `tenantMiddleware` has pinned one of the pool's 20 connections and opened a transaction before this
+ * handler runs, and `commitTransaction` is what releases it. Fanning out to TROCK Scope before committing
+ * would hold that slot for the whole network wait — up to the 5s deadline — on an endpoint the deal page
+ * POLLS. That is the same pool-occupancy cost the ingest side reshaped its phases around
+ * (GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY), on the side with far more traffic. After the commit the
+ * resolver touches no database at all, which is what makes committing early safe rather than merely
+ * faster.
+ */
+router.get("/:id/glasses-walkthroughs", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const rows = await loadDealGlassesWalkthroughRows(req.tenantDb! as any, req.params.id);
+    await req.commitTransaction!();
+
+    const walkthroughs = await resolveGlassesWalkthroughScope(rows, {
+      scopeReader: createGlassesWalkthroughScopeReader(),
+    });
+    // NO-STORE, because this body now carries PRESIGNED URLs. Frame and clip links are
+    // bearer-equivalent for as long as they are valid, and an ordinary cacheable JSON response leaves
+    // them in the browser's HTTP cache — and in any intermediary — after the render that needed them.
+    // It also defeats the panel's refresh control, which exists precisely to re-sign expired media: a
+    // cache hit would hand back the same stale signatures it is trying to replace.
+    res.setHeader("Cache-Control", "no-store, private");
+    res.status(200).json({ walkthroughs });
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get("/:id/estimating", async (req, res, next) => {
   try {
@@ -3866,6 +4220,7 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
           bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
           isReadOnlyMirror: deal.isReadOnlyMirror,
           readOnlySyncedAt: deal.readOnlySyncedAt,
+          bidBoardDetachedAt: deal.bidBoardDetachedAt,
         })
       : null;
     const bidBoardOwnership = deal
@@ -3914,6 +4269,135 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
     next(err);
   }
 });
+
+// GET /api/deals/:id/return-to-opportunity/preview — what the confirm dialog needs BEFORE committing:
+// eligibility, whether the move voids commission, and the exact dollar amount it would destroy. The
+// dialog must name that number, and the commit path requires it echoed back, so this endpoint is part
+// of the safety mechanism, not a convenience.
+router.get(
+  "/:id/return-to-opportunity/preview",
+  requireRole("admin", "director"),
+  // Same allowlist as the commit below: someone who cannot perform the move has no reason to be shown the
+  // dollar figure it would destroy, and gating only the commit would leave the dialog openable.
+  requireDealMoveBackApprover,
+  async (req, res, next) => {
+    try {
+      const dealId = req.params.id as string;
+      // Office-scope check still runs (the tenant schema is the boundary, but a missing office is a 403).
+      await assertDealOwnerRouteAccess(req, dealId, {
+        allowAdmin: true,
+        allowDirector: true,
+      });
+      const preview = await previewReturnToOpportunity(req.tenantDb!, {
+        dealId,
+        userRole: req.user!.role,
+      });
+      await req.commitTransaction!();
+      res.json(toJsonSafe(preview));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/deals/:id/return-to-opportunity — "Move back to Opportunity": sever the Bid Board linkage,
+// reset the RFP cycle, void any booked commission, and run the backward stage move, all in this
+// request's transaction.
+//
+// requireRole("admin","director") is the OUTER gate; the inner service re-evaluates the same shared
+// predicate and narrows to admin-only when the move would void commission — never trust the route
+// alone (changeDealStage sets that precedent with its own rep-ownership check).
+router.post(
+  "/:id/return-to-opportunity",
+  requireRole("admin", "director"),
+  // The role floor admits every admin and director; this narrows to the named approvers who may destroy
+  // booked commission. The service still re-evaluates its own eligibility on top of both.
+  requireDealMoveBackApprover,
+  async (req, res, next) => {
+    try {
+      const dealId = req.params.id as string;
+      await assertDealOwnerRouteAccess(req, dealId, {
+        allowAdmin: true,
+        allowDirector: true,
+      });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+      if (reason.length === 0) {
+        throw new AppError(
+          400,
+          "A reason is required to move a deal back to Opportunity.",
+          "MOVE_BACK_REASON_REQUIRED"
+        );
+      }
+      const acknowledgedCommissionTotal =
+        typeof req.body?.acknowledgedCommissionTotal === "string"
+          ? req.body.acknowledgedCommissionTotal
+          : typeof req.body?.acknowledgedCommissionTotal === "number"
+            ? String(req.body.acknowledgedCommissionTotal)
+            : null;
+      // The row count the dialog displayed next to the total. Both are checked server-side; a
+      // non-numeric or absent value stays null so the service refuses rather than guesses.
+      const rawAcknowledgedRowCount = req.body?.acknowledgedCommissionRowCount;
+      const parsedAcknowledgedRowCount =
+        typeof rawAcknowledgedRowCount === "number"
+          ? rawAcknowledgedRowCount
+          : typeof rawAcknowledgedRowCount === "string" && rawAcknowledgedRowCount.trim() !== ""
+            ? Number(rawAcknowledgedRowCount)
+            : null;
+      const acknowledgedCommissionRowCount =
+        parsedAcknowledgedRowCount != null && Number.isInteger(parsedAcknowledgedRowCount)
+          ? parsedAcknowledgedRowCount
+          : null;
+
+      const result = await returnDealToOpportunity(req.tenantDb!, {
+        dealId,
+        userId: req.user!.id,
+        userRole: req.user!.role,
+        reason,
+        acknowledgedCommissionTotal,
+        acknowledgedCommissionRowCount,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+        tenantSchema: req.officeSlug ? `office_${req.officeSlug}` : null,
+        auditContext: buildRouteAuditContext(req),
+      });
+
+      // Same copilot refresh the ordinary stage change enqueues — the deal's stage and its whole RFP /
+      // Bid Board context just changed, so a cached brief would be stale.
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "ai_refresh_copilot",
+        payload: {
+          dealId,
+          reason: "deal_returned_to_opportunity",
+          requestedBy: req.user!.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+
+      await req.commitTransaction!();
+      emitLocalDealEvents(result._eventsToEmit ?? [], {
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        userId: req.user!.id,
+      });
+
+      res.json(
+        toJsonSafe({
+          deal: redactDealResponse(result.deal, {
+            includeHubspotId: shouldIncludeHubspotId(req.query, req.user!.role),
+          }),
+          stageHistory: result.stageChange.stageHistory,
+          commissionRowsVoided: result.commissionRowsVoided,
+          commissionTotalVoided: result.commissionTotalVoided,
+          contractSignedDateCleared: result.contractSignedDateCleared,
+          wasBidBoardLinked: result.wasBidBoardLinked,
+          rfpSubmissionMayExist: result.rfpSubmissionMayExist,
+        })
+      );
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // POST /api/deals/:id/service-handoff/activate — activate service workflow once scoping is ready
 router.post("/:id/service-handoff/activate", async (req, res, next) => {

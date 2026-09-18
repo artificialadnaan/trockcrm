@@ -1,4 +1,5 @@
 import { Router, type Request } from "express";
+import { getServiceRfpReport } from "./service-rfp-service.js";
 import {
   ESTIMATOR_PIPELINE_BUCKETS,
   ESTIMATOR_PIPELINE_COHORTS,
@@ -6,7 +7,12 @@ import {
   type EstimatorPipelineCohort,
   type ScorecardKind,
 } from "@trock-crm/shared/types";
-import { requireRole, requireDirector } from "../../middleware/rbac.js";
+import {
+  requireRole,
+  requireDirector,
+  requireDailyActivityLogViewer,
+  requireCanvassingReportViewer,
+} from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -65,6 +71,18 @@ import {
   type ForecastEvidenceMetric,
 } from "./performance-tier2-service.js";
 import {
+  getDailyActivityLogReport,
+  normalizeDailyActivityLogOptions,
+} from "./daily-activity-log-service.js";
+import {
+  getCanvassingActivityReport,
+  normalizeCanvassingFilters,
+} from "./canvassing-activity-service.js";
+import {
+  getCanvassingEvidence,
+  parseCanvassingEvidenceParams,
+} from "./canvassing-evidence-service.js";
+import {
   getAnalyticsEvidence,
   getCustomerConcentrationReport,
   getExecutiveTrendsReport,
@@ -87,6 +105,13 @@ import {
   type MondayShowcaseEvidenceOptions,
 } from "./monday-showcase-service.js";
 import type { ProjectionBand } from "./foundations.js";
+import {
+  WORKFLOW_ROUTE_BUCKETS,
+  type WorkflowRouteBucket,
+} from "../shared/deal-value-sql.js";
+// The verdict on `?routes` is decided ONCE, in shared/, so the two server endpoints and the client page
+// cannot disagree about what a given URL means.
+import { parseShowcaseRouteValues, showcaseRouteValuesFromQuery } from "@trock-crm/shared/types";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
@@ -262,6 +287,16 @@ router.get("/pipeline-velocity", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+router.get("/service-rfps", requireAnyRole, async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!officeId) throw new AppError(400, "Office context is required");
+    const data = await getServiceRfpReport(req.tenantDb!, parseSalesReportRequest(req), officeId);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) { next(err); }
 });
 
 router.get("/closed-won-revenue", async (req, res, next) => {
@@ -733,6 +768,42 @@ router.get("/rep-activity", requireAnyRole, async (req, res, next) => {
   }
 });
 
+// GET /api/reports/daily-activity-log?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&types=note,call&loggedOffDay=1&page=1&limit=200
+// The readable day-by-day log of notes and updates behind the Rep Activity counts.
+//
+// TWO guards, and the order matters. `requireAnyRole` is the ordinary role floor; `requireDailyActivityLogViewer`
+// then narrows to the named allowlist in DAILY_ACTIVITY_LOG_VIEWER_EMAILS. The allowlist can only take access
+// away -- the in-service scoping (resolveRepActivityScope) still applies underneath, so a listed rep reads only
+// their own entries, and email CONTENT still requires the admin/director baseRole check inside the service.
+// With the env var unset nobody may open it; see shared/lib/dailyActivityLogViewers.ts for why that direction.
+//
+// `types` and `loggedOffDay` narrow the LISTED ROWS (and pagination.total) only; the response's `kpis`
+// always describe the whole date/office/owner window, because the client renders them on cards that
+// are themselves these filters. Email CONTENT is readable here by admin/director -- deliberately more
+// permissive than GET /activities, see the PRIVACY block in daily-activity-log-service.ts.
+router.get("/daily-activity-log", requireAnyRole, requireDailyActivityLogViewer, async (req, res, next) => {
+  try {
+    const data = await getDailyActivityLogReport(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      normalizeDailyActivityLogOptions(req.query as Record<string, unknown>),
+      {
+        role: req.user!.role,
+        // The HOME role, NOT the per-office effective one. Email-content visibility is gated on both
+        // so a `rep` holding a director role_override on an office cannot read that office's mailboxes
+        // (the #740 escalation shape). Row scoping still uses the effective `role`.
+        baseRole: req.user!.baseRole,
+        userId: req.user!.id,
+        displayName: req.user!.displayName,
+      }
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/reports/forecast-accuracy?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&ownerNames=Rep%20One,Rep%20Two
 router.get("/forecast-accuracy", requireDirector, async (req, res, next) => {
   try {
@@ -1150,11 +1221,58 @@ router.post(
 // the exec hero tile) render slices of THIS one response, so they reconcile by construction. Visible to
 // standard CRM sales roles so reps can review the same Monday visibility. ?mode=to_date (live WTD) |
 // completed (prior full Sun-Sat box).
+/**
+ * Page-local Service / Other selection, as a comma-separated bucket list (`?routes=service`,
+ * `?routes=service,other`). ABSENT = both = no narrowing at all, so every pre-existing caller and bookmark
+ * keeps today's numbers exactly.
+ *
+ * The VERDICT is not decided here — it comes from parseShowcaseRouteValues in shared/, the one function the
+ * report endpoint, the evidence endpoint AND the client page all consult. This wrapper only maps that shared
+ * verdict onto HTTP: anything not `absent`/`selection` is a 400, never a silently-full result. An empty
+ * selection matters as much as a typo: "neither bucket" has no honest payload, and answering it with the
+ * unfiltered report (or with zeros) is exactly the lie this endpoint must not tell.
+ *
+ * TAKES THE RAW QUERY VALUE, deliberately NOT a pickQueryValue()-normalized string. pickQueryValue drops
+ * empty and whitespace-only values, so `?routes=` and `?routes=%20` would arrive as `undefined` and be read
+ * as ABSENT — the silent full-report fallback this contract forbids. Present-but-unusable is not absent, and
+ * only the raw value can tell them apart. It also preserves a REPEATED param as a list, which is what lets
+ * the shared parser reject it instead of guessing which occurrence wins.
+ */
+export function parseShowcaseRouteBuckets(raw: unknown): WorkflowRouteBucket[] | undefined {
+  const parsed = parseShowcaseRouteValues(showcaseRouteValuesFromQuery(raw));
+  switch (parsed.kind) {
+    case "absent":
+      return undefined; // the param is genuinely absent -> no narrowing
+    case "selection":
+      return parsed.buckets;
+    case "empty":
+      throw new AppError(400, `routes must select at least one of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
+    case "invalid":
+      throw new AppError(400, parsed.reason);
+  }
+}
+
+/**
+ * THE single reader of `?routes` on the server, used by both showcase endpoints. The two must accept and
+ * reject identically: if the data endpoint accepted a value the evidence endpoint rejected (or the reverse),
+ * a card and the drill behind it could disagree about whether the page is filtered — the one property this
+ * feature exists to guarantee. Going through one function makes that symmetry structural rather than a
+ * convention two call sites have to remember, and gives the symmetry test one real code path to exercise
+ * from both entry points. (The CLIENT is kept in agreement a layer up, by sharing the parser itself.)
+ */
+export function readShowcaseRouteParam(query: Record<string, unknown>): WorkflowRouteBucket[] | undefined {
+  return parseShowcaseRouteBuckets(query.routes);
+}
+
 router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
   try {
     const modeRaw = pickQueryValue(req.query.mode);
     const mode = parseWeekMode(modeRaw);
-    const data = await getMondayShowcaseData(req.tenantDb!, { mode });
+    // Raw, NOT pickQueryValue: an empty/whitespace ?routes must reach the parser to be rejected, not be
+    // normalized away into "absent" and silently answered with the unfiltered report. Read through the
+    // SHARED reader so this endpoint and the evidence one cannot drift apart.
+    const routes = readShowcaseRouteParam(req.query as Record<string, unknown>);
+    const data = await getMondayShowcaseData(req.tenantDb!, { mode, routes });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
@@ -1250,7 +1368,17 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "from must be on or before to"); // ISO YYYY-MM-DD sorts chronologically
   }
 
-  return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to };
+  // routes: the SAME Service/Other selection the clicked number was computed under, so the drawer's total
+  // equals that number instead of an office-wide superset. Same validation as the data endpoint (an
+  // unrecognised or empty value is a 400, never a silently-unfiltered drill). It is accepted for EVERY
+  // metric — including `leads`, whose source table has no workflow_route: rejecting it there would force the
+  // client to special-case which metrics may carry the page's filter, and the service reports
+  // routeFilter.applied=false so the drawer states plainly that this one list ignores the selection.
+  // The SAME shared reader the data endpoint uses — the two MUST reject the same inputs, or a card and
+  // the drill behind it could disagree about whether the page is filtered at all.
+  const routes = readShowcaseRouteParam(query);
+
+  return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to, routes };
 }
 
 /**
@@ -1304,7 +1432,23 @@ router.get("/estimator-pipeline/evidence", requireDirector, async (req, res, nex
 });
 
 // Reports Part 4 -- A·3 At-Risk & Value-at-Stake Watchlist (the forecast blind spots; M − N).
-router.get("/at-risk", requireDirector, async (req, res, next) => {
+//
+// Deliberately not DIRECTOR-gated: a rep whose own deal has no maintained close date is exactly who
+// needs to see it, and the reports index has always listed this card to every CRM role — so the old
+// guard did not hide the report, it only turned the click into a 403.
+//
+// But NOT ungated either. `requireAnyRole` (admin/director/rep) is the report-capable CRM set, and the
+// same guard /qc-scorecards, /rep-activity, /market-mix and /customer-concentration already use.
+// Dropping the guard entirely would NOT have left `construction` where it was: the upstream
+// requireCrmUser mount turns away field_contractor but lets construction through, so an ungated route
+// would have handed that role office-wide deal names, owners and values — a widening nobody asked for,
+// on the same route whose whole purpose here was to widen access by exactly one role.
+//
+// The response is office-wide and is NOT scoped to the viewer: everyone who may read it sees the same
+// watchlist, so the number a rep reads reconciles with the one a director reads. `repId` stays a
+// caller-supplied FILTER, not a permission boundary — narrowing to one rep is a view, not an
+// authorization decision.
+router.get("/at-risk", requireAnyRole, async (req, res, next) => {
   try {
     const repIdRaw = pickQueryValue(req.query.repId);
     let repId: string | null | undefined;
@@ -1484,6 +1628,70 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json({ data: { rep: { id: rep.id, displayName: rep.displayName }, grain, dates, actions, views } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/canvassing-activity?dateFrom=2026-06-01&dateTo=2026-08-31&bucket=week&userIds=<uuid>,<uuid>
+//
+// Who entered new companies, properties, contacts and leads, per person, per week/month/quarter — plus the
+// notes those people logged. Gated on the CANVASSING_REPORT_VIEWER_EMAILS allowlist rather than a role,
+// because it is a per-person scoreboard; see shared/lib/canvassingReportViewers.ts. The role floor still
+// runs first, and the tenant search_path still scopes every count to the caller's office.
+//
+// Counts come from `created_by_user_id`, which only exists from migration 0220 onward for companies /
+// properties / contacts. The response carries `attributionStartHint` and per-bucket `unattributed` counts
+// so a zero before that date reads as "not recorded", not as "did nothing".
+router.get("/canvassing-activity", requireAnyRole, requireCanvassingReportViewer, async (req, res, next) => {
+  try {
+    const data = await getCanvassingActivityReport(req.tenantDb!, {
+      ...normalizeCanvassingFilters(req.query as Record<string, unknown>),
+      // Bounds the roster lookup: `users` is global, so a pinned id from another office must not resolve.
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      // Only the notes FEED reads these: a rep sees their own notes' text, never the office's. The HOME
+      // role, not the effective one — a rep holding a director role_override on an office must not read
+      // that office's note content through it (#740).
+      viewerRole: req.user!.baseRole ?? req.user!.role,
+      viewerEffectiveRole: req.user!.role,
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/canvassing-activity/evidence?kind=company&userId=<uuid>&bucketStart=2026-06-07&bucket=week&dateFrom=..&dateTo=..
+//
+// The records behind ONE number on the Canvassing Activity report. Same allowlist as the report itself —
+// the drill must not be a way in for someone who cannot open the page it drills.
+//
+// `total` is counted with the SAME predicate the report counts with (both build on canvassingKindSourceSql),
+// so the list reconciles with the figure it was opened from. A drill that does not add up teaches a reader
+// the report cannot be checked, which is worse than having no drill.
+router.get("/canvassing-activity/evidence", requireAnyRole, requireCanvassingReportViewer, async (req, res, next) => {
+  try {
+    const filters = normalizeCanvassingFilters(req.query as Record<string, unknown>);
+    let params;
+    try {
+      params = parseCanvassingEvidenceParams(req.query as Record<string, unknown>);
+    } catch (err) {
+      throw new AppError(400, err instanceof Error ? err.message : "Invalid evidence parameters");
+    }
+    const data = await getCanvassingEvidence(req.tenantDb!, {
+      ...params,
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      // The same notes boundary the report's feed applies: a rep reads only their own note text.
+      viewerRole: req.user!.baseRole ?? req.user!.role,
+      viewerEffectiveRole: req.user!.role,
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
   } catch (err) {
     next(err);
   }

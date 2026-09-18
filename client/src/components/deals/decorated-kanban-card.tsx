@@ -1,6 +1,7 @@
 import { AlertCircle, Clock, GripVertical, MapPin } from "lucide-react";
 import { DealValue } from "@/components/deals/deal-value";
 import type { Deal } from "@/hooks/use-deals";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
@@ -17,8 +18,28 @@ import {
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
 import { OnHoldBadge } from "@/components/deals/on-hold-badge";
+import {
+  pendingRfpAttentionPresentation,
+  type PendingRfpTone,
+} from "@/lib/pending-rfp-presentation";
 
 const KANBAN_SLA_AUDIENCE = "rep" satisfies SlaAudience;
+
+// Tone -> classes for the Pending RFP attention marking. The tone KEY and the label come from the
+// shared map (pending-rfp-presentation), which the `/deals/pending-rfp` queue reads too; only these
+// card-shaped classes live here, mirroring the billing-attention treatment directly below them.
+const RFP_ATTENTION_BAR: Record<PendingRfpTone, string> = {
+  sky: "bg-sky-600",
+  rose: "bg-rose-500",
+  amber: "bg-amber-500",
+  red: "bg-red-600",
+};
+const RFP_ATTENTION_CHIP: Record<PendingRfpTone, string> = {
+  sky: "bg-sky-50 text-sky-700",
+  rose: "bg-rose-50 text-rose-700",
+  amber: "bg-amber-50 text-amber-800",
+  red: "bg-red-50 text-red-700",
+};
 
 export function resolveKanbanSlaThresholdDays(stageSlug: string): number | null {
   return getSlaPolicy(stageSlug as SlaPolicyStageSlug, KANBAN_SLA_AUDIENCE)?.thresholdDays ?? null;
@@ -53,6 +74,9 @@ export function DecoratedKanbanCard({
   onClick,
 }: DecoratedKanbanCardProps) {
   const displayNumber = getDealDisplayNumber(deal);
+  // A change-order child is STORED as "<Parent> — Change Order N", so a truncated card title reads as
+  // its parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched.
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
   const days = getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
   const slaDays = resolveKanbanSlaThresholdDays(stageSlug);
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
@@ -61,6 +85,10 @@ export function DecoratedKanbanCard({
   // Surface the deal description on the card so users can tell deals apart without drilling in (it is
   // already shown in the list view). Trimmed + clamped so long text can't inflate the card height.
   const description = deal.description?.trim() ?? "";
+  // Telling cards apart is EXACTLY what the scope title is for, and it does it better than two clamped
+  // lines of a notes field — so when a deal has one it leads, with the description still beneath it.
+  // A deal without a title is unchanged (#1051).
+  const scopeTitle = deal.scopeTitle?.trim() ?? "";
   const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
   // The column slug is authoritative (a board row may omit deal.stageSlug). Stamp it ONCE and use the
   // same object for the value AND the badge, so the won-aware hold check and the value can't disagree
@@ -70,13 +98,29 @@ export function DecoratedKanbanCard({
   const now = new Date();
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue, now);
   const billingAttentionRequired = deal.billingAttentionRequired === true;
+  // Mark ONLY the Pending RFP deals that need someone to act (send_failed / declined / conflict). Gated
+  // on the column slug, which the board stamps from the synthetic column (`pending_rfp`) — membership was
+  // already decided upstream, so this reads that decision rather than re-deriving it and risking a card
+  // that disagrees with the column it is drawn in. Awaiting deals are deliberately left unmarked.
+  const rfpAttention =
+    stageSlug === "pending_rfp" ? pendingRfpAttentionPresentation(deal.rfpApprovalStatus) : null;
+  // Billing attention is computed for Won-family columns only, so it can never co-occur with an RFP
+  // mark — but the spacing offsets belong to "there is a top bar", not to either flag specifically.
+  const hasTopAccentBar = billingAttentionRequired || rfpAttention !== null;
   // The button's aria-label overrides its descendant text, so fold the description into the accessible
   // name — otherwise screen-reader users can't use it to tell similar cards apart (the whole point of
   // showing it). Appended after any billing alert; omitted when there is no description.
-  const descriptionSuffix = description ? `. ${description}` : "";
-  const accessibleName = billingAttentionRequired
-    ? `Open deal ${deal.name}: billing contact missing${descriptionSuffix}`
-    : `Open deal ${deal.name}${descriptionSuffix}`;
+  // Both go into the accessible name, title first, in the same order they render.
+  const descriptionSuffix = [scopeTitle, description].filter(Boolean).map((part) => `. ${part}`).join("");
+  // The marking's colour must never be the only carrier of its meaning — the chip states it in text for
+  // sighted users, and this states it for screen readers. Billing keeps precedence in the name for the
+  // same reason it keeps the bar: it is the more urgent flag, even though the two cannot co-occur today.
+  const alertSuffix = billingAttentionRequired
+    ? ": billing contact missing"
+    : rfpAttention
+      ? `: RFP ${rfpAttention.label.toLowerCase()}`
+      : "";
+  const accessibleName = `Open deal ${displayName}${alertSuffix}${descriptionSuffix}`;
 
   return (
     <button
@@ -91,15 +135,33 @@ export function DecoratedKanbanCard({
       {billingAttentionRequired ? (
         <span className="absolute inset-x-0 top-0 h-1 bg-red-600" aria-hidden="true" />
       ) : null}
+      {rfpAttention ? (
+        <span
+          className={cn("absolute inset-x-0 top-0 h-1", RFP_ATTENTION_BAR[rfpAttention.tone])}
+          aria-hidden="true"
+        />
+      ) : null}
       <GripVertical
-        className={cn("mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 group-hover:text-slate-500", billingAttentionRequired && "mt-1")}
+        className={cn("mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 group-hover:text-slate-500", hasTopAccentBar && "mt-1")}
         aria-hidden="true"
       />
-      <div className={cn("min-w-0 flex-1 space-y-2", billingAttentionRequired && "pt-1")}>
+      <div className={cn("min-w-0 flex-1 space-y-2", hasTopAccentBar && "pt-1")}>
         {billingAttentionRequired ? (
           <span className="inline-flex items-center gap-1 rounded-sm bg-red-50 px-1.5 py-0.5 text-[10px] font-black tracking-[0.12em] text-red-700 uppercase">
             <AlertCircle className="h-3 w-3" aria-hidden="true" />
             Billing contact missing
+          </span>
+        ) : null}
+        {rfpAttention ? (
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[10px] font-black tracking-[0.12em] uppercase",
+              RFP_ATTENTION_CHIP[rfpAttention.tone]
+            )}
+            data-testid="pending-rfp-attention-chip"
+          >
+            <rfpAttention.Icon className="h-3 w-3" aria-hidden="true" />
+            {rfpAttention.label}
           </span>
         ) : null}
         <div className="flex items-start justify-between gap-3">
@@ -128,7 +190,17 @@ export function DecoratedKanbanCard({
         <AtRiskBadge atRisk={effectivelyHeld ? null : deal.atRisk} compact />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 
-        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>
+        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{displayName}</p>
+
+        {scopeTitle ? (
+          <p
+            className="line-clamp-2 text-xs font-bold leading-4 text-slate-700"
+            title={scopeTitle}
+            data-testid="kanban-card-scope-title"
+          >
+            {scopeTitle}
+          </p>
+        ) : null}
 
         {description ? (
           <p

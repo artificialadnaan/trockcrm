@@ -214,11 +214,26 @@ export async function authorizeAndCastRfpVote(
   );
 }
 
-/** Service / type-4 == project-type code '4'. Voting applies ONLY to non-service deals. */
-export function isServiceRfp(deal: { projectType?: string | null; workflowRoute?: "normal" | "service" | null }): boolean {
+/**
+ * Service / type-4 == project-type code '4'. Voting applies ONLY to non-service deals.
+ *
+ * `projectTypeCode` is the CONFIGURED digit from project_type_config, resolved through project_type_id,
+ * and it is load-bearing rather than decorative: most deals carry no `project_type` TEXT at all (646 of
+ * 1,351 active ones, measured) and are typed only by that FK. Without it a service deal in the common
+ * import shape read as NON-service here, so triggering RFP opened the three-voter CRM round instead of
+ * the SyncHub service-approval path, and buildNormalizedRfpRequestBody shipped project type 9 instead
+ * of 4. It maps onto resolveProjectTypeCode's existing digit tier, which sits exactly where the SQL
+ * predicate puts it: after the text type, before the route.
+ */
+export function isServiceRfp(deal: {
+  projectType?: string | null;
+  projectTypeCode?: string | null;
+  workflowRoute?: "normal" | "service" | null;
+}): boolean {
   return (
     resolveProjectTypeCode({
       projectType: deal.projectType,
+      projectTypes: deal.projectTypeCode,
       workflowRoute: deal.workflowRoute ?? "normal",
     }) === "4"
   );
@@ -283,6 +298,13 @@ export async function openRfpVoteRound(args: {
     // gap. Binding both columns into the atomic reserve makes a re-typed deal 409 here instead of opening a CRM
     // 3-voter round for a service RFP (which must stay on the SyncHub service-approval path).
     args.deal.projectType == null ? isNull(deals.projectType) : eq(deals.projectType, args.deal.projectType),
+    // project_type_id is bound for the SAME reason as project_type: the configured digit behind this FK is
+    // now part of the service verdict (isServiceRfp), and it is the ONLY tier that answers for the many
+    // deals carrying no project_type text. Without it a concurrent re-type through the FK alone would slip
+    // past this reserve and open a CRM 3-voter round for what had just become a service RFP.
+    args.deal.projectTypeId == null
+      ? isNull(deals.projectTypeId)
+      : eq(deals.projectTypeId, args.deal.projectTypeId),
     eq(deals.workflowRoute, args.deal.workflowRoute ?? "normal"),
   ];
   if (args.enforceAssignedRepId != null) {

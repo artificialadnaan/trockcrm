@@ -72,6 +72,23 @@ describe("RfpReviewPage states", () => {
     expect(html).toContain("Re-confirm denial");
   });
 
+  it("leads a change-order child's Deal row with 'Change Order N', and leaves an ordinary deal alone", () => {
+    // The endpoint sends `deals.is_change_order`, and it OUTRANKS the name. A generated child is
+    // relabelled; a real deal a human happened to name "Lobby — Change Order 1" is not, even though the
+    // two are indistinguishable by syntax. Reading the name alone gets the second case wrong.
+    authUser = { isRfpReviewer: true };
+
+    reviewState = baseReview({ dealName: "Tides Park Lane — Change Order 2", dealIsChangeOrder: true });
+    const child = render();
+    expect(child).toContain("Change Order 2 — Tides Park Lane");
+    expect(child).not.toContain("Tides Park Lane — Change Order 2");
+
+    reviewState = baseReview({ dealName: "Lobby — Change Order 1", dealIsChangeOrder: false });
+    const ordinary = render();
+    expect(ordinary).toContain("Lobby — Change Order 1");
+    expect(ordinary).not.toContain("Change Order 1 — Lobby");
+  });
+
   it("an in-flight override shows the creating-project panel, hides re-approve, but offers the duplicate-safe denial escape", () => {
     authUser = { isRfpReviewer: true };
     reviewState = baseReview({ actionable: false, overrideState: "approving", reviewedByName: "Takashi" });

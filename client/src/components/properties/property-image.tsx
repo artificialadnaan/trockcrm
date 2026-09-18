@@ -53,7 +53,7 @@ export function PropertyImageAvatar({
         />
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="sm:max-w-3xl">
           <DialogTitle className="sr-only">Photo of {name}</DialogTitle>
           <img
             src={imageUrl ?? imageThumbnailUrl}

@@ -37,19 +37,36 @@ const boardRows = [
 ];
 
 describe("portfolio project board service", () => {
-  it("groups projects into the shared seven board stages in order", () => {
+  it("groups projects into the shared board stages in construction-then-service order", () => {
     const board = groupPortfolioProjectsForBoard(boardRows);
 
+    // Construction lifecycle first, then the service track, then the catch-all column (present
+    // here only because the "hold (legacy)" fixture row has no column of its own).
     expect(board.stages.map((stage) => stage.stage)).toEqual([
       "bidding",
+      "estimating",
+      "pre-construction",
       "buyout",
+      "contract executed",
+      "in production",
       "close out",
       "close out - final invoice",
       "closed",
-      "contract executed",
-      "in production",
+      "service - estimating",
+      "service - in production",
+      "service - close out",
+      "service - close out final invoice",
+      "service - lost",
+      "unmapped",
     ]);
-    expect(board.projects).toHaveLength(1);
+    // BOTH rows survive now. The legacy-stage row used to be dropped from this array entirely.
+    expect(board.projects).toHaveLength(2);
+    expect(board.stages.find((stage) => stage.stage === "unmapped")?.projects).toEqual([
+      expect.objectContaining({
+        id: "00000000-0000-4000-8000-000000000002",
+        currentStageNormalized: "hold (legacy)",
+      }),
+    ]);
     expect(board.stages.find((stage) => stage.stage === "closed")?.projects).toEqual([
       expect.objectContaining({
         id: "00000000-0000-4000-8000-000000000001",
@@ -77,6 +94,56 @@ describe("portfolio project board service", () => {
     expect(sql).not.toContain("office_dallas.portfolio_projects");
     expect(board.projects).toHaveLength(1);
     expect(board.stages.find((stage) => stage.stage === "closed")?.projects).toHaveLength(1);
+  });
+
+  it("derives a stage entry's board-relevance from its stage, not the cached column", async () => {
+    // The stored is_board_relevant is whatever the classifier said the day the event was relayed, and
+    // the detail page renders it as "Board stage" / "Legacy stage". After this release a backfilled
+    // Pre-Construction / Service project was reachable but every history row still read "Legacy stage".
+    const staleRows = [
+      // Newly-mapped stages, stamped false by the OLD classifier -> must now read as board stages.
+      { id: "e1", stage: "Pre-Construction", stage_normalized: "pre - construction", is_board_relevant: false, expected: true },
+      { id: "e2", stage: "Service - In Production", stage_normalized: "service - in production", is_board_relevant: false, expected: true },
+      // Genuinely dead work stays "Legacy stage" whatever the column says.
+      { id: "e3", stage: "Hold (LEGACY)", stage_normalized: "hold (legacy)", is_board_relevant: true, expected: false },
+      // A stage nobody anticipated is not a decision to exclude.
+      { id: "e4", stage: "Warranty - Punch List", stage_normalized: "warranty - punch list", is_board_relevant: false, expected: true },
+      // DOUBLE-NORMALIZATION GUARD. The predicate normalizes internally, and the normalizer is not
+      // idempotent here: raw `_Hold` normalizes to " hold" (JS trims before collapsing, so the
+      // underscore becomes a leading space), and normalizing THAT trims it to "hold" — a legacy
+      // alias. Classifying from stage_normalized would therefore label this "Legacy stage" while
+      // the seed, relay and migration 0216 all call the same project board-relevant.
+      { id: "e5", stage: "_Hold", stage_normalized: " hold", is_board_relevant: false, expected: true },
+    ];
+
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM portfolio_projects")) {
+        return { rows: [{ ...boardRows[0], is_board_relevant: true, last_stage_event_key: null, raw_snapshot: {}, created_at: "2026-05-18T12:00:00.000Z" }] };
+      }
+      if (sql.includes("FROM portfolio_project_stage_entries")) {
+        return {
+          rows: staleRows.map((row) => ({
+            id: row.id,
+            event_key: `key-${row.id}`,
+            previous_stage: null,
+            previous_stage_normalized: null,
+            stage: row.stage,
+            stage_normalized: row.stage_normalized,
+            is_board_relevant: row.is_board_relevant,
+            entered_at: "2026-05-20T12:00:00.000Z",
+            relay_detected_at: null,
+            webhook_timestamp: null,
+            created_at: "2026-05-20T12:01:05.000Z",
+          })),
+        };
+      }
+      return { rows: [] };
+    });
+
+    const detail = await getPortfolioProjectDetail({ query } as any, "00000000-0000-4000-8000-000000000001");
+
+    expect(detail!.stageHistory.map((entry) => ({ id: entry.id, isBoardRelevant: entry.isBoardRelevant })))
+      .toEqual(staleRows.map((row) => ({ id: row.id, isBoardRelevant: row.expected })));
   });
 
   it("returns portfolio project detail with stage history using sequential tenant queries", async () => {

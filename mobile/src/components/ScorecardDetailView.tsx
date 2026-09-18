@@ -5,6 +5,7 @@ import { theme } from "../theme/theme";
 import { Button, SectionLabel } from "./ui";
 import { RatingBadge } from "./RatingBadge";
 import type { FieldScorecardDetail, FieldScorecardPhotoView } from "../api/types";
+import { formatDealDisplayName } from "../projects/field-projects";
 import {
   deficiencyLabel,
   formatShortDate,
@@ -65,7 +66,9 @@ export function ScorecardDetailView({
   const isV2 = scorecard.formVersion === 2;
   const displayScore = isV2 ? (scorecard.averageScore ?? scorecard.totalScore / 10).toFixed(1) : String(scorecard.totalScore);
   const displayMax = isV2 ? "10" : String(SCORECARD_TOTAL_POINTS);
-  const canonicalProjectName = scorecard.projectName?.trim();
+  // A change-order child deal is stored "<Parent> — Change Order N"; move the label to the front so it
+  // survives the two-line clamp. Display-only — `scorecard.projectName` itself is untouched.
+  const canonicalProjectName = formatDealDisplayName(scorecard.projectName?.trim(), scorecard.isChangeOrder);
   const projectName =
     canonicalProjectName || (scorecard.projectNumber ? `Project ${scorecard.projectNumber}` : "Untitled project");
 

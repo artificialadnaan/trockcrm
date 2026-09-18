@@ -8,7 +8,9 @@ import { AppError } from "../../middleware/error-handler.js";
 import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets, type PhotoUploadTarget } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 import { officeTag, type FieldOffice, type OfficeTag } from "./cross-office.js";
-import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { activeProjectWhere } from "./project-browsability.js";
+
+export { activeProjectWhere } from "./project-browsability.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -17,21 +19,25 @@ export type FieldAccessContext = {
   userRole: UserRole;
 };
 
-// Field "browsable projects" stage rule. The field surface shows ACTIVE-pipeline deals AND Won-family
-// terminal deals — crews must find and photograph Won / in-production jobs — but NEVER Lost-family (dead
-// jobs). This is the intent-explicit replacement for the old "exclude ALL terminal" rule (which hid Won):
-// it deliberately does NOT widen to every terminal stage, which would flood the list with hundreds of
-// active Lost deals. `is_active = true` is still required, so only LIVE Won deals surface — the exact set
-// the capture-target picker already reaches; archived (is_active=false) Won stay hidden. Both sets come
-// from the SHARED canonical slug families (not a hardcoded literal) so omitted alias stages can't drift.
-const FIELD_WON_BROWSABLE_SLUGS = WON_STAGE_SLUGS;
-const FIELD_LOST_EXCLUDED_SLUGS = LOST_STAGE_SLUGS;
-
-const textArray = (values: readonly string[]) => sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
-
 export type FieldProject = {
   id: string;
   name: string;
+  /**
+   * `deals.is_change_order`. The field clients move "Change Order N" to the FRONT of the displayed
+   * name (a change-order child is STORED as "<Parent> — Change Order N", which truncates on a phone),
+   * and this flag is the AUTHORITY for that decision — a deal a human happened to name
+   * "Lobby — Change Order 1" is not a change order and must render exactly as typed. Display-only:
+   * `name` itself is the stored value, unchanged.
+   */
+  isChangeOrder: boolean;
+  /**
+   * `deals.scope_title`, the short accounting title. Travels WITH `isChangeOrder`: the flag is what
+   * front-loads "Change Order N" onto the displayed name, and once it does, this is the only field
+   * left saying WHICH change order — two children of one parent are otherwise the same row. It is
+   * also a SEARCHED column here (see activeProjectWhere), so without it a field user can type the
+   * scope phrase, match, and get back a row that cannot explain why it matched.
+   */
+  scopeTitle: string | null;
   /**
    * RAW `deals.deal_number`. For HubSpot-imported deals this is the meaningless HubSpot id
    * ("HS-…") — do NOT display it. Kept raw because it is also a stable, unique, non-null key used
@@ -100,6 +106,11 @@ function mapFieldProject(row: any): FieldProject {
   const project: FieldProject = {
     id: row.id,
     name: row.name,
+    // `deals.is_change_order` is the AUTHORITY on whether this is a change-order child. The field
+    // clients move "Change Order N" to the front of the displayed name, and without this they had to
+    // infer it from the name's shape — which mislabels a deal a human happened to name that way.
+    isChangeOrder: row.is_change_order === true,
+    scopeTitle: row.scope_title ?? null,
     // Raw deal_number stays raw (storage-path / matching key). The display number is resolved the
     // same way the CRM + global search do: project_number, else a non-HubSpot deal_number, else null
     // — so the HubSpot id in deal_number is never shown.
@@ -116,30 +127,6 @@ function mapFieldProject(row: any): FieldProject {
   // present so every other path's payload stays byte-identical (and the existing toEqual tests hold).
   if (row.distance_miles != null) project.distanceMiles = Number(row.distance_miles);
   return project;
-}
-
-export function activeProjectWhere(search?: string) {
-  const normalizedSearch = search?.trim();
-  const stageSlug = sql`COALESCE(psc.slug, d.bid_board_stage_slug, '')`;
-  return sql`
-    d.is_active = true
-    AND (
-      COALESCE(psc.is_terminal, false) = false
-      OR ${stageSlug} = ANY(${textArray(FIELD_WON_BROWSABLE_SLUGS)})
-    )
-    AND ${stageSlug} <> ALL(${textArray(FIELD_LOST_EXCLUDED_SLUGS)})
-    ${normalizedSearch ? sql`
-      AND (
-        d.name ILIKE ${`%${normalizedSearch}%`}
-        OR d.deal_number ILIKE ${`%${normalizedSearch}%`}
-        -- For HubSpot-imported deals the canonical DFW/ATL number lives in project_number (deal_number
-        -- holds the HS- id), so it must be searchable too.
-        OR d.project_number ILIKE ${`%${normalizedSearch}%`}
-        OR d.property_address ILIKE ${`%${normalizedSearch}%`}
-        OR d.property_city ILIKE ${`%${normalizedSearch}%`}
-      )
-    ` : sql``}
-  `;
 }
 
 // NOTE: the field surface is intentionally UNSCOPED by rep — EVERY field user (incl. role "rep") sees
@@ -177,6 +164,8 @@ export async function listFieldProjects(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -274,6 +263,8 @@ export async function listNearbyFieldProjects(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -307,6 +298,8 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -361,6 +354,8 @@ export async function assertActiveFieldProject(tenantDb: TenantDb, _access: Fiel
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -397,6 +392,8 @@ export async function getFieldProject(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -576,7 +573,7 @@ export async function listFieldProjectPhotos(
   access: FieldAccessContext,
   dealId: string,
   filters: DealPhotoTimelineFilters = {},
-  input: { page?: number; perPage?: number } = {},
+  input: { page?: number; perPage?: number; withTotal?: boolean } = {},
 ) {
   await assertActiveFieldProject(tenantDb, access, dealId);
   // Finite-guard before clamping: Math.max/min don't coerce NaN, so a non-numeric query param must fall
@@ -585,7 +582,16 @@ export async function listFieldProjectPhotos(
   const perPage = Number.isFinite(input.perPage)
     ? Math.min(FIELD_PHOTOS_MAX_PER_PAGE, Math.max(1, input.perPage as number))
     : FIELD_PHOTOS_DEFAULT_PER_PAGE;
-  const result = await getDealPhotoTimeline(tenantDb, dealId, page, perPage, filters);
+  // The count(*) is the same number on every page of one walk, and a client paging a whole gallery needs
+  // it once — on a 7,708-photo deal the gallery walks 39 pages and threw 38 identical counts away. But
+  // this is OPT-IN per request rather than "skip it whenever page > 1", and that is deliberate: the
+  // T-Rock Cam photo viewer's URL re-scanner (mobile/src/lib/photo-url-scan.ts) reads totalPages off
+  // EVERY page and stops when `page >= totalPages`, so a null total on page 2 would end its walk at page
+  // 2 and it would never reach a photo deeper in the deal. `mobile/` has no OTA, so the builds already in
+  // the field cannot be fixed by this deploy — they simply never send the flag and keep their counts.
+  const result = await getDealPhotoTimeline(tenantDb, dealId, page, perPage, filters, {
+    withTotal: input.withTotal ?? true,
+  });
   // thumbnailUrl/fullUrl are already resolved in-batch by getDealPhotoTimeline — no per-photo work here.
   const photos = result.photos.map((photo) => safePhoto(photo, photo.thumbnailUrl, photo.fullUrl));
   return { photos, pagination: result.pagination };
@@ -655,6 +661,8 @@ export async function listNearbyFieldCaptureTargets(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
@@ -678,6 +686,8 @@ export async function listNearbyFieldCaptureTargets(
       id: row.id,
       type: "deal" as const,
       name: row.name,
+      isChangeOrder: row.is_change_order === true,
+      scopeTitle: row.scope_title ?? null,
       recordNumber: resolveDealDisplayNumber({ projectNumber: row.project_number, dealNumber: row.deal_number }),
       stageName: row.stage_name ?? null,
       companyName: row.company_name ?? null,

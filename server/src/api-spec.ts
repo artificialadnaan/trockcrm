@@ -57,6 +57,14 @@ export const apiSpec = {
           bidEstimate: { type: "string", nullable: true, example: "480000.00" },
           awardedAmount: { type: "string", nullable: true, example: "495000.00" },
           changeOrderTotal: { type: "string", default: "0", example: "12500.00" },
+          scopeTitle: {
+            type: "string",
+            nullable: true,
+            maxLength: 120,
+            example: "Balcony Repair",
+            description:
+              "Short scope-of-work title used as the project title in accounting. Distinct from `description`, which is long-form notes. Trimmed on write; blank normalizes to null. Over 120 characters is rejected with 400 SCOPE_TITLE_INVALID.",
+          },
           description: { type: "string", nullable: true },
           propertyAddress: { type: "string", nullable: true },
           propertyCity: { type: "string", nullable: true },
@@ -875,7 +883,7 @@ export const apiSpec = {
           { name: "regionId", in: "query", schema: { type: "string", format: "uuid" } },
           { name: "source", in: "query", schema: { type: "string" } },
           { name: "isActive", in: "query", schema: { type: "boolean", default: true }, description: "Set to false to include soft-deleted deals." },
-          { name: "sortBy", in: "query", schema: { type: "string", enum: ["name", "createdAt", "updatedAt", "awardedAmount", "bidEstimate", "stageEnteredAt"] } },
+          { name: "sortBy", in: "query", schema: { type: "string", enum: ["name", "created_at", "updated_at", "awarded_amount", "stage_entered_at", "expected_close_date", "contract_signed_date", "display_date", "bid_due_date"] } },
           { $ref: "#/components/parameters/SortDirParam" },
           { $ref: "#/components/parameters/PageParam" },
           { $ref: "#/components/parameters/LimitParam" },
@@ -920,6 +928,13 @@ export const apiSpec = {
                   companyId: { type: "string", format: "uuid" },
                   ddEstimate: { type: "string", example: "250000.00" },
                   bidEstimate: { type: "string", example: "480000.00" },
+                  scopeTitle: {
+                    type: "string",
+                    nullable: true,
+                    maxLength: 120,
+                    example: "Balcony Repair",
+                    description: "Short scope-of-work title (the accounting/QuickBooks project title). Over 120 characters is rejected with 400 SCOPE_TITLE_INVALID.",
+                  },
                   description: { type: "string" },
                   propertyAddress: { type: "string" },
                   propertyCity: { type: "string" },
@@ -948,7 +963,7 @@ export const apiSpec = {
               },
             },
           },
-          400: { description: "name and stageId are required." },
+          400: { description: "name and stageId are required; or scopeTitle exceeded 120 characters (SCOPE_TITLE_INVALID)." },
         },
       },
     },
@@ -1043,6 +1058,14 @@ export const apiSpec = {
                   ddEstimate: { type: "string" },
                   bidEstimate: { type: "string" },
                   awardedAmount: { type: "string" },
+                  scopeTitle: {
+                    type: "string",
+                    nullable: true,
+                    maxLength: 120,
+                    example: "Balcony Repair",
+                    description:
+                      "Short scope-of-work title (the accounting/QuickBooks project title). Send null to CLEAR it; omit the key to leave it untouched. Trimmed on write; blank normalizes to null. Over 120 characters is rejected with 400 SCOPE_TITLE_INVALID.",
+                  },
                   description: { type: "string" },
                   propertyAddress: { type: "string" },
                   propertyCity: { type: "string" },
@@ -1073,6 +1096,7 @@ export const apiSpec = {
               },
             },
           },
+          400: { description: "Invalid field value — e.g. scopeTitle exceeded 120 characters (SCOPE_TITLE_INVALID)." },
           403: { description: "Access denied." },
           404: { description: "Deal not found." },
         },
@@ -2395,12 +2419,26 @@ export const apiSpec = {
                   {
                     type: "object",
                     properties: {
-                      nextStatus: { type: "string", enum: ["pending", "in_progress", "completed", "dismissed"] },
+                      nextStatus: { type: "string", enum: ["pending", "in_progress"] },
                       scheduledFor: { type: "string", format: "date-time", nullable: true },
                       waitingOn: { type: "object", nullable: true, additionalProperties: true },
                       blockedBy: { type: "object", nullable: true, additionalProperties: true },
                     },
                     required: ["nextStatus"],
+                  },
+                  {
+                    type: "object",
+                    properties: {
+                      nextStatus: { type: "string", enum: ["completed", "dismissed"] },
+                      resolutionNote: {
+                        type: "string",
+                        minLength: 1,
+                        maxLength: 2000,
+                        pattern: "\\S",
+                        description: "Required explanation of the action taken before closing the task.",
+                      },
+                    },
+                    required: ["nextStatus", "resolutionNote"],
                   },
                 ],
               },
@@ -2428,6 +2466,26 @@ export const apiSpec = {
         tags: ["Tasks"],
         summary: "Mark a task as completed",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  resolutionNote: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 2000,
+                    pattern: "\\S",
+                    description: "Required explanation of the action taken before completing the task.",
+                  },
+                },
+                required: ["resolutionNote"],
+              },
+            },
+          },
+        },
         responses: {
           200: {
             description: "Task completed.",
@@ -2437,6 +2495,7 @@ export const apiSpec = {
               },
             },
           },
+          400: { description: "A written completion explanation is required." },
           403: { description: "Access denied." },
           404: { description: "Task not found." },
         },
@@ -2448,6 +2507,26 @@ export const apiSpec = {
         tags: ["Tasks"],
         summary: "Dismiss a task",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  resolutionNote: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 2000,
+                    pattern: "\\S",
+                    description: "Required explanation of why the task is being dismissed.",
+                  },
+                },
+                required: ["resolutionNote"],
+              },
+            },
+          },
+        },
         responses: {
           200: {
             description: "Task dismissed.",
@@ -2457,6 +2536,9 @@ export const apiSpec = {
               },
             },
           },
+          400: { description: "A written dismissal explanation is required." },
+          403: { description: "Access denied." },
+          404: { description: "Task not found." },
         },
       },
     },

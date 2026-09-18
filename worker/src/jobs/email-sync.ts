@@ -1,3 +1,4 @@
+import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 import crypto from "crypto";
 
@@ -800,12 +801,34 @@ export async function processMailMessage(
 
   // For a deal-assigned email, the activity's parent link columns + the parent-company stat target come
   // FROM THE DEAL (company/property/lead), exactly like CRM sendEmail's resolveOutboundAssociation.
-  let dealParents: { company_id: string | null; property_id: string | null; source_lead_id: string | null } | null =
-    null;
+  let dealParents: {
+    company_id: string | null;
+    property_id: string | null;
+    source_lead_id: string | null;
+    is_dead_stage: boolean;
+  } | null = null;
   if (association.dealId) {
+    // LEFT JOIN, deliberately: an inner join would drop the whole row for a deal whose stage_id is null or
+    // unmatched, and this row feeds the activity's company/property/lead link columns below. Losing those to
+    // add a flag would be a silent regression, so an unresolvable stage COALESCEs to "not dead" — the
+    // behaviour this call site had before the flag existed.
+    //
+    // DEAD, not terminal. is_terminal is true for the whole Won family too — including sent_to_production
+    // and service_sent_to_production, which are AWARDED JOBS STILL IN PRODUCTION. A client emailing about
+    // a roof that is being built right now needs a reply, and this task is the only thing that says so
+    // (the inbound-without-follow-up disconnect is itself terminal-gated on both the dashboard and the
+    // admin-task job). 1,891 of the 1,977 reply-needed tasks on prod sit on Won-family deals, so treating
+    // is_terminal as "dead" here would have suppressed and then swept the overwhelming majority of them.
+    // LOST_DEAL_STAGE_SLUGS is the canonical list (outcomeCategory === 'lost' + its aliases), shared with
+    // the reporting layer so a stage rename cannot make the two disagree.
     const dp = await client.query(
-      `SELECT company_id, property_id, source_lead_id FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
-      [association.dealId]
+      `SELECT d.company_id, d.property_id, d.source_lead_id,
+              COALESCE(psc.slug = ANY($2::text[]), false) AS is_dead_stage
+         FROM ${schemaName}.deals d
+         LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE d.id = $1
+        LIMIT 1`,
+      [association.dealId, [...LOST_DEAL_STAGE_SLUGS]]
     );
     dealParents = dp.rows[0] ?? null;
   }
@@ -906,8 +929,14 @@ export async function processMailMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (!isOutbound && association.dealId) {
+  } else if (!isOutbound && association.dealId && !dealParents?.is_dead_stage) {
     // Reply-task evaluation ("a client replied → maybe a follow-up task") is an INBOUND concern only.
+    //
+    // ...and only while the deal is not DEAD (the Lost family). Note what is and is not gated: the email is
+    // still stored, still associated with the deal, still written as an activity, and still counted in the
+    // deal's email stats above — a message about a closed job belongs on that job's timeline. Only the
+    // "reply needed" TASK is suppressed, and only where there is no longer anything to advance by replying.
+    // A Won or in-production job keeps its reply task, because that client is still owed an answer.
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -1283,8 +1312,8 @@ async function createClassificationTaskRaw(
       input.candidateDealNames.length > 0 ? input.candidateDealNames.join(", ") : "No clear deal candidate";
     await client.query(
       `INSERT INTO ${schemaName}.tasks
-         (title, description, type, priority, status, assigned_to, created_by, office_id, origin_rule, source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id, email_id, due_date, due_time, remind_at)
-       VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, 'email_assignment_queue', 'email_assignment_queue', 'email.received', $6, $7, $8, NULL, $9, $10, NULL, NULL, NULL)`,
+         (title, description, type, priority, status, assigned_to, created_by, office_id, origin_rule, source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id, email_id, due_date, due_time, remind_at, source)
+       VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, 'email_assignment_queue', 'email_assignment_queue', 'email.received', $6, $7, $8, NULL, $9, $10, NULL, NULL, NULL, 'automated')`,
       [
         title,
         `Review email assignment for ${input.contactName}${input.companyName ? ` at ${input.companyName}` : ""}. Candidate deals: ${dealNames}.`,

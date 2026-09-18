@@ -18,7 +18,15 @@ const U = (s: string) => {
   return `00000000-0000-0000-0000-${hex.padStart(12, "0").slice(-12)}`;
 };
 const ST = { opp: U("a1"), won: U("a2"), lost: U("a3") };
-const D = { opp: U("d1"), won: U("d2"), lost: U("d3"), wonArchived: U("d4") };
+const D = {
+  opp: U("d1"),
+  won: U("d2"),
+  lost: U("d3"),
+  wonArchived: U("d4"),
+  // Two change-order children of one parent: near-identical stored names, different scope titles.
+  coPanel: U("d5"),
+  coRoof: U("d6"),
+};
 const FIELD_USER = U("f1");
 const ACCESS = { userId: FIELD_USER, userRole: "field_contractor" as const };
 
@@ -31,7 +39,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text UNIQUE, is_terminal boolean NOT NULL DEFAULT false);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, sales_source_user_id uuid, name text NOT NULL, deal_number text, project_number text, stage_id uuid,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text NOT NULL, scope_title text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
       property_address text, property_city text, property_state text, property_zip text,
       bid_board_stage_slug text, is_active boolean NOT NULL DEFAULT true,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
@@ -50,6 +58,13 @@ beforeAll(async () => {
       ('${D.lost}','Lost Job','TR-3','${ST.lost}',true,  '2026-05-03T00:00:00Z'),
       ('${D.wonArchived}','Won Archived','TR-4','${ST.won}',false,'2026-05-04T00:00:00Z');
 
+    -- A change-order child and a sibling of the SAME parent. Their NAMES are near-identical by
+    -- construction (that is what a change order is), so the scope title is the only thing separating
+    -- them — and it is the only thing either row can be found by.
+    INSERT INTO deals (id, name, deal_number, stage_id, is_active, is_change_order, scope_title, created_at) VALUES
+      ('${D.coPanel}','Tides Park — Change Order 1','TR-5','${ST.won}',true,true,'Panel Relocation','2026-05-05T00:00:00Z'),
+      ('${D.coRoof}','Tides Park — Change Order 2','TR-6','${ST.won}',true,true,'Roof Flashing','2026-05-06T00:00:00Z');
+
     -- star ALL four directly (bypassing the gate) so the starred list's own filter is what's under test
     INSERT INTO field_user_starred_projects (user_id, deal_id) VALUES
       ('${FIELD_USER}','${D.opp}'),('${FIELD_USER}','${D.won}'),('${FIELD_USER}','${D.lost}'),('${FIELD_USER}','${D.wonArchived}');
@@ -65,8 +80,11 @@ describe("field surface — WON browsable, LOST excluded", () => {
   it("browse list shows active-pipeline AND Won, but NOT Lost or archived Won", async () => {
     const { projects, total } = await listFieldProjects(tdb, ACCESS, {});
     const ids = projects.map((p) => p.id).sort();
-    expect(ids).toEqual([D.opp, D.won].sort());
-    expect(total).toBe(2);
+    // The two change-order children are Won and active, so they belong in this list on exactly the same
+    // rule as D.won — they are listed here rather than excluded, because excluding them would weaken
+    // what this test asserts (which STAGES are browsable), not strengthen it.
+    expect(ids).toEqual([D.opp, D.won, D.coPanel, D.coRoof].sort());
+    expect(total).toBe(4);
     expect(ids).not.toContain(D.lost);
     expect(ids).not.toContain(D.wonArchived);
   });
@@ -74,6 +92,27 @@ describe("field surface — WON browsable, LOST excluded", () => {
   it("search also surfaces a Won deal", async () => {
     const { projects } = await listFieldProjects(tdb, ACCESS, { search: "Won Job" });
     expect(projects.map((p) => p.id)).toEqual([D.won]);
+  });
+
+  it("a change order is findable by its scope phrase, and the row CARRIES the phrase back", async () => {
+    // The round trip Codex's finding is about. Matching on scope_title without returning it hands the
+    // user a result they cannot account for: both change orders are stored "Tides Park — Change Order
+    // N", so the name explains nothing about why THIS row came back for "Panel Relocation".
+    const { projects } = await listFieldProjects(tdb, ACCESS, { search: "Panel Relocation" });
+
+    expect(projects.map((p) => p.id)).toEqual([D.coPanel]);
+    expect(projects[0]!.scopeTitle).toBe("Panel Relocation");
+  });
+
+  it("carries each sibling's OWN title, and null for a project that has none", async () => {
+    // Per-row, not a constant: the two change orders differ ONLY here, and a deal without an
+    // accounting title must come back null rather than absent or an invented string.
+    const { projects } = await listFieldProjects(tdb, ACCESS, {});
+    const byId = new Map(projects.map((p) => [p.id, p.scopeTitle]));
+
+    expect(byId.get(D.coPanel)).toBe("Panel Relocation");
+    expect(byId.get(D.coRoof)).toBe("Roof Flashing");
+    expect(byId.get(D.won)).toBeNull();
   });
 
   it("starred list applies the same filter — Won stays, Lost/archived drop", async () => {

@@ -36,7 +36,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.region_config (id uuid PRIMARY KEY, name varchar(100) NOT NULL);
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_terminal boolean NOT NULL DEFAULT false);
-    CREATE TABLE deals (id uuid PRIMARY KEY, name text, region_id uuid, project_number text, stage_id uuid, bid_board_stage_slug text, is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false);
+    CREATE TABLE deals (id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false, region_id uuid, project_number text, stage_id uuid, bid_board_stage_slug text, is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false);
     SET search_path TO public;
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards]));

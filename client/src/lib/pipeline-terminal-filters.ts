@@ -40,6 +40,27 @@ export type TerminalDateFilter =
     }
   | { preset: "custom"; customStart: string; customEnd?: string };
 
+/**
+ * Whether two resolved terminal-date filter maps mean the same thing.
+ *
+ * `resolveDrilldownTerminalDateFilters` builds a FRESH object every call, and that object is a
+ * dependency of the board fetch. Re-setting state to a structurally identical value therefore used to
+ * fire a SECOND /deals/pipeline request on every mount — a 1.6–2.5s query issued twice for no change at
+ * all. Callers compare before setting so identity only changes when the filter actually does.
+ */
+export function terminalDateFiltersEqual(
+  left: Record<TerminalOutcome, TerminalDateFilter>,
+  right: Record<TerminalOutcome, TerminalDateFilter>
+): boolean {
+  return (["won", "lost"] as const).every((outcome) => {
+    const a = left[outcome];
+    const b = right[outcome];
+    return (
+      a.preset === b.preset && a.customStart === b.customStart && a.customEnd === b.customEnd
+    );
+  });
+}
+
 const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
   won: "deals.kanban.wonFilter",
   lost: "deals.kanban.lostFilter",
@@ -326,9 +347,26 @@ export function buildDealStageWorkspacePath(input: {
       input.queryParams instanceof URLSearchParams
         ? Array.from(input.queryParams.entries())
         : Object.entries(input.queryParams);
+    // ESTIMATOR WINS, mirroring how the dashboard reads these two. The caller hands us the RAW
+    // searchParams, so a shared or hand-edited URL carrying both dimensions would otherwise re-introduce
+    // the owner param that the dashboard just suppressed — and the stage page consumes it, giving a
+    // drill-down narrower than the board that opened it.
+    const hasEstimator = entries.some(([key, value]) => key === "estimatorId" && Boolean(value));
     for (const [key, value] of entries) {
       if (!value) continue;
-      if (key === "assignedRepId" || key.startsWith("estimate_sent_")) {
+      if (key === "assignedRepId" && hasEstimator) continue;
+      // estimatorId rides along with assignedRepId: a stage column counted under an estimator filter must
+      // open a stage page holding the same set, or the drill-down stops reconciling with the board.
+      // `search` rides along for the same reason: the board's column count is search-narrowed, so its
+      // "Showing 50 of 87 — view all 87" must open those 87 and not the whole stage. This allowlist is
+      // the ONLY thing that reaches the generated URL — a caller setting a key that is not named here is
+      // silently dropped, which is exactly how the first cut of this shipped as a no-op.
+      if (
+        key === "assignedRepId" ||
+        key === "estimatorId" ||
+        key === "search" ||
+        key.startsWith("estimate_sent_")
+      ) {
         params.set(key, value);
       }
     }

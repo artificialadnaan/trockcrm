@@ -87,6 +87,43 @@ const QUIET: DailySummaryPayload = {
 };
 const PAGE_URL = "https://trockcrm.com/daily-summary/2026-06-12?token=TESTTOKEN123";
 
+describe("renderDailySummaryEmail — change-order labels match the page it links to", () => {
+  // The payload has carried `dealIsChangeOrder` since the won/advanced readers were wired, and the
+  // public page already used it. The EMAIL rendered the raw stored name, so the digest and the page it
+  // links to disagreed about what the same deal is called.
+  const CO_PAYLOAD: DailySummaryPayload = {
+    ...ACTIVE,
+    wonToday: [
+      // Ordinary deal, human-typed change-order-shaped name. THE discriminating row: only the flag can
+      // get this right, and syntax gets it wrong.
+      { dealName: "Lobby — Change Order 1", dealIsChangeOrder: false, repName: "Kaleb Marshall", value: 186000 },
+      { dealName: "Tides Park Lane — Change Order 2", dealIsChangeOrder: true, repName: "Sidney Monroe", value: 126000 },
+    ],
+    advancedToday: [
+      { dealName: "Lobby — Change Order 1", dealIsChangeOrder: false, repName: "Adnaan", fromStage: "Opportunity", toStage: "Estimating" },
+    ],
+  };
+
+  it("leaves an ordinary deal's name alone in the won rows", () => {
+    const html = renderDailySummaryEmail(CO_PAYLOAD, PAGE_URL);
+    expect(html).toContain("Lobby &mdash; Change Order 1".replace("&mdash;", "—"));
+    expect(html).not.toContain("Change Order 1 — Lobby");
+  });
+
+  it("moves the label to the front for a real change-order child", () => {
+    expect(renderDailySummaryEmail(CO_PAYLOAD, PAGE_URL)).toContain("Change Order 2 — Tides Park Lane");
+  });
+
+  it("applies the same rule to the advanced-today rows", () => {
+    const html = renderDailySummaryEmail(
+      { ...CO_PAYLOAD, wonToday: [] },
+      PAGE_URL
+    );
+    expect(html).toContain("Lobby — Change Order 1");
+    expect(html).not.toContain("Change Order 1 — Lobby");
+  });
+});
+
 describe("renderDailySummaryEmail", () => {
   it("states 'as of 5:00 PM CT' so it isn't read as a complete daily total", () => {
     expect(renderDailySummaryEmail(ACTIVE, PAGE_URL)).toContain(AS_OF_LABEL);

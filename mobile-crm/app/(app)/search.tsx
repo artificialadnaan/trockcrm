@@ -189,6 +189,7 @@ export default function SearchScreen() {
                 item.isChangeOrder ? "Change order" : null,
                 TYPE_LABEL[item.entityType],
                 item.primaryLabel,
+                item.entityType === "deal" ? item.scopeTitle : null,
                 item.secondaryLabel,
                 item.tertiaryLabel,
               ]
@@ -218,6 +219,16 @@ export default function SearchScreen() {
                   <Text style={styles.badge}>{TYPE_LABEL[item.entityType]}</Text>
                 </View>
               </View>
+              {/* The scope title, for the same reason as `tertiaryLabel` below and gated the same way
+                  the CO badge is: the server SEARCHES and RANKS on scope_title, so this is often the
+                  only thing on the row that matches what the rep typed — most sharply on a change-order
+                  child, whose name is its parent's and carries no scope. Deal-only: this row also
+                  renders files, and a file's name is not a scope. */}
+              {item.entityType === "deal" && item.scopeTitle ? (
+                <Text testID="search-scope-title" style={styles.rowScopeTitle} numberOfLines={1}>
+                  {item.scopeTitle}
+                </Text>
+              ) : null}
               {/* BOTH labels. `tertiaryLabel` is often WHY the row matched — a contact reached
                   through its company's name keeps its email in `secondaryLabel` and the company in
                   `tertiaryLabel`, so showing only the secondary returns a contact with no visible
@@ -333,6 +344,9 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     overflow: "hidden",
   },
+  // Between the name and the meta line, and weighted above the meta: it is the matched field, not
+  // trailing detail.
+  rowScopeTitle: { ...theme.type.small, fontWeight: "600", color: theme.color.textPrimary },
   rowMeta: { ...theme.type.small, color: theme.color.textSecondary },
   otherOffice: { ...theme.type.small, color: theme.color.textMuted, paddingVertical: theme.space.md },
 });

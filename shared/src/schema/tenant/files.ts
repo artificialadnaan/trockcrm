@@ -64,6 +64,10 @@ export const files = pgTable(
     contactId: uuid("contact_id"),
     procoreProjectId: bigint("procore_project_id", { mode: "number" }),
     changeOrderId: uuid("change_order_id"),
+    // Supporting documents on a marketing & advertising expense request (migration 0232). A dedicated
+    // nullable FK rather than a join table, because `files_association_check` rejects a row that attaches
+    // to nothing — so no file row could ever have existed for a join table to point at.
+    marketingExpenseRequestId: uuid("marketing_expense_request_id"),
     externalUrl: varchar("external_url", { length: 2000 }),
     externalThumbnailUrl: varchar("external_thumbnail_url", { length: 2000 }),
     companycamPhotoId: varchar("companycam_photo_id", { length: 50 }),
@@ -93,6 +97,7 @@ export const files = pgTable(
     index("files_deal_idx").on(table.dealId, table.category, table.createdAt),
     index("files_lead_idx").on(table.leadId, table.category, table.createdAt),
     index("files_folder_idx").on(table.folderPath, table.displayName),
+    index("files_marketing_expense_request_idx").on(table.marketingExpenseRequestId, table.createdAt),
   ]
 );
 

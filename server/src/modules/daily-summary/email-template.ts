@@ -1,7 +1,12 @@
-import { breakdownLabel } from "@trock-crm/shared/types";
+import { breakdownLabel, formatDealDisplayName } from "@trock-crm/shared/types";
 import type { DailySummaryPayload, LeaderRow, RepBreakdown, WonDeal } from "./service.js";
 
 // Email-client-safe: tables + inline styles only (no <style>, flexbox, or JS — survives Outlook/Gmail).
+//
+// Deal names go through formatDealDisplayName with the row's authoritative flag, exactly as the public
+// page does. The payload has carried `dealIsChangeOrder` since the won/advanced readers were wired; the
+// email rendered the raw stored name, so the same digest disagreed with its own "full list on the page"
+// link about what a deal is called.
 // Brand: T Rock red accents (#CC0000 / #790000) on a neutral body.
 
 const RED = "#CC0000";
@@ -96,7 +101,7 @@ function wonRows(won: WonDeal[]): string {
       (d) => `
       <tr>
         <td style="padding:3px 8px 3px 0; font:13px Arial; color:${DARK};">
-          <span style="color:#16a34a;">&#9679;</span> ${esc(d.dealName)}
+          <span style="color:#16a34a;">&#9679;</span> ${esc(formatDealDisplayName(d.dealName, d.dealIsChangeOrder))}
         </td>
         <td style="padding:3px 8px; font:13px Arial; color:${MUTE};">${esc(d.repName)}</td>
         <td style="padding:3px 0; font:bold 13px Arial; color:${DARK}; text-align:right; white-space:nowrap;">${esc(usdFull(d.value))}</td>
@@ -120,7 +125,7 @@ function advancedRows(moves: DailySummaryPayload["advancedToday"]): string {
       (m) => `
       <tr>
         <td style="padding:5px 0; border-bottom:1px solid #f1f5f9;">
-          <div style="font:bold 13px Arial; color:${DARK};">&#9656; ${esc(m.dealName)}</div>
+          <div style="font:bold 13px Arial; color:${DARK};">&#9656; ${esc(formatDealDisplayName(m.dealName, m.dealIsChangeOrder))}</div>
           <div style="font:12px Arial; color:${MUTE}; padding-top:1px;">${esc(m.fromStage ?? "—")} &rarr; ${esc(m.toStage ?? "—")} &middot; ${esc(m.repName)}</div>
         </td>
       </tr>`,

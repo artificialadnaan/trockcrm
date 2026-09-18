@@ -39,6 +39,8 @@ export interface EmailThreadBinding {
   leadName: string | null;
   dealId: string | null;
   dealName: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   projectId: string | null;
   projectName: string | null;
   confidence: "high" | "medium" | "low";

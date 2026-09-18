@@ -92,6 +92,11 @@ export const deals = pgTable(
     // deal incl. bid-board-owned; unlike awarded_amount it is NOT role-gated. Migration 0164.
     ddEstimateOverridden: boolean("dd_estimate_overridden").notNull().default(false),
     changeOrderTotal: numeric("change_order_total", { precision: 14, scale: 2 }).default("0"),
+    // A SHORT title for the scope of work ("Balcony Repair", "Plumbing Renovations") — the field
+    // accounting reads to name a project in QuickBooks. Distinct from `description` below, which is the
+    // 5000-char notes field; the varchar(120) here is what stops this one becoming a second one. Cap is
+    // DEAL_SCOPE_TITLE_MAX_LENGTH in shared/types and must move with this column. Migration 0218.
+    scopeTitle: varchar("scope_title", { length: 120 }),
     description: text("description"),
     estimator: text("estimator"),
     propertyAddress: text("property_address"),
@@ -158,13 +163,72 @@ export const deals = pgTable(
     bidBoardProfitMarginPct: numeric("bid_board_profit_margin_pct", { precision: 9, scale: 4 }),
     bidBoardTotalSales: numeric("bid_board_total_sales", { precision: 14, scale: 2 }),
     bidBoardCreatedAt: timestamp("bid_board_created_at", { withTimezone: true }),
+    /**
+     * LAST KNOWN Bid Board Due Date — not "the current export's Due Date". The ingest mirror writes it
+     * through a COALESCE (buildBidBoardDealUpdateSql), so a blank cell on a later export leaves the last
+     * date we were given in place rather than clearing it: a blank export is the absence of information,
+     * not an instruction to forget.
+     *
+     * Read as a SIGNAL, never as a value: the bid-due-date resolver ([[bid-due-date]]) compares this
+     * against `(bid_due_date AT TIME ZONE 'UTC')::date` to decide whether the Bid Board's date has LANDED
+     * in the CRM column. Nothing publishes this column's value to a user.
+     */
     bidBoardDueDate: date("bid_board_due_date"),
+    /**
+     * PROVENANCE for the read-back (migration 0225): when the Bid Board sync last wrote `bid_due_date`.
+     * NULL means "this deal's bid due date did not come from the Bid Board".
+     *
+     * Required by the bid-due-date resolver's signal, together with a still-matching day. Neither alone is
+     * correct: comparing days alone accepts a COINCIDENCE (the mirror has been populated on prod for
+     * months, so a pre-existing date sharing the board's calendar day would look landed the instant the
+     * flag flipped, with no sync having run), and the stamp alone goes stale the moment a rep or the lead
+     * corrects the date. Deliberately never cleared — it records a historical fact; the day check is what
+     * revokes the override.
+     */
+    bidDueDateFromBidBoardAt: timestamp("bid_due_date_from_bid_board_at", { withTimezone: true }),
+    /**
+     * The Bid Board project the stamp above was earned ON (migration 0225) — a copy of
+     * `bid_board_project_number` taken in the same write.
+     *
+     * The stamp vouches for "the sync wrote this value FOR THE PROJECT THIS DEAL IS CURRENTLY ON", not
+     * merely "the sync once wrote this value". Without the project identity, a deal that was detached and
+     * later linked to a genuinely NEW Bid Board project would keep firing the override on provenance
+     * earned from the retired project — the link path clears `bid_board_detached_at` but preserves the
+     * dates and the stamp. The detach NULLs `bid_board_project_number`, so a mismatch is detected the
+     * instant a deal leaves its project and stays detected until a sync legitimately re-earns the stamp.
+     */
+    bidDueDateBidBoardProjectNumber: text("bid_due_date_bid_board_project_number"),
     bidBoardCustomerName: text("bid_board_customer_name"),
     bidBoardCustomerContactRaw: text("bid_board_customer_contact_raw"),
     bidBoardProjectNumber: text("bid_board_project_number"),
     projectNumber: text("project_number"),
     bidBoardLinkedAt: timestamp("bid_board_linked_at", { withTimezone: true }),
     bidBoardLastUpdatedAt: timestamp("bid_board_last_updated_at", { withTimezone: true }),
+    // Bid Board DETACH marker (migration 0200) — set by "Move back to Opportunity". While non-null the
+    // deal is invisible to every Bid Board ingress (the export matcher's base WHERE + all four of its
+    // write sites + the SyncHub /opportunities webhook), so the next export cannot drag it forward
+    // again. The procore/synchub identity columns above are deliberately PRESERVED: nulling them would
+    // make the webhook miss and INSERT a bid-board-owned twin of the same project. Cleared only when a
+    // NEW Bid Board project is genuinely created for the deal (the internal-RFP bid-board-created
+    // callback), which is the one moment re-attachment is correct.
+    bidBoardDetachedAt: timestamp("bid_board_detached_at", { withTimezone: true }),
+    bidBoardDetachedBy: uuid("bid_board_detached_by"),
+    bidBoardDetachReason: text("bid_board_detach_reason"),
+    // Did the detach sever a REAL Bid Board project? PERSISTED at detach time rather than derived
+    // afterwards: the answer counts is_bid_board_owned / bid_board_project_number /
+    // bid_board_linked_at / read_only_synced_at, and the detach CLEARS all four, so nothing on the row
+    // afterwards can reconstruct it. The preserved procore/synchub identity is not a substitute — most
+    // Bid Board linked deals in prod carry neither. Drives the standing "delete this project from the
+    // Bid Board" reminder, which must not appear on a CRM-only deal and must not vanish on a real one.
+    //
+    // SEMANTIC (the field name implies neither, so it is stated here): "was there a real Bid Board
+    // project at the moment this deal was DISCONNECTED" — a property of the RETIRED project, not of the
+    // deal's live state and not "was ever linked at any point in its history". A repeat detach
+    // therefore preserves the stored answer rather than recomputing it, and only a genuine
+    // re-attachment (the internal-RFP bid-board-created callback) resets it to NULL so the next detach
+    // computes fresh. Those two readings cannot diverge today — a detached deal cannot become linked
+    // again without passing through that callback — which is why preserving is safe.
+    bidBoardDetachedWasLinked: boolean("bid_board_detached_was_linked"),
     // Assigned PM is not present in the Bid Board export; role polling can populate this after portfolio handoff.
     bidBoardAssignedPm: text("bid_board_assigned_pm"),
     intendedProjectNumber: text("intended_project_number"),
@@ -294,5 +358,13 @@ export const deals = pgTable(
     index("deals_property_active_idx")
       .on(table.propertyId)
       .where(sql`${table.isActive} = TRUE`),
+    // Partial index over the DETACHED deals only — the small side. Source-of-truth mirror of migration
+    // 0200. It backs the Bid Board sync's classification lookup (the "was this deliberately detached,
+    // or is there genuinely no CRM deal?" re-query that runs only after a match miss); the hot matcher
+    // path uses it as an anti-join filter on rows it already located, so it neither needs nor would use
+    // an index on the NULL side.
+    index("deals_bid_board_detached_idx")
+      .on(table.bidBoardDetachedAt)
+      .where(sql`${table.bidBoardDetachedAt} IS NOT NULL`),
   ]
 );

@@ -58,6 +58,10 @@ export interface DirectorDashboardData {
     dealId: string;
     dealNumber: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     repName: string;
     daysInStage: number;
@@ -91,6 +95,10 @@ export interface DirectorDashboardData {
   downstreamBottlenecks?: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     mirroredStageStatus: string | null;
     workflowRoute: "normal" | "service";
@@ -104,6 +112,10 @@ export interface DirectorDashboardData {
     repId: string | null;
     repName: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     mirroredStageStatus: string | null;
     workflowRoute: "normal" | "service";
@@ -140,6 +152,10 @@ export interface DirectorDashboardData {
     dealId: string;
     dealNumber: string | null;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     repId: string | null;
     repName: string;
     outcome: "won" | "lost";
@@ -242,6 +258,8 @@ export interface RepDetailData {
     dealId: string;
     dealNumber: string | null;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     companyName: string | null;
     propertyName: string | null;
     paidRevenue: number;
@@ -255,6 +273,8 @@ export interface RepDetailData {
     dealId: string;
     dealNumber: string | null;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     companyName: string | null;
     propertyName: string | null;
     value: number;
@@ -291,6 +311,10 @@ export interface RepDetailData {
     dealId: string;
     dealNumber: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     repName: string;
     daysInStage: number;
@@ -467,6 +491,9 @@ export interface CommissionEvidenceRecord {
   value: number | null;
   date: string | null;
   companyName: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. Absent on lead /
+   *  activity / manager-override rows, whose `name` is not a deal name (see server CommissionEvidenceRecord). */
+  dealIsChangeOrder?: boolean | null;
   // Won·unsigned ("missing contract date") reconciliation fields (see server CommissionEvidenceRecord).
   projectNumber?: string | null;
   wonClosedDate?: string | null;

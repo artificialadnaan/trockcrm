@@ -35,6 +35,8 @@ export interface AtRiskRecord {
   id: string;
   dealNumber: string | null;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   repId: string | null;
   repName: string;
   stageLabel: string;
@@ -55,6 +57,7 @@ export function buildAtRiskDealsSql(repId?: string | null): SQL {
     SELECT d.id AS id,
            d.deal_number AS deal_number,
            d.name AS name,
+           d.is_change_order AS is_change_order,
            d.assigned_rep_id AS rep_id,
            COALESCE(u.display_name, '') AS rep_name,
            COALESCE(psc.name, '') AS stage_label,
@@ -92,6 +95,7 @@ interface AtRiskRow {
   deal_number: string | null;
   name: string;
   rep_id: string | null;
+  is_change_order?: boolean | null;
   rep_name: string;
   stage_label: string;
   value: unknown;
@@ -113,6 +117,7 @@ export async function getAtRiskWatchlist(tenantDb: TenantDb, options: AtRiskOpti
     id: String(r.id),
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
     name: r.name,
+    isChangeOrder: r.is_change_order ?? undefined,
     repId: r.rep_id == null ? null : String(r.rep_id),
     repName: r.rep_name || (r.rep_id ? "Unknown rep" : "Unassigned"),
     stageLabel: r.stage_label,

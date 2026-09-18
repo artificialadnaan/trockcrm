@@ -158,6 +158,41 @@ describe("seed-portfolio-projects-from-synchub", () => {
     ]);
   });
 
+  it("seeds an active project whose stage is blank instead of short-circuiting it out", () => {
+    // The stage guard used to be `!rawStage || !isBoardRelevant(rawStage)`. That `!rawStage` half
+    // excluded a blank-stage project BEFORE the fail-open classifier ran — the same shape of bug as
+    // the board drop, one layer up: a project nobody classified became a project nobody ingested,
+    // and the "Other / No Column" bucket could never surface it because no row was ever written.
+    const { candidates, excluded } = splitSeedCandidates([
+      project({ procore_id: "blank-both", project_stage_name: null, stage: null }),
+      project({ procore_id: "blank-empty-string", project_stage_name: "", stage: "   " }),
+    ]);
+
+    expect(excluded).toEqual([]);
+    expect(candidates.map((candidate) => candidate.procoreProjectId)).toEqual([
+      "blank-both",
+      "blank-empty-string",
+    ]);
+    // current_stage is NOT NULL (0135), so a blank stage stores "" rather than an invented name.
+    expect(candidates[0].currentStage).toBe("");
+    expect(candidates[0].currentStageNormalized).toBe("");
+  });
+
+  it("still excludes rows it physically cannot store, and still reports why", () => {
+    // These guards are NOT the same class as the stage short-circuit: procore_id and company_id are
+    // the ON CONFLICT key and are NOT NULL, so there is no row to write and nothing to surface.
+    const { candidates, excluded } = splitSeedCandidates([
+      project({ procore_id: null, project_stage_name: "Buy Out" }),
+      project({ procore_id: "no-company", project_stage_name: "Buy Out", company_id: null, properties: {} }),
+    ]);
+
+    expect(candidates).toEqual([]);
+    expect(excluded.map((row) => row.reason)).toEqual([
+      "missing_procore_project_id",
+      "missing_procore_company_id",
+    ]);
+  });
+
   it("summarizes SyncHub value freshness for PR-ready dry-run evidence", () => {
     const summary = summarizeSyncHubValueFreshness(
       [

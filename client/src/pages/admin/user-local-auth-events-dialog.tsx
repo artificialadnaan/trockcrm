@@ -25,7 +25,7 @@ function formatTimestamp(value: string) {
 export function UserLocalAuthEventsDialog(props: UserLocalAuthEventsDialogProps) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Local Auth History</DialogTitle>
           <DialogDescription>

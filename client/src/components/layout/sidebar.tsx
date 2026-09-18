@@ -32,7 +32,9 @@ import {
   DollarSign,
   Ticket,
   Hourglass,
+  Megaphone,
   type LucideIcon,
+  CalendarClock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -83,6 +85,19 @@ const navItems: NavItem[] = [
   { to: "/commissions", icon: DollarSign, label: "Commissions", roles: ["rep"] },
   { to: "/projects", icon: Building2, label: "Projects", roles: ["admin", "director", "rep"] },
   { to: "/deals/pending-rfp", icon: Hourglass, label: "Pending RFP", roles: ["admin", "director", "rep"] },
+  // Submitting a marketing/advertising expense request is an ordinary staff action, so it sits in the
+  // MAIN nav rather than under ADMIN — only the approver QUEUE is admin-gated (see adminGroups below).
+  //
+  // Roles enumerated literally, and matched line-for-line in mobile-nav.tsx. `construction` is included:
+  // it is a real CRM role, the server route admits it (requireCrmUser), and a booth or a sponsorship is
+  // not a sales-only expense. `sales_manager` is NOT: it is in this file's Role union and in neither
+  // USER_ROLES nor CRM_ASSIGNABLE_ROLES, so no account can hold it, and it appears in zero entries here.
+  {
+    to: "/marketing-expense-requests",
+    icon: Megaphone,
+    label: "Expense Requests",
+    roles: ["admin", "director", "rep", "construction"],
+  },
 ];
 
 const directorItems: NavItem[] = [
@@ -102,6 +117,7 @@ const adminGroups: AdminGroup[] = [
       { to: "/admin/lead-due-diligence-queue", icon: Shield, label: "Lead DD Queue", roles: ["admin", "director"] },
       { to: "/admin/merge-queue", icon: GitMerge, label: "Merge Queue", roles: ["admin", "director"] },
       { to: "/admin/directory-merge-queue", icon: Building2, label: "Directory Merge Queue", roles: ["admin", "director"] },
+      { to: "/admin/marketing-expense-requests", icon: Megaphone, label: "Expense Approvals", roles: ["admin", "director"] },
       { to: "/admin/notification-recipients", icon: BellRing, label: "Notification Recipients", roles: ["admin"] },
     ],
   },
@@ -260,7 +276,7 @@ export function Sidebar() {
 
       <nav className="flex-1 px-2 space-y-1">
         {visibleNavItems.map((item) => {
-          // Projects gets an on-hover flyout submenu (All Projects · QC Reports).
+          // Projects gets an on-hover flyout submenu (All Projects · QC Reports · Weekly Reports · Field Team).
           if (!item.external && item.to === "/projects") {
             const subItemClass = ({ isActive }: { isActive: boolean }) =>
               `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-semibold transition-colors ${
@@ -282,6 +298,9 @@ export function Sidebar() {
                     </NavLink>
                     <NavLink to="/projects/qc-reports" className={subItemClass}>
                       <ClipboardCheck className="h-4 w-4" /> QC Reports
+                    </NavLink>
+                    <NavLink to="/projects/weekly-reports" className={subItemClass}>
+                      <CalendarClock className="h-4 w-4" /> Weekly Reports
                     </NavLink>
                     <NavLink to="/projects/field-team" className={subItemClass}>
                       <Users className="h-4 w-4" /> Field Team
@@ -412,6 +431,7 @@ export function Sidebar() {
             variant="ghost"
             size="icon"
             className="text-slate-500 hover:bg-slate-100 hover:text-slate-950"
+            aria-label="Sign out"
             onClick={logout}
           >
             <LogOut className="h-4 w-4" />

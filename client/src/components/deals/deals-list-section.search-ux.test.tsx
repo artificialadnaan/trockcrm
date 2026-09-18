@@ -13,12 +13,14 @@ const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
+  useRepRosterMock: vi.fn(() => ({ reps: [], loading: false, error: null, loadedOfficeId: null, refetch: vi.fn() })),
   apiMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({ useDeals: mocks.useDealsMock }));
 vi.mock("@/hooks/use-pipeline-config", () => ({ usePipelineStages: mocks.usePipelineStagesMock }));
 vi.mock("@/hooks/use-task-assignees", () => ({ useTaskAssignees: mocks.useTaskAssigneesMock }));
+vi.mock("@/hooks/use-rep-roster", () => ({ useRepRoster: mocks.useRepRosterMock }));
 vi.mock("@/lib/api", () => ({ api: mocks.apiMock }));
 
 // Plain input so typing via the native value setter behaves predictably; the real

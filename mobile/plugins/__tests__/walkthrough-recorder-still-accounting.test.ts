@@ -23,7 +23,10 @@ import { join } from "path";
  *      allocated. Reading the allocation index means a failed write still counts, so a walk whose
  *      storage ran out — failing the still write and the video finalize together — keeps a directory
  *      that nothing can ever open: the recovery scan refuses the unfinalized mp4 and finds no still
- *      beside it, and a multi-gigabyte folder stays on the device permanently.
+ *      beside it, and a multi-gigabyte folder stays on the device permanently. The same decision now
+ *      also keeps a directory holding a closed narration.m4a, which is the mirror-image loss: the
+ *      recovery scan WOULD offer that walk, and discarding deletes the one recording that survived
+ *      the failure the standalone recorder exists for.
  *
  * If this file is ever genuinely restructured, update the guard deliberately — do not delete it
  * because it went red.
@@ -88,10 +91,18 @@ describe("WalkthroughRecorder.swift still accounting (source guard)", () => {
   });
 
   it("decides keep-or-discard from stills WRITTEN, not filenames allocated", () => {
-    // The single most consequential line in the file: `finalized || stills > 0 ? .keep : .discard`.
+    // The single most consequential line in the file. narration.m4a joined the disjunction after
+    // review: a finalize failure with no still deleted a narration file that was already closed and
+    // recoverable — the exact walk the standalone recorder exists for. Both operands are pinned for
+    // the same reason, and both are the ON-DISK answer rather than the intent: `stillsWritten` is
+    // JPEGs that landed (not filenames allocated), and `narration?.audioUri` is what
+    // `narrationFileUrl()` returns after checking the file's bytes (not "the recorder was started").
     expect(SOURCE).toContain("let stills = stillsWritten");
     expect(SOURCE).not.toContain("let stills = stillIndex");
-    expect(SOURCE).toMatch(/teardown\(finalized \|\| stills > 0 \? \.keep : \.discard\)/);
+    expect(SOURCE).toContain("let narrationKept = narration?.audioUri != nil");
+    expect(SOURCE).toMatch(
+      /teardown\(finalized \|\| stills > 0 \|\| narrationKept \? \.keep : \.discard\)/,
+    );
   });
 
   it("resets both counters when a walk claims the recorder", () => {

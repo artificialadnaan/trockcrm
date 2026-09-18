@@ -73,6 +73,26 @@ describe("PublicPhotoViewerPage", () => {
     }
   });
 
+  it("renders the deal name VERBATIM — the server already formatted it and sends no flag to re-decide with", async () => {
+    // The change-order relabel is decided by `deals.is_change_order`, which the public payload
+    // deliberately does not carry (server: public-photo-tokens exposure lock). The server formats the
+    // name before sending it, so this page must render the string as-is.
+    //
+    // The name below is what the server sends for an ORDINARY deal a customer happened to name that way:
+    // flag false, so no relabel. A client that "helpfully" re-ran formatDealDisplayName here would have
+    // only the syntax to go on, guess "generated child", and show "Change Order 1 — Portfolio Roof" to an
+    // external viewer. That regression is the reason this test exists.
+    apiMock.mockResolvedValue({
+      deal: { name: "Portfolio Roof — Change Order 1", propertyAddress: "123 Main St" },
+      photos: [basePhoto],
+    });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Portfolio Roof — Change Order 1"));
+    expect(node.textContent).not.toContain("Change Order 1 — Portfolio Roof");
+  });
+
   it("renders the invalid, expired, or revoked link state without redirecting to CRM auth", async () => {
     apiMock.mockRejectedValue(new Error("not found"));
 

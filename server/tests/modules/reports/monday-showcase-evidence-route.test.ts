@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseShowcaseEvidenceParams, assertShowcaseEvidenceAccess } from "../../../src/modules/reports/routes.js";
+import { readFileSync } from "node:fs";
+import {
+  parseShowcaseEvidenceParams,
+  assertShowcaseEvidenceAccess,
+  parseShowcaseRouteBuckets,
+  readShowcaseRouteParam,
+} from "../../../src/modules/reports/routes.js";
 
 // The evidence endpoint's query parsing/validation (the HTTP wiring is thin; this locks the contract).
 describe("parseShowcaseEvidenceParams", () => {
@@ -131,5 +137,159 @@ describe("assertShowcaseEvidenceAccess — the region drill's elevated surface i
     const rep = "11111111-1111-1111-1111-111111111111";
     expect(() => parseShowcaseEvidenceParams({ metric: "pipeline", repId: rep, regionName: "West Coast" })).toThrow(/only be combined for the won metric/);
     expect(() => parseShowcaseEvidenceParams({ metric: "projection", repId: rep, regionName: "Central" })).toThrow(/only be combined for the won metric/);
+  });
+});
+
+// The Service / Other selection, shared by BOTH showcase endpoints. An unrecognised value must be a 400 --
+// never a silently full result under a filtered-looking UI -- and an ABSENT value must stay exactly the
+// no-narrowing request the report has always made.
+describe("parseShowcaseRouteBuckets", () => {
+  it("absent means no narrowing at all (undefined, not an implicit both-list)", () => {
+    expect(parseShowcaseRouteBuckets(undefined)).toBeUndefined();
+  });
+
+  it("accepts each single bucket and the explicit pair", () => {
+    expect(parseShowcaseRouteBuckets("service")).toEqual(["service"]);
+    expect(parseShowcaseRouteBuckets("other")).toEqual(["other"]);
+    expect(parseShowcaseRouteBuckets("service,other")).toEqual(["service", "other"]);
+  });
+
+  it("normalizes order and whitespace so a link cannot mean two different things", () => {
+    expect(parseShowcaseRouteBuckets("other,service")).toEqual(["service", "other"]);
+    expect(parseShowcaseRouteBuckets(" service , other ")).toEqual(["service", "other"]);
+  });
+
+  it("rejects an unknown bucket rather than dropping it and returning a broader set", () => {
+    expect(() => parseShowcaseRouteBuckets("banana")).toThrow(/routes/);
+    expect(() => parseShowcaseRouteBuckets("service,banana")).toThrow(/routes/);
+    // 'normal' is the raw COLUMN value, not a bucket name -- accepting it would quietly mean "other".
+    expect(() => parseShowcaseRouteBuckets("normal")).toThrow(/routes/);
+  });
+
+  it("rejects a duplicate bucket", () => {
+    expect(() => parseShowcaseRouteBuckets("service,service")).toThrow(/duplicate/);
+  });
+
+  it("rejects an EMPTY selection -- there is no honest report for 'neither'", () => {
+    expect(() => parseShowcaseRouteBuckets("")).toThrow(/at least one/);
+    expect(() => parseShowcaseRouteBuckets(",")).toThrow(/at least one/);
+    expect(() => parseShowcaseRouteBuckets("  ")).toThrow(/at least one/);
+  });
+
+  it("distinguishes PRESENT-but-empty from ABSENT -- only absent means 'both'", () => {
+    // The reason this parser takes the RAW query value: pickQueryValue() drops empty and whitespace-only
+    // strings, so routing `?routes=` through it would deliver `undefined` and be answered with the FULL
+    // unfiltered report -- the silent fallback the contract forbids. Absent is the only "both".
+    expect(parseShowcaseRouteBuckets(undefined)).toBeUndefined();
+    for (const present of ["", " ", "\t", "   ", ","]) {
+      expect(() => parseShowcaseRouteBuckets(present)).toThrow(/at least one/);
+    }
+  });
+
+  it("rejects a REPEATED ?routes param instead of guessing which one wins", () => {
+    expect(() => parseShowcaseRouteBuckets(["service", "other"])).toThrow(/once/);
+    expect(() => parseShowcaseRouteBuckets(["service", "service"])).toThrow(/once/);
+  });
+
+  it("accepts a ONE-element list as a single occurrence, not as a repeat", () => {
+    // Required for client/server agreement: the page parses searchParams.getAll(), which returns a
+    // one-element array for a singly-specified param. Rejecting that shape here would mean the server
+    // refused the very selection the chips produce.
+    expect(parseShowcaseRouteBuckets(["service"])).toEqual(["service"]);
+    expect(parseShowcaseRouteBuckets(["service,other"])).toEqual(["service", "other"]);
+  });
+
+  it("rejects a non-string value (e.g. ?routes[a]=b) rather than reading it as absent", () => {
+    expect(() => parseShowcaseRouteBuckets({ a: "b" })).toThrow(/routes/);
+    expect(() => parseShowcaseRouteBuckets(null)).toThrow(/routes/);
+    expect(() => parseShowcaseRouteBuckets(7)).toThrow(/routes/);
+  });
+
+  it("is wired into the evidence params, for every metric", () => {
+    expect(parseShowcaseEvidenceParams({ metric: "won", routes: "service" }).routes).toEqual(["service"]);
+    // Accepted for `leads` too: the service reports applied=false rather than the client having to know
+    // which metrics may carry the page's filter.
+    expect(parseShowcaseEvidenceParams({ metric: "leads", routes: "other" }).routes).toEqual(["other"]);
+    expect(parseShowcaseEvidenceParams({ metric: "won" }).routes).toBeUndefined();
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", routes: "nope" })).toThrow(/routes/);
+  });
+
+  it("rejects an empty/whitespace ?routes through the evidence params too", () => {
+    // Exercised at the params level (not just the parser) because this is where the normalization that
+    // swallowed it used to live.
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", routes: "" })).toThrow(/at least one/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", routes: " " })).toThrow(/at least one/);
+    // "%20" is what a browser sends for a space; Express decodes it to " " before we see it.
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", routes: decodeURIComponent("%20") })).toThrow(
+      /at least one/
+    );
+  });
+});
+
+/**
+ * The two showcase endpoints must accept and reject the SAME route values. If one rejects what the other
+ * accepts, a card and the drill behind it can disagree about whether the page is filtered -- the single
+ * property this feature exists to guarantee. Both now read the raw query value through the same parser, so
+ * this walks the shared inputs and asserts the verdicts match rather than trusting that by inspection.
+ */
+describe("the data and evidence endpoints treat ?routes identically", () => {
+  // The DATA endpoint's real code path: its handler calls readShowcaseRouteParam(req.query). Calling the
+  // same function here (rather than re-implementing the handler's line) is what makes this a symmetry
+  // test and not two copies of the same assumption.
+  const dataVerdict = (raw: unknown) => {
+    try {
+      const query: Record<string, unknown> = {};
+      if (raw !== undefined) query.routes = raw;
+      return { ok: true as const, value: readShowcaseRouteParam(query) };
+    } catch (err) {
+      return { ok: false as const, message: (err as Error).message };
+    }
+  };
+  // The EVIDENCE endpoint's real code path: parseShowcaseEvidenceParams, which reads routes through the
+  // same shared reader. Both sides therefore exercise shipped code, not a test-local paraphrase of it.
+  const evidenceVerdict = (raw: unknown) => {
+    try {
+      const query: Record<string, unknown> = { metric: "won" };
+      if (raw !== undefined) query.routes = raw;
+      return { ok: true as const, value: parseShowcaseEvidenceParams(query).routes };
+    } catch (err) {
+      return { ok: false as const, message: (err as Error).message };
+    }
+  };
+
+  // The symmetry above compares the two REAL parse paths, but it cannot see a handler that stops calling
+  // the shared reader altogether -- at that point the test's data side no longer reflects the data
+  // endpoint. This source guard closes that hole: it pins both showcase handlers to readShowcaseRouteParam
+  // and forbids re-composing the normalization that caused the bug (pickQueryValue drops "" and "  ", so
+  // `?routes=` would read as absent and be answered with the full unfiltered report).
+  it("keeps BOTH handlers on the shared reader, with no pickQueryValue normalization", () => {
+    const source = readFileSync(
+      new URL("../../../src/modules/reports/routes.ts", import.meta.url),
+      "utf8"
+    );
+    expect(source).not.toContain("parseShowcaseRouteBuckets(pickQueryValue");
+    expect(source).toContain("export function readShowcaseRouteParam(");
+    // Exactly two CALL SITES (the data endpoint and the evidence params) once the definition itself is
+    // removed from the text -- so dropping either handler off the shared reader fails here.
+    const callSites =
+      source.replace("export function readShowcaseRouteParam(", "").match(/readShowcaseRouteParam\(/g) ?? [];
+    expect(callSites).toHaveLength(2);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["service", "service"],
+    ["other", "other"],
+    ["both", "service,other"],
+    ["reordered", "other,service"],
+    ["empty", ""],
+    ["whitespace", "   "],
+    ["comma only", ","],
+    ["unknown bucket", "banana"],
+    ["raw column value", "normal"],
+    ["duplicate", "service,service"],
+    ["repeated param", ["service", "other"]],
+  ])("agree on %s", (_label, raw) => {
+    expect(evidenceVerdict(raw)).toEqual(dataVerdict(raw));
   });
 });

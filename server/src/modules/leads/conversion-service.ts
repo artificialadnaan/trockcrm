@@ -111,6 +111,9 @@ export interface ConvertLeadInput {
   officeId?: string;
   name?: string;
   source?: string;
+  // The short accounting title, captured on the convert dialog. Deliberately NOT derived from the lead:
+  // see the createDeal call below.
+  scopeTitle?: string | null;
   description?: string;
   ddEstimate?: string;
   bidEstimate?: string;
@@ -330,6 +333,14 @@ export function createLeadConversionService(
       creationContext: "lead_conversion",
       sourceLeadWriteMode: "lead_conversion",
       source: input.source ?? resolveLeadSourceDisplayValue(lead) ?? undefined,
+      // Passed through from the convert dialog, and NOT defaulted from the lead. leads.description is the
+      // same notes field that produced the unusable values this whole feature exists to replace — across
+      // the 180 live leads that have one it runs to a p90 of 200 characters and a max of 2658, with real
+      // values like "fsad", "summary" and "[Archived 2026-07-14 — test data]". Seeding those as QuickBooks
+      // project titles is worse than leaving the field blank: a wrong title looks authoritative, an empty
+      // one prompts someone to fill it. (Contrast the change-order seed, where the census showed the
+      // description IS already a title 97% of the time.) The route validates the length before this runs.
+      scopeTitle: input.scopeTitle ?? undefined,
       description: input.description ?? lead.description ?? undefined,
       // Carry the rep's gated lead estimate onto the Opportunity as a pipeline
       // estimate when conversion input does not supply one, so the value the rep

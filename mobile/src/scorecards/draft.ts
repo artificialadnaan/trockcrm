@@ -66,6 +66,11 @@ export interface ScorecardDraft {
   kind?: ScorecardKind;
   dealId: string;
   dealName: string;
+  /**
+   * `deals.is_change_order` for `dealName`, captured when the draft was started. Optional so drafts
+   * already on a phone resume without a migration (absent ⇒ the display helper reads the name instead).
+   */
+  isChangeOrder?: boolean;
   projectNumber: string | null;
   weekOf: string; // yyyy-mm-dd
   superintendentName: string;
@@ -247,6 +252,7 @@ export function createScorecardDraft(input: {
   clientSubmissionId: string;
   dealId: string;
   dealName: string;
+  isChangeOrder?: boolean;
   projectNumber: string | null;
   weekOf: string;
   now: number;
@@ -258,6 +264,7 @@ export function createScorecardDraft(input: {
     clientSubmissionId: input.clientSubmissionId,
     dealId: input.dealId,
     dealName: input.dealName,
+    isChangeOrder: input.isChangeOrder,
     projectNumber: input.projectNumber,
     weekOf: input.weekOf,
     superintendentName: input.superintendentName ?? "",

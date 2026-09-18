@@ -36,6 +36,9 @@ export interface PhotoAuditEventRow {
     id: string;
     name: string;
     dealNumber: string;
+    /** `deals.is_change_order` — the authority for the change-order display relabel of `name`. Optional
+     *  because only the admin query joins deals with it; absent means "unknown", NOT false. */
+    isChangeOrder?: boolean | null;
   } | null;
 }
 
@@ -117,6 +120,10 @@ export function normalizePhotoAuditRow(row: any): PhotoAuditEventRow {
           id: row.deal_id,
           name: row.deal_name,
           dealNumber: row.deal_number,
+          // `?? undefined`, never `?? false`. Two callers share this mapper and only the admin query
+          // projects the column, so an absent key must stay "unknown" — asserting false here would tell
+          // formatDealDisplayName authoritatively that a real change-order child is not one.
+          isChangeOrder: row.deal_is_change_order ?? undefined,
         }
       : null,
   };
@@ -203,7 +210,8 @@ export async function getAdminPhotoAuditEvents(
       f.external_thumbnail_url AS photo_external_thumbnail_url,
       d.id AS deal_id,
       d.name AS deal_name,
-      d.deal_number AS deal_number
+      d.deal_number AS deal_number,
+      d.is_change_order AS deal_is_change_order
     FROM photo_audit_log pal
     JOIN files f ON f.id = pal.photo_id
     LEFT JOIN public.users u ON u.id = pal.user_id

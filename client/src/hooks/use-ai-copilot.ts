@@ -70,6 +70,7 @@ export interface DirectorBlindSpot {
   details: string | null;
   createdAt: string;
   dealName: string | null;
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string | null;
 }
 
@@ -77,6 +78,8 @@ export interface CompanyCopilotDeal {
   id: string;
   dealNumber: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   lastActivityAt: string | null;
   updatedAt: string;
   latestPacketSummary: string | null;

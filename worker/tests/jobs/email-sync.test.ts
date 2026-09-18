@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
 
 const evaluateTaskRulesMock = vi.fn();
 const createTenantTaskRulePersistenceMock = vi.fn();
@@ -60,6 +61,9 @@ function createQueryMock(options: {
     company_id: string | null;
   } | null;
   companyName?: string | null;
+  /** Whether the deal the email resolves to sits in a DEAD (Lost-family) stage. Won and
+   *  in-production deals are NOT dead: their clients are still owed a reply. */
+  dealIsDead?: boolean;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.startsWith("SELECT set_config('search_path', $1, false)")) {
@@ -114,6 +118,24 @@ function createQueryMock(options: {
       return { rows: [{ id: "email-1" }] };
     }
 
+    // Deal-parent fetch (company/property/source-lead) for the activity link columns + parent-company stat,
+    // which ALSO reports is_dead_stage — the reply-needed task is suppressed once the deal is DEAD.
+    // MUST precede the broad `FROM office_beta.deals d` branch below: that one matches this SQL too and
+    // would answer with a deal-candidate row that has no is_dead_stage field, so every case would read as
+    // "open" and the terminal-deal assertions would prove nothing.
+    if (sql.includes("is_dead_stage")) {
+      return {
+        rows: [
+          {
+            company_id: null,
+            property_id: null,
+            source_lead_id: null,
+            is_dead_stage: options.dealIsDead ?? false,
+          },
+        ],
+      };
+    }
+
     if (sql.includes("FROM office_beta.deals d")) {
       return { rows: options.activeDeals };
     }
@@ -124,11 +146,6 @@ function createQueryMock(options: {
 
     if (sql.startsWith("UPDATE office_beta.emails")) {
       return { rows: [] };
-    }
-
-    // Deal-parent fetch (company/property/source-lead) for the activity link columns + parent-company stat.
-    if (sql.includes("SELECT company_id, property_id, source_lead_id FROM") && sql.includes(".deals")) {
-      return { rows: [{ company_id: null, property_id: null, source_lead_id: null }] };
     }
 
     // Email-stat refresh (email_count / last_email_at) for any resolved target.
@@ -651,5 +668,120 @@ describe("email sync inbound message routing", () => {
         ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
       )
     ).toBe(true);
+  });
+
+  // A "reply needed" task on a Won or Lost deal is the single biggest source of task debris in prod: 1,977
+  // of the 3,395 open tasks sitting on closed deals were inbound_email_reply_needed, 56 of them minted in
+  // the last 7 days. The email itself is NOT the problem — a message about a closed job belongs on that
+  // job's timeline — so both halves are asserted here: the task is suppressed AND the storage, the deal
+  // association, the activity row and the stat refresh all still happen.
+  describe("an inbound email on a DEAD (Lost) deal", () => {
+    const closedDealMsg = {
+      id: "graph-terminal-1",
+      subject: "Invoice question on the finished job",
+      from: { emailAddress: { address: "pat@alpha.example" } },
+      toRecipients: [{ emailAddress: { address: "rep@trockgc.com" } }],
+      body: { content: "<p>One more thing about the job you wrapped up.</p>" },
+      hasAttachments: false,
+      receivedDateTime: "2026-09-12T18:00:00.000Z",
+      conversationId: "conv-terminal-1",
+    };
+    const oneDeal = [
+      { id: "deal-9", deal_number: "DFW-4-22226-ab", name: "Lost Job", company_id: "company-1", stage_slug: "lost", stage_display_order: 9 },
+    ];
+    const contact = { id: "contact-1", first_name: "Pat", last_name: "Rivera", company_id: "company-1" };
+
+    it("mints no reply-needed task, while still storing and associating the email", async () => {
+      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsDead: true });
+      const processed = await processInboundMessage(
+        { query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg
+      );
+
+      expect(processed).toBe(true);
+      // Suppressed: no rule evaluation at all, so no inbound_email_reply_needed task.
+      expect(evaluateTaskRulesMock).not.toHaveBeenCalled();
+      // Preserved: the email row, the deal-linked activity, and the deal's email stats.
+      const ranSql = (needle: string) =>
+        queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes(needle));
+      expect(ranSql("INSERT INTO office_beta.emails")).toBe(true);
+      expect(ranSql("INSERT INTO office_beta.activities")).toBe(true);
+      const activityCall = queryMock.mock.calls.find(
+        ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.activities")
+      );
+      // params: [responsible, performedBy, sourceEntityType, sourceEntityId, dealId, ...]
+      expect((activityCall?.[1] as unknown[])?.[2]).toBe("deal");
+      expect((activityCall?.[1] as unknown[])?.[4]).toBe("deal-9");
+    });
+
+    // The deal-parent lookup that now also reports is_terminal feeds the activity's company/property/lead
+    // link columns. It must therefore stay a LEFT JOIN: a deal whose stage_id is null or dangling has to
+    // keep returning its row, or adding a flag would silently strip those links. A stubbed query cannot
+    // tell a JOIN from a LEFT JOIN, so this case takes the SQL the job actually issued and EXECUTES it.
+    it("keeps the deal's link columns for a STAGELESS deal (the lookup is a LEFT JOIN)", async () => {
+      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsDead: true });
+      await processInboundMessage({ query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg);
+
+      const issued = queryMock.mock.calls
+        .map(([sql]) => sql)
+        .filter((sql): sql is string => typeof sql === "string" && sql.includes("is_dead_stage"));
+      expect(issued).toHaveLength(1);
+
+      const db = new PGlite();
+      await db.exec(`
+        CREATE SCHEMA office_beta;
+        CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_terminal boolean NOT NULL DEFAULT false);
+        CREATE TABLE office_beta.deals (
+          id uuid PRIMARY KEY, company_id uuid, property_id uuid, source_lead_id uuid, stage_id uuid
+        );
+        INSERT INTO public.pipeline_stage_config (id, slug, is_terminal)
+          VALUES ('00000000-0000-4000-8000-0000000050e1', 'lost', true);
+        INSERT INTO office_beta.deals (id, company_id, property_id, source_lead_id, stage_id) VALUES
+          ('00000000-0000-4000-8000-00000000d001',
+           '00000000-0000-4000-8000-0000000c0001',
+           '00000000-0000-4000-8000-0000000b0001',
+           '00000000-0000-4000-8000-0000000e0001', NULL);
+      `);
+
+      const { rows } = await db.query<{
+        company_id: string | null;
+        source_lead_id: string | null;
+        is_dead_stage: boolean;
+      }>(issued[0], ["00000000-0000-4000-8000-00000000d001", ["lost", "closed_lost"]]);
+
+      // The row survives, its parent links are intact, and an unresolvable stage reads as "not dead" —
+      // i.e. exactly the behaviour this call site had before the flag was added.
+      expect(rows).toHaveLength(1);
+      expect(rows[0].company_id).toBe("00000000-0000-4000-8000-0000000c0001");
+      expect(rows[0].source_lead_id).toBe("00000000-0000-4000-8000-0000000e0001");
+      expect(rows[0].is_dead_stage).toBe(false);
+    });
+
+    // The finding all three reviewers raised. is_terminal is true for the Won family too, including
+    // sent_to_production — awarded jobs still being built. Gating on it would have silenced the only
+    // surface that reports an unanswered client email on live work, for 1,891 of the 1,977 such tasks.
+    it("KEEPS the reply task for a WON, in-production job — is_terminal is not the same as dead", async () => {
+      const wonDeal = [
+        { id: "deal-7", deal_number: "DFW-4-22226-ag", name: "Won Job", company_id: "company-1", stage_slug: "sent_to_production", stage_display_order: 9 },
+      ];
+      const queryMock = createQueryMock({ activeDeals: wonDeal, contactMatch: contact, dealIsDead: false });
+      await processInboundMessage({ query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg);
+
+      expect(evaluateTaskRulesMock).toHaveBeenCalledTimes(1);
+      expect(evaluateTaskRulesMock.mock.calls[0][0]).toMatchObject({ dealId: "deal-7" });
+    });
+
+    it("CONTROL — the same email on an OPEN deal still evaluates the reply rule", async () => {
+      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsDead: false });
+      const processed = await processInboundMessage(
+        { query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg
+      );
+
+      expect(processed).toBe(true);
+      expect(evaluateTaskRulesMock).toHaveBeenCalledTimes(1);
+      expect(evaluateTaskRulesMock.mock.calls[0][0]).toMatchObject({
+        sourceEvent: "email.received",
+        dealId: "deal-9",
+      });
+    });
   });
 });

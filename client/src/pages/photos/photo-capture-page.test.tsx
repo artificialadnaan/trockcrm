@@ -4,7 +4,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildUnifiedCaptureHref, groupPhotoUploadTargets, PhotoCapturePage } from "./photo-capture-page";
+import {
+  buildUnifiedCaptureHref,
+  groupPhotoUploadTargets,
+  parseChangeOrderParam,
+  PhotoCapturePage,
+} from "./photo-capture-page";
 import type { PhotoUploadTarget } from "@/hooks/use-files";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -131,6 +136,76 @@ describe("photo capture upload targets", () => {
       .find((link) => link.textContent?.includes("Open unified capture"));
     expect(linkAfter?.href).toContain("leadId=lead-1");
     expect(linkAfter?.href).not.toContain("dealId=old-deal");
+  });
+});
+
+describe("photo capture URL-seeded change-order flag", () => {
+  beforeEach(() => {
+    mocks.searchPhotoUploadTargets.mockReset();
+    mocks.searchPhotoUploadTargets.mockResolvedValue([]);
+    mocks.uploadFile.mockReset();
+    mocks.useAuth.mockReturnValue({ user: { activeOfficeId: "office-atl" } });
+  });
+
+  async function renderWithSearch(search: string) {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={[`/photos/capture${search}`]}>
+          <PhotoCapturePage />
+        </MemoryRouter>
+      );
+    });
+  }
+
+  // The selected-target card's first paragraph — the rendered display name. Located from the clear
+  // button's aria-label so this does not pin styling classes.
+  function selectedTargetLabel() {
+    const clear = container.querySelector<HTMLButtonElement>('[aria-label="Clear selected project"]');
+    return clear?.closest("div")?.querySelector("p")?.textContent ?? null;
+  }
+
+  function captureHrefParams() {
+    const link = Array.from(container.querySelectorAll<HTMLAnchorElement>("a"))
+      .find((anchor) => anchor.textContent?.includes("Open unified capture"));
+    expect(link).toBeTruthy();
+    return new URL(link!.href).searchParams;
+  }
+
+  // THE discriminating case: `is_change_order = false` on a deal a HUMAN named "Lobby — Change Order 1".
+  // Syntax alone says "generated change order", the flag says otherwise, and the flag wins. An
+  // isChangeOrder=1 case would pass even with the param dropped entirely, by syntax coincidence — this
+  // one cannot, so it is the case that actually pins the seeded target to the URL.
+  it("keeps a NOT-a-change-order deal's name verbatim, and forwards the false flag, when the URL says isChangeOrder=0", async () => {
+    await renderWithSearch("?dealId=deal-1&dealName=Lobby%20%E2%80%94%20Change%20Order%201&isChangeOrder=0");
+
+    expect(selectedTargetLabel()).toBe("Lobby — Change Order 1");
+    // And the next surface must inherit the answer, not re-derive it from the name it is handed.
+    expect(captureHrefParams().get("isChangeOrder")).toBe("0");
+  });
+
+  it("moves a real change order's label to the front and forwards the true flag", async () => {
+    await renderWithSearch("?dealId=deal-2&dealName=Tides%20Park%20Lane%20%E2%80%94%20Change%20Order%202&isChangeOrder=1");
+
+    expect(selectedTargetLabel()).toBe("Change Order 2 — Tides Park Lane");
+    expect(captureHrefParams().get("isChangeOrder")).toBe("1");
+  });
+
+  it("leaves the flag UNSTATED downstream when the URL carries none", async () => {
+    await renderWithSearch("?dealId=deal-3&dealName=Lobby%20%E2%80%94%20Change%20Order%201");
+
+    // No param means unknown, so display falls back to the name's syntax — the documented degradation.
+    expect(selectedTargetLabel()).toBe("Change Order 1 — Lobby");
+    // Unknown must NOT be forwarded as "0": that would assert something this page never learned.
+    expect(captureHrefParams().has("isChangeOrder")).toBe(false);
+  });
+
+  it("treats only the literal \"1\" and \"0\" as an assertion", () => {
+    expect(parseChangeOrderParam("1")).toBe(true);
+    expect(parseChangeOrderParam("0")).toBe(false);
+    for (const value of [null, undefined, "", " ", "true", "false", "01", "2", "yes"]) {
+      expect(parseChangeOrderParam(value)).toBeUndefined();
+    }
   });
 });
 

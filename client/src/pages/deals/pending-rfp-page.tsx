@@ -5,11 +5,12 @@ import {
   RefreshCw,
   Clock,
   AlertTriangle,
-  XCircle,
   Flame,
   Inbox,
 } from "lucide-react";
 import { usePendingRfp, type PendingRfpDeal } from "@/hooks/use-deals";
+import { formatDealDisplayName } from "@/lib/deal-utils";
+import { pendingRfpPresentation, type PendingRfpTone } from "@/lib/pending-rfp-presentation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -39,20 +40,22 @@ function waitingTone(days: number | null, isStale: boolean): string {
 }
 
 type StatusMeta = { label: string; Icon: typeof Clock; chip: string };
+
+// Ring-outlined pill classes for this page. The LABEL and the TONE come from the shared map, which the
+// /deals board card reads too — so the two surfaces agree on what each status is called and which colour
+// family it belongs to, while each keeps the chip shape its own layout needs.
+const STATUS_CHIP: Record<PendingRfpTone, string> = {
+  sky: "bg-sky-50 text-sky-700 ring-sky-600/20",
+  rose: "bg-rose-50 text-rose-700 ring-rose-600/20",
+  amber: "bg-amber-50 text-amber-800 ring-amber-600/20",
+  red: "bg-red-50 text-red-700 ring-red-600/20",
+};
+
 function statusMeta(deal: PendingRfpDeal): StatusMeta {
-  if (deal.subState === "awaiting") {
-    return { label: "Awaiting approval", Icon: Clock, chip: "bg-sky-50 text-sky-700 ring-sky-600/20" };
-  }
-  switch (deal.rfpApprovalStatus) {
-    case "declined":
-      return { label: "Declined", Icon: XCircle, chip: "bg-rose-50 text-rose-700 ring-rose-600/20" };
-    case "conflict":
-      return { label: "Conflict", Icon: AlertTriangle, chip: "bg-amber-50 text-amber-800 ring-amber-600/20" };
-    case "send_failed":
-      return { label: "Send failed", Icon: AlertTriangle, chip: "bg-red-50 text-red-700 ring-red-600/20" };
-    default:
-      return { label: "Needs attention", Icon: AlertTriangle, chip: "bg-amber-50 text-amber-800 ring-amber-600/20" };
-  }
+  const presentation =
+    pendingRfpPresentation(deal.rfpApprovalStatus) ??
+    ({ label: "Needs attention", tone: "amber", Icon: AlertTriangle } as const);
+  return { label: presentation.label, Icon: presentation.Icon, chip: STATUS_CHIP[presentation.tone] };
 }
 
 const AVATAR_TONES = [
@@ -113,6 +116,21 @@ export function PendingRfpPage() {
   const location = useLocation();
   const navigate = useNavigate();
 
+  // The board search this queue was opened under, if any. Guarded at >= 2 characters so the chip only
+  // ever claims a narrowing the server actually applied (usePendingRfp and getPendingRfpDeals use the
+  // same threshold) — a shorter term filters nothing and must not be advertised as if it did.
+  const activeSearch = useMemo(() => {
+    const term = (new URLSearchParams(location.search).get("search") ?? "").trim();
+    return term.length >= 2 ? term : null;
+  }, [location.search]);
+  // Clearing drops ONLY the search, keeping office and estimator context intact.
+  const clearSearchTo = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    params.delete("search");
+    const query = params.toString();
+    return query ? `${location.pathname}?${query}` : location.pathname;
+  }, [location.pathname, location.search]);
+
   const rows = useMemo(() => {
     const list = (deals ?? []).map((deal) => {
       const ageDays = computeAgeDays(deal.triggeredAt);
@@ -150,6 +168,27 @@ export function PendingRfpPage() {
           <p className="text-sm text-muted-foreground">
             Deals awaiting RFP approval — visible to everyone in your office.
           </p>
+          {/*
+            An inherited board search is SHOWN, never applied silently. This queue is opened by clicking
+            the board's Pending RFP column, whose count is search-narrowed, so the term has to travel with
+            it or the number and this list disagree. But a filter the page cannot see or undo is its own
+            bug — the reason this term was deliberately dropped from drill-downs before there was anywhere
+            to display it. Hence a labelled chip with a way out.
+          */}
+          {activeSearch && (
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-muted-foreground">Filtered by search:</span>
+              <span className="rounded-full bg-slate-100 px-2.5 py-0.5 font-semibold text-slate-700">
+                {activeSearch}
+              </span>
+              <Link
+                to={clearSearchTo}
+                className="rounded font-semibold text-brand-red underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+              >
+                Clear
+              </Link>
+            </p>
+          )}
         </div>
         <Button
           variant="outline"
@@ -241,7 +280,9 @@ export function PendingRfpPage() {
                                   onClick={(e) => e.stopPropagation()}
                                   className="font-semibold text-slate-900 group-hover:text-brand-red hover:underline"
                                 >
-                                  {deal.name}
+                                  {/* A change-order child is STORED as "<Parent> — Change Order N"; lead
+                                      with the label so the queue row names the CO. Display-only. */}
+                                  {formatDealDisplayName(deal.name, deal.isChangeOrder)}
                                 </Link>
                                 <p className="text-xs text-muted-foreground">
                                   {displayNumber ?? "No number"}

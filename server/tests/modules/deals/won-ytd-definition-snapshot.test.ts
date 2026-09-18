@@ -15,12 +15,26 @@ function createChainableMock(rows: any[] = []) {
     then: vi.fn((resolve: (value: any[]) => unknown) => resolve(rows)),
   };
   chain.select.mockReturnValue(chain);
-  chain.from.mockReturnValue(chain);
+  // The board's pipeline_stage_config read runs on the REQUEST's tenant client now (it used to take a
+  // second pool slot from the global `db` pool), so answer it at `.from()` time — after the tenantDb
+  // stub has installed its own `then`.
+  chain.from.mockImplementation((table: unknown) => {
+    if (isPipelineStageConfigTable(table)) {
+      chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(dbState.stages));
+    }
+    return chain;
+  });
   chain.where.mockReturnValue(chain);
   chain.leftJoin.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);
   chain.limit.mockReturnValue(chain);
   return chain;
+}
+
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
 }
 
 function containsValue(value: unknown, expected: unknown, seen = new Set<unknown>()): boolean {
@@ -102,6 +116,55 @@ describe("main Deals Dashboard Won YTD definition snapshot", () => {
     await getGlobalYtdBoard(tenantDb, { assignedRepId: "rep-1" });
 
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not let an ESTIMATOR-filtered board overwrite the global metric definition", async () => {
+    // Codex #1067 round-2 P1. The snapshot is the PUBLISHED all-reps baseline, so every narrowing
+    // dimension has to disqualify it — not just the owner one. Gating on assignedRepId alone meant a
+    // scope=all YTD board with an estimator selected still qualified, writing that person's subset over
+    // deals_dashboard.won_ytd and holding it there until the next unfiltered YTD request happened by.
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { estimatorId: "user-est-1" });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not let a SEARCHED board overwrite the global metric definition", async () => {
+    // The board's text search narrows exactly as hard as an owner or estimator filter, and is far easier
+    // to reach: it is a box on the default All-scope board, whose default period IS YTD. Without this
+    // gate, typing two characters publishes the matching subset's count/value as the all-deals baseline —
+    // and that value is what the won-metric reduction alert watches, so it would also fire a false alarm.
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { search: "bellemont" });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("STILL records the snapshot for a term too short to narrow the board", async () => {
+    // The eligibility rule here and the narrowing rule in getDealsForPipeline are one shared predicate
+    // (hasEffectiveDealSearch). This is the half that proves they agree in the other direction: a term
+    // the board does NOT filter on must not block the snapshot either, or a stray keystroke would stall
+    // the published definition. A drifting copy of the >= 2 rule fails one of these two tests.
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { search: "b" });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(containsValue(execute.mock.calls[0]?.[0], "deals_dashboard.won_ytd")).toBe(true);
+  });
+
+  it("STILL records the snapshot for a whitespace-only term", async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const tenantDb = buildTenantDb(execute);
+
+    await getGlobalYtdBoard(tenantDb, { search: "   " });
+
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it("only ignores the migration-not-yet-present PostgreSQL error", async () => {

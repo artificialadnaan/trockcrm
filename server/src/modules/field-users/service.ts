@@ -7,14 +7,24 @@ import { sendSystemEmail } from "../../lib/resend-client.js";
 import { hashPassword, verifyPassword } from "../auth/local-auth-service.js";
 import { signJwt } from "../auth/service.js";
 import { getFieldAppUrl } from "../auth/http-config.js";
+import { toProperCaseName } from "../../lib/person-name.js";
+import { generateResetToken, hashResetToken } from "../auth/reset-tokens.js";
 
-const INVITE_TOKEN_BYTES = 32;
 const INVITE_TTL_DAYS = 7;
 const PASSWORD_RESET_TTL_MINUTES = 30;
 const PASSWORD_RESET_MAX_LENGTH = 256;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MINUTES = 15;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * The T Rock brand red, as documented in server/src/modules/daily-summary/email-template.ts.
+ *
+ * These two templates had been using Tailwind's red-700 (#b91c1c) instead, so the two places a customer
+ * actually receives email from us rendered a different red from each other. Named once here so the next
+ * template added to this file cannot drift again.
+ */
+const BRAND_RED = "#CC0000";
 // FIELD session: long-lived so crews don't re-authenticate every time they open T-Rock Cam. Safe to
 // apply to EVERY field-app role (incl. CRM-capable admin/director/rep/construction) because field tokens
 // carry surface:"field" and CRM auth (authMiddleware) rejects that surface outright — so a field token
@@ -33,13 +43,15 @@ export function normalizeEmail(email: string): string {
   return normalized;
 }
 
-export function generateInviteToken(): string {
-  return crypto.randomBytes(INVITE_TOKEN_BYTES).toString("base64url");
-}
-
-export function hashInviteToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
+// Moved to ../auth/reset-tokens.js so the CRM reset path does not import the field module for its own
+// auth. Aliased under the original names so every existing field caller is untouched, and so both flows
+// keep sharing ONE implementation.
+//
+// Deliberately `import` + `export const`, NOT `export { x as y } from "..."`. A bare re-export creates
+// no LOCAL binding, and this module calls both helpers internally -- so the re-export form compiles and
+// then throws "hashInviteToken is not defined" at runtime on every invite and field login.
+export const generateInviteToken = generateResetToken;
+export const hashInviteToken = hashResetToken;
 
 export function splitName(displayName: string): { firstName: string; lastName: string } {
   const parts = displayName.trim().split(/\s+/).filter(Boolean);
@@ -119,7 +131,7 @@ export function buildInviteEmail(input: {
       <p>Hi ${input.inviteeName},</p>
       <p>${input.inviterName} invited you to join T Rock Field so you can access project photos and field workflows.</p>
       <p>
-        <a href="${input.inviteUrl}" style="display:inline-block;background:#b91c1c;color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">
+        <a href="${input.inviteUrl}" style="display:inline-block;background:${BRAND_RED};color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">
           Accept invite
         </a>
       </p>
@@ -156,7 +168,7 @@ export function buildFieldPasswordResetEmail(input: {
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111827">
       <p>Hi ${escapeHtml(firstName)},</p>
       <p>An administrator created a secure password reset for your T-Rock Cam account.</p>
-      <p><a href="${escapeHtml(input.resetUrl)}" style="display:inline-block;background:#b91c1c;color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">Set a new password</a></p>
+      <p><a href="${escapeHtml(input.resetUrl)}" style="display:inline-block;background:${BRAND_RED};color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">Set a new password</a></p>
       <p>This single-use link expires in 30 minutes.</p>
       <p>If you did not request help signing in, contact your administrator.</p>
     </div>
@@ -250,6 +262,14 @@ export async function inviteFieldUser(input: {
     throw new AppError(409, "A pending invite already exists for this email");
   }
 
+  // Normalised HERE, not only at acceptance (Codex P2). The invite row is not a private staging record:
+  // listFieldUsers returns pending invites and the Admin → Field Users table renders these columns
+  // directly, resends reuse them, and the invitation email greets the recipient by this name. Fixing the
+  // casing only on accept left the badly-cased version on all three surfaces until the person signed up —
+  // and the invite is exactly where a hand-typed lowercase name enters the system.
+  const firstName = toProperCaseName(input.firstName.trim());
+  const lastName = toProperCaseName(input.lastName.trim(), { surname: true });
+
   const rawToken = generateInviteToken();
   const tokenHash = hashInviteToken(rawToken);
   const expiresAt = inviteExpiry();
@@ -269,8 +289,8 @@ export async function inviteFieldUser(input: {
       ${email},
       ${input.tenantId}::uuid,
       ${tokenHash},
-      ${input.firstName.trim()},
-      ${input.lastName.trim()},
+      ${firstName},
+      ${lastName},
       ${input.phone?.trim() || null},
       ${input.invitedByUserId}::uuid,
       ${expiresAt},
@@ -285,7 +305,8 @@ export async function inviteFieldUser(input: {
   `);
   const inviter = ((inviterResult as any).rows ?? inviterResult)[0];
   const emailContent = buildInviteEmail({
-    inviteeName: `${input.firstName.trim()} ${input.lastName.trim()}`.trim(),
+    // The normalised names, so the email greets them the way the record will spell them.
+    inviteeName: `${firstName} ${lastName}`.trim(),
     inviterName: inviter?.display_name ?? "T Rock",
     inviteUrl: fieldInviteUrl(rawToken),
   });
@@ -804,8 +825,11 @@ export async function acceptFieldInvite(input: { token: string; password: string
   const user = {
     id: crypto.randomUUID(),
     email: invite.email,
-    first_name: invite.first_name,
-    last_name: invite.last_name,
+    // Capitalised here rather than at the INSERT so the API response, the JWT-bearing payload and the row
+    // all carry the same spelling. This is the path that produced most of the lowercase names in
+    // production — an invite is typed by hand, and nothing downstream ever corrected it.
+    first_name: toProperCaseName(invite.first_name),
+    last_name: toProperCaseName(invite.last_name, { surname: true }),
     role: "field_contractor",
     office_id: invite.tenant_id,
     is_active: true,
@@ -834,19 +858,24 @@ export async function acceptFieldInvite(input: { token: string; password: string
           role,
           office_id,
           is_active,
+          generates_sales,
           created_by_user_id,
           updated_at
         )
         VALUES (
           ${user.id}::uuid,
           ${invite.email},
-          ${`${invite.first_name} ${invite.last_name}`.trim()},
-          ${invite.first_name},
-          ${invite.last_name},
+          ${`${user.first_name} ${user.last_name}`.trim()},
+          ${user.first_name},
+          ${user.last_name},
           ${invite.phone},
           'field_contractor',
           ${invite.tenant_id}::uuid,
           true,
+          -- Explicit false, not the column default (migration 0219). A field contractor never carries
+          -- deals, so they must never reach a director-dashboard roster; spelling it out here means a
+          -- change to that default can't quietly enrol every future contractor.
+          false,
           ${invite.invited_by_user_id}::uuid,
           now()
         )

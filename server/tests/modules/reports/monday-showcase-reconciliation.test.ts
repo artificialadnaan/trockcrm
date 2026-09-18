@@ -77,6 +77,30 @@ function makeInput(): AssembleInput {
     sparklines: { estimating: [10, 12, 9, 15, 18, 14, 20, 21], sent: [5, 6, 4, 7, 9, 8, 11, 13], won: [3, 4, 5, 2, 6, 4, 7, 191] },
     lastWeek: { estimating: 20, sent: 11, won: 7 },
     repNames: new Map([["rep-a", "Alex Rep"], ["rep-b", "Bailey Rep"]]),
+    estimatingReport: {
+      currentAsOf: "2026-05-30T12:00:00.000Z",
+      currentEstimating: { count: 0, ddValue: 0, missingDdCount: 0, projects: [] },
+      newRfps: { count: 0, ddValue: 0, missingDdCount: 0, projects: [] },
+      rfpBySalesperson: [],
+      estimatesSent: {
+        count: 0,
+        latestBidBoardTotalSales: 0,
+        projects: [],
+        comparison: {
+          dollarComparableCount: 0,
+          percentageComparableCount: 0,
+          dollarComparableDdValue: 0,
+          dollarComparableLatestBidBoardTotalSales: 0,
+          varianceAmount: 0,
+          percentageComparableDdValue: 0,
+          percentageComparableLatestBidBoardTotalSales: 0,
+          variancePercent: null,
+        },
+        margin: { projectCount: 0, latestBidBoardTotalSales: 0, blendedPercent: null },
+        missingSentValueCount: 0,
+        missingMarginCount: 0,
+      },
+    },
   };
 }
 

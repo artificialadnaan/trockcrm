@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/components/charts/chart-colors";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { AlertTriangle } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -8,6 +9,12 @@ interface StaleDeal {
   dealId: string;
   dealNumber: string;
   dealName: string;
+  dealIsChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title`. Travels with the flag above: once the relabel fires the name reads
+   * "<Parent> — Change Order N", and this is the only field left saying which one.
+   */
+  dealScopeTitle?: string | null;
   stageName: string;
   repName: string;
   daysInStage: number;
@@ -60,7 +67,14 @@ export function StaleDealList({ deals }: StaleDealListProps) {
               className="flex items-center justify-between p-2 rounded-md hover:bg-slate-50 transition-colors"
             >
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium truncate">{deal.dealName}</p>
+                {/* A change-order child is STORED "<Parent> — Change Order N" and this row truncates;
+                    move the label to the front for DISPLAY only. */}
+                <p className="text-sm font-medium truncate">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</p>
+                {/* Between the relabelled name and the rep/stage line — the reason this row is
+                    identifiable at all when the name is the parent's. */}
+                {deal.dealScopeTitle ? (
+                  <p className="text-xs font-medium text-foreground/80 truncate">{deal.dealScopeTitle}</p>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   {deal.repName} &mdash; {deal.stageName}
                 </p>

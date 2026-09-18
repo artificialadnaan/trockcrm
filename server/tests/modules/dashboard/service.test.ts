@@ -580,10 +580,14 @@ describe("Dashboard Service", () => {
       const repCardsQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
 
       expect(repCardsQueryText).toContain("deal_owners");
-      // D-5: the rep branch is scoped to active-office membership (primary office OR a
-      // user_office_access grant), but the locked owner branch is preserved un-gated so
-      // deal-owning directors/admins (and cross-office owners) still appear in the roster.
-      expect(repCardsQueryText).toContain("u.role = 'rep' and (u.office_id =");
+      // 0219: membership is the generates_sales FLAG, not the role. `u.role = 'rep'` used to appear
+      // here and must not any more -- leaving it would mean an unticked estimator still qualified.
+      expect(repCardsQueryText).toContain("u.generates_sales = true");
+      expect(repCardsQueryText).not.toContain("u.role = 'rep'");
+      // D-5 survives verbatim: the office boundary is still active-office membership (primary office
+      // OR a user_office_access grant), and the owner branch is still un-gated by office, so
+      // deal-owning directors/admins and cross-office owners keep their row.
+      expect(repCardsQueryText).toContain("(u.office_id =");
       expect(repCardsQueryText).toContain("user_office_access");
       expect(repCardsQueryText).toContain("or owner_rows.rep_id is not null");
       expect(result.repCards.map((row) => row.repName)).toEqual(["Alex Rep", "Brett Bell", "Adnaan Iqbal"]);
@@ -649,9 +653,13 @@ describe("Dashboard Service", () => {
         .find((text: string) => text.includes("qualified_leads") && text.includes("deal_owners"));
 
       expect(funnelQueryText).toContain("deal_owners");
-      // D-5: rep branch scoped to active-office membership (primary office OR user_office_access);
-      // locked owner branch preserved un-gated so deal-owning directors/admins still appear.
-      expect(funnelQueryText).toContain("u.role = 'rep' and (u.office_id =");
+      // 0219: same generates_sales membership as the rep cards -- the two tables share ONE predicate
+      // (dashboardRosterMembershipSql), so they cannot list different people.
+      expect(funnelQueryText).toContain("u.generates_sales = true");
+      expect(funnelQueryText).not.toContain("u.role = 'rep'");
+      // D-5 preserved: active-office membership (primary office OR user_office_access), owner branch
+      // un-gated so deal-owning directors/admins still appear.
+      expect(funnelQueryText).toContain("(u.office_id =");
       expect(funnelQueryText).toContain("user_office_access");
       expect(funnelQueryText).toContain("or owner_rows.rep_id is not null");
       expect(result.repFunnelRows.map((row) => row.repName)).toEqual([
@@ -711,9 +719,13 @@ describe("Dashboard Service", () => {
 
       await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
 
+      // Match the CTE DEFINITION, not the bare token. The token also appears in prose — the commission
+      // roster's comment explains why its owner exception is narrower than the cards' — and counting that
+      // as "a query with deal-owner widening" made this fail for a comment, which is the wrong thing to
+      // measure. What the test means is: exactly two queries actually BUILD the deal_owners CTE.
       const dealOwnerQueries = tenantDb.execute.mock.calls
         .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
-        .filter((text: string) => text.includes("deal_owners"));
+        .filter((text: string) => text.includes("with deal_owners as ("));
 
       expect(dealOwnerQueries).toHaveLength(2);
       expect(dealOwnerQueries.every((text: string) => text.includes("from users u"))).toBe(true);
@@ -1441,9 +1453,12 @@ describe("Dashboard Service", () => {
 
       expect(rosterQuery, "rep-performance roster query").toBeDefined();
       expect(funnelQuery, "director funnel rep-rows query").toBeDefined();
-      // The membership filter gates ONLY the rep branch (foreign-office reps excluded)...
-      expect(rosterQuery).toContain("u.role = 'rep' and (u.office_id =");
-      expect(funnelQuery).toContain("u.role = 'rep' and (u.office_id =");
+      // The membership filter still excludes foreign-office reps. Since 0219 the qualifying half is
+      // the generates_sales flag rather than role='rep', but the office boundary is byte-identical.
+      expect(rosterQuery).toContain("u.generates_sales = true");
+      expect(funnelQuery).toContain("u.generates_sales = true");
+      expect(rosterQuery).toContain("(u.office_id =");
+      expect(funnelQuery).toContain("(u.office_id =");
       // ...via ACTIVE-OFFICE membership = primary office OR a user_office_access grant, matching
       // resolveActiveOfficeUserIds, so a rep shared into this office still appears...
       expect(rosterQuery).toContain("user_office_access");

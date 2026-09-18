@@ -4,6 +4,7 @@ type HygieneRecord = {
   entityType: "lead" | "deal";
   id: string;
   name: string;
+  isChangeOrder?: boolean | null;
   assignedRepId: string | null;
   assignedRepName: string | null;
   stageId: string;
@@ -35,7 +36,9 @@ export function evaluateSalesHygieneRecords(
   const staleActivityDays = options.staleActivityDays ?? 14;
 
   return records
-    .map((record) => {
+    // Annotated so the element type is exactly SalesHygieneIssueRow | null: without it TS infers
+    // isChangeOrder as a REQUIRED property and the null-narrowing predicate below stops matching.
+    .map((record): SalesHygieneIssueRow | null => {
       const issueTypes: string[] = [];
 
       if (!record.assignedRepId) issueTypes.push("unassigned_owner");
@@ -57,6 +60,7 @@ export function evaluateSalesHygieneRecords(
         entityType: record.entityType,
         id: record.id,
         name: record.name,
+        isChangeOrder: record.isChangeOrder,
         assignedRepId: record.assignedRepId,
         assignedRepName: record.assignedRepName,
         issueTypes,

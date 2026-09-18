@@ -1,4 +1,5 @@
 import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
+import { rfpProjectName } from "./rfp-project-name.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 
 type WorkflowRoute = "normal" | "service";
@@ -11,6 +12,8 @@ export interface RfpPayloadSourceDeal {
    *  so the payload never ships the raw HubSpot id. See resolveDealDisplayNumber. */
   projectNumber?: string | null;
   projectType?: string | null;
+  /** The CONFIGURED project-type digit (project_type_config.code via project_type_id). See isServiceRfp. */
+  projectTypeCode?: string | null;
   workflowRoute?: WorkflowRoute | null;
   awardedAmount?: string | number | null;
   bidEstimate?: string | number | null;
@@ -22,6 +25,17 @@ export interface RfpPayloadSourceDeal {
    *  assigned_rep → user, with fallbacks (see rfp-enqueue resolveDealOwner). */
   ownerName?: string | null;
   ownerEmail?: string | null;
+  /**
+   * `deals.company_id` / `deals.property_id`. Shipped so downstream systems resolve the customer and the
+   * job site BY ID rather than by the names below. Name matching is unsafe in the other direction:
+   * SyncHub's `street` falls back to `project_location`, which holds the office designator, so an
+   * address-less deal would create a property literally named "DFW" and every job site of that customer
+   * would collapse onto one row.
+   */
+  companyId?: string | null;
+  propertyId?: string | null;
+  propertyName?: string | null;
+  scopeTitle?: string | null;
   companyName?: string | null;
   contactName?: string | null;
   clientEmail?: string | null;
@@ -32,6 +46,12 @@ export interface RfpPayloadSourceDeal {
   propertyZip?: string | null;
   propertyCountry?: string | null;
   description?: string | null;
+  /**
+   * Pre-rendered CRM activity history (see bid-board-activity-note.ts). SyncHub posts it as a NOTE on
+   * the Bid Board project's Overview tab — never into Project Description, which stays the deal
+   * description only. Null when the deal has no activity.
+   */
+  crmActivityLog?: string | null;
   bidDueDate?: Date | string | null;
   bidBoardDueDate?: Date | string | null;
   createdAt?: Date | string | null;
@@ -49,6 +69,12 @@ export interface NormalizedRfpRequestBody {
     estimator: string | null;
     ownerName: string | null;
     ownerEmail: string | null;
+    /** CRM uuids for the customer and the job site — see RfpPayloadSourceDeal. Deliberately absent from
+     *  SACRIFICIAL_DEAL_FIELDS: they are identity, not display, so the size cap must never drop them. */
+    companyId: string | null;
+    propertyId: string | null;
+    propertyName?: string | null;
+    scopeTitle?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -61,6 +87,12 @@ export interface NormalizedRfpRequestBody {
       country: string | null;
     } | null;
     description: string | null;
+    /**
+     * The deal's CRM activity history as plain text, for the Note SyncHub posts on the Bid Board
+     * project. `.nullable().optional()` in SyncHub's contract, so it is safe to drop entirely — which
+     * fitWithinBudget does first, ahead of everything else.
+     */
+    crmActivityLog: string | null;
     dueDate: string | null;
     workflowRoute: string | null;
   };
@@ -203,6 +235,28 @@ function cleanIso(value: Date | string | null | undefined): string | null {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
+/**
+ * The ONE precedence that turns a deal's four value columns into the single `amount` SyncHub stores.
+ *
+ * `buildNormalizedRfpRequestBody` (the send-time snapshot) and the internal
+ * `POST /api/internal/deals/current-values` batch lookup (the report's render-time resolution) BOTH
+ * call this. Keep it that way: a second copy of the ordering would let the number a reviewer saw in
+ * the RFP email and the number the RFP report shows for the same deal drift apart silently.
+ */
+export function resolveRfpDealAmount(deal: {
+  awardedAmount?: string | number | null;
+  bidEstimate?: string | number | null;
+  ddEstimate?: string | number | null;
+  forecastRevenue?: string | number | null;
+}): number | null {
+  return (
+    cleanNumber(deal.awardedAmount) ??
+    cleanNumber(deal.bidEstimate) ??
+    cleanNumber(deal.ddEstimate) ??
+    cleanNumber(deal.forecastRevenue)
+  );
+}
+
 function buildAddress(deal: RfpPayloadSourceDeal): NormalizedRfpRequestBody["deal"]["address"] {
   const street = cleanString(deal.propertyAddress);
   const city = cleanString(deal.propertyCity);
@@ -271,6 +325,8 @@ const DESCRIPTION_TRUNCATED_SUFFIX = " […] (truncated for delivery — open th
  * SyncHub's contract, so dropping one can never turn a 413 into a 422.
  */
 const SACRIFICIAL_DEAL_FIELDS = [
+  "propertyName",
+  "scopeTitle",
   "estimator",
   "clientPhone",
   "clientEmail",
@@ -337,6 +393,28 @@ function trimAttachmentsToBudget(body: NormalizedRfpRequestBody, budget: number,
 }
 
 function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number, protectedCount = 0): void {
+  // FIRST, and whole: the activity log is the most expendable thing in the body. It is purely
+  // informational, the full history is one click away in the CRM, and it is a second UNBOUNDED input
+  // alongside the description.
+  //
+  // The ORDER matters and is not interchangeable with SACRIFICIAL_DEAL_FIELDS: leaving it to that list
+  // would shrink the DESCRIPTION — the deal's actual scope, which Procore shows as Project Description —
+  // in order to preserve an activity log, which is backwards. It is `.nullable()` in SyncHub's contract,
+  // so dropping it can never turn a 413 into a 422. The build-time caps in bid-board-activity-note.ts
+  // (MAX_NOTE_CHARS) mean this is a rare backstop, not the normal path.
+  if (body.deal?.crmActivityLog != null && serializedBytes(body) > budget) {
+    const droppedChars = body.deal.crmActivityLog.length;
+    body.deal.crmActivityLog = null;
+    // Say so. Unlike `attachmentsOmitted` there is no field on the wire carrying this, so without a log
+    // line "why did this Bid Board project get no note?" has no answer anywhere — and since the
+    // build-time caps make this a rare backstop, a line here is also the signal that something upstream
+    // is producing notes far larger than MAX_NOTE_CHARS.
+    console.warn(
+      `[RFP] Dropped crmActivityLog (${droppedChars} chars) from the body for deal ${body.sourceDealId} ` +
+        `to fit the ${budget}-byte budget; the Bid Board project will get no activity note.`
+    );
+  }
+
   const original = body.deal?.description;
   if (original && serializedBytes(body) > budget) {
     // Geometric shrink: guaranteed progress, terminates in O(log n), and exactness doesn't
@@ -405,6 +483,10 @@ export function capRfpRequestBody(
   // The retry path feeds us a body read back out of job_queue, which may predate this shape (older
   // dead jobs carry no attachmentsOmitted) — so tolerate a partial record rather than throwing and
   // turning a retry into a 500.
+  // The shallow spread carries every deal field through, including crmActivityLog. A body stored before
+  // that field existed simply has no key — `undefined` is treated as absent by both fitWithinBudget and
+  // JSON.stringify, so an old dead job re-caps to exactly the same shape it had (never a "undefined"
+  // string, never a spurious null).
   const deal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
   const next: NormalizedRfpRequestBody = {
     ...body,
@@ -414,6 +496,39 @@ export function capRfpRequestBody(
   };
   fitWithinBudget(next, maxBodyBytes ?? RFP_BODY_BYTE_BUDGET, protectedAttachmentCount(next.attachments));
   return next;
+}
+
+/**
+ * Re-resolves the identity uuids on a body read back out of job_queue, from the deal as it stands now.
+ *
+ * The gap capRfpRequestBody deliberately preserves is the right call for display fields and the WRONG
+ * one for identity: a job enqueued before these ids shipped has no `companyId`/`propertyId` key at all,
+ * and the shallow spread carries that absence straight into the re-enqueued body. Downstream a missing
+ * uuid is not "resolve it another way", it is a terminal skip — so the retry would silently never hand
+ * off, or fall back to the name/address matching these ids exist to retire.
+ *
+ * The deal's own columns are the authority, and a safe one: both are immutable once established (see
+ * assertDealUpdateLineagePolicy — neither can be cleared or repointed), so re-reading them can only
+ * FILL a gap, never disagree with the original enqueue.
+ * Must run BEFORE capRfpRequestBody so the limiter counts these bytes; they are not sacrificial, so the
+ * cap will never drop them again.
+ */
+export function withRfpRequestBodyIdentity(
+  body: NormalizedRfpRequestBody,
+  deal: Pick<RfpPayloadSourceDeal, "companyId" | "propertyId">
+): NormalizedRfpRequestBody {
+  // Same tolerance for a partial stored record as capRfpRequestBody, and the same cleanString the
+  // builder uses — so a retried body states an absent id exactly the way a first-attempt body does
+  // (an explicit null, never an omitted key).
+  const storedDeal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
+  return {
+    ...body,
+    deal: {
+      ...storedDeal,
+      companyId: cleanString(deal.companyId),
+      propertyId: cleanString(deal.propertyId),
+    },
+  };
 }
 
 export function buildNormalizedRfpRequestBody(input: {
@@ -431,7 +546,9 @@ export function buildNormalizedRfpRequestBody(input: {
     sourceDealId: deal.id,
     sourceEventId,
     deal: {
-      name: cleanString(deal.name) ?? "Untitled Deal",
+      // S01 intentionally applies to every new CRM opportunity handoff, not only service types:
+      // preserve the property's identity AND the opportunity context in the downstream project name.
+      name: rfpProjectName(deal.propertyName, deal.name),
       // Ship the FORMATTED project number (canonical `project_number`, else the
       // bid-board `deal_number`) — NEVER the raw HubSpot id (resolveDealDisplayNumber
       // guards HS ids out, returning null → we fall back to the deal UUID only when
@@ -439,24 +556,32 @@ export function buildNormalizedRfpRequestBody(input: {
       projectNumber:
         resolveDealDisplayNumber({ projectNumber: deal.projectNumber, dealNumber: deal.dealNumber }) ??
         deal.id,
+      // Same three tiers as isServiceRfp and the SQL predicate. The configured digit matters most here:
+      // a deal typed only by project_type_id (the common import shape) would otherwise ship as type 9,
+      // telling SyncHub a service job is residential work.
       projectType: resolveProjectTypeCode({
         projectType: deal.projectType,
+        projectTypes: deal.projectTypeCode,
         workflowRoute: deal.workflowRoute ?? "normal",
       }),
-      amount:
-        cleanNumber(deal.awardedAmount) ??
-        cleanNumber(deal.bidEstimate) ??
-        cleanNumber(deal.ddEstimate) ??
-        cleanNumber(deal.forecastRevenue),
+      amount: resolveRfpDealAmount(deal),
       estimator: cleanString(deal.estimator) ?? cleanString(deal.bidBoardEstimator),
       ownerName: cleanString(deal.ownerName),
       ownerEmail: cleanString(deal.ownerEmail),
+      companyId: cleanString(deal.companyId),
+      propertyId: cleanString(deal.propertyId),
+      propertyName: cleanString(deal.propertyName),
+      scopeTitle: cleanString(deal.scopeTitle),
       companyName: cleanString(deal.companyName),
       contactName: cleanString(deal.contactName),
       clientEmail: cleanString(deal.clientEmail),
       clientPhone: cleanString(deal.clientPhone),
       address: buildAddress(deal),
-      description: cleanString(deal.description),
+      description: cleanString(deal.description)
+        ?? (resolveProjectTypeCode({ projectType: deal.projectType, projectTypes: deal.projectTypeCode, workflowRoute: deal.workflowRoute ?? "normal" }) === "4" ? cleanString(deal.scopeTitle) : null),
+      // Pre-rendered by loadRfpPayloadDeal; cleanString so a blank/whitespace-only render lands as null
+      // (SyncHub then posts no note) rather than as an empty string.
+      crmActivityLog: cleanString(deal.crmActivityLog),
       dueDate: cleanIso(deal.bidDueDate) ?? cleanIso(deal.bidBoardDueDate),
       workflowRoute: deal.workflowRoute ?? null,
     },

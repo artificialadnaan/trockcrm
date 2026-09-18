@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useDraggable } from "@dnd-kit/core";
 import { GripVertical, Clock, MapPin } from "lucide-react";
-import { formatCurrencyCompact } from "@/lib/deal-utils";
+import { formatCurrencyCompact, formatDealDisplayName } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import {
   getEffectiveDealValue,
@@ -52,6 +52,10 @@ export interface PipelineRecordCardData {
   // CO-child model (BLUE PR1). Deal board cards are full Deal objects passed structurally as this
   // narrow type, so the flag flows through once it lands; only ever set/shown for deal records.
   isChangeOrder?: boolean | null;
+  // `deals.scope_title`. Same structural note as isChangeOrder above: the rep and director boards pass
+  // full Deal objects through this narrow type, so the field is present at runtime. Deal-only — a lead
+  // has no scope title.
+  scopeTitle?: string | null;
 }
 
 interface PipelineRecordCardProps {
@@ -96,6 +100,11 @@ export function PipelineRecordCard({
   const now = new Date();
   const effectivelyHeld = isDealValueEffectivelyOnHold(record, now);
   const value = formatValue(record, now);
+  // A change-order child deal is STORED as "<Parent> — Change Order N", so this clamped title reads as its
+  // parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched. GATED on
+  // `entity` — this card also backs the LEAD board, and only a deal can be a generated change-order child.
+  const displayName = entity === "deal" ? formatDealDisplayName(record.name, record.isChangeOrder) : record.name;
+  const scopeTitle = record.scopeTitle?.trim() ?? "";
   const location = [record.propertyCity, record.propertyState].filter(Boolean).join(", ");
   const contextLine = record.companyName ?? record.source ?? null;
   const ageLabel = `${record.atRisk?.effectiveStageAgeDays ?? getEffectiveStageAgeDays(getEffectiveStageAgeDeal(record))}d in stage`;
@@ -124,7 +133,7 @@ export function PipelineRecordCard({
           {...listeners}
           className="mt-1 cursor-grab text-slate-300 transition-colors hover:text-slate-600 active:cursor-grabbing"
           onClick={(event) => event.stopPropagation()}
-          aria-label={`Drag ${record.name}`}
+          aria-label={`Drag ${displayName}`}
         >
           <GripVertical className="h-4 w-4" />
         </button>
@@ -143,7 +152,20 @@ export function PipelineRecordCard({
               {entity === "deal" ? (
                 <ChangeOrderBadge isChangeOrder={record.isChangeOrder} compact />
               ) : null}
-              <p className="line-clamp-2 text-[15px] leading-5 font-semibold text-slate-900" title={record.name}>{record.name}</p>
+              <p className="line-clamp-2 text-[15px] leading-5 font-semibold text-slate-900" title={displayName}>{displayName}</p>
+              {/* The rep and director dashboards render their boards through THIS card, not the deals
+                  board's DecoratedKanbanCard — so a title added only there leaves the two dashboards
+                  showing name-only cards. Same structural blind spot as the deals-list mobile card.
+                  GATED on `entity`: this card also backs the LEAD board, and a lead has no scope title. */}
+              {entity === "deal" && scopeTitle ? (
+                <p
+                  className="line-clamp-2 text-xs leading-4 font-semibold text-slate-600"
+                  title={scopeTitle}
+                  data-testid="pipeline-record-card-scope-title"
+                >
+                  {scopeTitle}
+                </p>
+              ) : null}
             </div>
             {value ? (
               <span className="shrink-0 text-right text-[1.1rem] leading-none font-black tracking-tight text-slate-900">

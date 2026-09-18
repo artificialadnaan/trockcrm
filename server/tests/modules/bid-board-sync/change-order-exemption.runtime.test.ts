@@ -38,11 +38,15 @@ beforeAll(async () => {
       workflow_route text NOT NULL DEFAULT 'normal', deal_number text, project_number text, bid_board_project_number text,
       bid_board_estimator text, estimator_user_id uuid, sales_source_user_id uuid, bid_board_office text, bid_board_status text,
       bid_board_sales_price_per_area text, bid_board_project_cost numeric, bid_board_profit_margin_pct numeric,
-      bid_board_total_sales numeric, bid_board_created_at timestamptz, bid_board_due_date date,
+      bid_board_total_sales numeric, bid_board_created_at timestamptz, bid_board_due_date date, bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text,
       bid_board_customer_name text, bid_board_customer_contact_raw text, bid_board_stage_slug text,
       bid_board_stage_family text, bid_board_stage_status text, bid_board_last_updated_at timestamptz,
       bid_estimate numeric, awarded_amount numeric, won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       procore_bid_id bigint, is_active boolean NOT NULL DEFAULT true,
+      -- The full detach trio, not just the marker: this hand-rolled DDL is a standing invitation to
+      -- drift from the real table, and a partial copy is how the next suite that starts reading
+      -- bid_board_detached_by finds a column that exists in prod but not here.
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
       is_change_order boolean NOT NULL DEFAULT false, parent_deal_id uuid
     );
     INSERT INTO public.pipeline_stage_config (id, slug, name, display_order, is_terminal) VALUES ('${ST}','won','Won', 90, true);

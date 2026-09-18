@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { View } from "react-native";
 import { fireEvent, render } from "@testing-library/react-native";
-import { PhotoPickerGrid } from "../PhotoPickerGrid";
+import { PhotoPickerGrid, type PickablePhoto } from "../PhotoPickerGrid";
 import type { FieldPhoto } from "../../api/types";
 
 function makePhotos(count: number): FieldPhoto[] {
@@ -119,7 +119,10 @@ describe("PhotoPickerGrid", () => {
   });
 
   it("uses the getAccessibilityLabel override when provided", () => {
-    const getLabel = jest.fn((photo: FieldPhoto, isSelected: boolean) => `custom ${photo.id} ${isSelected}`);
+    // Typed as the grid's own structural row, not FieldPhoto: the prop widened to PickablePhoto so the
+    // weekly-report picker can reuse this grid, and a callback that demanded the full gallery shape would
+    // no longer be assignable.
+    const getLabel = jest.fn((photo: PickablePhoto, isSelected: boolean) => `custom ${photo.id} ${isSelected}`);
     const { getByTestId } = render(
       <PhotoPickerGrid
         photos={makePhotos(1)}

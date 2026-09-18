@@ -17,6 +17,15 @@ import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
+import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
+import { isCanvassingReportViewerEmail } from "@trock-crm/shared/lib/canvassingReportViewers";
+import { isDealMoveBackApproverEmail } from "@trock-crm/shared/lib/dealMoveBackApprovers";
+
+/**
+ * The role floor both allowlisted report routes sit behind (requireAnyRole). Shared by the two flags below
+ * so they cannot drift from each other; if that role list changes, this changes with it.
+ */
+const REPORT_SURFACE_ROLES = new Set(["admin", "director", "rep"]);
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -42,8 +51,25 @@ import {
   loginWithLocalPassword,
 } from "./local-auth-service.js";
 import { loginMobileUser } from "./mobile-auth-service.js";
+// From password-policy.js, NOT local-auth-service.js: several suites mock local-auth-service with a
+// plain factory, and reaching the policy through that module made this route depend on whichever mock
+// registered first in a worker.
+import { validatePasswordPolicy } from "./password-policy.js";
+import {
+  completePasswordReset,
+  dbClient,
+  deliverResetEmail,
+  finalizePasswordReset,
+  isResetTokenUsable,
+  issueResetToken,
+  lookupUserContact,
+  notifyPasswordChanged,
+} from "./password-reset-service.js";
 import { fieldUserAuthRouter } from "../field-users/routes.js";
 import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
+
+/** The role floor on the return-to-opportunity routes, kept beside the flag that mirrors it. */
+const MOVE_BACK_ROLES = new Set(["admin", "director"]);
 
 const router = Router();
 
@@ -171,11 +197,13 @@ function graphOAuthExchangeErrorRedirect(error: unknown) {
 }
 
 async function withOnboardingGate<T extends { id: string; email: string; officeId: string; activeOfficeId?: string; role: string }>(user: T) {
+  const officeId = user.activeOfficeId ?? user.officeId;
   const gate = await getUserOnboardingGateStatus({
     userId: user.id,
-    officeId: user.activeOfficeId ?? user.officeId,
+    officeId,
     role: user.role,
   });
+
   return {
     ...user,
     onboardingCompletedAt: gate.onboardingCompletedAt,
@@ -188,6 +216,18 @@ async function withOnboardingGate<T extends { id: string; email: string; officeI
     // Whether this user is one of the 3 RFP voters (Sidney/Tim/James). Gates the vote UI + /rfp-vote page;
     // the vote endpoint enforces the same allowlist (requireRfpVoter) as the hard boundary.
     isRfpVoter: isRfpVoterEmail(user.email, process.env),
+    // Whether this user can actually OPEN each allowlisted report. Both endpoints carry TWO guards —
+    // requireAnyRole then the allowlist — so both flags mirror BOTH. Reporting the allowlist alone would set
+    // a flag true for an allowlisted sales_manager or construction user, who would then be offered a card
+    // whose route bounces them to "/" with no explanation. The endpoints enforce both as the hard boundary.
+    canViewDailyActivityLog:
+      REPORT_SURFACE_ROLES.has(user.role) && isDailyActivityLogViewerEmail(user.email, process.env),
+    canViewCanvassingReport:
+      REPORT_SURFACE_ROLES.has(user.role) && isCanvassingReportViewerEmail(user.email, process.env),
+    // Same two-guard rule, for the destructive move-back action: the admin/director floor AND the
+    // DEAL_MOVE_BACK_APPROVER_EMAILS allowlist, so the deal menu never offers what the endpoint refuses.
+    canMoveDealBackToOpportunity:
+      MOVE_BACK_ROLES.has(user.role) && isDealMoveBackApproverEmail(user.email, process.env),
   };
 }
 
@@ -327,9 +367,9 @@ router.post("/mobile-login", authLimiter, async (req, res, next) => {
       res.cookie(clear.name, "", clear.options);
     }
 
-    // withOnboardingGate supplies isRfpVoter / isRfpReviewer / requiresOnboarding — the same flags the web
-    // client gates its RFP screens on, so the app can hide exactly what the web hides. The server
-    // endpoints still enforce those allowlists as the hard boundary.
+    // withOnboardingGate supplies isRfpVoter / isRfpReviewer / canViewDailyActivityLog / requiresOnboarding —
+    // the same flags the web client gates its RFP and reporting screens on, so the app can hide exactly what
+    // the web hides. The server endpoints still enforce those allowlists as the hard boundary.
     res.json({ token, user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }) });
   } catch (err) {
     next(err);
@@ -374,11 +414,32 @@ router.post("/local/change-password", authMiddleware, async (req, res, next) => 
       throw new AppError(400, "Current password and new password are required");
     }
 
-    await changeLocalPassword({
+    const { tokenVersion } = await changeLocalPassword({
       userId: req.user!.id,
       currentPassword,
       newPassword,
     });
+
+    // The change bumped users.token_version, which invalidates EVERY session including this one. Hand
+    // the caller a token at the new version so the device they just used stays signed in while all the
+    // others die. Role/office come from the HOME values (baseRole, officeId) exactly as /local/login
+    // mints them — the active-office override is request scoped and must never be baked into a token.
+    //
+    // Only for a caller who actually presented a cookie. The native CRM app is Bearer-only and
+    // /mobile-login deliberately CLEARS every auth cookie so it stays outside the cookie-triggered
+    // CSRF gate; handing it one here would quietly put it back inside, and authMiddleware reads the
+    // cookie before the Authorization header.
+    if (req.cookies?.token) {
+      const token = signJwt({
+        userId: req.user!.id,
+        email: req.user!.email,
+        officeId: req.user!.officeId,
+        role: req.user!.baseRole ?? req.user!.role,
+        tokenVersion,
+        authMethod: req.user!.authMethod ?? "local",
+      });
+      refreshAuthTokenCookie(req, res, token);
+    }
 
     res.json(withCsrfToken(req, res, {
       user: await withOnboardingGate({
@@ -685,6 +746,88 @@ router.post("/procore/disconnect", authMiddleware, requireAdmin, async (_req, re
   try {
     await clearStoredProcoreOauthTokens();
     res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Self-service password reset (unauthenticated) ---
+//
+// One message for every failure mode. "Expired", "already used", "never existed" and "invalidated" are
+// deliberately indistinguishable: a distinguishable response is an oracle, and none of the distinctions
+// help a legitimate user, who needs exactly one instruction either way.
+const GENERIC_RESET_FAILURE = "This reset link is no longer valid. Request a new one.";
+
+router.post("/password-reset/request", authLimiter, (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+  const requestedIp = req.ip ?? null;
+
+  // Respond FIRST, before ANY database work.
+  //
+  // Deferring only the email was not enough. The number of round trips before the response still gave
+  // the account away: an unknown address costs one query (the eligibility lookup), an eligible one
+  // costs five, and an eligible one that has hit the per-account cap costs two. That is measurable
+  // WITHOUT absolute timing -- send four requests for the same address and watch the fourth get faster
+  // as the cap trips, which only happens for an account that exists. Doing everything after the
+  // response makes the handler's cost identical in every case, because nothing is left in it.
+  res.status(200).json({ ok: true });
+
+  if (!email) return;
+
+  void (async () => {
+    try {
+      const issued = await issueResetToken(dbClient, email, requestedIp);
+      if (issued) await deliverResetEmail(dbClient, issued);
+    } catch (err) {
+      console.error("[password-reset] request failed", err);
+    }
+  })();
+});
+
+router.post("/password-reset/validate", authLimiter, async (req, res, next) => {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
+    // UX only -- it lets the page say "this link is dead" without burning the token. Carries no
+    // security weight; complete() re-checks every condition atomically.
+    const valid = token ? await isResetTokenUsable(dbClient, token) : false;
+    res.json({ valid });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/password-reset/complete", authLimiter, async (req, res, next) => {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!token || !password) {
+      res.status(400).json({ error: { message: GENERIC_RESET_FAILURE } });
+      return;
+    }
+
+    // Policy check BEFORE consuming, because consuming is destructive. Validating afterwards would burn
+    // the user's single-use link on a typo -- they would be told their password was too short AND have
+    // to request a whole new email to try again.
+    validatePasswordPolicy(password);
+
+    // Consume and apply are ONE transaction. Consuming separately left a window where a failure
+    // between the two burned the link without changing the password, telling the user their link was
+    // invalid and making them request another email.
+    const userId = await completePasswordReset(dbClient, token, password);
+    if (!userId) {
+      // Covers an unusable token AND an account whose eligibility lapsed inside the TTL -- the same
+      // generic message, because neither distinction helps a legitimate user and both help an attacker.
+      res.status(400).json({ error: { message: GENERIC_RESET_FAILURE } });
+      return;
+    }
+
+    res.json({ ok: true });
+
+    // Post-commit side effects (SSE teardown, audit row, change notice) run outside the try above and
+    // are individually guarded inside. A throw here would otherwise reach the error handler, which has
+    // no headersSent guard and would try to write a 500 onto a finished response -- and none of these
+    // may turn a committed password change into a failure the user is told about.
+    void finalizePasswordReset(dbClient, userId);
   } catch (err) {
     next(err);
   }

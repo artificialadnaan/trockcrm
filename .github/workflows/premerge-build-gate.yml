@@ -38,8 +38,8 @@ jobs:
   # Without this job, nothing in mobile-crm/ is compiled or run by CI at all, and a green gate would say
   # nothing about it. Its own lockfile is the cache key for the same reason.
   #
-  # T-Rock Cam (mobile/) has the identical shape and is still ungated; adding that is a separate change,
-  # deliberately not bundled into this PR.
+  # T-Rock Cam (mobile/) has the identical shape; the `mobile` job below is that same reasoning applied to
+  # it, and this comment's earlier note that it was "still ungated" no longer holds.
   mobile-crm:
     runs-on: ubuntu-latest
 
@@ -83,4 +83,55 @@ jobs:
         env:
           # Any syntactically valid host works: this step proves the bundle BUILDS, and reaches no network.
           # The real host is supplied as an EAS build env var and is never committed.
+          EXPO_PUBLIC_API_BASE_URL: https://api.ci.invalid
+
+  # T-Rock Cam (mobile/) — the same shape and the same reasoning as mobile-crm above: outside the npm
+  # workspace graph (root `workspaces` is shared/server/worker/client/client-field), so the root `npm ci`
+  # never installs mobile/node_modules and `npm run check:premerge` never iterates it.
+  #
+  # This is not hypothetical. While it was ungated, mobile/src/api/types.ts drifted from the server view it
+  # claims to match field-for-field: `CorrectiveActionItem` omitted the `events` array the server has
+  # emitted since the thread shipped, and the corrective-action detail screen read `item.events` at four
+  # sites against a type that never declared it. `npm run typecheck --prefix mobile` was RED on main and
+  # every gate was green (fixed in #1044, which is why this job can be added now rather than landing red).
+  mobile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        # Pinned to a SHA and credentials not persisted, for the same reason as mobile-crm: this job runs
+        # `npm ci`, which executes dependency lifecycle scripts (mobile/ has a patch-package postinstall),
+        # and performs no git operations after checkout.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: mobile
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: mobile
+
+      # mobile/'s own `test` script sets EXPO_PUBLIC_API_BASE_URL itself, so no env is needed here.
+      - name: Test
+        run: npm test
+        working-directory: mobile
+
+      # Same reason as mobile-crm: typecheck and Jest both pass happily on an app that cannot produce a
+      # bundle. A Metro resolution error, a bad Babel config or a missing asset surfaces only here, and
+      # otherwise is not discovered until someone burns an EAS build on it.
+      - name: Bundle (expo export)
+        run: npm run build:export
+        working-directory: mobile
+        env:
+          # Any syntactically valid host works: this proves the bundle BUILDS and reaches no network.
           EXPO_PUBLIC_API_BASE_URL: https://api.ci.invalid

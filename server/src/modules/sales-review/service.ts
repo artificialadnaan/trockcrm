@@ -229,6 +229,8 @@ export function buildSalesReviewOverview(input: {
         entityType: "deal" as const,
         id: deal.id,
         name: deal.name,
+        // The AUTHORITY for the change-order relabel — already on the record, previously dropped here.
+        isChangeOrder: deal.isChangeOrder,
         companyId: deal.companyId,
         companyName: deal.companyId ? (companyMap.get(deal.companyId) ?? null) : null,
         propertyId: deal.propertyId,
@@ -290,6 +292,7 @@ export function buildSalesReviewOverview(input: {
         entityType: "deal" as const,
         id: deal.id,
         name: deal.name,
+        isChangeOrder: deal.isChangeOrder,
         assignedRepId: deal.assignedRepId,
         assignedRepName: deal.assignedRepId ? (userNameMap.get(deal.assignedRepId) ?? "Unknown User") : null,
         stageId: deal.stageId,

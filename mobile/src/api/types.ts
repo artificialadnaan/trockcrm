@@ -83,6 +83,14 @@ export type ConfirmUploadRequest = {
   longitude?: number;
   addressSource?: "exif" | "live_gps";
   takenAt?: string;
+  /**
+   * How many captures are still queued behind this one on THIS device. Telemetry only — the server writes
+   * it to the photo audit event and makes no decision with it.
+   *
+   * The server cannot see a device's queue, which is why a three-day upload backlog was invisible until a
+   * superintendent reported missing photos and it had to be reconstructed from capture-vs-arrival dates.
+   */
+  queueDepth?: number;
 };
 
 // ── Capture targets ───────────────────────────────────────────────────────────
@@ -181,6 +189,12 @@ export type FieldScorecardSummary = {
   pmName: string | null;
   /** Current canonical deal/job name. Optional while older API deployments roll out. */
   projectName?: string | null;
+  /**
+   * `deals.is_change_order` for `projectName` — the AUTHORITY for the change-order display relabel.
+   * Optional and possibly ABSENT: an older API deployment omits it, and absent must stay absent (the
+   * display helper then reads the name). Never default this to false — false is an assertion.
+   */
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencyCount: number;
   submittedByName: string | null;
@@ -279,6 +293,322 @@ export type FieldResponderRole = "superintendent" | "project_manager";
 export type FieldResponderOption = { id: string; name: string; email: string; role: FieldResponderRole };
 export type FieldRespondersResponse = { responders: FieldResponderOption[] };
 
+// ── Weekly reports ────────────────────────────────────────────────────────────
+// The client-facing weekly progress report, authored on the phone and reviewed by the PM. Served from
+// /field/weekly-reports — a FIELD mount, because this app's `surface: "field"` token is rejected on every
+// CRM route (#722) and the CRM's own /weekly-reports router is additionally gated to admin/director/rep.
+//
+// `status` and `weekState` are kept as broad unions rather than plain strings because the app switches on
+// them to choose a label and an action; an unknown value falls through to a neutral chip.
+export type WeeklyReportStatusValue = "draft" | "pending_review" | "approved" | "sent";
+export type WeeklyReportWeekStateValue = WeeklyReportStatusValue | "not_started" | "dismissed";
+
+/** One project the signed-in user owes reports on. */
+export type WeeklyReportAssignment = {
+  weeklyReportProjectId: string;
+  dealId: string;
+  projectName: string;
+  projectNumber: string | null;
+  clientName: string | null;
+  /** The viewer's relationship to this project. Both are true on a one-person job. */
+  isSuper: boolean;
+  isPm: boolean;
+  cadenceWeekday: number;
+  /** What `week_of` auto-fills to — the cadence due date, NOT today. */
+  currentWeekOf: string;
+  currentState: WeeklyReportWeekStateValue;
+  currentReportId: string | null;
+  /**
+   * The newest week this project SENT, which survives a cadence rollover — `currentReportId` does not.
+   * Null until something has gone out.
+   */
+  lastSentReportId: string | null;
+  lastSentWeekOf: string | null;
+  currentReportStatus: WeeklyReportStatusValue | null;
+  /**
+   * False once reporting has ENDED but missed weeks remain: `currentWeekOf` is then past the cadence end
+   * date and the server refuses it, so the card must not offer to start it.
+   */
+  currentWeekFilable: boolean;
+  /**
+   * How late the OLDEST week still owed is — over the whole backlog, not just the weeks this payload
+   * carries. 0 when only the current, not-yet-due week is outstanding.
+   */
+  daysLate: number;
+  /**
+   * Earlier weeks still owed, oldest first. Offered, never auto-selected. A week whose only report is a
+   * DRAFT is still owed and still listed: the wizard creates the row on the photos step, so dropping it
+   * once a row existed put the week beyond reach of the phone entirely.
+   */
+  outstandingWeeks: string[];
+  /**
+   * weekOf → the report id an outstanding week already has, so the wizard resumes that row instead of
+   * posting a second create. Only weeks that were started appear. Optional: an older API build does not
+   * send it, and absent simply means every outstanding week starts fresh, as it did before.
+   */
+  outstandingWeekReportIds?: Record<string, string>;
+  hasMoreOutstandingWeeks: boolean;
+  previousWeekOf: string | null;
+  previousCompletionPercent: number | null;
+  previousWeatherDelayDays: number | null;
+  /** Predecessor figures keyed by the week being filled — cumulative values must not cross weeks. */
+  previousByWeekOf?: Record<
+    string,
+    { weekOf: string; completionPercent: number | null; weatherDelayDays: number | null }
+  >;
+};
+
+/** One row of the PM's review queue. */
+export type WeeklyReportReviewItem = {
+  reportId: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  projectName: string;
+  weekOf: string;
+  status: WeeklyReportStatusValue;
+  authoredByName: string | null;
+  submittedAt: string | null;
+};
+
+/**
+ * A week this PM sent that the mail provider has not accepted.
+ *
+ * FACTS, NOT A VERDICT — the same four columns the CRM board reads. "Send failed", "Send stuck" and
+ * "Sending…" are three different situations distinguished only by whether an error was recorded and how
+ * long ago the last attempt was, and the app derives them from these in one place
+ * (`src/weekly-reports/delivery.ts`) rather than being handed a label that goes stale the moment the
+ * payload is cached.
+ *
+ * `sentAt` is not only for display: it is the age the mail provider's 24-hour idempotency window is
+ * measured against, so it decides whether a Retry needs the duplicate-risk acknowledgement.
+ *
+ * There is no `sendDeliveredAt`, because the server's predicate for this list is `send_delivered_at IS
+ * NULL` — it could only ever be null here.
+ */
+export type WeeklyReportUndeliveredSend = {
+  reportId: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  projectName: string;
+  weekOf: string;
+  version: number;
+  /** When the PM committed the send. Stamped once and never moved — see `sendLastAttemptAt`. */
+  sentAt: string | null;
+  sendError: string | null;
+  sendAttempts: number;
+  /** When delivery was last ATTEMPTED — written by the worker, and by a retry when it re-queues. */
+  sendLastAttemptAt: string | null;
+};
+
+export type WeeklyReportAssignmentsResponse = {
+  asOf: string;
+  projects: WeeklyReportAssignment[];
+  /** Newest week first — the queue only empties when a report is SENT, so the tail is the stale end. */
+  pendingReview: WeeklyReportReviewItem[];
+  /**
+   * The true depth of the queue, which the payload caps. Greater than `pendingReview.length` ⇒ rows were
+   * left out and the hub must say so. Optional because an older API build does not send it; absent is
+   * read as "not truncated", which is what the app assumed before the field existed.
+   */
+  pendingReviewTotal?: number;
+  /**
+   * Weeks this PM SENT that have not reached the client, newest first.
+   *
+   * Deliberately its own list rather than extra rows on `pendingReview`. The two are different work — one
+   * ends in Approve, the other in Retry or a correction — and separating them is also what keeps this
+   * change safe to deploy: `mobile/` has no OTA, so the server's response is read today by builds that
+   * will never be updated, and an unknown key is ignored by all of them while a `sent` row inside
+   * `pendingReview` would render under "Waiting on your review" with a tap that dead-ends.
+   *
+   * Optional for the same reason every other addition here is: an older API build does not send it.
+   */
+  undeliveredSends?: WeeklyReportUndeliveredSend[];
+  /** The true depth of the list above, which the payload caps — same contract as `pendingReviewTotal`. */
+  undeliveredSendsTotal?: number;
+};
+
+/**
+ * A photo on a report. `caption` is REPORT-SPECIFIC: the server seeds it from `originalDescription` and
+ * never writes an edit back to the file, so retitling a photo for a client cannot rewrite what the crew
+ * typed on site.
+ */
+export type WeeklyReportPhotoView = {
+  fileId: string;
+  caption: string | null;
+  originalDescription: string | null;
+  sortOrder: number;
+  takenAt: string | null;
+  mimeType: string | null;
+  /** Presigned by the field route; the services deal in file ids. Null when unresolvable. */
+  thumbnailUrl: string | null;
+  fullUrl: string | null;
+};
+
+export type WeeklyReportPhotoCandidate = WeeklyReportPhotoView & {
+  /** The `week_of` of an earlier report this photo already appeared on, so it isn't repeated by accident. */
+  alreadyUsedOn: string | null;
+  selected: boolean;
+};
+
+export type WeeklyReportDetailView = {
+  id: string;
+  weeklyReportProjectId: string;
+  dealId: string;
+  weekOf: string;
+  version: number;
+  status: WeeklyReportStatusValue;
+  workCompleted: string | null;
+  nextWeekLookAhead: string | null;
+  issuesConcerns: string | null;
+  completionPercent: number | null;
+  weatherDelayDays: number | null;
+  remainingWeeks: number | null;
+  projectedDurationWeeks: number | null;
+  authoredByName: string | null;
+  submittedAt: string | null;
+  reviewedAt: string | null;
+  /** When the PM COMMITTED the send. Not when anything was delivered — see `sendDeliveredAt`. */
+  sentAt: string | null;
+  /**
+   * Whether a newer version of this week has been SENT, and which one.
+   *
+   * Read for one decision: a superseded version must never have its delivery retried. It is still `sent`,
+   * still undelivered and still carries a live share URL in its stored request, so replaying it would email
+   * a client the version they were already told was replaced. The service refuses it and the CRM's Retry
+   * button carries the same predicate; this is what lets the app not offer the button in the first place.
+   */
+  supersededById: string | null;
+  /**
+   * What the last delivery attempt reported, verbatim from the mail provider where there was one.
+   *
+   * Null on a `sent` report does NOT mean the delivery succeeded. The delivery job records its outcome in
+   * the same database whose unavailability is the likeliest reason it failed, so a job that dead-letters
+   * writes nothing at all — that row has no error, no delivery, and is indistinguishable from a send queued
+   * five seconds ago except by the clock. `src/weekly-reports/delivery.ts` is where the three are told
+   * apart; nothing should branch on this field alone.
+   */
+  sendError: string | null;
+  sendAttempts: number;
+  /**
+   * When the mail provider ACCEPTED the message — the one fact that means the client has it, and the
+   * predicate that takes a week off the hub's undelivered list.
+   *
+   * AND NOTHING MORE THAN THAT. There is no bounce webhook anywhere in this platform, so a report addressed
+   * to a mistyped domain is accepted, hard-bounces, and reads here forever as though it landed. Every
+   * sentence the app puts on screen about this field is worded accordingly.
+   */
+  sendDeliveredAt: string | null;
+  /** When delivery was last ATTEMPTED — moves on every worker attempt and on every retry. */
+  sendLastAttemptAt: string | null;
+  photos: WeeklyReportPhotoView[];
+};
+
+/** The standing setup the report prints its header from. */
+export type WeeklyReportProjectView = {
+  id: string;
+  dealId: string;
+  dealName: string | null;
+  propertyDisplayName: string | null;
+  clientName: string | null;
+  trockPmName: string | null;
+  trockSuperName: string | null;
+  projectStartDate: string | null;
+  projectCompletionDate: string | null;
+  projectedDurationWeeks: number | null;
+  cadenceWeekday: number;
+};
+
+/**
+ * Resolved SERVER-SIDE and shipped with the payload rather than re-derived here.
+ *
+ * The PM reviews on either surface, so two clients each deriving "can I approve this?" from a status and
+ * a pair of user ids would eventually disagree with each other and with the service that enforces it —
+ * and the visible failure is a button that 403s.
+ */
+export type WeeklyReportPermissions = {
+  canEdit: boolean;
+  canSubmit: boolean;
+  canApprove: boolean;
+  canReturnToDraft: boolean;
+};
+
+// ── The client send ───────────────────────────────────────────────────────────
+// The email the client receives is COMPOSED SERVER-SIDE and shipped here as data. Nothing below is
+// re-derived on the phone: the subject, the greeting, the default message and the body preview all arrive
+// from GET /field/weekly-reports/reports/:id/send-draft, and the CRM's dialog renders the very same
+// payload from the same service. A second implementation of any of it on either surface would mean the PM
+// approves one wording and the client receives another.
+
+/** A client-team address the modal offers. `role` is the label the report prints (DOC / PM / RM / CM). */
+export type WeeklyReportRecipientOption = { role: string; name: string | null; email: string };
+
+/** The T-Rock PM block that signs the email — what the client replies to. */
+export type WeeklyReportSenderContact = {
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+};
+
+export type WeeklyReportSendDraftView = {
+  reportId: string;
+  weekOf: string;
+  version: number;
+  /**
+   * True only when an EARLIER version of this week actually reached the client. Deliberately not
+   * `version > 1`: a v2 whose v1 never got out is not a correction, it is a first copy, and telling a
+   * client that this "replaces the copy they already have" sends them hunting for an email that does not
+   * exist. The banner the app shows and the sentence the client reads come from this one flag.
+   */
+  isCorrection: boolean;
+  propertyName: string | null;
+  /** The pre-filled selection. */
+  recipients: string[];
+  /** Everything the client team offers, so a role with an address can be re-added without retyping it. */
+  recipientOptions: WeeklyReportRecipientOption[];
+  subject: string;
+  greeting: string;
+  /** The one part the PM edits. */
+  contextParagraph: string;
+  sender: WeeklyReportSenderContact;
+  attachPdf: boolean;
+  /** The exact plain-text body the client will receive, given the values above. Preview, not input. */
+  bodyPreview: string;
+};
+
+export type WeeklyReportSendDraftResponse = { draft: WeeklyReportSendDraftView };
+
+/**
+ * The send's answer — and the ONE moment the raw client link exists.
+ *
+ * `public.weekly_report_tokens` stores a SHA-256 hash of the token, so this URL is unreproducible: no
+ * later API call returns it, and the send draft above deliberately does not carry it. The screen shows it
+ * once, for copying, and it MUST NOT be written to the draft store, a log line or crash telemetry.
+ */
+export type WeeklyReportSendResponse = { report: WeeklyReportDetailView; shareUrl: string };
+
+export type WeeklyReportResponse = { report: WeeklyReportDetailView };
+export type WeeklyReportDetailResponse = {
+  report: WeeklyReportDetailView;
+  project: WeeklyReportProjectView;
+  permissions: WeeklyReportPermissions;
+};
+/**
+ * What the server-side dictation pass hands back: an ADDITION, never a replacement for the section.
+ *
+ * `source` says which pass produced it — `"model"` when Claude cleaned the transcript, `"local"` when the
+ * server fell back to its own sentence split (no API key configured, or the model call failed). Both are
+ * appended identically; it exists so a degraded deploy is legible rather than invisible.
+ */
+export type WeeklyReportDictationResponse = { text: string; source?: "model" | "local" };
+export type WeeklyReportPhotoCandidatesResponse = {
+  photos: WeeklyReportPhotoCandidate[];
+  /**
+   * The true size of the window, which `photos` caps. Greater than `photos.length` ⇒ the oldest days of
+   * the fortnight were left out and the picker must say so. Optional for an older API build.
+   */
+  total?: number;
+};
+
 // ── Corrective actions ────────────────────────────────────────────────────────
 // A response-evidence photo linked to a corrective-action item. Mirrors the server's
 // CorrectiveActionResponsePhoto (corrective-action-api.ts). The read endpoint now resolves a presigned `url`
@@ -291,6 +621,18 @@ export type CorrectiveActionResponsePhoto = {
   clientUploadId: string | null;
   url?: string | null;
   caption: string | null;
+};
+// One entry in a corrective-action item's thread. Matches the server's CorrectiveActionEventView
+// (corrective-action-api.ts:35). `eventType` stays a broad string for the same reason `status` does.
+export type CorrectiveActionEvent = {
+  id: string;
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  /** Photos filed with THIS attempt. Empty for approvals and rejections. */
+  photos: CorrectiveActionResponsePhoto[];
 };
 // One flagged corrective-action item (an action item or critical deficiency) with its inline response.
 // Matches the server's CorrectiveActionItemView field-for-field. `itemType`/`status` are kept as broad
@@ -307,6 +649,16 @@ export type CorrectiveActionItem = {
   responderEmail: string | null;
   respondedAt: string | null;
   photos: CorrectiveActionResponsePhoto[];
+  /**
+   * The full thread, oldest first. The columns above hold only the LATEST attempt — a resubmission
+   * overwrites them — so this is the only place a rejection and what it asked for survives.
+   *
+   * The server has emitted this since the thread shipped (corrective-action-api.ts:64, populated at
+   * :162 with `?? []`, so it is always an array). It was missing here, and because `mobile/` is not in
+   * the root `workspaces` array nothing in CI compiles this file — the corrective-action detail screen
+   * has been reading `item.events` against a type that never declared it.
+   */
+  events: CorrectiveActionEvent[];
 };
 // GET /field/scorecards/:id/corrective-actions and the POST response both wrap the items in `{ items }`
 // (corrective-action-routes.ts) — there is no top-level scorecardId/status on the wire.

@@ -21,9 +21,17 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/procoreBidBoard": {
+      "types": "./dist/lib/procoreBidBoard.d.ts",
+      "default": "./dist/lib/procoreBidBoard.js"
+    },
     "./lib/editDistance": {
       "types": "./dist/lib/editDistance.d.ts",
       "default": "./dist/lib/editDistance.js"
+    },
+    "./lib/canvassingReportViewers": {
+      "types": "./dist/lib/canvassingReportViewers.d.ts",
+      "default": "./dist/lib/canvassingReportViewers.js"
     },
     "./lib/correctiveActionApprovers": {
       "types": "./dist/lib/correctiveActionApprovers.d.ts",
@@ -33,6 +41,14 @@
       "types": "./dist/lib/correctiveActionOrder.d.ts",
       "default": "./dist/lib/correctiveActionOrder.js"
     },
+    "./lib/dailyActivityLogViewers": {
+      "types": "./dist/lib/dailyActivityLogViewers.d.ts",
+      "default": "./dist/lib/dailyActivityLogViewers.js"
+    },
+    "./lib/dealMoveBackApprovers": {
+      "types": "./dist/lib/dealMoveBackApprovers.d.ts",
+      "default": "./dist/lib/dealMoveBackApprovers.js"
+    },
     "./lib/fieldScorecardEmails": {
       "types": "./dist/lib/fieldScorecardEmails.d.ts",
       "default": "./dist/lib/fieldScorecardEmails.js"
@@ -40,6 +56,10 @@
     "./lib/responderNameMatch": {
       "types": "./dist/lib/responderNameMatch.d.ts",
       "default": "./dist/lib/responderNameMatch.js"
+    },
+    "./lib/scorecardGeneration": {
+      "types": "./dist/lib/scorecardGeneration.d.ts",
+      "default": "./dist/lib/scorecardGeneration.js"
     },
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",
@@ -52,6 +72,26 @@
     "./lib/rfpVoteState": {
       "types": "./dist/lib/rfpVoteState.d.ts",
       "default": "./dist/lib/rfpVoteState.js"
+    },
+    "./lib/weeklyReportEmail": {
+      "types": "./dist/lib/weeklyReportEmail.d.ts",
+      "default": "./dist/lib/weeklyReportEmail.js"
+    },
+    "./lib/weeklyReportSendStall": {
+      "types": "./dist/lib/weeklyReportSendStall.d.ts",
+      "default": "./dist/lib/weeklyReportSendStall.js"
+    },
+    "./lib/weeklyReportDelivery": {
+      "types": "./dist/lib/weeklyReportDelivery.d.ts",
+      "default": "./dist/lib/weeklyReportDelivery.js"
+    },
+    "./lib/weeklyReportViews": {
+      "types": "./dist/lib/weeklyReportViews.d.ts",
+      "default": "./dist/lib/weeklyReportViews.js"
+    },
+    "./lib/weeklyReportTeam": {
+      "types": "./dist/lib/weeklyReportTeam.d.ts",
+      "default": "./dist/lib/weeklyReportTeam.js"
     },
     "./lib/userProvisioningGuards": {
       "types": "./dist/lib/userProvisioningGuards.d.ts",

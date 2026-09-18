@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EvidenceMetric, EvidenceRecord, MondayShowcaseEvidence } from "./types";
+import { UNFILTERED_EVIDENCE_ROUTE_FILTER } from "./types";
+import type { EvidenceMetric, EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
 
 // Controllable mock of the data hook so we can render the drawer with a fixed evidence payload.
 const hookState: { data: MondayShowcaseEvidence | null } = { data: null };
@@ -50,6 +51,7 @@ function evidence(metric: EvidenceMetric, records: EvidenceRecord[]): MondayShow
     scope: { kind: "office" },
     band: null,
     leadStage: null,
+    routeFilter: UNFILTERED_EVIDENCE_ROUTE_FILTER,
     total: { count: records.length, value: 1000, basisLabel: "Best current estimate" },
     records,
   };
@@ -70,15 +72,19 @@ afterEach(() => {
   hookState.data = null;
 });
 
-function mount(metric: EvidenceMetric, records: EvidenceRecord[]) {
-  hookState.data = evidence(metric, records);
+function renderDrawer(request: EvidenceRequest | null) {
   act(() => {
     root.render(
       <MemoryRouter>
-        <EvidenceDrawer request={{ metric, title: "Evidence" }} mode="to_date" onClose={() => {}} />
+        <EvidenceDrawer request={request} mode="to_date" onClose={() => {}} />
       </MemoryRouter>
     );
   });
+}
+
+function mount(metric: EvidenceMetric, records: EvidenceRecord[]) {
+  hookState.data = evidence(metric, records);
+  renderDrawer({ metric, title: "Evidence" });
 }
 
 function setCloseDateButtons(): HTMLButtonElement[] {
@@ -141,6 +147,34 @@ describe("evidence drawer deal-number resolution (canonical, never the HubSpot i
     expect(text).not.toContain("999000111222");
     expect(text).not.toContain("Pending"); // no "#Pending" chip — the line is omitted
     expect(text).not.toContain("#"); // the whole identifier line (the only "#" source) is gone
+  });
+});
+
+describe("evidence drawer change-order relabel is driven by the FLAG, not the name", () => {
+  // `deals.is_change_order` reaches the drawer as EvidenceRecord.dealIsChangeOrder and OUTRANKS the stored
+  // name. The DISCRIMINATING row is the deal a human named "Lobby — Change Order 1" with the flag FALSE: if
+  // the flag never reaches formatDealDisplayName the formatter parses the name instead and renders
+  // "Change Order 1 — Lobby". A true-only assertion passes even with the argument dropped entirely.
+  it("leaves a human-named 'X — Change Order N' alone and moves the label only for a real change order", () => {
+    mount("won", [
+      record({ id: "a", name: "Lobby — Change Order 1", dealNumber: "D-1", dealIsChangeOrder: false }),
+      record({ id: "b", name: "Tides Park Lane — Change Order 2", dealNumber: "D-2", dealIsChangeOrder: true }),
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+    expect(text).toContain("Change Order 2 — Tides Park Lane");
+  });
+
+  it("leaves a LEAD named 'X — Change Order N' alone (the server answers false for leads)", () => {
+    // Lead rows render through this same name cell, so the leads query answers FALSE rather than leaving
+    // the flag unknown — otherwise the name-shape fallback relabels a lead nobody ever called a change order.
+    mount("leads", [
+      record({ id: "l1", name: "Lobby — Change Order 1", dealNumber: null, value: null, dealIsChangeOrder: false }),
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Lobby");
   });
 });
 
@@ -273,5 +307,28 @@ describe("evidence drawer 'Set close date' action is owner-gated (CodeRabbit P2)
     authState.user = { id: "director-1", role: "director" };
     mount("undated", [record({ id: "own", repId: "director-1", repName: "Director" })]);
     expect(setCloseDateButtons()).toHaveLength(1);
+  });
+});
+
+describe("evidence drawer nested editor lifecycle (Codex P1)", () => {
+  it("unmounts and clears an open close-date editor when its outer evidence closes", () => {
+    authState.user = { id: "rep-self", role: "rep" };
+    hookState.data = evidence("undated", [record({ id: "office-a-deal", repId: "rep-self" })]);
+    renderDrawer({ metric: "undated", title: "Office A evidence" });
+
+    const editButton = setCloseDateButtons()[0];
+    expect(editButton).toBeDefined();
+    act(() => editButton.click());
+    expect(document.body.textContent).toContain("Move close date");
+
+    // An office switch closes the parent by clearing `request`; the nested dialog must disappear with it,
+    // rather than retaining office A's deal id after the outer evidence drawer has gone away.
+    renderDrawer(null);
+    expect(document.body.textContent).not.toContain("Move close date");
+
+    // Opening a later drawer must start with no editor selected — it cannot revive the old office's row.
+    hookState.data = evidence("undated", [record({ id: "office-b-deal", repId: "rep-self" })]);
+    renderDrawer({ metric: "undated", title: "Office B evidence" });
+    expect(document.body.textContent).not.toContain("Move close date");
   });
 });

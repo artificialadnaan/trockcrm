@@ -78,6 +78,13 @@ describe("field projects service", () => {
       projects: [{
         id: "deal-1",
         name: "Roof Repair",
+        // `deals.is_change_order` — the AUTHORITY the field clients use to decide whether to move
+        // "Change Order N" to the front of the displayed name, instead of guessing from the name.
+        isChangeOrder: false,
+        // Part of the field-safe shape now: `scope_title` is a SEARCHED column on this surface
+        // (activeProjectWhere), so the row has to be able to explain a match on it. Null here because
+        // the fixture row has no accounting title — mapFieldProject coerces `?? null`, never absent.
+        scopeTitle: null,
         dealNumber: "TR-100",
         // No project_number on the row and a non-HubSpot deal_number → the display number falls back to it.
         projectNumber: "TR-100",
@@ -237,9 +244,12 @@ describe("field projects service", () => {
     const result = await listFieldProjectPhotos(db, { userId: "field-1", userRole: "field_contractor" }, "deal-1", { categories: ["damage"] });
 
     // Default field window: page 1, perPage 200 (the surface's prior single-load cap; no regression).
+    // withTotal defaults to TRUE when the caller says nothing — the count is only skipped on explicit
+    // opt-out, so a client that has never heard of the flag (every T-Rock Cam build in the field) keeps
+    // getting the totalPages its page walk depends on.
     expect(fileServiceMocks.getDealPhotoTimeline).toHaveBeenCalledWith(db, "deal-1", 1, 200, {
       categories: ["damage"],
-    });
+    }, { withTotal: true });
     expect(result.photos[0]).toEqual(expect.objectContaining({
       id: "photo-1",
       imageUrl: "https://signed.example/thumb.jpg", // thumbnail for the grid
@@ -346,6 +356,10 @@ describe("field projects service", () => {
         id: "deal-1",
         type: "deal",
         name: "121 Preston Oaks",
+        // `deals.is_change_order` — the AUTHORITY the picker uses for the change-order display relabel.
+        isChangeOrder: false,
+        // Same for the capture-target shape: searched AND ranked in buildPhotoTargetDealSearchCondition.
+        scopeTitle: null,
         recordNumber: "DFW-1-17426-aa",
         stageName: "Construction",
         companyName: "Preston Oaks HOA",

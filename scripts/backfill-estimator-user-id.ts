@@ -19,7 +19,13 @@
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 
-import { resolveEstimatorUserId } from "../server/src/modules/bid-board-sync/estimator-map.js";
+import {
+  buildEstimatorDirectory,
+  ESTIMATOR_DIRECTORY_SQL,
+  officeSlugFromSchema,
+  resolveEstimatorUserId,
+  type EstimatorDirectory,
+} from "../server/src/modules/bid-board-sync/estimator-map.js";
 
 export interface EstimatorBackfillItem {
   estimator: string;
@@ -41,13 +47,23 @@ export function assertSafeOfficeSchema(name: string): string {
   return name;
 }
 
-/** Pure: resolve distinct estimator names to (name -> userId) for the mapped ones, de-duplicated. */
-export function planEstimatorBackfill(distinctEstimators: Array<string | null | undefined>): EstimatorBackfillItem[] {
+/**
+ * Pure: resolve distinct estimator names to (name -> userId) for the resolvable ones, de-duplicated.
+ *
+ * `directory` carries the `estimates_jobs` users (see estimator-map.ts). It is what lets this backfill
+ * reach the HISTORY: the flag makes future syncs resolve a name on their own, but a deal the export has
+ * already stopped listing is never revisited, so without the directory here a newly-flagged estimator
+ * would still need a hand-written env-map entry to clear their existing rows.
+ */
+export function planEstimatorBackfill(
+  distinctEstimators: Array<string | null | undefined>,
+  directory?: EstimatorDirectory | null
+): EstimatorBackfillItem[] {
   const seen = new Set<string>();
   const plan: EstimatorBackfillItem[] = [];
   for (const estimator of distinctEstimators) {
     if (!estimator || seen.has(estimator)) continue;
-    const userId = resolveEstimatorUserId(estimator);
+    const userId = resolveEstimatorUserId(estimator, directory);
     if (userId) {
       seen.add(estimator);
       plan.push({ estimator, userId });
@@ -80,15 +96,31 @@ async function main(): Promise<void> {
     // Existing active users — a mapped-but-nonexistent/inactive id is skipped (FK-safe).
     const { rows: userRows } = await pool.query<{ id: string }>(`SELECT id FROM public.users WHERE is_active = true`);
     const activeUserIds = new Set(userRows.map((r) => r.id));
+    // NOTE: the `estimates_jobs` directory is loaded PER SCHEMA below, not here. It is office-scoped, and
+    // this loop walks every office — one directory hoisted out of the loop would let an estimator from
+    // the first office resolve names in all the others, which is exactly the cross-office attribution
+    // ESTIMATOR_DIRECTORY_SQL exists to prevent.
     const { rows: schemas } = await pool.query<{ schema_name: string }>(OFFICE_SCHEMA_DISCOVERY_SQL);
     for (const { schema_name } of schemas) {
       const schema = assertSafeOfficeSchema(schema_name);
+      // Rebuilt for EVERY schema: the directory is office-scoped, so hoisting it out of this loop would
+      // let one office's flagged estimators resolve names in all the others.
+      const { rows: estimatorRows } = await pool.query<{ id: string; display_name: string | null }>(
+        ESTIMATOR_DIRECTORY_SQL,
+        [officeSlugFromSchema(schema)]
+      );
+      const directory = buildEstimatorDirectory(
+        estimatorRows.map((r) => ({ id: r.id, displayName: r.display_name }))
+      );
       const { rows } = await pool.query<{ bid_board_estimator: string | null }>(
         `SELECT DISTINCT bid_board_estimator
            FROM ${schema}.deals
           WHERE bid_board_estimator IS NOT NULL AND estimator_user_id IS NULL`
       );
-      const plan = planEstimatorBackfill(rows.map((r) => r.bid_board_estimator)).filter((item) => {
+      const plan = planEstimatorBackfill(
+        rows.map((r) => r.bid_board_estimator),
+        directory
+      ).filter((item) => {
         if (activeUserIds.has(item.userId)) return true;
         console.warn(`[${schema}] skipping ${item.estimator} -> ${item.userId}: not an active CRM user`);
         return false;

@@ -12,8 +12,9 @@ process.env.TZ = "America/Chicago";
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BidDueDateBanner } from "./bid-due-date-banner";
+import { BidDueDateBanner, toBidDueDateInputValue } from "./bid-due-date-banner";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -43,9 +44,19 @@ describe("BidDueDateBanner", () => {
     }
   });
 
-  async function render(bidDueDate: string | null | undefined) {
+  // Wrapped in a router because the banner renders a react-router Link. The href itself comes from the
+  // CALLER, which is what lets the deal page decide both whether this viewer may edit and how the tenant
+  // scope is carried (its own appendOfficeIdSearch) — rather than the banner answering either question.
+  async function render(
+    bidDueDate: string | null | undefined,
+    options: { editHref?: string | null } = {}
+  ) {
     await act(async () => {
-      root.render(<BidDueDateBanner bidDueDate={bidDueDate} />);
+      root.render(
+        <MemoryRouter initialEntries={["/deals/deal-1"]}>
+          <BidDueDateBanner bidDueDate={bidDueDate} editHref={options.editHref} />
+        </MemoryRouter>
+      );
     });
   }
 
@@ -93,4 +104,70 @@ describe("BidDueDateBanner", () => {
     await render("not-a-date");
     expect(container.textContent).toBe("");
   });
+
+  // The complaint this answers: the date is shown here and was changeable only from the Scoping tab's
+  // Project Overview section, which is not somewhere anyone looks for a bid due date.
+  describe("the way to change it", () => {
+    it("renders the Change link at the href the caller supplied", async () => {
+      await render("2026-07-03T00:00:00.000Z", { editHref: "/deals/deal-9/edit" });
+      const link = container.querySelector("a");
+      expect(link?.textContent).toBe("Change");
+      expect(link?.getAttribute("href")).toBe("/deals/deal-9/edit");
+    });
+
+    // The caller owns the tenant scope, so whatever it carries reaches the link verbatim — the banner
+    // never builds a second answer to office scoping alongside the page's own appendOfficeIdSearch.
+    it("passes an office-scoped href through untouched", async () => {
+      await render("2026-07-03T00:00:00.000Z", {
+        editHref: "/deals/deal-9/edit?officeId=office-atlanta",
+      });
+      expect(container.querySelector("a")?.getAttribute("href")).toBe(
+        "/deals/deal-9/edit?officeId=office-atlanta"
+      );
+    });
+
+    // The deal page admits collaborators (estimator / sales-source reps) who cannot edit. Offering
+    // them a link would let them complete the form and be refused only on PATCH, losing the change —
+    // so the page passes no href and the banner shows none.
+    it("shows no link when the caller supplies none, e.g. a viewer who cannot edit", async () => {
+      await render("2026-07-03T00:00:00.000Z");
+      expect(container.querySelector("a")).toBeNull();
+      expect(container.textContent).toContain("Bid due date: Jul 3, 2026");
+
+      await render("2026-07-03T00:00:00.000Z", { editHref: null });
+      expect(container.querySelector("a")).toBeNull();
+    });
+  });
 });
+
+// The value the date input is populated from. Same UTC rule as the display formatter, and for the same
+// reason: read locally, a UTC-midnight timestamptz lands on the previous day west of UTC, so simply
+// opening the form and saving would walk the deadline backwards a day at a time.
+describe("toBidDueDateInputValue", () => {
+  it("converts a UTC-midnight timestamptz to its intended calendar day", () => {
+    expect(toBidDueDateInputValue("2026-07-03T00:00:00.000Z")).toBe("2026-07-03");
+  });
+
+  it("passes a date-only lead value through unchanged", () => {
+    expect(toBidDueDateInputValue("2026-07-03")).toBe("2026-07-03");
+  });
+
+  it("is a round trip — the form re-submits exactly the day it was shown", () => {
+    // The regression that matters: input value -> save -> reload -> input value must be stable. Under
+    // TZ=America/Chicago a local-time implementation returns 2026-07-02 here and loses a day per save.
+    expect(toBidDueDateInputValue("2026-07-03T00:00:00.000Z")).toBe(
+      formatToIsoDay(new Date("2026-07-03T00:00:00.000Z"))
+    );
+  });
+
+  it("treats absent and unparseable values as an empty box, not a crash", () => {
+    expect(toBidDueDateInputValue(null)).toBe("");
+    expect(toBidDueDateInputValue(undefined)).toBe("");
+    expect(toBidDueDateInputValue("")).toBe("");
+    expect(toBidDueDateInputValue("not-a-date")).toBe("");
+  });
+});
+
+function formatToIsoDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}

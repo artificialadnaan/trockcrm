@@ -99,7 +99,132 @@ export type WalkAudioCensus = {
    * that distinction is enforced, because that is where the raw native payload is still visible.
    */
   audioSecondsAppended: number;
+  /**
+   * Seconds `narration.m4a` holds — the standalone recording `WalkAudioCapture` keeps independently
+   * of the writer, and the walk this whole mechanism exists for is the one where the muxed track
+   * above is short and this one is not.
+   *
+   * Optional, and absent means "no narration file is being filed", not "zero seconds": a dev client
+   * older than the recorder reports nothing here, and useWalk.ts deliberately withholds it when
+   * native produced no `audioUri` — a recording nobody will ever hear must not talk the verdict out
+   * of a warning.
+   */
+  standaloneSecondsRecorded?: number;
 };
+
+/**
+ * The capture census as it is FILED with the walk — the server's `captureCensus`, pinned field for
+ * field. Distinct from the two verdict inputs above, which are the slices this reducer reasons
+ * about; this is the whole record, kept so the office can read what the recorder saw on a walk
+ * that came back thin (`engineRestarts`, the `events` timeline) rather than only that it did.
+ *
+ * `walkMs` is this reducer's wall clock (`startedAt` → `endedAt`), the same number every coverage
+ * verdict is measured against, so the server's copy of the census agrees with the title it arrives
+ * under. Everything else is native's, verbatim.
+ */
+export type WalkCaptureCensus = {
+  walkMs: number;
+  video: {
+    framesReceived: number;
+    framesAppended: number;
+    framesDropped: number;
+    secondsSinceLastFrameArrived: number;
+  };
+  audio: {
+    buffersReceived: number;
+    buffersAppended: number;
+    buffersDropped: number;
+    longestDropRun: number;
+    secondsAppended: number;
+    /** Times `WalkAudioCapture` brought the engine back after iOS stopped it. */
+    engineRestarts: number;
+    /** Seconds narration.m4a holds — the standalone file, independent of the writer. */
+    standaloneSecondsRecorded: number;
+    /** What happened to the microphone and when, `atMs` from the capture starting. */
+    events: Array<{ atMs: number; kind: string }>;
+  };
+};
+
+/** What the `finalized` event carries for the census: everything but the wall clock, which only
+ *  this reducer holds. */
+export type WalkCaptureCensusInput = Omit<WalkCaptureCensus, "walkMs">;
+
+/**
+ * The census as the SERVER will accept it: native's numbers, this reducer's wall clock, and the one
+ * value in the whole record that is not a measurement translated into one.
+ *
+ * `secondsSinceLastFrameArrived` is `-1` when not a single frame ever arrived — a sentinel, not a
+ * duration (see `WalkVideoCensus`). Every counter the completion contract pins must be a
+ * NON-NEGATIVE finite number, and the server refuses the whole completion with a 400 otherwise. That
+ * is not a lost diagnostic: the artifacts' bytes are already in object storage by the time the
+ * completion call runs, and a completion that cannot succeed retries a fixed number of times and
+ * then goes terminal (upload-core.ts's `isCompletionTerminal`) — so a census the server will not
+ * take strands the walk's video and every still with it. A walk with no video at all is not a
+ * hypothetical here; it is the near miss of the very failure this recorder keeps having.
+ *
+ * Translated the way `assessVideoCoverage` already reads the sentinel — no frame ever arrived means
+ * the whole walk was quiet — which is also the value the server's own contract describes as the
+ * "video died and never came back" signature. `walkMs` is clamped for the same reason: the wall
+ * clock is a subtraction of two device timestamps, and a clock that steps backwards mid-walk must
+ * not be what refuses the walk.
+ */
+function filedCaptureCensus(walkMs: number, census: WalkCaptureCensusInput): WalkCaptureCensus {
+  const walk = Math.max(0, walkMs);
+  const quiet = census.video.secondsSinceLastFrameArrived;
+  return {
+    walkMs: walk,
+    video: {
+      ...census.video,
+      secondsSinceLastFrameArrived:
+        Number.isFinite(quiet) && quiet >= 0 ? quiet : walk / 1000,
+    },
+    audio: census.audio,
+  };
+}
+
+/**
+ * Native's most recent `walkthrough:audioStalled` report — the microphone has delivered nothing
+ * for `sinceMs`, and this is what the watchdog did about it.
+ */
+export type WalkAudioStall = {
+  /** Consecutive watchdog restarts made for this stall, counting the one this report is about. */
+  attempt: number;
+  /** Whether that restart got the engine running. A running engine is not yet a delivering one —
+   *  `Walk.audioAlive` turns back on only when a buffer actually arrives. */
+  restarted: boolean;
+  /** How long the microphone had been silent when this was reported, ms. */
+  sinceMs: number;
+};
+
+/**
+ * How many consecutive restarts native's watchdog makes before it gives up on a stall and reports
+ * so (`WalkAudioCapture.maxWatchdogRestarts`). Mirrored rather than imported, like every other
+ * native constant here; if native's cap moves, this moves with it. Past it the screen stops saying
+ * "restarting" and says what is actually true: end this walk and start a new one.
+ */
+export const WALK_AUDIO_RESTART_ATTEMPTS = 3;
+
+/**
+ * Whether the watchdog has run out of restarts for the CURRENT stall. Only ever true while
+ * `audioAlive` is false: a buffer arriving clears the stall (see the `audioLevel` case of
+ * `reduceWalk`), which is the escape — an interruption that ends after the watchdog gave up still
+ * brings the microphone back, and the banner must follow it.
+ */
+export function isAudioRestartExhausted(stall: WalkAudioStall | null): boolean {
+  return stall !== null && stall.attempt >= WALK_AUDIO_RESTART_ATTEMPTS && !stall.restarted;
+}
+
+/**
+ * Map native's RMS reading (0–1, in float-sample units) onto the meter's fill (0–1). Speech at
+ * arm's length measures roughly 0.02–0.2 RMS, so drawn linearly the meter would barely move; the
+ * square root lifts that range into the middle of the bar, and the gain lets a raised voice reach
+ * the end of it. Non-finite and negative readings draw as empty — this is a meter, and a NaN would
+ * otherwise become a width nobody can render.
+ */
+export function meterFractionForRms(rms: number): number {
+  if (!Number.isFinite(rms) || rms <= 0) return 0;
+  return Math.min(1, Math.sqrt(rms) * 1.6);
+}
 
 export type Walk = {
   state: WalkState;
@@ -110,7 +235,31 @@ export type Walk = {
   endedAt: number | null;
   durationMs: number | null;
   videoUri: string | null;
+  /**
+   * `narration.m4a`, the phone-microphone recording native keeps INDEPENDENTLY of the video
+   * writer, set on "finalized" from `endWalk`'s `audioUri`. Null when native could not produce
+   * one — the recorder failed to start, or recorded nothing — and on a dev client older than the
+   * file. Never a reason to fail the walk: upload-core.ts's `toQueuedWalk` queues it as an audio
+   * artifact when present and simply has one artifact fewer when not.
+   */
   audioUri: string | null;
+  /**
+   * Whether phone-microphone audio is still arriving, as native last reported it. True from the
+   * start — a build whose native side predates the events never reports either way, and a walk
+   * nobody has measured must not open under a "narration stopped" banner — and false from a
+   * `walkthrough:audioStalled` until the next `walkthrough:audioLevel` says a buffer landed.
+   */
+  audioAlive: boolean;
+  /** Native's latest microphone level, RMS 0–1 (see `meterFractionForRms`). Zero while stalled. */
+  audioLevel: number;
+  /** Native's latest stall report, null while the microphone is delivering. See `WalkAudioStall`. */
+  audioStall: WalkAudioStall | null;
+  /**
+   * The census as it will be filed with the walk (`captureCensus` on the completion request), or
+   * null when native reported no complete one — a dev client older than the `audio` object. Set
+   * once, on "finalized", alongside the two coverage verdicts it is the full record behind.
+   */
+  captureCensus: WalkCaptureCensus | null;
   /**
    * Set once, on "finalized", when native reported a census — null otherwise, which means UNKNOWN
    * rather than "fine": a dev client older than the census cannot be interrogated, and a walk nobody
@@ -146,9 +295,11 @@ export type WalkEvent =
    * successful walk to the uploader. Taking the path from here rather than trusting the one
    * captured at start means only a finalised file is ever handed on.
    *
-   * `audioUri` is now always null: audio is muxed into the video track, so there is no separate
-   * audio artifact. The field stays because a walk that fails before the writer produces a video
-   * still needs somewhere for a future audio-only fallback to land.
+   * `audioUri` is `narration.m4a` — the standalone phone-microphone recording — when native produced
+   * one, null when it could not. It USED to be always null, on the reasoning that audio was a track
+   * inside the .mp4; two walks on 2026-09-02 then lost 3.8 minutes of narration to an engine iOS
+   * stopped and nothing restarted, and the file that does not depend on that engine is the answer.
+   * Only ever set from here (never from `failed`): a failed walk's file has not been closed.
    *
    * `videoCensus` is what native measured while the writer was still live. Passed in raw and turned
    * into `Walk.videoCoverage` here, rather than assessed at the bridge, because the verdict needs
@@ -160,6 +311,10 @@ export type WalkEvent =
    * than folded into `videoCensus` because a dev client can predate the audio counters while still
    * reporting every video one — so "video measured, audio not" is a real state that has to be
    * expressible.
+   *
+   * `captureCensus` is the whole record, for the server — see `WalkCaptureCensus`. Also optional,
+   * and for the same reason a third time: only a native side that reports the `audio` object can
+   * fill the pinned shape, and a partial census must arrive as none rather than as zeros.
    */
   | {
       type: "finalized";
@@ -167,8 +322,22 @@ export type WalkEvent =
       videoUri?: string | null;
       videoCensus?: WalkVideoCensus | null;
       audioCensus?: WalkAudioCensus | null;
+      captureCensus?: WalkCaptureCensusInput | null;
     }
-  | { type: "failed"; reason: string }
+  /** Native's ~4/s microphone level while recording. A buffer arrived, so the microphone is alive. */
+  | { type: "audioLevel"; rms: number }
+  /** Native's watchdog found the microphone silent — see `WalkAudioStall` for the fields. */
+  | { type: "audioStalled"; attempt: number; restarted: boolean; sinceMs: number }
+  /**
+   * `audioUri` is the ONE file a failed walk may still carry, and only when native named it on the
+   * rejection itself (`err.userInfo.audioUri` — WalkthroughRecorder.swift's `rejection(_:carrying:)`).
+   * A finalize failure rejects because walk.mp4 cannot be trusted; narration.m4a is a different file,
+   * closed by `WalkAudioCapture.stop()` before finalize ever ran and checked for bytes on disk before
+   * native would name it. Without this the walk is filed with its stills, and `finishWalkCleanup`
+   * then deletes the whole directory — the narration with it, on the exact walk the standalone
+   * recorder exists for. Omitted means "no narration": a failed walk never invents one.
+   */
+  | { type: "failed"; reason: string; audioUri?: string | null }
   /**
    * Snaps the walk back to a fresh `idle` for (dealId, projectId), discarding whatever walk —
    * complete, failed, or otherwise — was here before. REFUSED, however, while the walk is ACTIVE
@@ -196,6 +365,10 @@ export function initialWalk(dealId: string, projectId: string | null): Walk {
     durationMs: null,
     videoUri: null,
     audioUri: null,
+    audioAlive: true,
+    audioLevel: 0,
+    audioStall: null,
+    captureCensus: null,
     videoCoverage: null,
     audioCoverage: null,
     stills: [],
@@ -292,24 +465,42 @@ export const WALK_AUDIO_SHORTFALL_TOLERANCE_MS = 5_000;
 /**
  * Turn one audio census into a coverage estimate against the walk's own wall clock.
  *
- * Direct, not inferred: `audioSecondsAppended` is what native actually wrote, so the shortfall is
- * simply what the walk clock has and the track does not — and unlike the video estimate, it counts
- * gaps wherever they fall rather than assuming they are all at the end. Two clamps:
+ * Direct, not inferred: the counters are what native actually wrote, so the shortfall is simply what
+ * the walk clock has and the recordings do not — and unlike the video estimate, it counts gaps
+ * wherever they fall rather than assuming they are all at the end.
+ *
+ * THE LARGER OF THE TWO RECORDINGS, never their sum. The muxed track and narration.m4a are two
+ * recordings of the SAME minutes, and the question this verdict answers is whether the narration
+ * exists anywhere the office can read it — not how many copies of it there are. Taking the sum would
+ * declare a walk covered twice over; taking only the muxed track is the bug this whole change
+ * exists to fix, and would put "Narration is short" and an "(audio cut short)" title on exactly the
+ * walk the standalone recorder saved. The server computes its shortfall the same way
+ * (shared's `glassesWalkNarrationShortfallMs` takes the same max), so the completion screen and the
+ * filed row cannot disagree about one walk.
+ *
+ * Two clamps:
  *
  *   - Audio is clamped to `walkMs`, because the tap outlives the walk clock at both ends (see
  *     WALK_AUDIO_SHORTFALL_TOLERANCE_MS) and a walk must never report negative shortfall.
- *   - A non-finite counter is treated as ZERO coverage. useWalk.ts already refuses to build a census
- *     out of a missing counter, so this is a backstop — but the failure it prevents is quiet:
- *     `undefined * 1000` is NaN, NaN compares false against every threshold, and the warning would
- *     disappear rather than misfire.
+ *   - A non-finite or absent counter is treated as ZERO coverage. useWalk.ts already refuses to
+ *     build a census out of a missing counter, so this is a backstop — but the failure it prevents
+ *     is quiet: `undefined * 1000` is NaN, NaN compares false against every threshold, and the
+ *     warning would disappear rather than misfire.
  */
 export function assessAudioCoverage(walkMs: number, census: WalkAudioCensus): WalkAudioCoverage {
   const walk = Math.max(0, walkMs);
-  const appendedMs = Number.isFinite(census.audioSecondsAppended)
-    ? Math.max(0, census.audioSecondsAppended * 1000)
-    : 0;
-  const audioMs = Math.min(walk, Math.round(appendedMs));
+  const recordedSeconds = Math.max(
+    finiteSeconds(census.audioSecondsAppended),
+    finiteSeconds(census.standaloneSecondsRecorded),
+  );
+  const audioMs = Math.min(walk, Math.round(recordedSeconds * 1000));
   return { walkMs: walk, audioMs, shortfallMs: walk - audioMs };
+}
+
+/** A seconds counter as a non-negative finite number — anything else (absent, NaN, Infinity,
+ *  negative) is zero, which is the "unmeasured is not narration" rule the null census follows. */
+function finiteSeconds(seconds: number | undefined): number {
+  return typeof seconds === "number" && Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
 }
 
 /**
@@ -442,7 +633,7 @@ export function assessWalkVideoSize(bytes: number | null): WalkVideoSizeVerdict 
 
 /**
  * Whether ONE MORE still could be captured right now without the walk's eventual completion
- * payload — video, plus audio if that dead-but-modeled path is ever revived, plus every still —
+ * payload — video, plus the narration file when native produced one, plus every still —
  * exceeding MAX_WALK_ARTIFACTS. Layered on top of `canCapture` (the state gate): this is the COUNT
  * gate, and it is what the capture control itself should check before requesting a new still, so
  * the walk never accumulates more than the server will accept at completion.
@@ -458,10 +649,13 @@ export function assessWalkVideoSize(bytes: number | null): WalkVideoSizeVerdict 
  */
 export function canCaptureMore(walk: Walk, reserved = 0): boolean {
   if (!canCapture(walk)) return false;
+  // The narration file is not known to this reducer until "finalized" (native only resolves its
+  // path from endWalk), so it is reserved unconditionally rather than read off `audioUri` — a walk
+  // that captured exactly to the cap and then gained an artifact at the end would be refused whole.
   const projected =
     walk.stills.length + reserved + 1 /* the still being requested */ +
     (walk.videoUri ? 1 : 0) +
-    (walk.audioUri ? 1 : 0);
+    1; /* narration.m4a, if native produces one */
   return projected <= MAX_WALK_ARTIFACTS;
 }
 
@@ -501,6 +695,29 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
           }
         : walk;
 
+    case "audioLevel":
+      // Only while recording: the meter and the banner are drawn for a live microphone, and a
+      // level landing during "finalizing" (the tap is removed a bridge hop after "ended") must not
+      // rewrite a walk that has already stopped. A buffer arriving is the ONE fact that ends a
+      // stall — not a restart succeeding, which native itself only reports as "the engine
+      // started" — so this is where `audioStall` clears and the watchdog's count starts over.
+      if (walk.state !== "recording") return walk;
+      return {
+        ...walk,
+        audioAlive: true,
+        audioLevel: Number.isFinite(event.rms) ? Math.min(1, Math.max(0, event.rms)) : 0,
+        audioStall: null,
+      };
+
+    case "audioStalled":
+      if (walk.state !== "recording") return walk;
+      return {
+        ...walk,
+        audioAlive: false,
+        audioLevel: 0,
+        audioStall: { attempt: event.attempt, restarted: event.restarted, sinceMs: event.sinceMs },
+      };
+
     case "ended":
       return walk.state === "recording"
         ? { ...walk, state: "finalizing", endedAt: event.at }
@@ -514,6 +731,12 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
         ...walk,
         state: "complete",
         audioUri: event.audioUri,
+        // The wall clock is stamped here, once, so the census the server files agrees with the two
+        // verdicts below to the millisecond. Same rule as the verdicts for a walk with no clock.
+        captureCensus:
+          durationMs !== null && event.captureCensus
+            ? filedCaptureCensus(durationMs, event.captureCensus)
+            : null,
         // Only overwrite when the event actually carries one, so a caller that omits it
         // keeps whatever `started` recorded rather than having it silently nulled.
         videoUri: event.videoUri !== undefined ? event.videoUri : walk.videoUri,
@@ -539,6 +762,13 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
     case "failed":
       // Everything captured so far is kept. A walk is a site visit that physically happened;
       // its stills cannot be re-taken from a desk, so a failure must never be a delete.
-      return { ...walk, state: "failed", error: event.reason };
+      return {
+        ...walk,
+        state: "failed",
+        error: event.reason,
+        // Only ever ADDS one. A failure cannot clear a narration file an earlier `finalized` already
+        // recorded, and cannot invent one native did not name — see the event's doc.
+        audioUri: event.audioUri ? event.audioUri : walk.audioUri,
+      };
   }
 }

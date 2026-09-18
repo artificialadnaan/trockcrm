@@ -56,7 +56,7 @@ export interface InterventionQueueItem {
     assignedToName: string | null;
     title: string;
   } | null;
-  deal: { id: string; dealNumber: string; name: string } | null;
+  deal: { id: string; dealNumber: string; name: string; isChangeOrder?: boolean | null } | null;
   company: { id: string; name: string } | null;
   evidenceSummary: string | null;
   lastIntervention: { actionType: string; actedAt: string } | null;
@@ -107,7 +107,7 @@ export interface InterventionCaseDetail {
     assignedToName: string | null;
   } | null;
   crm: {
-    deal: { id: string; dealNumber: string; name: string } | null;
+    deal: { id: string; dealNumber: string; name: string; isChangeOrder?: boolean | null } | null;
     company: { id: string; name: string } | null;
   };
   history: Array<{

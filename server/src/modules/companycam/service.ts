@@ -29,6 +29,10 @@ export interface ProjectMapping {
   dealId: string | null;
   dealNumber: string | null;
   dealName: string | null;
+  /** `deals.is_change_order` — the authority for the change-order display relabel of `dealName`.
+   *  `undefined` on an unmatched project (there is no deal) and for a NULL column, which means
+   *  "unknown", NOT false. */
+  dealIsChangeOrder?: boolean | null;
   matchType: "linked" | "auto" | "unmatched";
 }
 
@@ -139,6 +143,9 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
       id: deals.id,
       dealNumber: deals.dealNumber,
       name: deals.name,
+      // Carried purely so the admin page can relabel a change-order child correctly; nothing in the
+      // matching below reads it (normalizeName works off the stored name, as CompanyCam's does).
+      isChangeOrder: deals.isChangeOrder,
     })
     .from(deals)
     .where(eq(deals.isActive, true));
@@ -201,6 +208,9 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
         dealId: linked.id,
         dealNumber: linked.dealNumber,
         dealName: linked.name,
+        // `?? undefined`, never `?? false`: a NULL column is "unknown", and claiming false would tell the
+        // formatter authoritatively that a real change-order child is not one.
+        dealIsChangeOrder: linked.isChangeOrder ?? undefined,
         matchType: "linked",
       });
       continue;
@@ -223,6 +233,7 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
         dealId: fuzzyMatch.id,
         dealNumber: fuzzyMatch.dealNumber,
         dealName: fuzzyMatch.name,
+        dealIsChangeOrder: fuzzyMatch.isChangeOrder ?? undefined,
         matchType: "auto",
       });
       // Keep the deal in the index: a deal can own MANY projects (1:many), so additional unlinked
@@ -239,6 +250,7 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
       dealId: null,
       dealNumber: null,
       dealName: null,
+      dealIsChangeOrder: undefined,
       matchType: "unmatched",
     });
   }

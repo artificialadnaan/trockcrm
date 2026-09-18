@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Plus, Trash2, ChevronDown, ChevronRight, Calculator, FileDown } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { DealAiWalkPanel } from "@/components/deals/deal-ai-walk-panel";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 
@@ -109,9 +110,14 @@ export function DealEstimatesTab({ dealId, proposalMode = false }: DealEstimates
     }
   };
 
+  // THE AI WALK PANEL IS NOT GATED ON THE ESTIMATE FETCH. It has its own endpoint and its own error
+  // handling, and it used to live on a different tab entirely — so letting `/deals/:id/estimates`
+  // failing hide it would mean moving it here made a healthy walk unreachable, which is a regression
+  // the move itself introduced. Rendered above both early returns for that reason.
   if (loading) {
     return (
       <div className="space-y-3">
+        <DealAiWalkPanel dealId={dealId} />
         {[1, 2].map((i) => (
           <div key={i} className="h-32 bg-muted animate-pulse rounded-lg" />
         ))}
@@ -121,20 +127,32 @@ export function DealEstimatesTab({ dealId, proposalMode = false }: DealEstimates
 
   if (error) {
     return (
-      <div className="text-center py-8">
-        <p className="text-sm text-muted-foreground">{error}</p>
-        <button
-          className="mt-2 text-sm text-[#CC0000] hover:underline"
-          onClick={fetchEstimates}
-        >
-          Retry
-        </button>
+      <div className="space-y-4">
+        <DealAiWalkPanel dealId={dealId} />
+        <div className="text-center py-8">
+          <p className="text-sm text-muted-foreground">{error}</p>
+          <button
+            className="mt-2 text-sm text-[#CC0000] hover:underline"
+            onClick={fetchEstimates}
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
+      {/* ABOVE the estimate, because it is the input to it. The scoping tab is where pre-RFP scoping is
+          written by hand; what the glasses heard on site is what an estimator prices FROM, so it belongs
+          beside the line items it feeds rather than beside the questionnaire that precedes them.
+
+          Renders NOTHING when this deal has no glasses walk — which is nearly every deal today — so it
+          costs the layout nothing until it has something to say. Read-only in both modes, proposal
+          included: it is reference material, not a field of the estimate. */}
+      <DealAiWalkPanel dealId={dealId} />
+
       <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border bg-background p-4">
         <div>
           <h3 className="text-sm font-semibold">{proposalMode ? "Proposal Draft" : "Estimate"}</h3>

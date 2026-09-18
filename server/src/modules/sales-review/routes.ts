@@ -18,6 +18,11 @@ function requireRole(req: Request, roles: Array<"admin" | "director" | "rep">) {
 
 router.get("/", async (req, res, next) => {
   try {
+    // The overview is TEAM-WIDE unless the caller is a rep — buildSalesReviewOverview only self-scopes on
+    // role === "rep". The cast below asserts that shape rather than checking it, so without this gate a
+    // `construction` user (whom requireCrmUser admits to every CRM mount) matched no self-scoping branch
+    // and was served the whole team's forecast, pipeline hygiene and named-rep activity.
+    requireRole(req, ["admin", "director", "rep"]);
     const overview = await getSalesReviewOverview(
       req.tenantDb!,
       {

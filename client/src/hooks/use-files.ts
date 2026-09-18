@@ -24,6 +24,7 @@ export interface FileRecord {
   thumbnailUrl?: string | null;
   dealId: string | null;
   leadId: string | null;
+  marketingExpenseRequestId?: string | null;
   intakeSection?: string | null;
   intakeRequirementKey?: string | null;
   intakeSource?: string | null;
@@ -89,6 +90,14 @@ export interface PhotoUploadTarget {
   id: string;
   type: "lead" | "opportunity" | "deal";
   name: string;
+  /** `deals.is_change_order` — deal/opportunity rows only; a lead can never be a change-order child. */
+  isChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title` — deal/opportunity rows only, same gate as the flag. It is SEARCHED and RANKED
+   * server-side, so a row can be in these results BECAUSE of this field; not showing it leaves the
+   * user with a match they cannot account for.
+   */
+  scopeTitle?: string | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;
@@ -345,6 +354,16 @@ export interface UploadFileInput {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  /** A supporting document on a marketing & advertising expense request (migration 0232). */
+  marketingExpenseRequestId?: string;
+  /**
+   * Stable per-file idempotency key, reused across retries of the SAME file.
+   *
+   * confirm-upload can commit and lose its response; without a key the retry presigns, uploads and
+   * confirms again, leaving two rows and two R2 objects for one document. The server already dedupes on
+   * this (migration 0170's partial unique index); the web path simply never sent one.
+   */
+  clientUploadId?: string;
   description?: string;
   tags?: string[];
   forceEditAfterRfp?: boolean;
@@ -459,6 +478,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
       contactId,
       procoreProjectId: input.procoreProjectId,
       changeOrderId: input.changeOrderId,
+      marketingExpenseRequestId: input.marketingExpenseRequestId,
       description,
       tags,
       forceEditAfterRfp,
@@ -471,6 +491,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     method: "POST",
     json: {
       uploadToken: presign.uploadToken,
+      clientUploadId: input.clientUploadId,
       forceEditAfterRfp,
     },
   });

@@ -6,9 +6,9 @@ import {
   formatCurrency,
   handleProjectNumberFirstSetEmail,
   resolveChristyProjectNumberRecipient,
-  resolveFrontendUrl,
   resolveProjectNumberEmailCcRecipient,
 } from "../../../../worker/src/jobs/project-number-email.js";
+import { resolveFrontendUrl } from "../../../../worker/src/lib/branded-email.js";
 import { sendSystemEmailWithMetadata } from "../../../../worker/src/lib/system-email.js";
 
 const migrationSql = fs.readFileSync(
@@ -490,7 +490,20 @@ describe("project number first-set notification email", () => {
         "christy@example.com",
         "Subject",
         "<p>Body</p>"
-      )).resolves.toEqual({ success: false, messageId: null });
+      // outcome MUST be "rejected", not "unknown": no request ever left the process, so nothing was
+      // delivered. The leadership digest treats "unknown" as delivered and keeps its claims, so a
+      // missing RESEND_API_KEY reported as "unknown" would silently never retry and never send.
+      //
+      // `reason` is asserted, not loosened away with objectContaining. This is a SERVER test importing
+      // the WORKER's system-email across the package boundary, so the exact shape is the only thing
+      // telling this package that the other one changed — it is what caught `reason` being added, after
+      // a green worker suite and a green server suite on their own branches. Keep it exact.
+      )).resolves.toEqual({
+        success: false,
+        messageId: null,
+        outcome: "rejected",
+        reason: "RESEND_API_KEY is not configured on this service, so no request was made",
+      });
       expect(errorSpy).toHaveBeenCalledWith("[Email] RESEND_API_KEY is not configured in production");
     } finally {
       if (originalNodeEnv === undefined) delete process.env.NODE_ENV;

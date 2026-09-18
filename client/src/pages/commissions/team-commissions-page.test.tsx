@@ -208,6 +208,37 @@ describe("TeamCommissionsPage", () => {
     expect(drawer).toContain("pending");
   });
 
+  it("the drill drawer relabels a change order by the FLAG, never by the deal's name", async () => {
+    // `deals.is_change_order` is the authority for the change-order display relabel; the drawer receives it
+    // as `dealIsChangeOrder`. The DISCRIMINATING row is the one a human named "Lobby — Change Order 1" with
+    // the flag FALSE: if the payload's flag never reaches formatDealDisplayName the formatter falls back to
+    // parsing the name and renders "Change Order 1 — Lobby" — the exact bug this closes. A true-only
+    // assertion would pass even with the argument dropped entirely.
+    const coEvidence = {
+      metric: "pipeline", kind: "deal", repId: "rep-1", repName: "Kaleb Marshall",
+      title: "Kaleb Marshall — Pipeline value", subtitle: "Open best-estimate", valueLabel: "Deal value",
+      total: { count: 2, value: 2000 },
+      records: [
+        { id: "d1", navKind: "deal", navId: "d1", primary: "D-1", name: "Lobby — Change Order 1", stageLabel: "Estimating", value: 1000, date: "2026-04-01", companyName: "Acme", dealIsChangeOrder: false },
+        { id: "d2", navKind: "deal", navId: "d2", primary: "D-2", name: "Tides Park Lane — Change Order 2", stageLabel: "Estimating", value: 1000, date: "2026-04-01", companyName: "Acme", dealIsChangeOrder: true },
+      ],
+    };
+    mocks.apiMock.mockImplementation((url: string) =>
+      url.includes("/evidence") ? Promise.resolve({ data: coEvidence }) : Promise.resolve({ data: workspace }),
+    );
+    await render();
+    const pipelineBtn = Array.from(document.querySelectorAll("button")).find(
+      (b) => b.textContent === "$11,601,319.00",
+    ) as HTMLButtonElement;
+    await act(async () => { pipelineBtn.click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    const drawer = document.body.textContent ?? "";
+    expect(drawer).toContain("Lobby — Change Order 1");        // flag false -> left exactly as stored
+    expect(drawer).not.toContain("Change Order 1 — Lobby");    // ...and NOT relabelled off the name shape
+    expect(drawer).toContain("Change Order 2 — Tides Park Lane"); // flag true -> label moved to the front
+  });
+
   it("a $0 figure is rendered dimmed and is NOT a drill button", async () => {
     const { container } = await render();
     // Both reps' earned = $0 -> rendered as plain dimmed spans ("$0.00" with usdExact), never buttons.
