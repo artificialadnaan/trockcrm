@@ -1055,3 +1055,64 @@ describe("Bid Board Due Date read-back (flag OFF)", () => {
     expect(rows[0].mirror).toBe("2026-09-01");
   });
 });
+
+/**
+ * The stage-metadata refresh writes SEVEN columns and, before review, compared only THREE of them when
+ * deciding whether to audit. `is_bid_board_owned` is one of the four it never looked at — so a cycle that
+ * ADOPTED a previously unowned deal (false -> true) recorded nothing at all once the no-op filter landed.
+ * That is the loudest thing this function ever does and it was the one change the filter erased.
+ *
+ * Run against the real ingest and a real Postgres, because the before/after now comes from a
+ * data-modifying CTE — a mock would assert my belief about that SQL rather than the SQL.
+ */
+describe("stage_metadata_refresh — an ownership adoption is audited, a no-op cycle is not", () => {
+  /** Put the deal at the mapped stage with every stage field ALREADY correct, so the only thing the
+   *  refresh can change is ownership. */
+  async function seedAtMappedStage(owned: boolean) {
+    await pg.exec(`DELETE FROM ${SCHEMA}.deals;`);
+    await pg.exec(`DELETE FROM ${SCHEMA}.audit_log;`);
+    await pg.exec(`DELETE FROM ${SCHEMA}.deal_history;`);
+    await pg.exec(`DELETE FROM ${SCHEMA}.bid_board_sync_runs;`);
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.deals
+         (id, name, stage_id, stage_entered_at, workflow_route, deal_number, project_number,
+          bid_board_project_number, bid_estimate, is_bid_board_owned, bid_board_stage_slug,
+          bid_board_stage_family, bid_board_stage_status, bid_board_stage_entered_at,
+          is_active, bid_due_date, bid_board_detached_at, updated_at)
+       VALUES
+         ($1, 'Riverbend Tower', $2, now() - interval '5 days', 'normal',
+          'DFW-1-00001-aa', 'DFW-1-00001-aa', 'DFW-1-00001-aa', 250000, $3, 'estimating',
+          'estimating', 'Estimate in Progress', now() - interval '5 days',
+          true, NULL, NULL, now() - interval '1 day')`,
+      [DEAL, ST_ESTIMATING, owned]
+    );
+  }
+
+
+  it("AUDITS the adoption when an unowned deal at the mapped stage becomes bid-board owned", async () => {
+    await seedAtMappedStage(false);
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    const { rows: deal } = await pg.query<{ is_bid_board_owned: boolean }>(
+      `SELECT is_bid_board_owned FROM ${SCHEMA}.deals WHERE id = $1`, [DEAL]
+    );
+    expect(deal[0].is_bid_board_owned).toBe(true);
+
+    // The adoption is visible in the trail, keyed by the column the refresh actually flipped.
+    const owned = (await auditFieldChanges()).filter((c) => "isBidBoardOwned" in c);
+    expect(owned).toHaveLength(1);
+    expect(owned[0].isBidBoardOwned).toEqual({ from: false, to: true });
+  });
+
+  it("CONTROL — an already-owned deal with every stage field matching writes NO stage audit", async () => {
+    await seedAtMappedStage(true);
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    // Nothing about ownership or the stage fields moved, so the refresh contributes no row at all.
+    // (The mirror may still audit its own fields; this asserts the stage refresh specifically.)
+    const stageish = (await auditFieldChanges()).filter(
+      (c) => "isBidBoardOwned" in c || "bidBoardStageSlug" in c || "bidBoardStageStatus" in c
+    );
+    expect(stageish).toHaveLength(0);
+  });
+});

@@ -212,7 +212,27 @@ const BID_BOARD_PROJECT_NUMBER_UNIQUE_CONSTRAINT = "deals_bid_board_project_numb
  * Measured consequence: 63,226 `bid_board_mirror` audit rows in 24 hours, most listing 16 fields of which
  * ~14 had not moved. Normalizing only the write and not the COMPARISON is what produced them.
  */
-function sameAuditValue(from: unknown, to: unknown): boolean {
+/**
+ * The mirror columns Postgres stores as `numeric`, with the SCALE it stores them at. Verified against
+ * production `information_schema.columns` rather than inferred from the field name:
+ * `bid_board_sales_price_per_area` looks numeric and is a TEXT column, so it is deliberately absent.
+ *
+ * Numeric equivalence is applied ONLY to these keys, for two reasons Codex raised:
+ *   - A field-agnostic "both sides look like digits" rule silently swallows a REAL change to a text
+ *     column whose value happens to be all digits — `bid_board_project_number` going `00123` -> `123`
+ *     is a genuine edit Postgres stores distinctly, and an audit that drops it is worse than one that
+ *     is merely noisy. Long digit strings can also collapse through JS float precision.
+ *   - The scale matters in the other direction: an export sending `737.704918` into a numeric(14,2)
+ *     column is STORED as `737.70`, so comparing the raw strings reports a change on every single
+ *     sync for a value that never moves — the exact treadmill this PR exists to stop.
+ */
+const AUDIT_NUMERIC_SCALES: Record<string, number> = {
+  bidBoardProjectCost: 2,
+  bidBoardProfitMarginPct: 4,
+  bidBoardTotalSales: 2,
+};
+
+function sameAuditValue(from: unknown, to: unknown, numericScale?: number): boolean {
   const blank = (v: unknown) => v === null || v === undefined || v === "";
   if (blank(from) && blank(to)) return true;
   if (blank(from) !== blank(to)) return false;
@@ -225,9 +245,14 @@ function sameAuditValue(from: unknown, to: unknown): boolean {
 
   const fs = String(from).trim();
   const ts = String(to).trim();
-  // Numeric only when BOTH sides are plainly numeric — never coerce "" or a date string into 0.
-  const numeric = /^-?\d+(\.\d+)?$/;
-  if (numeric.test(fs) && numeric.test(ts)) return Number(fs) === Number(ts);
+
+  // Numeric comparison is opt-in PER FIELD, and happens at the column's own scale so the comparison
+  // asks the only question that matters: "would Postgres store a different value?"
+  if (numericScale != null) {
+    const fn = Number(fs);
+    const tn = Number(ts);
+    if (Number.isFinite(fn) && Number.isFinite(tn)) return fn.toFixed(numericScale) === tn.toFixed(numericScale);
+  }
 
   return fs === ts;
 }
@@ -238,16 +263,32 @@ function onlyRealChanges(
 ): Record<string, { from: unknown; to: unknown }> {
   const out: Record<string, { from: unknown; to: unknown }> = {};
   for (const [key, pair] of Object.entries(changes)) {
-    if (!sameAuditValue(pair.from, pair.to)) out[key] = pair;
+    if (!sameAuditValue(pair.from, pair.to, AUDIT_NUMERIC_SCALES[key])) out[key] = pair;
   }
   return out;
+}
+
+/**
+ * Bookkeeping fields that move on EVERY cycle by construction and therefore cannot be evidence that the
+ * cycle did anything. `bidBoardLastUpdatedAt` is the run's own `extractedAt` (or `now()`), so it always
+ * differs from the stored value — which meant `onlyRealChanges` retained at least this one pair for every
+ * matched row and the ~63k/day mirror rows this change exists to suppress were still written, just with
+ * fewer fields in them. The filter looked like it worked and suppressed nothing.
+ *
+ * They are still REPORTED when something substantive moved (a heartbeat alongside a real edit tells you
+ * when the edit was synced); they just cannot be the reason a row exists.
+ */
+const MIRROR_AUDIT_HEARTBEAT_KEYS = new Set(["bidBoardLastUpdatedAt"]);
+
+function hasSubstantiveChange(changes: Record<string, { from: unknown; to: unknown }>): boolean {
+  return Object.keys(changes).some((key) => !MIRROR_AUDIT_HEARTBEAT_KEYS.has(key));
 }
 
 /**
  * Internal seam for the audit-suppression tests. These two are pure and carry the whole judgement about
  * what counts as a change, so they are worth asserting directly rather than through a sync run.
  */
-export const __auditTestables = { sameAuditValue, onlyRealChanges };
+export const __auditTestables = { sameAuditValue, onlyRealChanges, hasSubstantiveChange, AUDIT_NUMERIC_SCALES };
 
 
 function textValue(value: unknown): string | null {
@@ -883,24 +924,48 @@ async function updateBidBoardStageMetadata(
   row: NormalizedBidBoardRow
 ): Promise<boolean> {
   const status = row.bidBoardStatus ?? targetStageSlug;
+  // The pre-image comes from a CTE in the SAME statement, so it is the snapshot the UPDATE itself acted
+  // on — no second round-trip and no window for another writer to change the answer between them.
+  //
+  // It exists because three of this UPDATE's columns were invisible to the audit decision:
+  // `is_bid_board_owned` and `bid_board_stage_entered_at` are written here but were never compared, so a
+  // cycle that ADOPTED a previously unowned deal (false -> true) recorded nothing at all once the
+  // no-op filter was added. That is a substantive ownership change and the loudest thing this function
+  // ever does.
   const result = await client.query(
-    `UPDATE ${schemaName}.deals
-        SET is_bid_board_owned = true,
-            bid_board_stage_slug = $2::text,
-            bid_board_stage_family = $3::text,
-            bid_board_stage_status = $4::text,
-            bid_board_stage_entered_at = COALESCE(bid_board_stage_entered_at, NOW()),
-            read_only_synced_at = NOW(),
-            updated_at = NOW()
-      WHERE id = $1
-        AND stage_id = $5
-        -- This is the easy one to miss: it fires on a cycle where the CRM stage ALREADY equals the
-        -- mapped Bid Board stage, and it re-asserts is_bid_board_owned = true. Without the predicate a
-        -- detached deal that happens to sit at the mapped stage would be silently re-owned.
-        AND bid_board_detached_at IS NULL`,
+    `WITH prev AS (
+       SELECT id, is_bid_board_owned, bid_board_stage_entered_at
+         FROM ${schemaName}.deals
+        WHERE id = $1
+     ),
+     upd AS (
+       UPDATE ${schemaName}.deals
+          SET is_bid_board_owned = true,
+              bid_board_stage_slug = $2::text,
+              bid_board_stage_family = $3::text,
+              bid_board_stage_status = $4::text,
+              bid_board_stage_entered_at = COALESCE(bid_board_stage_entered_at, NOW()),
+              read_only_synced_at = NOW(),
+              updated_at = NOW()
+        WHERE id = $1
+          AND stage_id = $5
+          -- This is the easy one to miss: it fires on a cycle where the CRM stage ALREADY equals the
+          -- mapped Bid Board stage, and it re-asserts is_bid_board_owned = true. Without the predicate a
+          -- detached deal that happens to sit at the mapped stage would be silently re-owned.
+          AND bid_board_detached_at IS NULL
+        RETURNING id, is_bid_board_owned, bid_board_stage_entered_at
+     )
+     SELECT upd.id,
+            prev.is_bid_board_owned      AS prev_is_bid_board_owned,
+            upd.is_bid_board_owned       AS next_is_bid_board_owned,
+            prev.bid_board_stage_entered_at AS prev_bid_board_stage_entered_at,
+            upd.bid_board_stage_entered_at  AS next_bid_board_stage_entered_at
+       FROM upd
+       JOIN prev ON prev.id = upd.id`,
     [deal.id, targetStageSlug, stageFamilyForSlug(targetStageSlug), status, expectedStageId]
   );
-  const updated = (result.rowCount ?? 0) > 0;
+  const updatedRow = result.rows?.[0];
+  const updated = updatedRow != null;
   if (updated) {
     // AUDIT A STAGE MOVE, NOT A SYNC HEARTBEAT. This UPDATE always sets read_only_synced_at = NOW(), so
     // it always matches a row — and as the predicate note above says, it fires on cycles where the CRM
@@ -915,6 +980,17 @@ async function updateBidBoardStageMetadata(
         bidBoardStageSlug: { from: deal.bid_board_stage_slug, to: targetStageSlug },
         bidBoardStageFamily: { from: deal.bid_board_stage_family, to: stageFamilyForSlug(targetStageSlug) },
         bidBoardStageStatus: { from: deal.bid_board_stage_status, to: status },
+        // Read from the statement's own pre/post image, not from `deal` — neither column is carried on
+        // DealMatch, and an adoption (false -> true) is exactly the case the no-op filter would
+        // otherwise erase.
+        isBidBoardOwned: {
+          from: updatedRow?.prev_is_bid_board_owned ?? null,
+          to: updatedRow?.next_is_bid_board_owned ?? null,
+        },
+        bidBoardStageEnteredAt: {
+          from: updatedRow?.prev_bid_board_stage_entered_at ?? null,
+          to: updatedRow?.next_bid_board_stage_entered_at ?? null,
+        },
       }),
       { source: "stage_metadata_refresh" });
   }
@@ -1834,17 +1910,20 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         // estimator between findDealMatches and this UPDATE would make a snapshot-derived value wrong;
         // the RETURNING value is the source of truth for the mirror's `to` (Codex #741 TOCTOU).
         const writtenEstimatorUserId = (updateDeal.estimator_user_id ?? null) as string | null;
-        await logBidBoardActivity(
-          client,
-          schemaName,
-          updateDeal,
-          // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
-          // claim a mirror move that did not happen.
-          onlyRealChanges(
-            buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled)
-          ),
-          { source: "bid_board_mirror", runId }
+        // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
+        // claim a mirror move that did not happen.
+        const mirrorChanges = onlyRealChanges(
+          buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled)
         );
+        // The heartbeat check, not just the emptiness check. `bidBoardLastUpdatedAt` is this run's own
+        // timestamp, so it differs every cycle and `mirrorChanges` is therefore NEVER empty — gating on
+        // emptiness alone left every one of the ~63k/day rows in place with a single field in it.
+        if (hasSubstantiveChange(mirrorChanges)) {
+          await logBidBoardActivity(client, schemaName, updateDeal, mirrorChanges, {
+            source: "bid_board_mirror",
+            runId,
+          });
+        }
       }
 
       const estimateResult = await writeEstimateIfNeeded(client, schemaName, matches[0], normalized, changedByUserId);
