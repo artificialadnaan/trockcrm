@@ -13,17 +13,27 @@ import { PgDialect } from "drizzle-orm/pg-core";
 
 // listDealStages() reads the module-level db (not the tenantDb arg). Stub it so
 // the date path can resolve won/lost stage ids without a real database.
+const STAGES = [
+  { id: "won-1", slug: "won", workflowFamily: "standard_deal" },
+  { id: "lost-1", slug: "lost", workflowFamily: "standard_deal" },
+  { id: "op-1", slug: "opportunity", workflowFamily: "standard_deal" },
+];
+
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
+// listDealStages() reads pipeline_stage_config on the REQUEST's tenant client now — through the global
+// `db` pool it made one request hold TWO pool slots at once, which deadlocks once every slot is a tenant
+// client. This module mock is kept only so importing db.js is harmless.
 vi.mock("../../../src/db.js", () => {
-  const stages = [
-    { id: "won-1", slug: "won", workflowFamily: "standard_deal" },
-    { id: "lost-1", slug: "lost", workflowFamily: "standard_deal" },
-    { id: "op-1", slug: "opportunity", workflowFamily: "standard_deal" },
-  ];
   const chain: Record<string, unknown> = {};
   chain.select = () => chain;
   chain.from = () => chain;
   chain.where = () => chain;
-  chain.orderBy = () => Promise.resolve(stages);
+  chain.orderBy = () => Promise.resolve(STAGES);
   return { db: chain, pool: {} };
 });
 
@@ -34,9 +44,16 @@ const renderText = (value: unknown) => render(value).sql.toLowerCase();
 function createTenantDbCapturingWhere() {
   const capturedWheres: unknown[] = [];
   const capturedOrderBys: unknown[][] = [];
+  // The stage-config read gets its OWN chain: it must resolve to the stage list, and its WHERE must not
+  // land in capturedWheres, where the assertions below index by position.
+  const stageChain: Record<string, unknown> = {};
+  stageChain.where = () => stageChain;
+  stageChain.orderBy = () => Promise.resolve(STAGES);
+  (stageChain as { then: unknown }).then = (resolve: (rows: unknown[]) => unknown) => resolve(STAGES);
+
   const dataChain: Record<string, unknown> = {};
   dataChain.select = () => dataChain;
-  dataChain.from = () => dataChain;
+  dataChain.from = (table: unknown) => (isPipelineStageConfigTable(table) ? stageChain : dataChain);
   dataChain.leftJoin = () => dataChain;
   dataChain.where = (condition: unknown) => {
     capturedWheres.push(condition);
@@ -93,6 +110,96 @@ describe("getDeals — FilterBar wiring", () => {
     expect(sql).toContain('"is_active"'); // default active filter still applied
   });
 
+  it("maps the Pending RFP list bucket to Opportunity-family RFP rows, rather than a fake stage id", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { pendingRfpOnly: true, stageIds: ["estimating-1"], scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const sql = mainWhere(capturedWheres);
+    // A selection containing an ordinary stage and Pending RFP is a UNION, and the synthetic side
+    // uses the same RFP lifecycle predicate as the Pending RFP board column/queue.
+    expect(sql).toContain(" or ");
+    expect(sql).toContain("rfp_approval_status");
+    expect(sql).toContain("is_bid_board_owned");
+    expect(sql).toContain('"stage_id"');
+  });
+
+  it("keeps an Opportunity-only selection disjoint from the separate Pending RFP bucket", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { stageIds: ["op-1"], excludePendingRfpFromOpportunity: true, scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const sql = mainWhere(capturedWheres);
+    // Pending RFP rows retain an Opportunity stage id, so the ordinary branch needs the shared
+    // negated bucket predicate. Without it, checking Opportunity alone leaks the separate column.
+    expect(sql).toContain("rfp_approval_status");
+    expect(sql).toContain("is_bid_board_owned");
+    expect(sql).toContain("coalesce");
+  });
+
+  it("keeps archived RFP-state records under Opportunity because Pending RFP is active-only", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { stageIds: ["op-1"], excludePendingRfpFromOpportunity: true, status: "inactive", scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const sql = mainWhere(capturedWheres);
+    // One is the Status=Inactive filter. The second is the explicit inactive escape hatch in the
+    // Opportunity complement: deleteDeal only flips is_active, leaving RFP fields intact.
+    expect(sql.split('"is_active"').length - 1).toBe(2);
+    expect(sql).toContain("rfp_approval_status");
+    expect(sql).toContain(" or ");
+  });
+
+  it("keeps the Pending RFP-only bucket active-only even when Inactive is selected", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      db,
+      { pendingRfpOnly: true, status: "inactive", scope: "all" },
+      "director",
+      "director-1"
+    );
+
+    const query = render(capturedWheres[capturedWheres.length - 1]);
+    // Status owns one is_active=false predicate, while the actionable Pending RFP bucket adds
+    // is_active=true. Their deliberate contradiction means archived RFP-state rows cannot reappear
+    // under the synthetic queue; they belong to the ordinary Opportunity choice instead.
+    expect(query.sql.toLowerCase().split('"is_active"').length - 1).toBe(2);
+    expect(query.params).toContain(false);
+    expect(query.params).toContain(true);
+  });
+
+  it("keeps direct Opportunity stage-id callers inclusive when they do not render a separate bucket", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { stageIds: ["op-1"], scope: "all" }, "director", "director-1");
+
+    const sql = mainWhere(capturedWheres);
+    expect(sql).toContain('"stage_id"');
+    expect(sql).not.toContain("rfp_approval_status");
+    expect(sql).not.toContain("is_bid_board_owned");
+  });
+
   it("an unrecognized status passed through from the route becomes a no-match (sql false), never widened", async () => {
     // Codex #546: the route must pass raw values to the registry so a bad param
     // hits the predicate's no-match, instead of being normalized to undefined
@@ -139,6 +246,21 @@ describe("getDeals — FilterBar wiring", () => {
     expect(query.sql.toLowerCase()).toContain("assigned_rep_id");
     expect(query.sql.toLowerCase()).toContain("is null");
     expect(query.params).not.toContain(UNASSIGNED_FILTER_SENTINEL);
+  });
+
+  it("estimatorId reaches the SQL through getDeals, not just through the predicate registry", async () => {
+    // getDeals hands the WHOLE filters object to buildDealFilterBarConditions, so estimatorId arrives
+    // structurally rather than by an explicit line of wiring. That is easy to break silently: drop the
+    // field from DealFilters and the route still accepts ?estimatorId, the predicate still passes its own
+    // unit tests, and the filter just stops narrowing anything.
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { estimatorId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301", scope: "all" }, "director", "director-1");
+
+    const query = render(capturedWheres[capturedWheres.length - 1]);
+    expect(query.sql.toLowerCase()).toContain("estimator_user_id");
+    expect(query.params).toContain("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
   });
 
   it("value sort uses the effective value chain (on_hold), not raw awarded_amount", async () => {
@@ -288,6 +410,22 @@ describe("getDeals — FilterBar wiring", () => {
     expect(orderText).toContain("stage_entered_at"); // open rows by the entered-stage date
   });
 
+  it.each(["asc", "desc"] as const)("sortBy=bid_due_date orders the authoritative deadline with missing dates last (%s)", async (sortDir) => {
+    const { db, capturedOrderBys } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { sortBy: "bid_due_date", sortDir, scope: "all" }, "director", "director-1");
+
+    const finalOrder = capturedOrderBys[capturedOrderBys.length - 1]!;
+    const nullBucketText = renderText(finalOrder[1]);
+    const deadlineOrderText = renderText(finalOrder[2]);
+    expect(nullBucketText).toContain("bid_due_date");
+    expect(nullBucketText).toContain("then 1 else 0"); // the leading null bucket is always last
+    expect(deadlineOrderText).toContain("bid_due_date");
+    expect(deadlineOrderText).toContain('"leads"."id" is not null');
+    expect(deadlineOrderText).toContain("at time zone 'utc'");
+  });
+
   // The leading sort tier decides where a DEDUCTIVE change order (negative awarded_amount) lands, and
   // because it LEADS it decides that under every sort. Wiring only — that the list's tier is the
   // sign-aware one on every sort key including the value sort; the tier's own ordering behaviour is
@@ -308,6 +446,7 @@ describe("getDeals — FilterBar wiring", () => {
     "stage_entered_at",
     "expected_close_date",
     "contract_signed_date",
+    "bid_due_date",
   ] as const)(
     "sortBy=%s leads with the NON-ZERO tier, so a deductive CO is ordered by the column the user asked for",
     async (sortBy) => {

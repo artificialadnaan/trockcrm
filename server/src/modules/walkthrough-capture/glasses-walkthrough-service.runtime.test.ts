@@ -6,8 +6,9 @@
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import type { GlassesWalkCaptureCensus } from "@trock-crm/shared/types";
 import { migrationSql } from "../../../tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -115,6 +116,10 @@ function baseInput(overrides: Partial<IngestGlassesWalkthroughInput> = {}): Inge
     userId: USER,
     officeSlug: "dallas",
     officeId: null,
+    // Null by default: the client stating no job type is the shape every walk filed to date has, so
+    // that is what the unmodified fixture must exercise.
+    jobType: null,
+    captureCensus: null,
     artifacts: [
       {
         idempotencyKey: "artifact-1",
@@ -127,6 +132,35 @@ function baseInput(overrides: Partial<IngestGlassesWalkthroughInput> = {}): Inge
     ],
     ...overrides,
   };
+}
+
+/** The census of a walk that went badly — 30 min on the clock, 26.2 min of glasses audio, two engine
+ *  restarts — shaped exactly as the phone sends it. `overrides` reach into `audio` so one test can vary one
+ *  counter without restating the rest. */
+function census(audio: Partial<GlassesWalkCaptureCensus["audio"]> = {}): GlassesWalkCaptureCensus {
+  return {
+    walkMs: 1_800_000,
+    video: { framesReceived: 54_000, framesAppended: 1_800, framesDropped: 52_200, secondsSinceLastFrameArrived: 1_740.5 },
+    audio: {
+      buffersReceived: 90_000,
+      buffersAppended: 78_600,
+      buffersDropped: 11_400,
+      longestDropRun: 11_400,
+      secondsAppended: 1_572,
+      engineRestarts: 2,
+      standaloneSecondsRecorded: 1_500,
+      events: [
+        { atMs: 60_000, kind: "video-stalled" },
+        { atMs: 1_572_000, kind: "engine-restart" },
+      ],
+      ...audio,
+    },
+  };
+}
+
+/** A census with nothing wrong in it: audio covers the walk, the engine never restarted. */
+function cleanCensus(): GlassesWalkCaptureCensus {
+  return census({ secondsAppended: 1_800, engineRestarts: 0, events: [] });
 }
 
 describe("ingestGlassesWalkthrough", () => {
@@ -660,6 +694,101 @@ const domainEvents = () =>
 // project folder, and the `job_queue` row says a forward is scheduled — neither answers "which glasses
 // walks does this deal have, and which TROCK Scope walkthrough did each become".
 describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () => {
+  it("stores the resolved job type, and puts it on the forward job's payload", async () => {
+    // Two writes, one fact. The read-model column is what a reader of the CRM sees; the payload copy is
+    // what actually reaches TROCK Scope. They are written in different statements, so a change that
+    // updates one and not the other looks correct on the deal page and grades against the wrong catalog.
+    //
+    // The value arrives already resolved — the route settles it against the deal before calling in (see
+    // `resolveGlassesWalkthroughJobTypeForDeal`), which is why this suite can pass one in directly.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBe("roofing_envelope");
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
+  });
+
+  it("STORES a job type TROCK Scope cannot ground, but withholds it from the forward", async () => {
+    // The one place the row and the wire deliberately disagree, and the reason is severe: TROCK Scope
+    // answers 422 `job_type_unavailable` for a job type with no seeded work-type catalog, and the
+    // forwarder reads any 4xx as "safe to retry" — so the walk would loop into the same refusal until the
+    // queue dead-letters it and NOTHING reaches that service. Withheld, the walk lands under TROCK
+    // Scope's default, exactly as it does today.
+    //
+    // The column still records the truth, so the day `service_repair` gets a catalog the walks already on
+    // file are correctly labelled and a re-forward needs no backfill.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "service_repair" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBe("service_repair");
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
+  it("REGRESSION: a REPLACEMENT forward carries the job type on the ROW, not the retry's own", async () => {
+    // The row's job type belongs to the first completion and nothing rewrites it. A re-completion,
+    // however, rebuilds the forward payload from scratch — so taking that payload's job type from the
+    // retry's input let the two disagree the moment the deal's project type was corrected while the bytes
+    // were still draining: the deal page would show the catalog the walk was filed under while TROCK
+    // Scope graded it under a different one, with nothing anywhere recording the disagreement.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
+
+    // The same walk, re-filed after somebody retyped the deal. The route resolves a different answer.
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "interior_finish_out" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.jobType).toBe("roofing_envelope");
+
+    const replacement = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect((replacement[0]!.payload as Record<string, unknown>).jobType).toBe("roofing_envelope");
+  });
+
+  it("REGRESSION: a replacement forward keeps a PRE-0243 walk's NULL rather than inferring one", async () => {
+    // "The row says NULL" and "there is no row" are different answers. Every walk filed before the column
+    // existed holds NULL, and migration 0243 deliberately declines to backfill it — the deal's project
+    // type today is not evidence of what it was on the day of the walk. Read as "nobody has answered
+    // yet", that NULL would let a replacement forward re-grade a historical walk under the deal's current
+    // catalog, quietly re-categorising a scope somebody may already have reviewed, while the row it is
+    // filed under still says NULL.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBeNull();
+
+    const replacement = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect((replacement[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
+  it("leaves the job type NULL when there is nothing to record", async () => {
+    // The shape every historical row has. NULL reaches the forward job, which omits the field and lets
+    // TROCK Scope apply its own default — so a re-filed legacy walk behaves exactly as it did.
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows[0]!.jobType).toBeNull();
+
+    const jobs = await tenantDb.select().from(jobQueue);
+    expect((jobs[0]!.payload as Record<string, unknown>).jobType ?? null).toBeNull();
+  });
+
   it("writes ONE row carrying the deal, the walk, the capture time and the capturing user", async () => {
     await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
 
@@ -754,6 +883,150 @@ describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.capturedAt.toISOString()).toBe("2026-07-30T15:04:00.000Z");
     expect(rows[0]!.capturedByUserId).toBe(USER);
+  });
+});
+
+describe("ingestGlassesWalkthrough — the capture census", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function storedCensus(): Promise<unknown> {
+    const rows = await tenantDb.select().from(glassesWalkthroughs).where(eq(glassesWalkthroughs.walkId, WALK));
+    expect(rows).toHaveLength(1);
+    return rows[0]!.captureCensus;
+  }
+
+  it("stores the phone's census on the walk's row, verbatim", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+
+    expect(await storedCensus()).toEqual(census());
+    // The walk above is short by 228 s and restarted twice: the log line the census exists for.
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores NULL when the completion carries none — an older app build, not a walk that recorded nothing", async () => {
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    expect(await storedCensus()).toBeNull();
+  });
+
+  it("REGRESSION: a retry carrying a DIFFERENT census keeps the FIRST one", async () => {
+    // Every column on this row is a first-completion fact, and the census is no exception: a retry —
+    // plausibly from a different session on a recovered walk — has no better count than the completion
+    // that was actually there while the recorder ran.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: cleanCensus() }), {
+      artifactStore: healthyStore(),
+    });
+
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("fills the census on a retry when the FIRST completion carried none — the first NON-NULL census wins", async () => {
+    // Not a disagreement, a fact arriving late: the first completion came from a build that did not count,
+    // or from a recovery path with nothing to send. NULL is "we do not know", and a retry that does know
+    // must be allowed to say so.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    expect(await storedCensus()).toBeNull();
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("GUARD: a retry with no census does not erase the one already stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("GUARD: the late fill still happens on the retry whose forward is ALREADY LIVE and returns early", async () => {
+    // The census write shares `recordGlassesWalkthrough`'s placement BEFORE the live-forward early return,
+    // for the same reason that placement is load-bearing for the row itself: the retry of a walk whose
+    // forward is already queued is the most common second call this endpoint gets.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+
+    expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+    expect(await storedCensus()).toEqual(census());
+  });
+
+  it("GUARD: the same walkId filed against a SECOND deal carries its own census", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL, captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL, captureCensus: cleanCensus() }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r: { dealId: string }) => r.dealId === DEAL)!.captureCensus).toEqual(census());
+    expect(rows.find((r: { dealId: string }) => r.dealId === OTHER_DEAL)!.captureCensus).toEqual(cleanCensus());
+  });
+
+  it("WARNS the moment a walk lands short of narration, naming the walk, the shortfall and the restarts", async () => {
+    // 1,800,000 ms walk, 1,572 s of glasses audio, 1,500 s standalone: 228,000 ms missing. This line is
+    // what lets ops see a bad walk without anyone opening the deal.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: census() }), { artifactStore: healthyStore() });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0]![0]);
+    expect(line).toContain("[glasses-walkthrough]");
+    expect(line).toContain(`Walk ${WALK} on deal ${DEAL}`);
+    expect(line).toContain("228000 ms of narration missing from a 1800000 ms walk");
+    expect(line).toContain("2 audio engine restart(s)");
+  });
+
+  it("warns for an engine restart even when the audio covers the walk", async () => {
+    // A restart that lost nothing this time is the same engine that lost 3.8 min last time; ops wants
+    // to know the recorder is misbehaving before the walk where it costs something.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ captureCensus: census({ secondsAppended: 1_800, engineRestarts: 1 }) }),
+      { artifactStore: healthyStore() }
+    );
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("0 ms of narration missing");
+  });
+
+  it("stays silent for a clean census, for a walk with none, and on the retry that changes nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ captureCensus: cleanCensus() }), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL }), { artifactStore: healthyStore() });
+    expect(warn).not.toHaveBeenCalled();
+
+    // A bad walk is announced ONCE, when its census lands — not again on every retry of the completion.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ walkId: "walk-bad", captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ walkId: "walk-bad", captureCensus: census() }), {
+      artifactStore: healthyStore(),
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a shortfall just inside the threshold raise the alarm", async () => {
+    // Audio legitimately starts a beat after the walk clock does; five seconds is the line, not zero.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ captureCensus: census({ secondsAppended: 1_795, engineRestarts: 0 }) }),
+      { artifactStore: healthyStore() }
+    );
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -892,6 +1165,13 @@ describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () 
       await pg.exec("DELETE FROM files");
       await pg.exec("DELETE FROM job_queue");
       await pg.exec("DELETE FROM photo_audit_log");
+      // THE WALK ROW TOO, and leaving it out made this measure two different things. Both calls below
+      // run inside ONE test, so only the first saw the suite's `beforeEach` truncation: the second found
+      // the walk already recorded, took `recordGlassesWalkthrough`'s re-file branch — which reads the
+      // stored job type back — and issued one statement more than the first for a reason that has
+      // nothing to do with how many stills it carried. Cleared here, both measurements describe a FIRST
+      // completion, which is the only comparison this guard is about.
+      await pg.exec("DELETE FROM glasses_walkthroughs");
       const issued: string[] = [];
       const original = pg.query.bind(pg);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -909,9 +1189,11 @@ describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () 
       return issued.length;
     };
 
-    // Six statements either way, today: the `files` insert, the re-select, the audit insert, the event
-    // insert, the forward-state lookup and the forward enqueue. Nonzero on both sides is itself part of
-    // the assertion — a counter that silently stopped intercepting would otherwise report 0 === 0.
+    // The same statements either way: the `files` insert, the re-select, the audit insert, the event
+    // insert, the walk-row upsert, the forward-state lookup and the forward enqueue. The exact number is
+    // deliberately not asserted — counting rather than naming a figure is what keeps this true as the
+    // write phase gains or loses steps. Nonzero on both sides is itself part of the assertion: a counter
+    // that silently stopped intercepting would otherwise report 0 === 0.
     const wide = await statementsFor(40);
     const narrow = await statementsFor(2);
     expect(narrow).toBeGreaterThan(0);
@@ -1835,5 +2117,34 @@ describe("recording an inherited TROCK Scope id", () => {
 
     const [row] = await tenantDb.select().from(glassesWalkthroughs);
     expect(row!.scopeWalkthroughId).toBe(scopeId);
+  });
+
+  it("RETRACTS the job type it just inferred, because that walkthrough's catalog was not ours to pick", async () => {
+    // Same pre-0214 shape as above, and the same reasoning one column over. Re-completing the walk
+    // INSERTS the read-model row for the first time, with a job type freshly resolved from the deal —
+    // for a remote walkthrough created long ago under whatever default applied then. Left in place, the
+    // column would claim a catalog TROCK Scope is not using and never will: a repeat create under the
+    // same externalRef returns the existing walkthrough untouched, and a forward holding the checkpoint
+    // skips the create entirely. NULL is the honest value, and it is the one every pre-0243 row holds.
+    const scopeId = "b91a5bfd-eca9-4dbd-bde4-06528658b2b7";
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "completed",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', ${JSON.stringify(scopeId)}::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+    await tenantDb.delete(glassesWalkthroughs);
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ jobType: "roofing_envelope" }), {
+      artifactStore: healthyStore(),
+    });
+
+    const [row] = await tenantDb.select().from(glassesWalkthroughs);
+    expect(row!.scopeWalkthroughId).toBe(scopeId);
+    expect(row!.jobType).toBeNull();
   });
 });

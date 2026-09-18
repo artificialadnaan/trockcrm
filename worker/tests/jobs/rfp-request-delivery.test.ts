@@ -9,19 +9,28 @@ function makeDb() {
   return { query };
 }
 
-function makePayload() {
+function makePayload(sourceEventId = "event-1") {
   return {
     dealId: "deal-1",
     syncHubUrl: "https://synchub.example.com/api/rfp-requests",
     body: {
       sourceSystem: "trock_crm",
       sourceDealId: "deal-1",
-      sourceEventId: "event-1",
+      sourceEventId,
       deal: { name: "Deal", projectNumber: "DFW-1", projectType: "4" },
       attachments: [],
     },
   };
 }
+
+/**
+ * A sourceEventId in the form the round guard can actually parse.
+ *
+ * The bare "event-1" default does NOT match, and that is the fail-open path — worth keeping as the default
+ * because it is what most historical payloads look like, but useless on its own for proving the guard binds
+ * anything. Both shapes are exercised below.
+ */
+const ROUND_EVENT_ID = "crm:deal-stage:opportunity:round-77";
 
 describe("handleRfpRequestDelivery", () => {
   beforeEach(() => {
@@ -47,7 +56,9 @@ describe("handleRfpRequestDelivery", () => {
     );
     const updateSql = db.query.mock.calls.map((call) => String(call[0])).join("\n");
     expect(updateSql).toContain("rfp_approval_status = 'pending'");
-    expect(db.query.mock.calls.at(-1)?.[1]).toEqual([123, "tok", "deal-1"]);
+    // Four params, not three: the write-back is bound to the ROUND it answers. Null here is the deliberate
+    // fail-open — "event-1" is not a parseable round id — see the round-guard cases below.
+    expect(db.query.mock.calls.at(-1)?.[1]).toEqual([123, "tok", "deal-1", null]);
   });
 
   it("clears the override-cycle fields when a new RFP cycle starts (stale override state can't leak across cycles)", async () => {
@@ -82,7 +93,56 @@ describe("handleRfpRequestDelivery", () => {
 
     const updateSql = db.query.mock.calls.map((call) => String(call[0])).join("\n");
     expect(updateSql).toContain("rfp_approval_status = 'conflict'");
-    expect(db.query.mock.calls.at(-1)?.[1]).toEqual(["pending_collision", JSON.stringify(conflict), "deal-1"]);
+    expect(db.query.mock.calls.at(-1)?.[1]).toEqual(["pending_collision", JSON.stringify(conflict), "deal-1", null]);
+  });
+
+  // The round guard, which this file did not previously know about.
+  //
+  // This job writes back BY DEAL ID from a payload snapshot taken when the delivery was queued. Two things
+  // can happen while it is in flight: "Move back to Opportunity" clears the RFP cycle, or a move-back
+  // followed by a fresh trigger starts a NEW round. Without binding the response to the round that produced
+  // it, a late reply either resurrects a cleared cycle or overwrites the new round's request id and token
+  // with the old round's — silently, and with no way to tell afterwards which round the stored token belongs
+  // to. Asserting only the fail-open null (as the cases above do) would leave that unpinned.
+  it.each([
+    ["the success path", 201, { requestId: 123, token: "tok" }, "rfp_approval_status = 'pending'"],
+    ["the conflict path", 409, { error: "pending_collision", conflict: {} }, "rfp_approval_status = 'conflict'"],
+  ])("binds %s write-back to the round that produced it", async (_label, status, body, marker) => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+
+    await handleRfpRequestDelivery(makePayload(ROUND_EVENT_ID), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      secret: "secret",
+    });
+
+    const update = db.query.mock.calls.map((call) => String(call[0])).find((sql) => sql.includes(marker));
+    expect(update).toBeDefined();
+    // Both halves of the guard: a cleared cycle fails the status predicate, a DIFFERENT round fails the
+    // identity one. Either alone lets one of the two races through.
+    expect(update).toContain("rfp_approval_status IN ('pending_outbox', 'pending')");
+    expect(update).toContain("rfp_approval_request_event_id");
+    expect(db.query.mock.calls.at(-1)?.[1]?.at(-1)).toBe("round-77");
+  });
+
+  // Fail-open is a decision, not an oversight: an over-eager guard would stop EVERY delivery whose payload
+  // predates the round-stamped event id, which is far worse than the drift it prevents.
+  it("passes a null round for a payload whose event id carries no round, rather than refusing to write", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ requestId: 9, token: "t" }), { status: 201 }));
+
+    await handleRfpRequestDelivery(makePayload("some-unparseable-id"), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      secret: "secret",
+    });
+
+    const update = db.query.mock.calls.map((c) => String(c[0])).find((s) => s.includes("rfp_approval_status = 'pending'"));
+    expect(update).toBeDefined();
+    expect(db.query.mock.calls.at(-1)?.[1]?.at(-1)).toBeNull();
+    // And the SQL itself tolerates that null rather than matching nothing.
+    expect(update).toContain("$4::text IS NULL");
   });
 
   it.each([401, 422, 500])("throws on SyncHub %s so job_queue retries or deads the row", async (status) => {

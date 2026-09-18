@@ -13,6 +13,7 @@ import { ReportFilterBar, useReportFilters } from "@/components/reports/report-f
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useDailyActivityLogReport, type DailyActivityLogEntry } from "@/hooks/use-reports";
 import { useDealHref } from "@/hooks/use-office-scope";
+import { useAuth } from "@/lib/auth";
 import { parseDisplayDate } from "@/lib/deal-utils";
 import { EmptyState, ErrorState, KpiCard, LoadingState, ReportPanel, formatNumber } from "./performance-report-ui";
 
@@ -92,7 +93,32 @@ function LoggedOffDayBadge({ entry }: { entry: DailyActivityLogEntry }) {
   );
 }
 
+/**
+ * Readership gate. The log carries the CONTENT of what people wrote, including synced email bodies, so it is
+ * limited to a named allowlist rather than a role — see shared/lib/dailyActivityLogViewers.ts.
+ *
+ * This wrapper exists so the denial short-circuits BEFORE the report component mounts: the fetch lives in
+ * that component's hooks, and rendering it just to early-return would still fire a request that 403s. The
+ * server enforces the same allowlist on the endpoint; this only avoids offering a surface that cannot load.
+ */
 export function DailyActivityLogPage() {
+  const { user } = useAuth();
+
+  if (!user?.canViewDailyActivityLog) {
+    return (
+      <div className="space-y-6">
+        <PageHeader eyebrow="Performance" title="Daily Activity Log" description="Access restricted." />
+        <ReportPanel title="Not available to your account">
+          <EmptyState label="The Daily Activity Log is limited to designated viewers. Contact an administrator if you need access." />
+        </ReportPanel>
+      </div>
+    );
+  }
+
+  return <DailyActivityLogReport />;
+}
+
+function DailyActivityLogReport() {
   const { query } = useReportFilters();
   const [searchParams, setSearchParams] = useSearchParams();
   const { search } = useLocation();

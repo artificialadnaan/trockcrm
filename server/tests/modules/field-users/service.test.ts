@@ -381,6 +381,40 @@ describe("field user service helpers", () => {
     expect(emailMocks.sendSystemEmail.mock.calls[0][2]).not.toContain("internal-field-host.up.railway.app");
   });
 
+  it("capitalises the invite's names before storing and emailing them (Codex P2)", async () => {
+    // Normalising only on ACCEPT left the badly-cased spelling on three live surfaces until the person
+    // signed up: listFieldUsers returns pending invites and Admin → Field Users renders these columns
+    // directly, resends reuse them, and the invitation email greets the recipient by this name. The
+    // invite form is also exactly where a hand-typed lowercase name enters the system.
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "invite-2", email: "nreyes@example.com", expires_at: new Date("2026-05-12T12:00:00.000Z") }] })
+      .mockResolvedValueOnce({ rows: [{ display_name: "Admin User" }] });
+
+    await inviteFieldUser({
+      email: "nreyes@example.com",
+      firstName: "nick",
+      lastName: "reyes",
+      phone: null,
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      invitedByUserId: "22222222-2222-2222-2222-222222222222",
+    });
+
+    // The INSERT carries the corrected spelling, not the raw input.
+    const insertParams = JSON.stringify(dbMocks.execute.mock.calls[2]);
+    expect(insertParams).toContain("field_user_invites");
+    expect(insertParams).toContain("Nick");
+    expect(insertParams).toContain("Reyes");
+    expect(insertParams).not.toContain('"nick"');
+    expect(insertParams).not.toContain('"reyes"');
+
+    // ...and so does the greeting, so the email does not address them by the bad spelling.
+    const emailHtml = emailMocks.sendSystemEmail.mock.calls[0][2];
+    expect(emailHtml).toContain("Nick Reyes");
+    expect(emailHtml).not.toContain("nick reyes");
+  });
+
   it("rejects duplicate field invite emails", async () => {
     dbMocks.execute.mockResolvedValueOnce({ rows: [{ id: "existing-user" }] });
 

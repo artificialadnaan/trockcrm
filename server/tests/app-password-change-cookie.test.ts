@@ -111,7 +111,8 @@ describe("password-change auth cookies", () => {
     localAuthServiceMocks.loginWithLocalPassword.mockResolvedValue({
       user: { ...crmUser, mustChangePassword: true },
     });
-    localAuthServiceMocks.changeLocalPassword.mockResolvedValue(undefined);
+    // Returns the POST-bump token version; the route re-mints the caller's cookie from it.
+    localAuthServiceMocks.changeLocalPassword.mockResolvedValue({ tokenVersion: 1 });
     localAuthServiceMocks.getUserLocalAuthGate.mockResolvedValue({
       mustChangePassword: false,
       isEnabled: true,

@@ -55,16 +55,38 @@ describe("deal photo timeline filters", () => {
 });
 
 describe("latestActiveVersionCondition", () => {
-  it("excludes a row when an active family member has a HIGHER version (handles flat parent=root chains)", () => {
+  // WHAT IS AND IS NOT ASSERTED HERE. The SEMANTICS of this predicate — which rows survive, for flat,
+  // nested, tied, inactive and self-parent version families — are proven by EXECUTING it against a real
+  // Postgres in latest-version-predicate-equivalence.runtime.test.ts. Those belong there; a regex over
+  // generated SQL cannot tell a correct predicate from a broken one (the assertion this replaced matched
+  // `f2.version > files.version` and so failed on nothing worse than renaming an alias).
+  //
+  // What survives here is the one property that is INVISIBLE to a result-set test: the predicate must
+  // stay INDEXABLE. Comparing two COALESCE expressions to each other returns exactly the same rows as
+  // the two correlated lookups do — so every semantic test still passes — while forcing Postgres to hash
+  // the entire files table, which is the regression this whole change exists to remove. Nothing but the
+  // shape of the SQL can catch that, so it is pinned as shape.
+  it("keeps the family lookup indexable — no COALESCE compared against another COALESCE", () => {
     const sqlText = dialect.sqlToQuery(latestActiveVersionCondition()).sql;
-    // Groups the whole version family (root + every child) via COALESCE(parent_file_id, id) and excludes
-    // a row only when an active sibling has a greater version — so intermediate versions (v2 when v3
-    // exists) are correctly hidden, not just the root.
-    expect(sqlText).toContain("COALESCE");
-    expect(sqlText).toContain("parent_file_id");
-    expect(sqlText).toContain("is_active");
-    expect(sqlText).toMatch(/f2\.version\s*>\s*files\.version/);
-    // Must NOT be the old single-level check (only excluded the root).
-    expect(sqlText).not.toContain("f2.parent_file_id = files.id");
+    // The unindexable shape: an expression on the INNER side equated to one on the outer side. No index
+    // can serve it, so this must never come back.
+    expect(sqlText).not.toMatch(/COALESCE\([^)]*\)\s*=\s*COALESCE\(/i);
+    // Each half must key on a BARE inner column, which is what lets files_version_chain_idx and
+    // files_pkey drive correlated lookups instead of a whole-table hash.
+    expect(sqlText).toMatch(/\bnewer_child\.parent_file_id\s*=\s*COALESCE\(files\.parent_file_id, files\.id\)/);
+    expect(sqlText).toMatch(/\bfamily_root\.id\s*=\s*COALESCE\(files\.parent_file_id, files\.id\)/);
+    // The root half is only equivalent to the old expression for rows whose own parent is NULL; see the
+    // NESTED_MID case in the equivalence suite for what this guard prevents.
+    expect(sqlText).toContain("family_root.parent_file_id IS NULL");
+    // Must NOT be the pre-2026-06 single-level check, which only ever excluded the family root.
+    expect(sqlText).not.toMatch(/parent_file_id\s*=\s*files\.id\b/);
+  });
+
+  it("is parenthesized as one unit so callers can compose it with or()", () => {
+    const sqlText = dialect.sqlToQuery(latestActiveVersionCondition()).sql.trim();
+    // Two AND-ed NOT EXISTS clauses returned unwrapped would re-associate the first time this is dropped
+    // into an or(...) branch, silently widening whatever it was OR-ed with.
+    expect(sqlText.startsWith("(")).toBe(true);
+    expect(sqlText.endsWith(")")).toBe(true);
   });
 });

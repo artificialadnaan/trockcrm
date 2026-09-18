@@ -48,6 +48,7 @@ import {
   markScorecardEditEvidenceUploadConfirmed,
   type ScorecardEditUploadScope,
 } from "../field/scorecard-evidence-upload.js";
+import { assertMarketingExpenseAttachmentAccess } from "../marketing-expense/service.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -111,6 +112,7 @@ interface PendingUpload {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  marketingExpenseRequestId?: string;
   description?: string;
   photoCategory?: PhotoCategory | null;
   tags?: string[];
@@ -165,6 +167,12 @@ export interface RequestUploadInput {
   procoreProjectId?: number;
   /** Target change order ID */
   changeOrderId?: string;
+  /**
+   * Target marketing & advertising expense request (migration 0232). A supporting document on the paper
+   * form — a quote, an event agenda, a travel estimate. The route asserts the caller is the request's
+   * submitter and that no decision has been made yet.
+   */
+  marketingExpenseRequestId?: string;
   /** Optional description */
   description?: string;
   /**
@@ -216,6 +224,7 @@ export interface FileFilters {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  marketingExpenseRequestId?: string;
   category?: FileCategory;
   fileKind?: "photos" | "documents";
   linkedType?: "deal" | "lead" | "contact" | "procore" | "change_order" | "unassigned";
@@ -343,13 +352,46 @@ function validateAssociations(input: {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  marketingExpenseRequestId?: string;
   allowUnassigned?: boolean;
 }): void {
   if (input.allowUnassigned) {
     return;
   }
-  if (!input.dealId && !input.leadId && !input.opportunityId && !input.contactId && !input.procoreProjectId && !input.changeOrderId) {
-    throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, or change order).");
+  if (
+    !input.dealId && !input.leadId && !input.opportunityId && !input.contactId
+    && !input.procoreProjectId && !input.changeOrderId && !input.marketingExpenseRequestId
+  ) {
+    throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, change order, or marketing expense request).");
+  }
+
+  // An expense-request attachment claims exactly ONE owner.
+  //
+  // Every other association here is additive and harmless together, because they all resolve to the same
+  // office-scoped visibility. This one does not: it is the only association that RESTRICTS who may read the
+  // file. A row carrying both a deal and an expense request is a question about which authorization
+  // applies, and the read paths cannot express "both" — they are an else-if ladder, so the first matching
+  // branch decides. Such a row reads as an ordinary deal file, and every collaborator on that deal gets a
+  // private quote plus the ability to edit it after the request was decided.
+  //
+  // Refused at the point of creation rather than reconciled later, because there is no correct
+  // reconciliation: the two answers are "more people may see it" and "fewer people may see it", and
+  // silently picking either is wrong.
+  if (input.marketingExpenseRequestId) {
+    const competing = [
+      input.dealId && "deal",
+      input.leadId && "lead",
+      input.opportunityId && "opportunity",
+      input.contactId && "contact",
+      input.procoreProjectId && "Procore project",
+      input.changeOrderId && "change order",
+    ].filter((label): label is string => Boolean(label));
+    if (competing.length > 0) {
+      throw new AppError(
+        400,
+        `A marketing expense request attachment can be associated with the expense request only, not also with a ${competing.join(" or ")}.`,
+      );
+    }
   }
 }
 
@@ -370,6 +412,23 @@ export async function buildDealFileScopeCondition(tenantDb: TenantDb, dealId: st
   }
 
   return or(eq(files.dealId, dealId), eq(files.leadId, sourceLeadId))!;
+}
+
+/**
+ * THE FILES-SIDE INVARIANT for marketing-expense attachments.
+ *
+ * An expense-request attachment is reachable ONLY through a path that has authorized the parent request.
+ * Deal- and lead-scoped reads satisfy that by construction — an expense attachment carries no deal_id or
+ * lead_id, so it cannot match. Every UNSCOPED read over `files` has to say so explicitly, and this is that
+ * predicate. Applied in: getFiles (unless the caller scoped to a request), getFileStats, getTagSuggestions,
+ * the photo feed, and global search.
+ *
+ * Fixing the per-ID handlers was not enough on its own: the LIST endpoint had no idea the association
+ * existed, and it resolves signed thumbnail URLs for images and rasterized PDFs — so the contents leaked,
+ * not merely the names, to anyone who could open the Files page.
+ */
+export function excludeMarketingExpenseAttachments(): SQL {
+  return isNull(files.marketingExpenseRequestId);
 }
 
 export function activeLatestFileConditions(): SQL[] {
@@ -400,12 +459,15 @@ function linkedFileCondition(linkedType: NonNullable<FileFilters["linkedType"]>)
     case "change_order":
       return isNotNull(files.changeOrderId);
     case "unassigned":
+      // Every association column, including the expense-request one. Omitting it would list every
+      // supporting document in the Files page's Unassigned tab, where anybody could re-file it onto a deal.
       return and(
         isNull(files.dealId),
         isNull(files.leadId),
         isNull(files.contactId),
         isNull(files.procoreProjectId),
-        isNull(files.changeOrderId)
+        isNull(files.changeOrderId),
+        isNull(files.marketingExpenseRequestId)
       )!;
   }
 }
@@ -540,6 +602,7 @@ function buildR2Key(
     contactId?: string;
     procoreProjectId?: number;
     changeOrderId?: string;
+    marketingExpenseRequestId?: string;
     category: FileCategory;
     systemFilename: string;
   }
@@ -560,6 +623,9 @@ function buildR2Key(
   }
   if (input.changeOrderId) {
     return `office_${officeSlug}/change-orders/${input.changeOrderId}/${segment}/${input.systemFilename}`;
+  }
+  if (input.marketingExpenseRequestId) {
+    return `office_${officeSlug}/marketing-expense-requests/${input.marketingExpenseRequestId}/${segment}/${input.systemFilename}`;
   }
 
   return `office_${officeSlug}/unassociated/${segment}/${input.systemFilename}`;
@@ -650,6 +716,7 @@ export async function requestUploadUrl(
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
+    marketingExpenseRequestId: input.marketingExpenseRequestId,
     category: resolvedCategory,
     systemFilename,
   });
@@ -687,6 +754,7 @@ export async function requestUploadUrl(
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
+    marketingExpenseRequestId: input.marketingExpenseRequestId,
     description: input.description,
     photoCategory: input.photoCategory,
     tags: input.tags,
@@ -785,6 +853,18 @@ export async function confirmUpload(
   }
   // Do NOT delete yet — verify and insert first so client can retry on failure
 
+  // RE-ASSERT the expense-request lifecycle on the association about to be persisted.
+  //
+  // The grant route already checked this, and that is not sufficient: an upload is two round trips with an
+  // arbitrarily long gap between them, so a token minted while the request was a draft can arrive here
+  // after it has been submitted, approved, denied or withdrawn — filing new evidence on a decided request
+  // and making the audit trail claim it was there when the approver looked. The check re-reads the request
+  // ROW rather than trusting `pending`, because `pending` is precisely the thing that has gone stale. It is
+  // also not a narrow window: pendingUploads is a process-local Map with no invalidation on status change.
+  if (pending.marketingExpenseRequestId) {
+    await assertMarketingExpenseAttachmentAccess(tenantDb, pending.marketingExpenseRequestId, userId);
+  }
+
   // ── Verify the R2 object before persisting metadata ──────────────
   if (isR2Configured()) {
     const head = await headObject(pending.r2Key);
@@ -836,12 +916,32 @@ export async function confirmUpload(
       geocodedAt: null,
     };
 
+  // The capture time only becomes known HERE, in step 3. `pending.folderPath` was derived back in step 1
+  // from now() — before anyone could know it — and for photos that path carries a YYYY-MM bucket
+  // ("Photos/Site Visits/2026-04"), so an April photo imported in September files itself under September.
+  // Re-derive from the row's OWN date, which is the rule updateFile already documents for the edit path
+  // ("never uses now(), which would move it"); create was the one call site violating it.
+  //
+  // Moving zero bytes: buildR2Key takes no date and has no month segment, so folder_path is a purely
+  // virtual column and correcting it never orphans a stored object.
+  //
+  // The parse is guarded because neither confirm route validates takenAt (only the corrective-action route
+  // does, at corrective-action-routes.ts:275): an unparseable value yields an Invalid Date whose
+  // toISOString() THROWS, inside this request's transaction. Such a value is dropped rather than trusted,
+  // leaving the step-1 path standing exactly as before this fix — and dropping it also stops `takenAt`
+  // below from handing that Invalid Date to the driver, which was a 500 on the same unvalidated input.
+  const parsedTakenAt = input.takenAt ? new Date(input.takenAt) : null;
+  const takenAt = parsedTakenAt && !Number.isNaN(parsedTakenAt.getTime()) ? parsedTakenAt : null;
+  const folderPath = pending.category === "photo" && takenAt
+    ? buildFolderPath(pending.category, pending.subcategory, takenAt)
+    : pending.folderPath;
+
   const result = await tenantDb
     .insert(files)
     .values({
       category: pending.category,
       subcategory: pending.subcategory ?? null,
-      folderPath: pending.folderPath,
+      folderPath,
       tags: pending.tags ?? [],
       displayName: pending.displayName,
       systemFilename: pending.systemFilename,
@@ -857,12 +957,13 @@ export async function confirmUpload(
       contactId: pending.contactId ?? null,
       procoreProjectId: pending.procoreProjectId ?? null,
       changeOrderId: pending.changeOrderId ?? null,
+      marketingExpenseRequestId: pending.marketingExpenseRequestId ?? null,
       description: pending.description ?? null,
       photoCategory: pending.photoCategory ?? null,
       notes: null,
       version: pending.version ?? 1,
       parentFileId: pending.parentFileId ?? null,
-      takenAt: input.takenAt ? new Date(input.takenAt) : null,
+      takenAt,
       geoLat: photoAddress.geoLat,
       geoLng: photoAddress.geoLng,
       latitude: photoAddress.latitude,
@@ -1019,6 +1120,10 @@ export async function uploadNewVersion(
     contactId: input.contactId ?? parentFile.contactId ?? undefined,
     procoreProjectId: input.procoreProjectId ?? parentFile.procoreProjectId ?? undefined,
     changeOrderId: input.changeOrderId ?? parentFile.changeOrderId ?? undefined,
+    // A version is the same supporting document, not a new upload with a caller-selectable owner. Without
+    // this the request-only parent loses its sole association, `validateAssociations` rejects the version,
+    // and draft evidence cannot be corrected before submission.
+    marketingExpenseRequestId: parentFile.marketingExpenseRequestId ?? undefined,
     category: input.category ?? parentFile.category,
     subcategory: input.subcategory ?? parentFile.subcategory ?? undefined,
     tags: input.tags ?? Array.from(parentFile.tags),
@@ -1056,6 +1161,14 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   if (filters.contactId) conditions.push(eq(files.contactId, filters.contactId));
   if (filters.procoreProjectId) conditions.push(eq(files.procoreProjectId, filters.procoreProjectId));
   if (filters.changeOrderId) conditions.push(eq(files.changeOrderId, filters.changeOrderId));
+  if (filters.marketingExpenseRequestId) {
+    // The caller scoped to ONE request. The route that accepts this filter has already run
+    // assertMarketingExpenseRequestReadAccess, so these rows are authorized.
+    conditions.push(eq(files.marketingExpenseRequestId, filters.marketingExpenseRequestId));
+  } else {
+    // Otherwise this is the general library, and expense attachments are not part of it.
+    conditions.push(excludeMarketingExpenseAttachments());
+  }
   if (filters.category) conditions.push(eq(files.category, filters.category));
   if (filters.fileKind === "photos") conditions.push(photoFileCondition());
   if (filters.fileKind === "documents") conditions.push(documentFileCondition());
@@ -1148,7 +1261,7 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
 }
 
 export async function getFileStats(tenantDb: TenantDb, _filters: Record<string, never> = {}): Promise<FileStats> {
-  const where = and(...activeLatestFileConditions());
+  const where = and(...activeLatestFileConditions(), excludeMarketingExpenseAttachments());
   const photoCondition = photoFileCondition();
 
   const [row] = await tenantDb
@@ -1877,7 +1990,9 @@ export async function getTagSuggestions(
   tenantDb: TenantDb,
   dealId?: string
 ): Promise<string[]> {
-  const conditions: SQL[] = [eq(files.isActive, true)];
+  // Tags are free text a requester typed — vendor names, event names — so they leak just as much as the
+  // filename does.
+  const conditions: SQL[] = [eq(files.isActive, true), excludeMarketingExpenseAttachments()];
   if (dealId) conditions.push(await buildDealFileScopeCondition(tenantDb, dealId));
 
   const result = await tenantDb
@@ -1981,12 +2096,22 @@ export async function getDealPhotoTimeline(
   dealId: string,
   page: number = 1,
   limit: number = 50,
-  filters: DealPhotoTimelineFilters = {}
+  filters: DealPhotoTimelineFilters = {},
+  // `withTotal: false` skips the count(*) and reports total/totalPages as null. The count is the same
+  // number on every page of one walk, so a client that pages through a whole gallery only ever needs it
+  // once — and it is the most expensive part of a deep page (it has to match every row, where the page
+  // query stops at `limit`). Defaults to true: no existing caller changes behaviour, and the numbered-page
+  // web timeline keeps its total because it renders "page X of Y".
+  options: { withTotal?: boolean } = {},
 ): Promise<{
   photos: Array<
     // clientUploadId is the upload queue's idempotency key — kept OUT of this (API-exposed) row so it can't
     // be read off /api/files/deal/:dealId/photos and replayed against confirm-upload.
-    Omit<typeof files.$inferSelect, "clientUploadId"> & {
+    //
+    // marketingExpenseRequestId is omitted for a duller reason: this is a DEAL's photo timeline, the select
+    // below names its columns explicitly, and an expense-request attachment is not a deal photo. Widening
+    // the select just to satisfy the type would put a column in the API response that nothing reads.
+    Omit<typeof files.$inferSelect, "clientUploadId" | "marketingExpenseRequestId"> & {
       uploaderName: string;
       uploaderAvatarUrl: string | null;
       // Display URLs resolved server-side IN-BATCH so clients never round-trip per photo (rate-limit safe).
@@ -1994,12 +2119,18 @@ export async function getDealPhotoTimeline(
       fullUrl: string | null;
     }
   >;
-  pagination: { page: number; limit: number; total: number; totalPages: number };
+  // total/totalPages are null exactly when the caller passed `withTotal: false` — see `options`.
+  pagination: { page: number; limit: number; total: number | null; totalPages: number | null };
 }> {
   const offset = (page - 1) * limit;
+  const withTotal = options.withTotal ?? true;
   const conditions = await buildDealPhotoTimelineConditions(tenantDb, dealId, filters);
 
-  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions);
+  // req.tenantDb is a single transaction-bound client, so this must stay sequential with the page query
+  // below rather than becoming a Promise.all (see the note at the /deal/:dealId/photos route).
+  const countResult = withTotal
+    ? await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions)
+    : null;
   const photoRows = await tenantDb
     .select({
       id: files.id,
@@ -2063,7 +2194,7 @@ export async function getDealPhotoTimeline(
     .limit(limit)
     .offset(offset);
 
-  const total = Number(countResult[0]?.count ?? 0);
+  const total = countResult === null ? null : Number(countResult[0]?.count ?? 0);
 
   // Resolve each photo's thumbnail + full-res URL HERE (in one batch) rather than letting the client
   // fetch a signed URL per photo — that N+1 is what trips the rate limiter on a 400-photo deal. Presigns
@@ -2074,7 +2205,7 @@ export async function getDealPhotoTimeline(
 
   return {
     photos,
-    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    pagination: { page, limit, total, totalPages: total === null ? null : Math.ceil(total / limit) },
   };
 }
 
@@ -2108,3 +2239,13 @@ export async function getDealPhotoUploaders(
     .filter((row): row is { id: string; name: string; avatarUrl: string | null } => Boolean(row.id))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
+
+/**
+ * Internal helpers exposed for tests ONLY.
+ *
+ * These three are module-private on purpose — nothing outside this file should build an R2 key or decide
+ * what "unassigned" means. But they are exactly where the expense-request association had to be threaded,
+ * and testing them through the full presign/confirm round trip would need R2, an office slug and a deal
+ * lookup to prove one boolean. Exported here rather than made public API.
+ */
+export const __filesTestExports = { validateAssociations, buildR2Key, linkedFileCondition };

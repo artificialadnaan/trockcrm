@@ -75,7 +75,11 @@ export async function uploadCapture(
   // `shouldConfirm` is consulted right before the confirm step (the ONLY step that links the photo to the
   // deal). If it returns false, the upload is treated as cancelled: confirm is skipped so a photo the user
   // removed mid-upload never surfaces in the gallery — the already-PUT R2 bytes just dangle unconfirmed.
-  opts: { shouldConfirm?: () => boolean | Promise<boolean> } = {},
+  opts: {
+    shouldConfirm?: () => boolean | Promise<boolean>;
+    /** Captures still queued behind this one, reported to the server as telemetry (see ConfirmUploadRequest). */
+    queueDepth?: number;
+  } = {},
 ): Promise<FieldPhoto> {
   // Compression normally happens at ENQUEUE now, so a queued item's `uri` is already the compressed JPEG.
   // Never re-encode it (a 2nd 0.92 pass softens detail): trust the stored size, or re-STAT the durable file
@@ -136,6 +140,7 @@ export async function uploadCapture(
     longitude: input.metadata.longitude,
     addressSource: input.metadata.addressSource,
     takenAt: input.metadata.takenAt,
+    ...(typeof opts.queueDepth === "number" ? { queueDepth: opts.queueDepth } : {}),
   });
 
   // Cleanup authorization lives in a server-owned registry, never in user-editable gallery tags. Keep the

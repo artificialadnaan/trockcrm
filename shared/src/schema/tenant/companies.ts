@@ -54,12 +54,17 @@ export const companies = pgTable(
     companyVerificationRejectedAt: timestamp("company_verification_rejected_at", { withTimezone: true }),
     companyVerificationRejectedBy: uuid("company_verification_rejected_by"),
     assignedApproverUserId: uuid("assigned_approver_user_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    index("companies_created_at_idx").on(table.createdAt),
+    index("companies_attributed_created_at_idx")
+      .on(table.createdAt)
+      .where(sql`${table.createdByUserId} IS NOT NULL`),
     index("companies_name_idx").on(table.name),
     index("companies_category_idx").on(table.category),
     index("companies_industry_idx").on(table.industry),

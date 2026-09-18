@@ -101,11 +101,35 @@ function awardedFirstValueForRow(row: {
   return value ?? 0;
 }
 
+// resolveActiveOfficeScope now runs its `public.offices` lookup on the REQUEST's tenant client instead of
+// the global `db` pool (it used to make one request hold TWO pool slots at once — see the comment on
+// resolveActiveOfficeScope). That lookup ends in `.limit(1)`, so this mock's `where()` has to be both
+// awaitable (for resolveActiveOfficeUserIds) and chainable into `.limit()`.
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
 function createOfficeScopeSelectMock(rows: any[] = [{ id: "rep-1" }]) {
-  return vi.fn(() => ({
-    from: vi.fn().mockReturnThis(),
-    where: vi.fn().mockResolvedValue(rows),
-  }));
+  return vi.fn(() => {
+    let servesStageConfig = false;
+    const chain: any = {
+      // listDealStages() reads pipeline_stage_config on the REQUEST's tenant client now — it used to
+      // take a SECOND pool slot from the global `db` pool while the tenant middleware already held one,
+      // which is the deadlock this branch exists to close. Serve the stage list here.
+      from: vi.fn((table: unknown) => {
+        servesStageConfig = isPipelineStageConfigTable(table);
+        return chain;
+      }),
+      where: vi.fn(() => chain),
+      limit: vi.fn(() => chain),
+      orderBy: vi.fn(() => chain),
+      then: (resolve: (value: any[]) => unknown) =>
+        resolve(servesStageConfig ? dbState.responses.shift() ?? [] : rows),
+    };
+    return chain;
+  });
 }
 
 describe("listDealStagePage", () => {
@@ -947,9 +971,19 @@ describe("listDealStagePage", () => {
     ];
 
     const teamRows = [{ id: "rep-team-1" }, { id: "rep-team-2" }];
-    const teamQuery = {
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockResolvedValue(teamRows),
+    // Awaitable AND chainable into `.limit(1)`: the office lookup in resolveActiveOfficeScope runs on the
+    // tenant client now (see createOfficeScopeSelectMock above).
+    let teamServesStageConfig = false;
+    const teamQuery: any = {
+      from: vi.fn((table: unknown) => {
+        teamServesStageConfig = isPipelineStageConfigTable(table);
+        return teamQuery;
+      }),
+      where: vi.fn(() => teamQuery),
+      limit: vi.fn(() => teamQuery),
+      orderBy: vi.fn(() => teamQuery),
+      then: (resolve: (value: any[]) => unknown) =>
+        resolve(teamServesStageConfig ? dbState.responses.shift() ?? [] : teamRows),
     };
     const tenantDb = {
       select: vi.fn().mockReturnValue(teamQuery),
@@ -974,6 +1008,41 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("assigned_rep_id");
     expect(countQueryText).toContain("rep-team-1");
     expect(countQueryText).toContain("rep-team-2");
+  });
+
+  it("applies estimatorId so a drill-down keeps the board's estimator filter (Codex #1067 P1)", async () => {
+    // The board forwards ?estimatorId into /deals/stages/:id. Without this the stage page listed every
+    // estimator's deals, so its total disagreed with the card that opened it — the same reconciliation
+    // break the owner filter avoids by being applied here.
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "1", active_count: "1", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      estimatorId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+    } as any);
+
+    const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countQueryText).toContain("estimator_user_id");
+    expect(countQueryText).toContain("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+    // The estimator dimension must not drag the owner column in with it — they answer different questions
+    // and the server ANDs them, so a stray owner arm here would silently intersect two filters.
+    expect(countQueryText).not.toContain("assigned_rep_id = ");
   });
 
   it("layers Estimate Sent filters and zeroes on-hold deals in stage summaries", async () => {

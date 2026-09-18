@@ -1,4 +1,5 @@
-import { pgTable, uuid, varchar, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, varchar, timestamp, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import type { GlassesWalkCaptureCensus } from "../../types/glasses-walk-capture-census.js";
 import { deals } from "./deals.js";
 
 // Per-office (cloned into every office_* schema). The CRM's own record that a Ray-Ban Meta glasses walk
@@ -42,6 +43,44 @@ export const glassesWalkthroughs = pgTable(
      * somebody paid for nor be blocked by it.
      */
     capturedByUserId: uuid("captured_by_user_id"),
+    /**
+     * Which TROCK Scope work-type catalog this walk should be graded against.
+     *
+     * RESOLVED AT INGEST, never merely received: the client's statement if it made one, otherwise the
+     * DEAL's own project type. No capture client sends a job type and none is likely to — nobody picks a
+     * work-type catalog on a phone mid-walk — so in practice this column is the deal's answer, mapped in
+     * server/src/modules/walkthrough-capture/glasses-walkthrough-job-type.ts.
+     *
+     * NULL means "filed before anyone asked": every historical row, and nothing backfills them, because
+     * the deal's type today is not evidence of what it was on the day of the walk.
+     *
+     * WIDER THAN WHAT IS SENT, deliberately. This says what the walk IS; the forward job withholds a job
+     * type TROCK Scope has no seeded catalog for, since sending one it cannot ground is a 422 that costs
+     * the walk entirely. So this stays correct for the day that catalog exists.
+     *
+     * The authoritative vocabulary is `JOB_TYPES` in the trock-scope repo, validated at the ingest route
+     * and again by TROCK Scope. Migration 0243 owns the DDL and explains why there is no CHECK here.
+     */
+    jobType: varchar("job_type", { length: 40 }),
+    /**
+     * What the phone's recorder ACTUALLY wrote during this walk — frames and audio buffers received,
+     * appended and dropped, seconds of narration landed, audio engine restarts — as counted by the phone
+     * itself and sent on the completion call. NULL when the client did not send one: every walk before
+     * migration 0244, and every walk from an app build that predates the census.
+     *
+     * The phone already measures this for its completion screen and then throws it away; on 2026-09-02
+     * two walks lost minutes of narration and finding out why meant reading packet timestamps out of
+     * 400 MB of video. Filed here, that diagnosis is one row read. See migration 0244 for why this is one
+     * jsonb column rather than a column per counter (the recorder owns the shape, on its own release
+     * cadence), and shared/src/types/glasses-walk-capture-census.ts for the contract, the bounds the ingest
+     * route enforces, and the one number derived from it at read time — the narration shortfall — which is
+     * deliberately never stored, so it cannot disagree with the counts it came from.
+     *
+     * A THIRD WRITER joins the two named above, but only of this column: `recordGlassesWalkthrough` fills
+     * it on a re-filed walk when — and only when — it is still NULL, so the first non-null census wins in
+     * the same way every other fact on this row belongs to the first completion.
+     */
+    captureCensus: jsonb("capture_census").$type<GlassesWalkCaptureCensus>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

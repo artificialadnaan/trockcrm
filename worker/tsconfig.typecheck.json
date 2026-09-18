@@ -1,3 +1,20 @@
+// KNOWN GAP, DELIBERATELY NOT FIXED HERE: this program contains NO test files.
+//
+// `typecheck` and `typecheck:tests` in worker/package.json both point at this config, and the root gate's
+// `typecheck:tests:all` fans out to them — but the `include` inherited from ./tsconfig.json is
+// `["src/**/*"]` and nothing here overrides it. Verify with:
+//
+//     cd worker && npx tsc -p tsconfig.typecheck.json --listFiles | grep -c "worker/tests/"   ->  0
+//
+// So the compiler has never looked at `worker/tests/**`, and the name of the script says otherwise. The
+// concrete cost today: `SendSystemEmailResult` in src/lib/system-email.ts carries an `outcome` field that
+// the weekly-report digest branches on, and ~93 hand-written send stubs under worker/tests still return
+// `{success, messageId}` without it. Every one of them is a stub that CANNOT express the failure its
+// caller is deciding on, and not one is a compile error.
+//
+// Widening the `include` is the fix and it is NOT this PR's: it surfaces all of those at once, across
+// jobs this change does not touch, and the gap predates it. (server/tsconfig.json has the same shape, so
+// the same is broadly true there.) Do it as its own change, with the stub updates in the same commit.
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {

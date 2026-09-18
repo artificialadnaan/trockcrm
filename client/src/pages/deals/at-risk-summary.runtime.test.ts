@@ -35,6 +35,11 @@ function deal(o: {
   // OMIT the key entirely to model a wire payload that carries no route at all; pass null to model an
   // explicit null. Neither is "service", so both must land in the non-service bucket.
   workflowRoute?: "normal" | "service" | null;
+  // The PROJECT TYPE, which outranks the route. Omitted on most fixtures so the existing route-only
+  // assertions keep exercising the fallback tier.
+  projectType?: string | null;
+  // The CONFIGURED digit, shipped by the server. Most real deals are typed only by this.
+  projectTypeCode?: string | null;
 }): Deal {
   const { id, atRisk = false, value = 0, onHold = false, updatedAt = "2026-06-10T00:00:00.000Z" } = o;
   return {
@@ -43,6 +48,8 @@ function deal(o: {
     updatedAt,
     bidEstimate: value,
     ...("workflowRoute" in o ? { workflowRoute: o.workflowRoute } : {}),
+    ...("projectType" in o ? { projectType: o.projectType } : {}),
+    ...("projectTypeCode" in o ? { projectTypeCode: o.projectTypeCode } : {}),
     atRisk: atRisk
       ? { isAtRisk: true, status: "at_risk", effectiveStageAgeDays: 30 }
       : { isAtRisk: false, status: "on_track", effectiveStageAgeDays: 1 },
@@ -258,6 +265,88 @@ describe("at-risk route bucketing — the predicate", () => {
   });
 });
 
+describe("at-risk route bucketing — PROJECT TYPE outranks the route", () => {
+  // The Deals page and the Monday Showcase answer the same question with the same words, so they must not
+  // answer it differently. The showcase was fixed to resolve service from project_type (project_type wins,
+  // workflow_route is the fallback); this page tested workflow_route ALONE. Until both used the canonical
+  // definition, a deal whose own number reads DFW-4-… counted as service in one place and normal in the
+  // other — and 279 prod deals, $3.1M, are in exactly that state.
+
+  it("puts a typed-service deal in Service even when its route says normal", () => {
+    const d = deal({ id: "t1", atRisk: true, workflowRoute: "normal", projectType: "service" });
+    expect(isServiceRouteDeal(d)).toBe(true);
+    expect(matchesAtRiskRouteBucket(d, "service")).toBe(true);
+    expect(matchesAtRiskRouteBucket(d, "non_service")).toBe(false);
+  });
+
+  it("puts a typed-roofing deal in Non-service even when its route says service", () => {
+    // Precedence runs BOTH ways, or it is not precedence — otherwise this change would only ever grow
+    // the Service bucket rather than correct it.
+    const d = deal({ id: "t2", atRisk: true, workflowRoute: "service", projectType: "roofing" });
+    expect(isServiceRouteDeal(d)).toBe(false);
+    expect(matchesAtRiskRouteBucket(d, "non_service")).toBe(true);
+  });
+
+  it("normalizes case and whitespace the way the canonical resolver does", () => {
+    for (const spelling of ["Service", "  SERVICE  ", "\tservice\n"]) {
+      const d = deal({ id: `t-${spelling}`, workflowRoute: "normal", projectType: spelling });
+      expect({ spelling, service: isServiceRouteDeal(d) }).toEqual({ spelling, service: true });
+    }
+  });
+
+  it("uses the CONFIGURED code when there is no project type text — the majority shape", () => {
+    // Measured on production: 646 of 1,351 active deals carry no projectType text and are typed ONLY by
+    // the FK, and 277 of the 279 misclassified deals are in exactly this shape. Without this tier the
+    // client would fall back to the route for essentially the whole population being corrected — the
+    // fix would have looked done and changed almost nothing on this page.
+    const svc = deal({ id: "c1", atRisk: true, workflowRoute: "normal", projectType: null, projectTypeCode: "4" });
+    expect(isServiceRouteDeal(svc)).toBe(true);
+    expect(matchesAtRiskRouteBucket(svc, "service")).toBe(true);
+
+    // ...and a non-4 code is decisive the other way, so this cannot only ever add to Service.
+    const roof = deal({ id: "c2", atRisk: true, workflowRoute: "service", projectType: null, projectTypeCode: "3" });
+    expect(isServiceRouteDeal(roof)).toBe(false);
+  });
+
+  it("prefers the TEXT type over the configured code when both are present", () => {
+    // Tier order matters: project_type is what the platform treats as authoritative, and the code is the
+    // fallback for rows that never got the text written.
+    const d = deal({ id: "c3", workflowRoute: "normal", projectType: "roofing", projectTypeCode: "4" });
+    expect(isServiceRouteDeal(d)).toBe(false);
+  });
+
+  it("ignores a malformed or absent code rather than guessing", () => {
+    for (const code of [null, "", "  ", "0", "44", "x"]) {
+      const d = deal({ id: `c-${code}`, workflowRoute: "normal", projectType: null, projectTypeCode: code });
+      expect({ code, service: isServiceRouteDeal(d) }).toEqual({ code, service: false });
+    }
+  });
+
+  it("falls back to the route when the type is absent or unrecognised", () => {
+    // The fallback tier must survive: deals carrying no usable type are exactly the population the route
+    // column was carrying, and dropping it would lose them from Service entirely.
+    expect(isServiceRouteDeal(deal({ id: "f1", workflowRoute: "service", projectType: null }))).toBe(true);
+    expect(isServiceRouteDeal(deal({ id: "f2", workflowRoute: "service", projectType: "not a type" }))).toBe(true);
+    expect(isServiceRouteDeal(deal({ id: "f3", workflowRoute: "normal", projectType: "" }))).toBe(false);
+  });
+
+  it("keeps the split TOTAL — every deal lands in exactly one bucket", () => {
+    const deals = [
+      deal({ id: "a", workflowRoute: "normal", projectType: "service" }),
+      deal({ id: "b", workflowRoute: "service", projectType: "roofing" }),
+      deal({ id: "c", workflowRoute: "service" }),
+      deal({ id: "d", workflowRoute: null }),
+      deal({ id: "e" }),
+    ];
+    for (const d of deals) {
+      const inService = matchesAtRiskRouteBucket(d, "service");
+      const inNonService = matchesAtRiskRouteBucket(d, "non_service");
+      expect({ id: d.id, exactlyOne: inService !== inNonService }).toEqual({ id: d.id, exactlyOne: true });
+      expect(matchesAtRiskRouteBucket(d, "all")).toBe(true);
+    }
+  });
+});
+
 describe("at-risk route bucketing — the ?filter round trip (the card↔list contract)", () => {
   it("atRiskRouteBucketForFilter inverts atRiskFilterForRouteBucket for every bucket", () => {
     for (const bucket of AT_RISK_ROUTE_BUCKETS) {
@@ -381,5 +470,98 @@ describe("getActivePipelineSummary — empty state + NaN safety (R3)", () => {
     expect(Number.isFinite(summary.value)).toBe(true);
     expect(summary.value).toBe(0);
     expect(Number.isFinite(summary.count)).toBe(true);
+  });
+});
+
+describe("countAtRiskDeals — server board summary outranks the (capped) card array", () => {
+  // The board fetches BOARD_CARDS_PER_STAGE_LIMIT cards per column, so a column holding more deals than
+  // that arrives truncated. Counting the cards would then under-report every At-Risk KPI card. These pin
+  // the contract that makes shrinking the card slice safe: when the server ships counts, they win.
+  const truncatedBoard = () => [
+    // Two at-risk cards survived the slice; the server says the column really holds 41.
+    column("estimating", [
+      deal({ id: "c1", atRisk: true, value: 1000, projectTypeCode: "4" }),
+      deal({ id: "c2", atRisk: true, value: 1000, projectTypeCode: "1" }),
+    ]),
+    column("contract", [deal({ id: "c3", atRisk: true, value: 1000, projectTypeCode: "1" })]),
+    column("won", [deal({ id: "w1", atRisk: true, value: 1000 })]),
+  ];
+  const serverCounts = {
+    estimating: { service: 17, nonService: 24 },
+    contract: { service: 0, nonService: 6 },
+    // A terminal column can never contribute; if the server ever emitted one it must still be ignored.
+    won: { service: 99, nonService: 99 },
+  };
+
+  it("reports the server's totals, not the number of cards that fit in the slice", () => {
+    const columns = truncatedBoard();
+    expect(countAtRiskDeals(columns, "all", serverCounts)).toBe(47);
+    expect(countAtRiskDeals(columns, "service", serverCounts)).toBe(17);
+    expect(countAtRiskDeals(columns, "non_service", serverCounts)).toBe(30);
+    // The card-derived answer is what this replaces — 3 cards vs 47 real deals.
+    expect(countAtRiskDeals(columns, "all")).toBe(3);
+  });
+
+  it("keeps Service + Non-service === All on the server numbers too", () => {
+    const columns = truncatedBoard();
+    expect(
+      countAtRiskDeals(columns, "service", serverCounts) +
+        countAtRiskDeals(columns, "non_service", serverCounts)
+    ).toBe(countAtRiskDeals(columns, "all", serverCounts));
+  });
+
+  it("still excludes terminal columns when counting from the server summary", () => {
+    // The Won column carries 198 in the fixture above and one at-risk card; neither may be counted.
+    expect(countAtRiskDeals([column("won", [deal({ id: "w", atRisk: true })])], "all", serverCounts)).toBe(0);
+  });
+
+  it("treats a column the server did not mention as zero, not as 'fall back to cards'", () => {
+    // The server emits a bucket only for columns that HAVE at-risk rows. A missing key therefore means
+    // zero — falling back to the truncated cards there would double-count against the server's total.
+    const columns = [column("estimating", [deal({ id: "c1", atRisk: true })])];
+    expect(countAtRiskDeals(columns, "all", { contract: { service: 3, nonService: 3 } })).toBe(0);
+  });
+
+  it("falls back to the card count when there is NO summary (older payload)", () => {
+    const columns = truncatedBoard();
+    expect(countAtRiskDeals(columns, "all", null)).toBe(3);
+    expect(countAtRiskDeals(columns, "all", undefined)).toBe(3);
+  });
+});
+
+describe("countAtRiskDeals — the Pending RFP bucket is keyed to the column that RENDERS it", () => {
+  /**
+   * The regression this pins. On `?filter=opportunities` the board narrows to slugs ["opportunity"],
+   * which does NOT include the synthetic pending_rfp column. The card-derived count never saw pending
+   * deals there (buildCanonicalDealBoardColumns strips them out of the opportunity card array), so
+   * folding them into the server's `opportunity` bucket made all three At-Risk cards jump on that route
+   * while the main board — where both columns are summed — stayed correct and hid the bug.
+   */
+  const opportunityOnlyView = () => [column("opportunity", [deal({ id: "o1", atRisk: true })])];
+  const wholeBoard = () => [
+    column("opportunity", [deal({ id: "o1", atRisk: true })]),
+    column("pending_rfp", [deal({ id: "p1", atRisk: true }), deal({ id: "p2", atRisk: true })]),
+  ];
+  // 3 at-risk opportunity-canonical deals, 2 of them pending RFP — the reviewer's executed fixture.
+  const serverCounts = {
+    opportunity: { service: 0, nonService: 1 },
+    pending_rfp: { service: 0, nonService: 2 },
+  };
+
+  it("counts ONLY the non-pending deals on the opportunities drill-down (pre-PR behaviour)", () => {
+    expect(countAtRiskDeals(opportunityOnlyView(), "all", serverCounts)).toBe(1);
+    expect(countAtRiskDeals(opportunityOnlyView(), "service", serverCounts)).toBe(0);
+    expect(countAtRiskDeals(opportunityOnlyView(), "non_service", serverCounts)).toBe(1);
+  });
+
+  it("still counts all three on the main board, where both columns are rendered", () => {
+    expect(countAtRiskDeals(wholeBoard(), "all", serverCounts)).toBe(3);
+  });
+
+  it("keeps Service + Non-service === All on the narrowed view too", () => {
+    const cols = opportunityOnlyView();
+    expect(
+      countAtRiskDeals(cols, "service", serverCounts) + countAtRiskDeals(cols, "non_service", serverCounts)
+    ).toBe(countAtRiskDeals(cols, "all", serverCounts));
   });
 });

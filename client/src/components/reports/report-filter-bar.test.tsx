@@ -130,6 +130,37 @@ function apiCallsMatching(predicate: (path: string, init: any) => boolean) {
 }
 
 describe("ReportFilterBar", () => {
+  it("does not load or offer owners when the report is self-scoped", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<MemoryRouter><ReportFilterBar showOffice={false} showOwner={false} ownerPickerPurpose="service-rfp-report" /></MemoryRouter>);
+    });
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(apiMock).not.toHaveBeenCalled();
+  });
+  it.each(["", "?officeId=office-dallas"])("uses only canonical sales choices for service RFP reports: %s", async (scope) => {
+    apiMock.mockImplementation(async (path) => ({ users: path === "/dashboard/rep-roster" ? [
+      { id: "seller-1", displayName: "Generating Seller", group: "sales" },
+      { id: "estimator-1", displayName: "Estimator Only", group: "estimator" },
+    ] : [{ id: "admin-1", displayName: "Non-selling Admin" }] }));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<MemoryRouter initialEntries={[`/reports/sales/service-rfps${scope}`]}>
+        <ReportFilterBar showOffice={false} ownerPickerPurpose="service-rfp-report" />
+      </MemoryRouter>);
+    });
+    const choices = [...container.querySelectorAll('label')]
+      .filter((label) => label.querySelector('input[type="checkbox"]'))
+      .map((label) => label.textContent?.trim());
+    expect(choices).toEqual(["Generating Seller"]);
+    expect(apiCallsMatching((path) => path.startsWith("/users/sales-reps"))).toEqual([]);
+    expect(apiCallsMatching((path) => path === "/dashboard/rep-roster")).toHaveLength(1);
+  });
+
   it("hydrates ownerIds from URL search params instead of hardcoding an empty owner scope", () => {
     const query = renderHookSnapshot("/reports/operations/workflow-bottlenecks?ownerIds=rep-1,rep-2&dateFrom=2026-02-01&dateTo=2026-05-01");
 

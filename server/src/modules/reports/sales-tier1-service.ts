@@ -4,6 +4,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
+  aliasedIsServiceProjectSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedWonHsClosedWonDateSql,
@@ -692,7 +693,9 @@ export async function getClosedWonRevenueReport(
 
     const workflowRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
-        CASE WHEN d.workflow_route = 'service' THEN 'service_deal' ELSE 'standard_deal' END AS "workflowFamily",
+        -- Canonical service test, not the raw route, so this Won split agrees with the Monday
+        -- Showcase and the deals board instead of under-reporting service revenue.
+        CASE WHEN ${aliasedIsServiceProjectSql("d")} THEN 'service_deal' ELSE 'standard_deal' END AS "workflowFamily",
         COUNT(*)::int AS "wonDeals",
         COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS "totalRevenue"
       FROM deals d

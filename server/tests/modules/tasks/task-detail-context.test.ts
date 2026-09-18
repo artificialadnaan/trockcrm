@@ -63,11 +63,15 @@ describe("getTaskById project context", () => {
     expect(task.assignedToName).toBe("Derek Barr");
   });
 
+  // The fixture's task is assigned to `user-derek` and has no createdBy, so "someone-else" is neither
+  // its assignee NOR its assigner — still a 403. The rule widened to admit a rep who ASSIGNED the task
+  // (F4: without that, a rep assigner is 403'd from the thread on their own task), which is why the
+  // message names both halves now.
   it("still enforces the rep-only-own-tasks rule", async () => {
     const { db } = createCapturingDb([taskRow]);
 
     await expect(getTaskById(db as any, taskRow.id, "rep", "someone-else")).rejects.toThrow(
-      /only view your own tasks/i
+      /only view tasks assigned to you or by you/i
     );
   });
 
@@ -100,7 +104,7 @@ describe("getTaskRowById", () => {
     const { db } = createCapturingDb([taskRow]);
 
     await expect(getTaskRowById(db as any, taskRow.id, "rep", "someone-else")).rejects.toThrow(
-      /only view your own tasks/i
+      /only view tasks assigned to you or by you/i
     );
   });
 });

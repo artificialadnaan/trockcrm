@@ -5,9 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dealsServiceMocks = vi.hoisted(() => ({
   createDeal: vi.fn(),
 }));
+const rosterMocks = vi.hoisted(() => ({ getRepRosterOptions: vi.fn() }));
+vi.mock("../../../src/modules/dashboard/service.js", () => rosterMocks);
 const pipelineServiceMocks = vi.hoisted(() => ({
   getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(),
+  resolveActiveProjectTypeValue: vi.fn(),
 }));
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
@@ -39,6 +42,9 @@ vi.mock("../../../src/modules/pipeline/service.js", async () => {
     ...(actual as Record<string, unknown>),
     getStageBySlug: pipelineServiceMocks.getStageBySlug,
     getActiveProjectTypes: pipelineServiceMocks.getActiveProjectTypes,
+    // Reads project_type_config directly, so without this the TEXT tier of the route derivation dies on a
+    // DB call in this no-DB harness — a 500 that hides whether the guard would have fired.
+    resolveActiveProjectTypeValue: pipelineServiceMocks.resolveActiveProjectTypeValue,
   };
 });
 
@@ -69,13 +75,13 @@ function createTenantDb(selectRows: unknown[][] = [
   };
 }
 
-function createApp(officeSlug: string | null = "dallas", tenantDb = createTenantDb()) {
+function createApp(officeSlug: string | null = "dallas", tenantDb = createTenantDb(), role = "admin") {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).user = {
       id: "admin-1",
-      role: "admin",
+      role,
       displayName: "Admin",
       email: "admin@example.com",
       officeId: "office-dallas",
@@ -171,6 +177,10 @@ function validBody(overrides: Record<string, unknown> = {}) {
 describe("POST /api/deals create context", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    rosterMocks.getRepRosterOptions.mockResolvedValue([
+      { id: "rep-1", displayName: "Seller", group: "sales" },
+      { id: "admin-1", displayName: "Admin Seller", group: "sales" },
+    ]);
     accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
       id: "deal-1",
       assignedRepId: "rep-1",
@@ -192,6 +202,16 @@ describe("POST /api/deals create context", () => {
       { id: "type-service", name: "Service", slug: "service", code: "4", isActive: true },
       { id: "type-roofing", name: "Roofing", slug: "roofing", code: "9", isActive: true },
     ]);
+    // Faithful about the ONE thing these tests turn on: a recognised active type resolves to a value and
+    // anything else resolves to null, so the route derivation runs its real tier order. It is deliberately
+    // NOT a full stand-in — the real one also matches on slug and normalises differently — but the code is
+    // then resolved by the pure resolveProjectTypeCode, which is the logic actually under test.
+    pipelineServiceMocks.resolveActiveProjectTypeValue.mockImplementation(async (value: unknown) => {
+      const text = String(value ?? "").trim().toLowerCase();
+      if (text === "service") return "Service";
+      if (text === "roofing") return "Roofing";
+      return null;
+    });
     dealsServiceMocks.createDeal.mockImplementation(async (_tenantDb, input) => {
       if (input.officeCode !== "dfw" && input.officeCode !== "atl") {
         throw new AppError(400, "officeCode must be 'dfw' or 'atl'");
@@ -279,6 +299,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
       });
 
@@ -292,6 +313,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectType: "service",
         projectTypeId: "type-service",
         workflowRoute: "service",
@@ -309,6 +331,115 @@ describe("POST /api/deals create context", () => {
     );
   });
 
+  it.each(["admin", "rep"])("rejects an ineligible service assignee before creation for %s, including forced self", async (role) => {
+    rosterMocks.getRepRosterOptions.mockResolvedValue([
+      { id: role === "rep" ? "rep-1" : "admin-1", displayName: "Other Eligible Seller", group: "sales" },
+      { id: role === "rep" ? "admin-1" : "rep-1", displayName: "Estimator Only", group: "estimator" },
+    ]);
+    const res = await request(createApp("dallas", createTenantDb(), role))
+      .post("/api/deals/service-opportunity")
+      .send(validBody({ primaryContactId: "contact-1", projectTypeId: "type-service" }));
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("SERVICE_SALES_REP_INELIGIBLE");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+    expect(rosterMocks.getRepRosterOptions).toHaveBeenCalledWith(expect.anything(), "office-dallas", { assignableOnly: true });
+  });
+
+  it("rejects a stale or direct API assignee absent from the active sales roster", async () => {
+    rosterMocks.getRepRosterOptions.mockResolvedValue([]);
+    const res = await request(createApp())
+      .post("/api/deals/service-opportunity")
+      .send(validBody({ primaryContactId: "contact-1", projectTypeId: "type-service" }));
+    expect(res.status).toBe(400);
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Service opportunity with no point of contact", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals/service-opportunity")
+      .send({
+        name: "SMOKE TEST DELETE No Contact",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-service",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
+    // The deal must not be created — a 400 that still wrote the row would be worse than no guard.
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("does NOT require a point of contact for a non-Service deal on the generic deal endpoint", async () => {
+    // The guard must not leak into a blanket requirement. validBody() carries no projectType/projectTypeId,
+    // so it derives to the "normal" route — Bid Board sync, RFP ingestion, imports and lead conversion all
+    // create contact-less deals this way through POST /deals (via createDeal directly, not this route, but
+    // the route must not be stricter than they need it to be either), and every one of them would break if
+    // this became unconditional.
+    const res = await request(createApp("dallas")).post("/api/deals").send(validBody());
+
+    expect(res.status).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalled();
+  });
+
+  it("rejects a Service-typed create with no point of contact on the generic deal endpoint", async () => {
+    // /deals/new (the generic deal form) lets a rep pick project type Service + stage Opportunity and
+    // submit here — the door bd81e938e's /service-opportunity guard did not close. projectTypeId resolves
+    // through the SAME getActiveProjectTypes() config used everywhere else (code "4" == service).
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ projectTypeId: "type-service" }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
+    // The deal must not be created — a 400 that still wrote the row would be worse than no guard.
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects a contact-less create classified as Service by the projectType TEXT, not just the id", async () => {
+    // The derivation has TWO tiers — resolveActiveProjectTypeValue(projectType) and the configured code
+    // behind projectTypeId — and the generic deal form sends the NAME. Covering only the id would leave
+    // the path the form actually uses unguarded.
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ projectType: "Service" }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("creates a Service-typed deal on the generic deal endpoint when a point of contact is provided", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ projectTypeId: "type-service", primaryContactId: "contact-1" }));
+
+    expect(res.status).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        projectTypeId: "type-service",
+        primaryContactId: "contact-1",
+      })
+    );
+  });
+
+  it("rejects an explicit workflowRoute: 'service' with no point of contact, even with a non-Service project type", async () => {
+    // Lead conversion, SyncHub ingest and Bid Board all state workflowRoute explicitly, and an explicit
+    // route always wins over the derived one (createDeal's own precedence). The guard has to honor that
+    // SAME precedence — asking only "did this derive to service" and ignoring an explicit route would
+    // both miss real service creates that set the route directly and, worse, invert the precedence rule
+    // the rest of the create path depends on.
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ workflowRoute: "service" }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
   it("rejects a non-Service project type on the Service opportunity endpoint", async () => {
     const res = await request(createApp("dallas"))
       .post("/api/deals/service-opportunity")
@@ -317,6 +448,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-roofing",
       });
 
@@ -338,6 +470,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
       });
 
@@ -354,6 +487,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
         creationContext: "migration",
         migrationMode: true,
@@ -393,6 +527,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
         bidDueDate: "2026-06-01",
       },
@@ -416,6 +551,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
         regionId: "region-central",
         winProbability: 65,

@@ -5,6 +5,7 @@ import {
   Calculator,
   CalendarClock,
   ChartNoAxesCombined,
+  ClipboardCheck,
   ClipboardList,
   DollarSign,
   Gauge,
@@ -15,12 +16,16 @@ import {
   ShieldAlert,
   TrendingUp,
   UserRound,
+  UserRoundPlus,
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { useMemo } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
+import { useAuth } from "@/lib/auth";
+import { REPORT_VIEWER_ROLES } from "@/lib/roles";
 import type { UserRole } from "@trock-crm/shared/types";
 
 export function canViewDataMiningSection(role: UserRole | undefined) {
@@ -32,7 +37,36 @@ type ReportCard = {
   description: string;
   icon: LucideIcon;
   path?: string;
+  /**
+   * A session flag the viewer must carry — for reports behind a named email allowlist rather than a role.
+   * Cards carrying this are dropped for anyone the server did not flag; see visibleReportCategories.
+   */
+  requiresFlag?: ReportAccessFlag;
+  /**
+   * Roles whose route will actually open this report. Present only on cards whose route is NARROWER than
+   * the index itself — most reports share the index's admin/director/rep floor and need nothing here.
+   * A card that redirects the moment it is clicked is worse than one that was never listed.
+   */
+  requiresRole?: readonly string[];
 };
+
+/** What the index needs to know about the viewer: the allowlist flags, and the role for the few narrow routes. */
+export type ReportVisibilityContext = {
+  canViewDailyActivityLog?: boolean;
+  canViewCanvassingReport?: boolean;
+  /**
+   * Compared as a plain string: the client session's Role union (which has sales_manager) and the shared
+   * UserRole union (which has field_contractor) are different sets, and this gate only ever asks whether
+   * the viewer's role is in a card's list.
+   */
+  role?: string;
+};
+
+/**
+ * The allowlist flags a card can require. Narrower than `keyof ReportVisibilityContext` on purpose — that
+ * would also admit `role`, which is a string and would silently never equal true.
+ */
+type ReportAccessFlag = "canViewDailyActivityLog" | "canViewCanvassingReport";
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
   {
@@ -70,9 +104,11 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     description: "Pipeline, forecasts, close rates, and booked revenue.",
     reports: [
       { name: "Pipeline Velocity", description: "Stage movement, aging, and value trends.", icon: TrendingUp, path: "/reports/sales/pipeline-velocity" },
+      { name: "Service RFPs by Sales Rep", description: "Service RFPs supplied by each salesperson, weekly and overall, with submission evidence.", icon: ClipboardCheck, path: "/reports/sales/service-rfps", requiresRole: REPORT_VIEWER_ROLES },
       { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign, path: "/reports/sales/closed-won-revenue" },
       { name: "Reports by Region", description: "Won / pipeline / win rate / avg + forecast, stage mix and top reps, segmented by deal Region (with the Unassigned bucket).", icon: MapPinned, path: "/reports/region" },
       { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined, path: "/reports/sales/lead-conversion" },
+      { name: "Sales Review", description: "Run the weekly forecast and pipeline hygiene meeting from CRM data instead of a spreadsheet.", icon: ClipboardCheck, path: "/sales-review", requiresRole: REPORT_VIEWER_ROLES },
     ],
   },
   {
@@ -81,9 +117,11 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     reports: [
       { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, path: "/reports/performance/director-scorecard" },
       { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, path: "/reports/performance/rep-activity" },
-      { name: "Daily Activity Log", description: "The actual notes and updates reps logged, day by day — the readable record behind the Rep Activity counts.", icon: NotebookPen, path: "/reports/performance/daily-activity-log" },
+      { name: "Canvassing Activity", description: "New companies, properties, contacts and leads entered by each person — weekly, monthly or quarterly — plus the notes they logged.", icon: UserRoundPlus, path: "/reports/performance/canvassing-activity", requiresFlag: "canViewCanvassingReport" },
+      { name: "Daily Activity Log", description: "The actual notes and updates reps logged, day by day — the readable record behind the Rep Activity counts.", icon: NotebookPen, path: "/reports/performance/daily-activity-log", requiresFlag: "canViewDailyActivityLog" },
       { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
       { name: "Platform Usage", description: "Active time, actions, and views per rep — daily and weekly.", icon: Activity, path: "/reports/performance/platform-usage" },
+      { name: "Team Commissions", description: "Earned and projected commission by rep — every figure drills to the deals behind it.", icon: DollarSign, path: "/director/commissions", requiresRole: ["admin", "director"] },
     ],
   },
   {
@@ -109,6 +147,13 @@ const reportCategories: Array<{ category: string; description: string; reports: 
         path: "/reports/operations/portfolio-load",
       },
       {
+        name: "QC Reports",
+        description: "Field scorecards submitted from T-Rock Cam across every active project — performance, corrective actions, and the signed PDF.",
+        icon: ClipboardCheck,
+        path: "/projects/qc-reports",
+        requiresRole: REPORT_VIEWER_ROLES,
+      },
+      {
         name: "Estimator Pipeline",
         description: "Current estimator workload by pipeline stage, plus projects missing a linked estimator.",
         icon: Calculator,
@@ -127,8 +172,38 @@ const reportCategories: Array<{ category: string; description: string; reports: 
   },
 ];
 
+/**
+ * The report index as THIS viewer should see it: allowlist-only cards are removed for anyone the server
+ * did not flag, and a category left with nothing is dropped rather than rendered as an empty heading.
+ *
+ * The counts at the top of the page read off the same filtered list, so the tally can never advertise a
+ * report the grid below does not offer.
+ */
+export function visibleReportCategories(ctx: ReportVisibilityContext) {
+  return reportCategories
+    .map((group) => ({
+      ...group,
+      reports: group.reports.filter((report) => {
+        if (report.requiresFlag && ctx[report.requiresFlag] !== true) return false;
+        if (report.requiresRole && !(ctx.role && report.requiresRole.includes(ctx.role))) return false;
+        return true;
+      }),
+    }))
+    .filter((group) => group.reports.length > 0);
+}
+
 export function ReportsPage() {
   const { search } = useLocation();
+  const { user } = useAuth();
+  const categories = useMemo(
+    () =>
+      visibleReportCategories({
+        canViewDailyActivityLog: user?.canViewDailyActivityLog,
+        canViewCanvassingReport: user?.canViewCanvassingReport,
+        role: user?.role,
+      }),
+    [user?.canViewDailyActivityLog, user?.canViewCanvassingReport, user?.role]
+  );
 
   return (
     <div className="space-y-6">
@@ -139,7 +214,7 @@ export function ReportsPage() {
       />
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
-        {reportCategories.map((group) => (
+        {categories.map((group) => (
           <Card key={group.category} className="relative overflow-hidden">
             <CardContent className="p-5">
               <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{group.category}</p>
@@ -152,7 +227,7 @@ export function ReportsPage() {
       </section>
 
       <section className="space-y-5">
-        {reportCategories.map((group) => (
+        {categories.map((group) => (
           <div key={group.category} className="space-y-3">
             <div>
               <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{group.category}</p>

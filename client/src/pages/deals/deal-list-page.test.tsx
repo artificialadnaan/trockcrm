@@ -10,6 +10,7 @@ import { act, useEffect } from "react";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import type { Deal } from "@/hooks/use-deals";
 import type { AtRiskResult } from "@trock-crm/shared/types";
+import { PENDING_RFP_STAGE_FILTER_VALUE } from "@/components/deals/deals-filterbar-adapter";
 import {
   DealListPage,
   buildDealsPageKpiDrilldownPath,
@@ -111,7 +112,7 @@ const mocks = vi.hoisted(() => ({
   useDealBoardMock: vi.fn(),
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
-  useTaskAssigneesMock: vi.fn(),
+  useRepRosterMock: vi.fn(),
   readTerminalDateFilterMock: vi.fn(),
   buildDealStageWorkspacePathMock: vi.fn(),
   useAuthMock: vi.fn(),
@@ -129,8 +130,8 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
   useProjectTypes: () => ({ projectTypes: [{ id: "type-1", name: "Multifamily" }] }),
 }));
 
-vi.mock("@/hooks/use-task-assignees", () => ({
-  useTaskAssignees: mocks.useTaskAssigneesMock,
+vi.mock("@/hooks/use-rep-roster", () => ({
+  useRepRoster: mocks.useRepRosterMock,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -346,8 +347,14 @@ async function renderPageDom(path = "/deals?scope=all", role = "admin") {
 async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admin") {
   const searches: string[] = [];
 
+  // Captured so a test can move the query string underneath the MOUNTED component, which is what
+  // Back/Forward does on this route — React Router keeps the element and only the search changes.
+  let navigateFn: ((to: string) => void) | null = null;
+
   function PageWithLocationProbe() {
     const location = useLocation();
+    const navigate = useNavigate();
+    navigateFn = navigate;
     useEffect(() => {
       searches.push(location.search);
     }, [location.search]);
@@ -382,6 +389,7 @@ async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admi
   return {
     container,
     searches,
+    navigate: (to: string) => navigateFn?.(to),
     cleanup: async () => {
       await act(async () => {
         root?.unmount();
@@ -401,6 +409,18 @@ describe("boardRelevantParamKey (the board sync ignores list-namespace params, C
   it("yields the SAME key when only fb_* (drill-down list) params change — a drill-down list edit must not refetch the kanban either (Codex #589 P3)", () => {
     expect(boardRelevantParamKey("scope=all&period=qtd&filter=won&fb_search=acme&fb_stageIds=x")).toBe(
       boardRelevantParamKey("scope=all&period=qtd&filter=won&fb_search=beta&fb_stageIds=y&fb_page=3")
+    );
+  });
+
+  it("yields the SAME key when only ?search changes — the board reads the term from state, not the URL", () => {
+    // The page MIRRORS the settled term into the URL so drill-downs inherit it and a reload survives.
+    // Counting it here would re-key the board on that write and fire a second /deals/pipeline request
+    // alongside the one the debounced state change already triggers — the duplicate #1074 removed.
+    expect(boardRelevantParamKey("scope=all&search=bellemont")).toBe(
+      boardRelevantParamKey("scope=all")
+    );
+    expect(boardRelevantParamKey("scope=all&search=a")).toBe(
+      boardRelevantParamKey("scope=all&search=b")
     );
   });
 
@@ -425,7 +445,7 @@ describe("DealListPage", () => {
     mocks.useDealBoardMock.mockReset();
     mocks.useDealsMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
-    mocks.useTaskAssigneesMock.mockReset();
+    mocks.useRepRosterMock.mockReset();
     mocks.readTerminalDateFilterMock.mockReset();
     mocks.buildDealStageWorkspacePathMock.mockReset();
     mocks.useAuthMock.mockReset();
@@ -436,8 +456,8 @@ describe("DealListPage", () => {
     }));
     mocks.buildDealStageWorkspacePathMock.mockReturnValue("/deals/stages/stage-won?scope=all");
 
-    mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [
         { id: "rep-1", displayName: "Brett Jones" },
         { id: "rep-9", displayName: "Nina Nine" },
       ],
@@ -459,6 +479,7 @@ describe("DealListPage", () => {
       ],
     });
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -515,10 +536,20 @@ describe("DealListPage", () => {
   it("renders a readonly deal board with canonical stage labels", () => {
     const html = renderPage();
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined);
+    },
+      50,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
     expect(html).toContain("Deals Dashboard"); // relabeled to distinguish the dashboard from /pipeline
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -643,8 +674,8 @@ describe("DealListPage", () => {
 
   it("defers hydration while the loaded assignees still belong to a previous office (office-switch race)", async () => {
     // Simulate the hook briefly reporting a stale office's list (loading:false) right after an office switch.
-    mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [{ id: "rep-1", displayName: "Brett Jones" }],
       loading: false,
       loadedOfficeId: "office-STALE",
     });
@@ -661,7 +692,7 @@ describe("DealListPage", () => {
   });
 
   it("still restores the timeframe when the assignee list has finished loading but is empty", async () => {
-    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [], loading: false, loadedOfficeId: "office-1" });
+    mocks.useRepRosterMock.mockReturnValue({ reps: [], loading: false, loadedOfficeId: "office-1" });
     window.localStorage.setItem(
       "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
@@ -700,9 +731,12 @@ describe("DealListPage", () => {
       "all",
       true,
       { won: { preset: "all" }, lost: { preset: "all" } },
-      1000,
+      50,
       null,
-      "rep-1"
+      "rep-1",
+      undefined,
+      undefined,
+      expect.any(Object)
     );
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -723,6 +757,7 @@ describe("DealListPage", () => {
 
   it("excludes terminal-stage cards from the Active Pipeline value and count", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -790,6 +825,7 @@ describe("DealListPage", () => {
 
   it("uses backend column aggregates for Active Pipeline instead of truncated card arrays", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -851,6 +887,7 @@ describe("DealListPage", () => {
 
   it("renders the Won KPI from the canonical Won column and ignores duplicated terminal-stage aggregates", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -929,6 +966,7 @@ describe("DealListPage", () => {
 
   it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -982,6 +1020,7 @@ describe("DealListPage", () => {
 
   it("preserves empty canonical columns so stage parity remains visible", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1058,10 +1097,20 @@ describe("DealListPage", () => {
   it("collapses standalone won_*/lost_* params when there is no shared period — the board reads ?period, not per-column overrides (Option A)", () => {
     renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined);
+    },
+      50,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
   });
 
   it("strips stale estimate_sent_* params from the URL on load — the removed control must not invisibly filter the board or a stage drill-down (Codex #600 P2)", async () => {
@@ -1077,19 +1126,39 @@ describe("DealListPage", () => {
     // Deals-at-Risk is current-state: the board-wide period (arg 5) is null even with ?period=week, so the
     // server does not window the OPEN columns by stage_entered_at and drops no at-risk deals at the source.
     // (The Won/Lost terminal presets in arg 3 are moot here — terminal columns aren't shown on this view.)
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" },
       lost: { preset: "wtd" },
-    }, 1000, null, undefined);
+    },
+      1000,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
     renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" }, // Option A: the stale won_preset is collapsed; the board-wide won_period (arg5) windows Won
       lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month
-    }, 1000, { from: "2026-04-01", to: "2026-04-30" }, undefined);
+    },
+      50,
+      { from: "2026-04-01", to: "2026-04-30" },
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
   });
 
   describe("Option A: one board-wide date — Won & Lost columns mirror the shared ?period", () => {
@@ -1153,9 +1222,12 @@ describe("DealListPage", () => {
         "all",
         true,
         { won: { preset: "all" }, lost: { preset: "qtd" } },
-        1000,
+        50,
         expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
-        undefined
+        undefined,
+        undefined,
+        undefined,
+        expect.any(Object)
       );
     });
 
@@ -1323,7 +1395,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -1375,16 +1447,16 @@ describe("DealListPage", () => {
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
 
     renderPage("/deals?scope=mine", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("hides the Team scope and coerces a requested team scope to mine (D-12b)", () => {
@@ -1394,7 +1466,7 @@ describe("DealListPage", () => {
     // coerced to the rendered fallback ("mine"); no dead placeholder is shown.
     expect(html).not.toContain(">Team</button>");
     expect(html).not.toContain("Team view is not yet configured");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("drops a stale owner filter when a team bookmark is coerced to mine (D-12b)", () => {
@@ -1402,7 +1474,7 @@ describe("DealListPage", () => {
 
     // Coerced to mine AND the owner filter cleared (6th arg undefined), so the Mine board is
     // not intersected with rep-2's deals into an empty result.
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("rewrites a parked team bookmark URL to mine and drops the stale owner param (D-12b)", async () => {
@@ -1425,7 +1497,7 @@ describe("DealListPage", () => {
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
     // Team is not an offered scope (D-12b).
@@ -1439,7 +1511,7 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="false">All');
     // watched survives end-to-end (not silently coerced to mine) — the board hook receives it.
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("watched", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("watched", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
   it("mounts the FULL FilterBar (incl. Rep, dl_-namespaced) on the BASE deal list, inheriting scope; Scope omitted", () => {
     renderPage("/deals?scope=mine", "director");
@@ -1466,9 +1538,25 @@ describe("DealListPage", () => {
     expect(props.enableDateFilter).toBeUndefined();
   });
 
+  it("includes the synthetic Pending RFP bucket in the base Deals-list Stage menu", () => {
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { options?: { stages?: Array<{ value: string; label: string }> } };
+    };
+
+    expect(props.filterBar.options?.stages).toContainEqual({
+      value: PENDING_RFP_STAGE_FILTER_VALUE,
+      label: "Pending RFP",
+    });
+    expect(props.filterBar.options?.stages).not.toContainEqual({
+      value: "canonical-pending_rfp",
+      label: "Pending RFP",
+    });
+  });
+
   it("drops the Rep dimension entirely when the header pins a concrete rep (no no-op single-rep control, no misleading Unassigned) (Codex #589 P2)", () => {
-    mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [
         { id: "rep-1", displayName: "Brett Jones" },
         { id: "rep-2", displayName: "Adam Smith" },
       ],
@@ -1583,14 +1671,42 @@ describe("DealListPage", () => {
         wonQueryParams: new URLSearchParams("won_preset=30&won_since=2026-04-01&won_until=2026-04-30"),
       })
     ).toBe("/deals?filter=won&scope=team&period=last_month");
+    // `search` is now FORWARDED, reversing Codex #600 P2 — and the premise it rested on is what changed,
+    // not the principle. #600 dropped the term because nothing on the destination displayed it: the page
+    // hard-coded an empty search box, so an inherited `?search` would have been an INVISIBLE filter, the
+    // very thing that review was about. The page now seeds that box from `?search`, so the term arrives
+    // visible and clearable. It has to arrive at all, because the board's search narrows the column
+    // aggregates and boardSummary these KPI cards read — dropping it opens a wider cohort than the number
+    // clicked. `period` and the rep dimension are unaffected.
     expect(
       buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
         queryParams: new URLSearchParams("assignedRepId=rep-1&period=mtd&search=roof"),
       })
-    ).toBe("/deals?filter=active_pipeline&scope=all&assignedRepId=rep-1&period=mtd"); // rep + period preserved; search dropped (Codex #600 P2)
+    ).toBe("/deals?filter=active_pipeline&scope=all&assignedRepId=rep-1&period=mtd&search=roof");
+    // The allowlist is still an allowlist, not a pass-through.
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("regionId=region-9&dl_page=3"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all");
     expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
       "/deals?filter=at_risk&scope=mine"
     );
+    // Codex #1067 P1: the estimator dimension travels with the owner one. Forwarding only assignedRepId
+    // widened every KPI drill-down back to all estimators, so a card counted under "Sidney is estimating"
+    // opened a destination that no longer reconciled with it.
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("estimatorId=est-1&search=roof"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all&estimatorId=est-1&search=roof");
+    // Estimator wins when a URL carries both, matching how the page reads them — otherwise a shared
+    // drill-down link hands on the owner param the page had suppressed.
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("assignedRepId=rep-1&estimatorId=est-1"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all&estimatorId=est-1");
     // SLA drill-downs (at_risk / stale) must DROP ?period even when the page URL carries it: there period
     // becomes updatedFrom/updatedTo (matchesUpdatedRange), a different axis than the SLA card count, so a
     // perioded at-risk link would show a different cohort than the card (Codex #600 P2). Rep still preserved.
@@ -1664,9 +1780,12 @@ describe("DealListPage", () => {
       "all",
       true,
       expect.objectContaining({ lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" } }),
-      1000,
+      50,
       expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
-      undefined
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
     );
 
     await view.cleanup();
@@ -1720,6 +1839,7 @@ describe("DealListPage", () => {
 
   it("renders the Won KPI from the canonical backend column when the request preserves the page period", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1757,6 +1877,7 @@ describe("DealListPage", () => {
 
   it("does not use aggregate-only terminal response shape for Won KPI rendering", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1800,6 +1921,7 @@ describe("DealListPage", () => {
     const sharedCount = 294;
     const sharedTotal = 21690316.66;
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1844,6 +1966,7 @@ describe("DealListPage", () => {
 
   it("passes the same effective won date range into the board request and drilldown list", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -1885,9 +2008,12 @@ describe("DealListPage", () => {
         won: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" },
         lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month (Codex #600 P2)
       },
-      1000,
+      50,
       { from: "2026-04-01", to: "2026-04-30" },
-      undefined
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
     );
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2212,6 +2338,7 @@ describe("DealListPage", () => {
   // ALL at-risk deals show regardless of updated_at; only the non-at-risk deal is excluded (by predicate).
   it("shows ALL at-risk stale deals regardless of ?period (current-state view); excludes non-at-risk", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2275,7 +2402,7 @@ describe("DealListPage", () => {
     // Even with ?period=qtd, the board fetch must carry NO period on the at-risk/stale drill-down — else
     // the server windows the OPEN columns by stage_entered_at (won_period) and drops at-risk deals at the
     // SOURCE. The 5th arg (period range) must be null for current-state.
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, expect.any(Object), 1000, null, undefined, undefined, undefined, expect.any(Object));
 
     expect(html).toContain("QTD Stale Deal");
     expect(html).toContain("Second QTD Stale Deal");
@@ -2288,6 +2415,7 @@ describe("DealListPage", () => {
 
   it("uses engine at-risk results for the KPI count and drilldown population", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2379,6 +2507,7 @@ describe("DealListPage", () => {
   function mockRouteMixedAtRiskBoard() {
     const atRisk = () => makeAtRiskResult();
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2709,6 +2838,7 @@ describe("DealListPage", () => {
 
   it("excludes on-hold cards from at-risk drilldown column fallback totals", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2752,28 +2882,122 @@ describe("DealListPage", () => {
     expect(html).not.toMatch(/Contract.*1\/2.*\$550\.0K/);
   });
 
-  it("excludes on-hold cards from search-filtered column totals", async () => {
+  /**
+   * The board's text search resolves SERVER-side.
+   *
+   * It used to be a client-side filter over `column.cards` that recounted each column from the surviving
+   * cards. That silently became "search the top 50 of each column" when #1074 cut the card slice, and the
+   * board answered 0/0 for deals that plainly exist. The term now travels with the board REQUEST.
+   *
+   * The on-hold-$-excluded-from-column-totals invariant that the previous test asserted THROUGH that
+   * client recount has not been dropped — it moved to where it now lives. The column's count and total
+   * come from the server's aggregate, whose FILTER clause is aliasedActiveDealCountFilterSql; see the
+   * server's terminal-aware-value + board-summary-aggregates suites. Re-asserting it here would only
+   * re-test the mock.
+   */
+  async function typeBoardSearch(view: { container: HTMLElement }, term: string) {
+    const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      valueSetter?.call(input, term);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // Clear the debounce that keeps the pipeline query off the keystroke path.
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+  }
+
+  it("sends the board search to the SERVER rather than filtering the cards it already holds", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      // The options bag is the 9th argument. If the term never reaches the request, the board is back to
+      // filtering the slice it holds — the 0/0 regression.
+      const options = mocks.useDealBoardMock.mock.lastCall?.[8];
+      expect(options).toEqual(expect.objectContaining({ search: "bellemont" }));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("does not re-issue the board query on every keystroke", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+
+      for (const term of ["b", "be", "bel", "bell", "belle"]) {
+        await act(async () => {
+          valueSetter?.call(input, term);
+          input!.dispatchEvent(new Event("input", { bubbles: true }));
+          // Well inside the debounce window — a partial term must not reach the request.
+          vi.advanceTimersByTime(50);
+        });
+      }
+
+      const searchesMidType = mocks.useDealBoardMock.mock.calls
+        .map((call) => (call[8] as { search?: string } | undefined)?.search)
+        .filter((term) => term);
+      expect(searchesMidType).toEqual([]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+      expect((mocks.useDealBoardMock.mock.lastCall?.[8] as { search?: string })?.search).toBe("belle");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("renders every card the server returned for a search, and keeps the server's column totals", async () => {
+    // The server matches a WIDER field set than any client haystack — scope title, description, property
+    // address, company and contact names, owner. This card matches NONE of the fields the old client
+    // filter looked at, so re-adding that filter would drop it while the header still counted it. The
+    // header figures are likewise the server's, and deliberately not derivable from the two cards.
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
       board: {
         columns: [
           {
             stage: { id: "stage-contract", name: "Contract", slug: "contract" },
-            count: 2,
-            totalValue: 550000,
+            count: 40,
+            totalCount: 312,
+            totalValue: 9500000,
             cards: [
               makeDeal({
-                id: "deal-active-search",
-                name: "Roof Search Active",
+                id: "deal-matched-on-description",
+                name: "Totally Unrelated Name",
                 stageId: "stage-contract",
                 bidEstimate: "250000",
                 onHold: false,
               }),
               makeDeal({
-                id: "deal-on-hold-search",
-                name: "Roof Search Held",
+                id: "deal-matched-on-address",
+                name: "Also Unrelated",
                 stageId: "stage-contract",
                 bidEstimate: "300000",
-                onHold: true,
+                onHold: false,
               }),
             ],
           },
@@ -2788,18 +3012,456 @@ describe("DealListPage", () => {
     const view = await renderPageDom("/deals?scope=all", "director");
 
     try {
-      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
-      expect(input).not.toBeNull();
-
-      await act(async () => {
-        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-        valueSetter?.call(input, "Roof Search");
-        input!.dispatchEvent(new Event("input", { bubbles: true }));
-      });
+      await typeBoardSearch(view, "bellemont");
 
       const html = normalize(view.container.innerHTML);
-      expect(html).toMatch(/Contract.*1\/2.*\$250\.0K/);
-      expect(html).not.toMatch(/Contract.*1\/2.*\$550\.0K/);
+      // Both cards survive: the server already decided they match.
+      expect(view.container.querySelector('[data-virtualized-card-count="2"]')).not.toBeNull();
+      // The header reads the server's aggregate, NOT a recount of the two cards it happens to hold.
+      expect(html).toMatch(/Contract.*40\/312.*\$9\.5M/);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("carries the board search into the stage drill-down, so 'view all N' opens exactly those N", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 40,
+            totalCount: 87,
+            totalValue: 9500000,
+            cards: [],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      const header = Array.from(view.container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Contract"
+      );
+      expect(header).toBeTruthy();
+      await act(async () => {
+        header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      // HALF the chain, and only half: this file MOCKS buildDealStageWorkspacePath, so it can prove the
+      // page hands the term over but NOT that the term survives into the URL. That builder applies an
+      // allowlist, and the first cut of this change omitted `search` from it — this test passed against a
+      // no-op. The other half ("forwards the board's search term to the stage drill-down") asserts the
+      // GENERATED PATH against the real builder in pipeline-terminal-filters.test.ts. Neither test is
+      // sufficient alone; do not delete one without moving its assertion.
+      const queryParams = mocks.buildDealStageWorkspacePathMock.mock.lastCall?.[0]?.queryParams;
+      expect(new URLSearchParams(queryParams).get("search")).toBe("bellemont");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("seeds the search box from ?search so an inherited term is visible, not an invisible filter", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all&filter=active_pipeline&search=bellemont", "director");
+
+    try {
+      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      expect(input?.value).toBe("bellemont");
+      // And it must actually reach the board request, or the box would show a term the board ignored.
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+      expect((mocks.useDealBoardMock.mock.lastCall?.[8] as { search?: string })?.search).toBe("bellemont");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("carries the active search into the KPI drill-down destinations", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      // The KPI cards read search-narrowed aggregates, so their links must hold the same population.
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        expect(new URL(href, "https://x.test").searchParams.get("search")).toBe("bellemont");
+      }
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("gives the KPI destination BOTH the board's search and the list's fb_search", async () => {
+    // The destination mounts DealsListSection with the drill-down FilterBar, whose useFilterState reads
+    // the `fb_` prefix. The bare param alone narrows the board and the KPI cards while the list beneath
+    // stays wide with an empty search control — the board/list divergence, one layer down.
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "bellemont",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        const params = new URL(href, "https://x.test").searchParams;
+        expect(params.get("search")).toBe("bellemont");
+        expect(params.get("fb_search")).toBe("bellemont");
+      }
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  /** Type into the page-level box and let the debounce settle, on a location-tracking harness. */
+  async function typeAndSettle(view: { container: HTMLElement }, term: string) {
+    const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      valueSetter?.call(input, term);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+  }
+
+  it("clearing the box drops ?search, so a reload cannot restore the filter", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&filter=active_pipeline&search=bellemont&fb_search=bellemont",
+      "director"
+    );
+
+    try {
+      expect(
+        view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]')?.value
+      ).toBe("bellemont");
+
+      await typeAndSettle(view, "");
+
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBeNull();
+      // fb_search belongs to the LIST's FilterBar. The page seeds it into an outbound link and never
+      // touches it again — clearing the page box must not reach into the list's own filter.
+      expect(params.get("fb_search")).toBe("bellemont");
+      expect(params.get("filter")).toBe("active_pipeline");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("editing the box updates ?search and leaves the list's fb_search alone", async () => {
+    // ONE WRITER PER PARAM. An earlier cut had the page mirror fb_search too, which meant the page
+    // restored the term the list had just edited — and deleted it outright whenever the page box was
+    // empty, breaking the list's own search control on every drill-down.
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&filter=active_pipeline&search=bellemont&fb_search=bellemont",
+      "director"
+    );
+
+    try {
+      await typeAndSettle(view, "victoria");
+
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBe("victoria");
+      expect(params.get("fb_search")).toBe("bellemont");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("mirrors a fresh search into ?search even when the page was opened without one", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+    try {
+      await typeAndSettle(view, "bellemont");
+
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBe("bellemont");
+      // The page does not invent an fb_search for the list; only an outbound drill-down LINK carries it.
+      expect(params.get("fb_search")).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("builds drill-down links from the term the VISIBLE board was fetched with, not the pending one", async () => {
+    // The distinction only exists while a search request is in flight: useDealBoard keeps the previous
+    // response on screen, so the KPI cards still show the OLD cohort's numbers. A link built from the
+    // term being typed would send a user who clicked a displayed count to a different population.
+    //
+    // The two values must DIFFER here or this proves nothing — an earlier version of this test typed the
+    // same term it mocked as applied, so swapping appliedSearch for debouncedSearch in the source
+    // changed nothing and the guard could not fire.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "bellemont", // the board ON SCREEN
+      loading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "victoria"); // still in flight — not yet applied
+
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        const params = new URL(href, "https://x.test").searchParams;
+        expect(params.get("search")).toBe("bellemont");
+        expect(params.get("search")).not.toBe("victoria");
+      }
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("adopts an EXTERNAL ?search change into the box — Back must actually go back", async () => {
+    // React Router keeps this component mounted across /deals query-only navigations, so a one-shot
+    // initializer leaves the box on the previous term and the mirror effect then writes that stale term
+    // straight back over the URL. Back would appear to do nothing.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "",
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation("/deals?scope=all&search=bellemont", "director");
+
+    try {
+      const input = () =>
+        view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      expect(input()?.value).toBe("bellemont");
+
+      // Simulate history moving the query string underneath the mounted component.
+      await act(async () => {
+        view.navigate("/deals?scope=all&search=victoria");
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+
+      expect(input()?.value).toBe("victoria");
+      // ...and the mirror must NOT have written the stale term back over it.
+      expect(new URLSearchParams(lastSearch(view.searches)).get("search")).toBe("victoria");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("never requests a board that pairs a NEW filter with the OLD search term", async () => {
+    // A single history navigation can move `search` AND another board param at once. With the term read
+    // from component state it arrived one effect late, so the hook re-keyed on the new filters while
+    // still holding the old term — one pipeline request for a cohort nobody asked for (briefly rendered),
+    // then a second, correct one. Reading the settled term from the URL makes the two move together.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "bellemont",
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&search=bellemont&assignedRepId=rep-old",
+      "director"
+    );
+
+    try {
+      await act(async () => {
+        view.navigate("/deals?scope=all&search=victoria&assignedRepId=rep-new");
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+
+      // Positional args: scope, includeDd, terminalDateFilters, previewLimit, wonPeriodRange,
+      // assignedRepId, estimateSentDateRange, estimatorId, options.
+      const badPairing = mocks.useDealBoardMock.mock.calls.filter(
+        (call) => call[5] === "rep-new" && (call[8] as { search?: string } | undefined)?.search === "bellemont"
+      );
+      expect(
+        badPairing,
+        "a request combined the new rep with the previous search term"
+      ).toEqual([]);
+
+      // And the destination combination WAS requested.
+      const good = mocks.useDealBoardMock.mock.calls.filter(
+        (call) => call[5] === "rep-new" && (call[8] as { search?: string } | undefined)?.search === "victoria"
+      );
+      expect(good.length).toBeGreaterThan(0);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("keeps an inherited term on drill-down links before the first board response lands", async () => {
+    // The KPI cards render outside the loading branch, so on /deals?search=bellemont they are clickable
+    // for the whole 1.6-2.5s pipeline query. `appliedSearch` is still "" then — indistinguishable from
+    // "a board with no search" — so without the URL fallback the links would drop the term and open a
+    // wider cohort than the page is showing.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: null,
+      appliedSearch: "",
+      loading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all&search=bellemont", "director");
+
+    try {
+      const hrefs = Array.from(view.container.querySelectorAll("a"))
+        .map((anchor) => anchor.getAttribute("href") ?? "")
+        .filter((href) => href.includes("filter="));
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        expect(new URL(href, "https://x.test").searchParams.get("search")).toBe("bellemont");
+      }
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("never overwrites an fb_search the LIST owns, at any page-box state", async () => {
+    // The regression this locks down: the mirror effect keyed on searchParams re-ran whenever the list
+    // edited its own param and wrote the page term back over it — or deleted it when the page box was
+    // empty, erasing an fb_search-only bookmark on mount.
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      appliedSearch: "",
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDomWithLocation(
+      "/deals?scope=all&filter=active_pipeline&fb_search=roofing",
+      "director"
+    );
+
+    try {
+      // Page box empty, list term present: the page must leave it completely alone.
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+      });
+      expect(new URLSearchParams(lastSearch(view.searches)).get("fb_search")).toBe("roofing");
+
+      // And still alone once the page box has its own, different term.
+      await typeAndSettle(view, "bellemont");
+      const params = new URLSearchParams(lastSearch(view.searches));
+      expect(params.get("search")).toBe("bellemont");
+      expect(params.get("fb_search")).toBe("roofing");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("does not attach a stale search to a stage drill-down opened with the box cleared", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 40,
+            totalCount: 312,
+            totalValue: 9500000,
+            cards: [],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      await typeBoardSearch(view, "bellemont");
+      await typeBoardSearch(view, "");
+
+      const header = Array.from(view.container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Contract"
+      );
+      await act(async () => {
+        header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const queryParams = mocks.buildDealStageWorkspacePathMock.mock.lastCall?.[0]?.queryParams;
+      expect(new URLSearchParams(queryParams).get("search")).toBeNull();
     } finally {
       await view.cleanup();
     }
@@ -2807,6 +3469,7 @@ describe("DealListPage", () => {
 
   it("orders SLA drilldown rows by engine effective age instead of raw stage-entered date", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2860,6 +3523,7 @@ describe("DealListPage", () => {
 
   it("shows explicit stage and project-owner fields in the SLA drilldown list", async () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -2939,7 +3603,10 @@ describe("DealListPage", () => {
       expect.any(Object),
       1000,
       null,
-      undefined
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
     );
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
@@ -2970,6 +3637,7 @@ describe("DealListPage", () => {
         ],
         terminalStages: [],
       },
+      appliedSearch: "",
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -2990,6 +3658,7 @@ describe("DealListPage", () => {
 
   it("renders refreshed at-risk rows after the uncapped board fetch completes", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: {
         columns: [
           {
@@ -3025,7 +3694,7 @@ describe("DealListPage", () => {
   it("coerces a requested team scope to mine in the scope toggle (D-12b)", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
     expect(html).not.toContain(">Team</button>");
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');
@@ -3048,6 +3717,7 @@ describe("DealListPage", () => {
 
   it("shows a selected-range empty state for empty terminal columns when a board date is active", () => {
     mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
       board: { columns: [], terminalStages: [] },
       loading: false,
       error: null,
@@ -3057,5 +3727,688 @@ describe("DealListPage", () => {
     const html = renderPage("/deals?scope=all&period=qtd");
 
     expect(html).toContain("No deals in selected range");
+  });
+
+
+
+  describe("At-Risk KPI on the ?filter=opportunities drill-down (server bucket == the rendered column)", () => {
+    /**
+     * That route narrows the board to slugs ["opportunity"], which EXCLUDES the synthetic pending_rfp
+     * column. The pre-PR count came from opportunity.cards, and buildCanonicalDealBoardColumns strips
+     * every pending-RFP card out of that array — so pending deals were never counted there. Bucketing
+     * them under `opportunity` server-side made all three cards jump on this one route while the main
+     * board (which sums both columns) stayed right and hid it.
+     */
+    function boardWithAtRisk(atRiskByStageSlug: Record<string, { service: number; nonService: number }>) {
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 3,
+              activeCount: 3,
+              totalCount: 3,
+              totalValue: 300000,
+              cards: [
+                makeDeal({ id: "o1" }),
+                makeDeal({ id: "p1", rfpApprovalStatus: "pending", isBidBoardOwned: false }),
+                makeDeal({ id: "p2", rfpApprovalStatus: "pending", isBidBoardOwned: false }),
+              ],
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug, pendingRfp: { count: 2, totalCount: 2, totalValue: 200000 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    // 3 at-risk opportunity-canonical deals, 2 of them pending RFP — the reviewer's executed fixture.
+    const SERVER_BUCKETS = {
+      opportunity: { service: 0, nonService: 1 },
+      pending_rfp: { service: 0, nonService: 2 },
+    };
+
+    /**
+     * Read the At-Risk total off its OWN element, via the data-testid the card already carries.
+     *
+     * This used to match `/text-4xl[^>]*>(\d+)</` — a CSS class as a stand-in for "the At-Risk card's
+     * number". That is an assertion about a representation, not about the thing: it happened to land on
+     * the right element only because the one earlier `text-4xl` node (the page <h1>) holds text rather
+     * than a digit. Restyle the card, or add any KPI above it whose value is a number, and the regex
+     * silently reads a DIFFERENT card's count while still passing.
+     */
+    const atRiskTotal = (html: string) => {
+      const match = html.match(/data-testid="at-risk-total"[^>]*>([^<]*)</);
+      expect(match, "at-risk-total element not found in the rendered board").not.toBeNull();
+      return match![1]!.trim();
+    };
+
+    it("counts 1, not 3 — the pending-RFP deals belong to a column this view does not render", () => {
+      boardWithAtRisk(SERVER_BUCKETS);
+
+      const html = renderPage("/deals?scope=all&filter=opportunities", "director");
+
+      expect(html).toContain("Opportunities");
+      expect(atRiskTotal(html)).toBe("1");
+    });
+
+    it("counts all 3 on the main board, where the pending_rfp column IS rendered", () => {
+      boardWithAtRisk(SERVER_BUCKETS);
+
+      const html = renderPage("/deals?scope=all", "director");
+
+      expect(atRiskTotal(html)).toBe("3");
+    });
+  });
+
+  describe("truncation affordance — the ONLY route to the deals the card slice hides", () => {
+    /**
+     * The board renders a SLICE ordered by tier then `created_at DESC` — the 50 NEWEST live deals, not
+     * the 50 largest. A column's biggest deals can therefore be entirely absent from it, which makes
+     * "view all" load-bearing rather than decorative. These pin the two ways it failed:
+     *   - it did not render at all when enough of the column was on hold, because the denominator was
+     *     the ACTIVE count while the cards include held rows;
+     *   - it advertised a number the drill-down target does not list (Opportunity, pending-RFP split).
+     */
+    function boardWith(column: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [{ stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" }, ...column }],
+          terminalStages: [],
+          summary: null,
+          pendingRfpCards: [],
+          ...extra,
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    it("renders when a column is truncated, using the ALL-ROWS total as the denominator", () => {
+      boardWith({
+        // 70 matching rows, 25 of them on hold -> active count 45, cards 50 (held rows included).
+        count: 45,
+        activeCount: 45,
+        totalCount: 70,
+        totalValue: 900000,
+        cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Against the ACTIVE count this read `50 < 45` — false — and the control never rendered: 20 deals
+      // unreachable behind a page that looked complete.
+      expect(html).toContain("Showing 50 of 70");
+      expect(html).toContain("view all 70");
+    });
+
+    it("renders for an on-hold-heavy column under ?scope=on_hold, where every row is held", () => {
+      boardWith({
+        // scope=on_hold: the active count is 0 by construction, the column is still full of cards.
+        count: 0,
+        activeCount: 0,
+        totalCount: 312,
+        totalValue: 0,
+        cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `held-${i}`, onHold: true })),
+      });
+
+      const html = renderPage("/deals?scope=on_hold");
+
+      expect(html).toContain("Showing 50 of 312");
+    });
+
+
+    it("renders the MERGED total as the denominator of a capped alias-merged column", () => {
+      // estimating <- estimating + estimate_in_progress. The server caps each raw stage at 50, so this
+      // column arrives with 60 cards; the canonical cap trims it to 50 and the notice has to describe the
+      // merged population (45 + 25), not one raw stage's share of it.
+      mocks.usePipelineStagesMock.mockReturnValue({
+        stages: [
+          { id: "est", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1 },
+          { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", displayOrder: 1 },
+        ],
+      });
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [
+            {
+              stage: { id: "est", name: "Estimating", slug: "estimating" },
+              count: 40,
+              activeCount: 40,
+              totalCount: 45,
+              totalValue: 400000,
+              cards: Array.from({ length: 30 }, (_, i) =>
+                makeDeal({ id: `est-${i}`, stageId: "est", createdAt: `2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z` })
+              ),
+            },
+            {
+              stage: { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress" },
+              count: 20,
+              activeCount: 20,
+              totalCount: 25,
+              totalValue: 200000,
+              cards: Array.from({ length: 30 }, (_, i) =>
+                makeDeal({ id: `eip-${i}`, stageId: "eip", createdAt: `2026-04-${String(i + 1).padStart(2, "0")}T00:00:00.000Z` })
+              ),
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalCount: 0, totalValue: 0 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // 50 rendered (the cap, applied to the merged column) of 70 (45 + 25, the merged population).
+      expect(html).toContain("Showing 50 of 70");
+      expect(html).toContain("view all 70");
+      // Without the canonical cap this said "Showing 60 of 70" — a column capped at 50 rendering 60.
+      expect(html).not.toContain("Showing 60 of");
+    });
+
+    it("does NOT render when the column is complete", () => {
+      boardWith({
+        count: 3,
+        activeCount: 3,
+        totalCount: 3,
+        totalValue: 1000,
+        cards: Array.from({ length: 3 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      expect(html).not.toContain("Showing 3 of");
+      expect(html).not.toContain("view all");
+    });
+
+    it("advertises the count the Opportunity drill-down will actually list (pending RFP included)", () => {
+      // The stage page filters by Opportunity stage ids and does NOT exclude the pending bucket, so the
+      // link must name the UNADJUSTED stage total even though this column's own cards/total exclude it.
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 100,
+              activeCount: 100,
+              totalCount: 120,
+              totalValue: 1000000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: {
+            atRiskByStageSlug: {},
+            pendingRfp: { count: 18, totalCount: 20, totalValue: 18000 },
+          },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Cards + totalCount are partitioned (120 - 20 pending = 100 rows this column renders from)...
+      expect(html).toContain("Showing 50 of 100");
+      // ...while the link names what the stage page lists: all 120.
+      expect(html).toContain("view all 120");
+    });
+
+    it("puts NO number on the Pending RFP link — its target is the office-wide cross-rep queue", () => {
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 5,
+              activeCount: 5,
+              totalCount: 5,
+              totalValue: 1000,
+              cards: [makeDeal({ id: "opp-1" })],
+            },
+          ],
+          terminalStages: [],
+          summary: {
+            atRiskByStageSlug: {},
+            pendingRfp: { count: 60, totalCount: 63, totalValue: 60000 },
+          },
+          pendingRfpCards: Array.from({ length: 50 }, (_, i) =>
+            makeDeal({ id: `pending-${i}`, rfpApprovalStatus: "pending", isBidBoardOwned: false })
+          ),
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      expect(html).toContain("Showing 50 of 63");
+      expect(html).toContain("open full queue");
+      // A scope-filtered board cannot know the cross-rep queue's size, so it must not claim one.
+      expect(html).not.toContain("view all 63");
+    });
+  });
+
+
+  describe("rolling deploy — a board response without boardSummary must not be truncated", () => {
+    /**
+     * The client and the server ship in one PR but deploy as two services. Against an API that predates
+     * `boardSummary`, EVERY aggregate on this page falls back to counting the card array — the three
+     * At-Risk KPI counts, the Pending RFP column, and the Opportunity total it is subtracted from.
+     * Those fallbacks are correct only over an UNTRUNCATED set, which is what they had before this PR
+     * shrank the slice to 50. So a summary-less response widens the request back to the full set for
+     * the rest of the session, rather than quietly under-reporting for the length of the deploy.
+     */
+    function boardWithoutSummary() {
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45,
+              activeCount: 45,
+              totalCount: 70,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: null,
+          // Absent, exactly as an older API sends it.
+          pendingRfpCards: undefined,
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    const previewLimitsRequested = () =>
+      mocks.useDealBoardMock.mock.calls.map((call) => call[3] as number);
+
+    it("re-requests the FULL per-stage set once it sees a summary-less response", async () => {
+      boardWithoutSummary();
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const limits = previewLimitsRequested();
+        // It starts at the small slice...
+        expect(limits[0]).toBe(50);
+        // ...and settles on the pre-PR full set once the response proves the API cannot aggregate.
+        expect(limits[limits.length - 1]).toBe(1000);
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("does NOT widen when the server DOES send a summary", async () => {
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45,
+              activeCount: 45,
+              totalCount: 70,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalCount: 0, totalValue: 0 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        expect(new Set(previewLimitsRequested())).toEqual(new Set([50]));
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("hides the truncation notice when the row total is UNKNOWN rather than inventing one", () => {
+      mocks.useDealBoardMock.mockReturnValue({
+      appliedSearch: "",
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45, // ACTIVE only; no totalCount on the wire
+              activeCount: 45,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: null,
+          pendingRfpCards: undefined,
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Quoting `count` here would read "Showing 50 of 45". Say nothing instead.
+      expect(html).not.toContain("Showing 50 of");
+      expect(html).not.toContain("view all");
+    });
+  });
+
+  describe("board request duplication — /deals must not ask for the pipeline more than once per view", () => {
+    // GET /api/deals/pipeline measured 1.6-2.5s in production and the page was firing it 2-3x per load.
+    // Two independent causes, both pinned here:
+    //   1. the saved Rep/timeframe restore rewrote the URL AFTER the first fetch had already gone out;
+    //   2. resolveDrilldownTerminalDateFilters returns a FRESH object every call, and that object is a
+    //      dependency of the fetch, so a no-op re-sync changed its identity and triggered another fetch.
+    const boardCalls = () => mocks.useDealBoardMock.mock.calls;
+    const enabledCalls = () =>
+      boardCalls().filter((call) => (call[8] as { enabled?: boolean } | undefined)?.enabled === true);
+
+    it("holds the fetch until the saved view is resolved, then asks with ONE stable parameter set", async () => {
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const enabled = enabledCalls();
+        expect(enabled.length).toBeGreaterThan(0);
+        // The FIRST render must not have fetched: the stored-view restore had not decided yet.
+        expect((boardCalls()[0]![8] as { enabled?: boolean }).enabled).toBe(false);
+
+        // Every enabled call carries the same board parameters, so useDealBoard's fetch callback keeps one
+        // identity and issues a single request no matter how many times the page re-renders.
+        const signature = (call: unknown[]) =>
+          JSON.stringify([call[0], call[1], call[2], call[3], call[4], call[5], call[6], call[7]]);
+        expect(new Set(enabled.map(signature)).size).toBe(1);
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("keeps the terminal-date-filter object IDENTITY stable across re-renders (arg 3 is a fetch dep)", async () => {
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const identities = new Set(enabledCalls().map((call) => call[2]));
+        // A fresh object per render is exactly what fired the duplicate request; one identity means the
+        // memoised fetch callback is never invalidated by a no-op re-sync.
+        expect(identities.size).toBe(1);
+      } finally {
+        await view.cleanup();
+      }
+    });
+  });
+
+  describe("Estimators section in the rep filter", () => {
+    // The bug this exists for: a rep filter matches the OWNER only (buildOwnedRepCondition), so Sidney
+    // Gibson — owner of 0 deals, estimator on 137 — returned an empty board from the only control there
+    // was. The fix is a SECOND dimension, not a loosened rep filter.
+    function rosterWithEstimator() {
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [
+          { id: "rep-1", displayName: "Brett Jones", group: "sales" },
+          { id: "est-1", displayName: "Sidney Gibson", group: "estimator" },
+        ],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+    }
+
+    it("names the selection as estimating, so the trigger cannot read 'All reps' while the board is narrowed", () => {
+      rosterWithEstimator();
+
+      const html = renderPage("/deals?scope=all&estimatorId=est-1", "director");
+
+      expect(html).toContain("Sidney Gibson (estimating)");
+      expect(html).not.toContain(">All reps</");
+    });
+
+    it("sends estimatorId to the board as its own argument, leaving the owner argument unset", () => {
+      rosterWithEstimator();
+
+      renderPage("/deals?scope=all&estimatorId=est-1", "director");
+
+      // 6th = assignedRepId, 8th = estimatorId. The owner slot MUST stay undefined: the server ANDs the
+      // two, so a value in both asks "deals Sidney estimates that Brett also owns" — a question the
+      // control cannot express and the user never asked.
+      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+        "all",
+        true,
+        expect.any(Object),
+        50,
+        null,
+        undefined,
+        undefined,
+        "est-1",
+        expect.any(Object)
+      );
+    });
+
+    it("renders one flat list when no estimators are ticked — the group headings are not worth their space", async () => {
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [{ id: "rep-1", displayName: "Brett Jones", group: "sales" }],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+
+      const view = await renderPageDom("/deals?scope=all", "director");
+
+      expect(view.container.innerHTML).not.toContain("Estimators");
+      expect(view.container.innerHTML).not.toContain("Sales Reps");
+
+      await view.cleanup();
+    });
+
+    it("splits the dropdown into Sales Reps and Estimators once an estimator exists", async () => {
+      rosterWithEstimator();
+
+      const view = await renderPageDom("/deals?scope=all", "director");
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Rep filter"]');
+      await act(async () => {
+        trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        trigger?.click();
+      });
+
+      const rendered = document.body.innerHTML;
+      expect(rendered).toContain("Sales Reps");
+      expect(rendered).toContain("Estimators");
+
+      await view.cleanup();
+    });
+
+    it("picking an estimator writes ?estimatorId and CLEARS a stale ?assignedRepId", async () => {
+      rosterWithEstimator();
+
+      const view = await renderPageDomWithLocation("/deals?scope=all&assignedRepId=rep-1", "director");
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Rep filter"]');
+      await act(async () => {
+        trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        trigger?.click();
+      });
+      await act(async () => {
+        const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+          (el) => el.textContent?.trim() === "Sidney Gibson"
+        );
+        option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+        option?.click();
+      });
+
+      expect(lastSearch(view.searches)).toContain("estimatorId=est-1");
+      // The sibling must go. Left behind, the server ANDs them into an intersection nobody asked for.
+      expect(lastSearch(view.searches)).not.toContain("assignedRepId");
+
+      await view.cleanup();
+    });
+
+    it("lets the estimator WIN when a URL carries both dimensions (Codex #1067 P2)", () => {
+      rosterWithEstimator();
+
+      // The control cannot produce this state — it always clears the sibling — but a hand-edited, shared
+      // or half-migrated bookmark can. The server ANDs the two, so sending both showed
+      // "Sidney Gibson (estimating)" over deals Sidney estimated AND rep-1 owns: usually empty, and the
+      // label gave no hint why. The label's precedence and the query must agree.
+      const html = renderPage("/deals?scope=all&assignedRepId=rep-1&estimatorId=est-1", "director");
+
+      expect(html).toContain("Sidney Gibson (estimating)");
+      // 6th arg = assignedRepId, 8th = estimatorId. The owner slot must be neutralised.
+      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+        "all",
+        true,
+        expect.any(Object),
+        50,
+        null,
+        undefined,
+        undefined,
+        "est-1",
+        expect.any(Object)
+      );
+    });
+
+    it("drops a parked ?estimatorId when a Team bookmark is coerced to Mine (Codex #1067 P2)", async () => {
+      rosterWithEstimator();
+
+      // Team is unsupported, so selectedEstimatorFilter suppresses the value on the first render — but the
+      // coercion effect then rewrites scope to Mine. A retained estimatorId springs back to life under the
+      // new scope and silently narrows the board, which is exactly what the owner half of this coercion
+      // already prevents for ?assignedRepId.
+      const view = await renderPageDomWithLocation("/deals?scope=team&estimatorId=est-1", "director");
+
+      const finalParams = new URLSearchParams(lastSearch(view.searches));
+      expect(finalParams.get("scope")).toBe("mine");
+      expect(finalParams.has("estimatorId")).toBe(false);
+
+      await view.cleanup();
+    });
+
+    it("keeps estimators OUT of the nested list bar, which writes an owner param (Codex #1067 P2)", () => {
+      rosterWithEstimator();
+
+      renderPage("/deals?scope=all", "director");
+
+      const props = mocks.dealsListSectionMock.mock.calls[
+        mocks.dealsListSectionMock.mock.calls.length - 1
+      ][0] as { filterBar: { options: { reps: Array<{ value: string; label: string }> } } };
+      const labels = props.filterBar.options.reps.map((rep) => rep.label);
+      // The bar's Rep dimension writes dl_assignedRepId — an OWNER filter. Offering Sidney here searches
+      // for deals she OWNS (zero) and reproduces the empty-result bug one control over.
+      expect(labels).toContain("Brett Jones");
+      expect(labels).not.toContain("Sidney Gibson");
+    });
+
+    it("releases a saved estimator who is no longer in the Estimators group (Codex #1067 P2)", async () => {
+      // "Estimates Jobs" unticked, the person deactivated, or Sales-wins moving them across: the roster no
+      // longer offers them, so a restored preference would narrow the board to a selection with no visible
+      // control to clear it. The roster below deliberately still CONTAINS est-1 — as a sales entry — so the
+      // assertion proves the guard checks the GROUP, not mere id membership.
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [
+          { id: "rep-1", displayName: "Brett Jones", group: "sales" },
+          { id: "est-1", displayName: "Sidney Gibson", group: "sales" },
+        ],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ estimatorId: "est-1", period: "ytd" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.every((s) => !s.includes("estimatorId=est-1"))).toBe(true);
+      // The office-independent timeframe still restores — only the stale person is dropped.
+      expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+
+      await view.cleanup();
+    });
+
+    it("does NOT restore a saved estimator under Mine scope (Codex #1067 P2)", async () => {
+      rosterWithEstimator();
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ estimatorId: "est-1", period: "ytd" })
+      );
+      // The shared scope preference can flip to Mine from another page; a bare return should then show the
+      // viewer's own board rather than a silently narrowed slice of it, matching the owner sibling.
+      window.localStorage.setItem("pipeline-scope-preference:user-1", "mine");
+
+      const view = await renderPageDomWithLocation("/deals", "director");
+
+      expect(view.searches.every((s) => !s.includes("estimatorId=est-1"))).toBe(true);
+      // The office-independent timeframe is still restored — only the person-narrowing filter is dropped.
+      expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+
+      await view.cleanup();
+    });
+
+    it("releases a saved OWNER who has since become an estimator (Codex #1067 P2)", async () => {
+      // A regression this PR created: the owner guard checked plain id membership, which was the same
+      // test as "is on the sales roster" only while the roster WAS sales-only. Widening it to include
+      // estimators broke that equivalence — the id still matches, so the owner filter restores, while the
+      // dropdown now offers this person solely as `est:<id>`. The board ends up narrowed by an owner
+      // filter the control can neither display nor clear.
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [
+          { id: "rep-1", displayName: "Brett Jones", group: "sales" },
+          { id: "rep-9", displayName: "Nina Nine", group: "estimator" },
+        ],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ assignedRepId: "rep-9", period: "ytd" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+      expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+
+      await view.cleanup();
+    });
+
+    it("still restores a saved owner who remains on the sales side", async () => {
+      // The guard must not become a blanket reject: a missing group counts as sales, so appended
+      // off-roster ids and ordinary sales reps both still hydrate.
+      rosterWithEstimator();
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ assignedRepId: "rep-1" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.some((s) => s.includes("assignedRepId=rep-1"))).toBe(true);
+
+      await view.cleanup();
+    });
+
+    it("restores a saved estimator who IS still in the Estimators group", async () => {
+      rosterWithEstimator();
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ estimatorId: "est-1" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.some((s) => s.includes("estimatorId=est-1"))).toBe(true);
+
+      await view.cleanup();
+    });
   });
 });

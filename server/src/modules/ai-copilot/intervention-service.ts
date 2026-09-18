@@ -4872,12 +4872,21 @@ async function syncGeneratedTaskResolution(
     return;
   }
 
+  // Explicit system-actor bypass. The AI-disconnect task is written by the cron with
+  // created_by = NULL, so there is no assigner to fall back on, and the person resolving the case is
+  // routinely not its assignee — the close-authority rule would 403 every resolution and leave the
+  // task open while the case reported itself resolved. Enumerated in tasks/service.ts
+  // TASK_CLOSE_SYSTEM_ACTORS; not reachable from a route.
   if (nextTaskStatus === "completed") {
-    await completeTask(tenantDb, disconnectCase.generatedTaskId, actor.role, actor.userId);
+    await completeTask(tenantDb, disconnectCase.generatedTaskId, actor.role, actor.userId, {
+      systemActor: "ai_disconnect_resolution",
+    });
     return;
   }
 
-  await dismissTask(tenantDb, disconnectCase.generatedTaskId, actor.role, actor.userId);
+  await dismissTask(tenantDb, disconnectCase.generatedTaskId, actor.role, actor.userId, {
+    systemActor: "ai_disconnect_resolution",
+  });
 }
 
 export async function assignInterventionCases(

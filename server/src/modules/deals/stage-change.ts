@@ -1,9 +1,9 @@
 import { eq, and, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   deals,
   dealStageHistory,
-  dealApprovals,
   jobQueue,
   tasks,
 } from "@trock-crm/shared/schema";
@@ -19,6 +19,7 @@ import {
   isContractStageSelectionEnabled,
 } from "../../config/feature-flags.js";
 import { validateStageGate, isStageRequiredFieldSatisfied } from "./stage-gate.js";
+import { retireDealApprovals } from "./approval-retirement.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
@@ -225,6 +226,7 @@ export async function changeDealStage(
     bidBoardMirrorSourceEnteredAt: currentDeal[0].bidBoardMirrorSourceEnteredAt,
     isReadOnlyMirror: currentDeal[0].isReadOnlyMirror,
     readOnlySyncedAt: currentDeal[0].readOnlySyncedAt,
+    bidBoardDetachedAt: currentDeal[0].bidBoardDetachedAt,
   });
   const estimatingBoundary = await getEstimatingBoundaryStage(currentDeal[0].workflowRoute);
   if (inferredOwnership.isBidBoardOwned && !estimatingBoundary) {
@@ -345,7 +347,31 @@ export async function changeDealStage(
     dealUpdates.readOnlySyncedAt = null;
   }
 
-  if (isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute)) {
+  // BID BOARD HANDOFF on entering the estimating boundary — SKIPPED ENTIRELY while the deal is detached.
+  //
+  // THE INVARIANT: a deal re-attaches to Bid Board sync only when a specific Bid Board project
+  // demonstrably exists for it, evidenced by an identity recorded at the moment of attachment. Advancing
+  // a stage is not evidence — changeDealStage neither creates nor links a project — so this path cannot
+  // satisfy the invariant and therefore must not re-attach. (It used to; that was wrong.) The one path
+  // that can is the internal-RFP `bid-board-created` callback, which is handed the new project's id and
+  // writes it in the same statement that clears the marker. That callback also performs its own stage
+  // transition, so a detached deal's legitimate route back into estimating goes through it, not here.
+  //
+  // Re-attaching here produced two concrete failures. If the operator had followed the dialog and deleted
+  // the old project, the deal became Bid-Board-owned and read-only with no counterpart to sync against.
+  // If they had not, the preserved identity let the very next export reclaim the OLD project and silently
+  // undo the move-back.
+  //
+  // Skipping the whole block — not just the marker clear — matters just as much: is_bid_board_owned,
+  // bid_board_stage_slug and read_only_synced_at are three of the ten conditions POST /:id/trigger-rfp's
+  // atomic reservation requires to be empty. Setting them on a detached deal would leave it unable to be
+  // re-submitted, which is precisely the "re-trigger silently impossible" dead end this feature exists to
+  // remove. A detached deal simply advances as a CRM-owned deal and waits for a real project.
+  const isDetachedFromBidBoard = currentDeal[0].bidBoardDetachedAt != null;
+  if (
+    isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute) &&
+    !isDetachedFromBidBoard
+  ) {
     dealUpdates.isBidBoardOwned = true;
     dealUpdates.bidBoardStageSlug = targetStage.slug;
     dealUpdates.readOnlySyncedAt = new Date();
@@ -410,11 +436,17 @@ export async function changeDealStage(
     dealUpdates.lostAt = new Date();
   }
 
-  // Reopen handling: invalidate old approvals so they can't be reused
+  // Reopen handling: retire the closed cycle's approvals so they can't be reused.
+  //
+  // This used to mark approved rows `rejected` in place, which left the deal UNABLE to request that
+  // approval again (the retained row still occupies the (deal_id, target_stage_id, required_role)
+  // unique key that the bare-INSERT request route has no onConflict for) and left any still-`pending`
+  // row resolvable to `approved` for the very cycle just closed. Both owners of this rule — here and
+  // "Move back to Opportunity" — now go through retireDealApprovals, which states the requirement and
+  // itemizes each retired approval into audit_log. Fixing only the move-back would have left the
+  // terminal-reopen path with the identical defect.
   if (isReopen) {
-    await tenantDb.update(dealApprovals)
-      .set({ status: "rejected", resolvedAt: new Date(), notes: "Auto-invalidated on deal reopen" })
-      .where(and(eq(dealApprovals.dealId, dealId), eq(dealApprovals.status, "approved")));
+    await retireDealApprovals(tenantDb, dealId, userId, "deal reopen");
   }
 
   // Tell the deal_stage_history backstop trigger (migration 0143) to stand down for this
@@ -462,15 +494,37 @@ export async function changeDealStage(
     });
   }
 
-  // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
+  // Auto-dismiss pending/in-progress tasks when the deal reaches a terminal stage.
+  //
+  // TWO THINGS THIS SWEEP MUST NOT DO, both found in review:
+  //
+  // 1. It must not destroy an unanswered client email. `is_terminal` is true for the whole WON family,
+  //    including sent_to_production / service_sent_to_production — awarded jobs still being built. An
+  //    inbound_email_reply_needed task says "a client wrote and nobody has answered", and email-sync
+  //    evaluates that rule only at INGEST, so once this sweep deletes it nothing ever recreates it.
+  //    Winning the job is not a reason to stop replying to the customer. Only the LOST family is.
+  //    (Gating the drain alone was not enough — Codex P1: this is an independent dismissal path.)
+  //
+  // 2. It must not look like a rep's missed follow-up. getFollowUpCompliance counts every dismissal in its
+  //    denominator, so an unmarked sweep here scores against whoever happened to own the deal. The marker
+  //    records that no person decided this, at the moment it happens — see migration 0246 for why every
+  //    derivable alternative turned out to be mutable.
   if (targetStage.isTerminal) {
+    const targetIsDead = LOST_STAGE_SLUGS.includes(targetStage.slug as (typeof LOST_STAGE_SLUGS)[number]);
     await tenantDb
       .update(tasks)
-      .set({ status: "dismissed", isOverdue: false })
+      .set({ status: "dismissed", isOverdue: false, autoDismissedReason: "deal_reached_terminal_stage" })
       .where(
         and(
           eq(tasks.dealId, dealId),
           inArray(tasks.status, ["pending", "in_progress"]),
+          // IS DISTINCT FROM, not `ne`: origin_rule is NULLABLE, and `NULL <> 'x'` is NULL, not true --
+          // so a plain inequality would have quietly stopped sweeping every MANUAL task (origin_rule IS
+          // NULL) on a Won deal, changing behaviour this fix never meant to touch. Caught by the test
+          // below asserting the manual task is still swept.
+          targetIsDead
+            ? undefined
+            : sql`${tasks.originRule} IS DISTINCT FROM 'inbound_email_reply_needed'`,
         )
       );
   }

@@ -17,6 +17,14 @@ vi.mock("@/lib/api", () => ({ api: mocks.api }));
 vi.mock("@/hooks/use-tasks", () => ({
   createTask: mocks.createTask,
   createProjectTask: mocks.createProjectTask,
+  // Real, not a stub: it is the value→label map Base UI needs to render "Urgent" on the trigger
+  // instead of the raw enum, so a mock that omitted it would hide exactly the bug it was added for.
+  TASK_PRIORITY_SELECT_ITEMS: [
+    { value: "urgent", label: "Urgent" },
+    { value: "high", label: "High" },
+    { value: "normal", label: "Normal" },
+    { value: "low", label: "Low" },
+  ],
 }));
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "user-1", role: "director" } }),

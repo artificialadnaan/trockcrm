@@ -23,10 +23,13 @@ import {
   getTaskStatusLabel,
   getTaskLifecycleSummary,
   isTerminalTaskStatus,
+  TASK_PRIORITY_SELECT_ITEMS as PRIORITY_SELECT_ITEMS,
 } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { TaskProjectLink } from "@/components/tasks/task-project-link";
+import { TaskResolutionDialog, type TaskResolutionAction } from "@/components/tasks/task-resolution-dialog";
 
 interface Assignee {
   id: string;
@@ -72,6 +75,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   const [transitioning, setTransitioning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transitionError, setTransitionError] = useState<string | null>(null);
+  const [resolutionAction, setResolutionAction] = useState<TaskResolutionAction | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
 
   const canAssign = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
@@ -93,6 +97,23 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     return assignees;
   }, [assignees, canAssign, task.assignedTo, task.assignedToName]);
 
+  /**
+   * ⚠️ WITHOUT THIS THE TRIGGER RENDERS A RAW UUID.
+   *
+   * Base UI's `Select.Value` resolves its label from the `items` prop on `Select.Root` — never from
+   * the `SelectItem` children. With no `items` it falls through to `String(value)`, so this control
+   * showed `5687a3c6-1556-4dd6-a3d6-b26fbc22f471` where a person's name belongs. `placeholder` cannot
+   * save it either: that is only used when NOTHING is selected, and a task always has an assignee.
+   *
+   * Mapped from the same array the items below are rendered from, so a name and its id cannot drift.
+   */
+  const assigneeSelectItems = useMemo(
+    () => assigneeOptions.map((u) => ({ value: u.id, label: u.displayName })),
+    [assigneeOptions]
+  );
+
+  const assignedByLabel = task.assignedByName?.trim() || null;
+
   // Reset form when task changes
   useEffect(() => {
     setTitle(task.title);
@@ -105,6 +126,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     setBlockedByText(getLifecycleLabel(task.blockedBy));
     setError(null);
     setTransitionError(null);
+    setResolutionAction(null);
   }, [task]);
 
   // Fetch assignees for every role that can edit assignee selection.
@@ -116,10 +138,15 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   }, [canAssign, open]);
 
   const handleTransition = async (nextStatus: "pending" | "scheduled" | "in_progress" | "waiting_on" | "blocked" | "completed" | "dismissed") => {
+    if (nextStatus === "completed" || nextStatus === "dismissed") {
+      setResolutionAction(nextStatus === "completed" ? "complete" : "dismiss");
+      return;
+    }
+
     setTransitioning(true);
     setTransitionError(null);
     try {
-      if (nextStatus === "completed" || nextStatus === "dismissed" || nextStatus === "pending" || nextStatus === "in_progress") {
+      if (nextStatus === "pending" || nextStatus === "in_progress") {
         await transitionTask(task.id, { nextStatus });
       } else if (nextStatus === "scheduled") {
         if (!scheduledFor) {
@@ -159,6 +186,32 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     }
   };
 
+  const resolveTerminalTransition = async (resolutionNote: string) => {
+    const action = resolutionAction;
+    if (!action) return;
+
+    setTransitioning(true);
+    setTransitionError(null);
+    try {
+      await transitionTask(task.id, {
+        nextStatus: action === "complete" ? "completed" : "dismissed",
+        resolutionNote,
+      });
+      handleEditOpenChange(false);
+      onUpdated();
+    } catch (err: unknown) {
+      console.error("[tasks] terminal transition failed", err);
+      throw err;
+    } finally {
+      setTransitioning(false);
+    }
+  };
+
+  const handleEditOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) setResolutionAction(null);
+    onOpenChange(nextOpen);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
@@ -192,42 +245,70 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <>
+    <Dialog open={open} onOpenChange={handleEditOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Edit Task</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <Input
-            placeholder="Task title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            required
-          />
-          <Textarea
-            placeholder="Description (optional)"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={3}
-          />
+          {/*
+            WHAT THIS TASK IS ABOUT, and a way out of the dialog to it. The editor named no project
+            and offered no route to one, so the only thing you could do here was save and go hunting
+            for the project number in the global search.
+          */}
+          {(task.dealId || assignedByLabel) && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              {task.dealId ? <TaskProjectLink task={task} className="text-xs" /> : null}
+              {assignedByLabel ? <span>Assigned by {assignedByLabel}</span> : null}
+            </div>
+          )}
+          <div>
+            <label htmlFor="task-edit-title" className="text-xs text-muted-foreground mb-1 block">
+              Title
+            </label>
+            <Input
+              id="task-edit-title"
+              placeholder="Task title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <label htmlFor="task-edit-description" className="text-xs text-muted-foreground mb-1 block">
+              Description
+            </label>
+            <Textarea
+              id="task-edit-description"
+              placeholder="Description (optional)"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+            />
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Priority</label>
-              <Select value={priority} onValueChange={(v) => setPriority(v ?? "normal")}>
+              {/* Same Base UI rule as the assignee select below: no `items`, no label — this trigger
+                  read `urgent` in lowercase, straight off the enum, beside items labelled `Urgent`. */}
+              <Select items={PRIORITY_SELECT_ITEMS} value={priority} onValueChange={(v) => setPriority(v ?? "normal")}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="urgent">Urgent</SelectItem>
-                  <SelectItem value="high">High</SelectItem>
-                  <SelectItem value="normal">Normal</SelectItem>
-                  <SelectItem value="low">Low</SelectItem>
+                  {PRIORITY_SELECT_ITEMS.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
             <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Due Date</label>
+              <label htmlFor="task-edit-due-date" className="text-xs text-muted-foreground mb-1 block">Due Date</label>
               <Input
+                id="task-edit-due-date"
                 type="date"
                 value={dueDate}
                 onChange={(e) => setDueDate(e.target.value)}
@@ -237,7 +318,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
           {canAssign && assigneeOptions.length > 0 && (
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Assignee</label>
-              <Select value={assignedTo} onValueChange={(v) => setAssignedTo(v ?? assignedTo)}>
+              <Select items={assigneeSelectItems} value={assignedTo} onValueChange={(v) => setAssignedTo(v ?? assignedTo)}>
                 <SelectTrigger>
                   <SelectValue placeholder={task.assignedToName ?? "Unassigned"} />
                 </SelectTrigger>
@@ -287,7 +368,14 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
                       Mark In Progress
                     </Button>
                   ) : null}
-                  {canTransitionTask(task.status, "dismissed") && (
+                  {/*
+                    Dismiss is TERMINAL, so it is gated on the server's close-authority verdict as
+                    well as on the transition table. Without this a construction user -- handed every
+                    task in the office, because the list only scopes reps -- gets a normal-looking
+                    Dismiss that 403s. The other transitions here are non-terminal and stay open:
+                    "somebody else picked this up" was never the accountability concern.
+                  */}
+                  {canTransitionTask(task.status, "dismissed") && task.canClose !== false && (
                     <Button
                       type="button"
                       variant="ghost"
@@ -380,7 +468,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
           {transitionError && <p className="text-sm text-red-600">{transitionError}</p>}
           {error && <p className="text-sm text-red-600">{error}</p>}
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="ghost" onClick={() => handleEditOpenChange(false)}>
               Cancel
             </Button>
             <Button type="submit" disabled={submitting || !title.trim()}>
@@ -390,5 +478,15 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
         </form>
       </DialogContent>
     </Dialog>
+    <TaskResolutionDialog
+      action={resolutionAction ?? "dismiss"}
+      taskTitle={task.title}
+      open={resolutionAction !== null}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) setResolutionAction(null);
+      }}
+      onResolve={resolveTerminalTransition}
+    />
+    </>
   );
 }

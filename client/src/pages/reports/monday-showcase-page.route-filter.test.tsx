@@ -9,6 +9,7 @@ import {
   type MondayShowcaseData,
   type RouteBucket,
 } from "./monday-showcase/types";
+import { emptyEstimatingReport } from "./monday-showcase/test-fixtures";
 import { DEFAULT_WEEK_MODE, WEEK_MODE_LABELS, type WeekMode } from "./week-mode";
 
 /**
@@ -75,6 +76,7 @@ const payload: MondayShowcaseData = {
   },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  estimatingReport: emptyEstimatingReport(),
   routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 };
@@ -388,6 +390,17 @@ describe("an open evidence drawer is pinned to the selection its number was clic
     act(() => navigateTo("/reports/monday-showcase?routes=other"));
     expect(last(calls).routes).toEqual(["other"]); // the PAGE follows the new selection
     expect(last(openCalls()).routes).toEqual(["service"]); // the open drill does not
+  });
+
+  it("closes captured evidence when the tenant scope changes", () => {
+    renderAt("/reports/monday-showcase?officeId=office-a&routes=service");
+    openDrill();
+    expect(last(openCalls())).toEqual({ metric: "won", mode: DEFAULT_WEEK_MODE, routes: ["service"] });
+
+    act(() => navigateTo("/reports/monday-showcase?officeId=office-b&routes=service"));
+    // A tenant switch is different from a period or route change: the captured office-a record ids must
+    // never be navigated under office-b's live URL scope, so the unconditionally mounted drawer closes.
+    expect(last(evidenceCalls).metric).toBeNull();
   });
 
   it("pins the PERIOD the same way — one rule, so the two cannot drift apart", () => {

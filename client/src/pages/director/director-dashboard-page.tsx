@@ -901,7 +901,7 @@ export function DirectorDashboardPage() {
           <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[980px] text-sm" data-testid="director-leaderboard">
               <thead>
-                <tr className="bg-gray-100 text-[10px] font-black uppercase tracking-widest text-gray-500">
+                <tr className="bg-gray-100 text-[10px] font-black uppercase tracking-widest text-gray-600">
                   <th className="px-5 py-3 text-left">Rep</th>
                   <th className="px-4 py-3 text-right">Closed</th>
                   <th className="px-4 py-3 text-right">Pipeline</th>

@@ -26,6 +26,7 @@ export { userExternalIdentities, externalUserSourceEnum } from "./user-external-
 export { userLocalAuth } from "./user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./user-local-auth-events.js";
 export { fieldUserPasswordResets } from "./field-user-password-resets.js";
+export { userPasswordResets } from "./user-password-resets.js";
 export { userCommissionSettings } from "./user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./job-queue.js";
 export { bidBoardIngestionInbox } from "./bid-board-ingestion-inbox.js";

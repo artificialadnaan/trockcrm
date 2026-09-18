@@ -33,8 +33,21 @@ function buildStageWhere(
   return conditions.length > 0 ? and(...conditions) : undefined;
 }
 
-export async function getAllStages(workflowFamily?: PipelineStageFamilyFilter) {
-  return db
+/**
+ * `tenantDb` is OPTIONAL but should be passed by anything running inside a tenant request.
+ *
+ * The tenant middleware checks out one pooled connection and holds it for the entire request, so a read
+ * that goes through the global `db` pool makes that request occupy TWO slots at once — and when every
+ * slot is held by a tenant client, the second acquire can never succeed. `pipeline_stage_config` lives
+ * only in `public`, which the tenant search_path (`office_<slug>,public`) covers, so the rows are
+ * identical either way. Optional rather than required so the callers outside this PR's surface (the
+ * pipeline and leads routes) are untouched; they keep today's behaviour.
+ */
+export async function getAllStages(
+  workflowFamily?: PipelineStageFamilyFilter,
+  tenantDb?: { select: typeof db.select }
+) {
+  return (tenantDb ?? db)
     .select()
     .from(pipelineStageConfig)
     .where(buildStageWhere({}, workflowFamily))

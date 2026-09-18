@@ -19,7 +19,9 @@ import {
   Ticket,
   Shield,
   Hourglass,
+  Megaphone,
   type LucideIcon,
+  CalendarClock,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -57,6 +59,7 @@ const moreNavItems: MobileNavItem[] = [
   { to: "/tasks", icon: CheckSquare, label: "Tasks", roles: CRM_ROLES },
   { to: "/reports", icon: BarChart3, label: "Reports", roles: CRM_ROLES },
   { to: "/projects/qc-reports", icon: ClipboardCheck, label: "QC Reports", roles: CRM_ROLES },
+  { to: "/projects/weekly-reports", icon: CalendarClock, label: "Weekly Reports", roles: CRM_ROLES },
   { to: "/projects/field-team", icon: Users, label: "Field Team", roles: CRM_ROLES },
   { to: "/files", icon: FileImage, label: "Files", roles: CRM_ROLES },
   { to: "/email", icon: Mail, label: "Email", roles: CRM_ROLES },
@@ -86,6 +89,22 @@ const moreNavItems: MobileNavItem[] = [
     roles: FIELD_ROLES,
   },
   { to: "/deals/pending-rfp", icon: Hourglass, label: "Pending RFP", roles: CRM_ROLES },
+  // Mirrors sidebar.tsx line-for-line. NOT `CRM_ROLES`: that constant is ["admin","director","rep"] and
+  // excludes `construction`, which the sidebar entry includes — reusing it here is exactly how a
+  // destination ends up reachable on a laptop and invisible on a phone. Enumerated instead.
+  {
+    to: "/marketing-expense-requests",
+    icon: Megaphone,
+    label: "Expense Requests",
+    roles: ["admin", "director", "rep", "construction"],
+  },
+  // The approver queue. This nav has no admin-group concept, so an admin item goes in flat.
+  {
+    to: "/admin/marketing-expense-requests",
+    icon: Megaphone,
+    label: "Expense Approvals",
+    roles: ["admin", "director"],
+  },
 ];
 
 function getNavItemKey(item: { label: string; to: string }) {

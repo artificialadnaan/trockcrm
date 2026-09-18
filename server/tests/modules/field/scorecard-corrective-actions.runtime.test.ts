@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import { createFieldScorecard } from "../../../src/modules/field/scorecards-service.js";
 import {
   reconcileScorecardCorrectiveActions,
+  retriggerCorrectiveActionNotification,
   resolveCorrectiveActionItem,
   restartCorrectiveActionNotificationCycleForDeal,
 } from "../../../src/modules/field/corrective-actions-service.js";
@@ -21,9 +22,12 @@ import {
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
-const DEAL = "11111111-1111-1111-1111-111111111111";
+const DEAL = "aaaaaaaa-1111-4111-8111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
+const STAGE_TERMINAL = "cccccccc-0000-0000-0000-000000000002";
+const STAGE_LOST = "cccccccc-0000-0000-0000-000000000003";
+const STAGE_WON = "cccccccc-0000-0000-0000-000000000004";
 const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
 
 const csid = (n: number) => `55555555-5555-5555-5555-${String(n).padStart(12, "0")}`;
@@ -110,7 +114,7 @@ beforeAll(async () => {
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text, scope_title text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
-      is_active boolean DEFAULT true, bid_board_stage_slug text,
+      is_active boolean DEFAULT true, is_test_data boolean DEFAULT false, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz DEFAULT now()
     );
@@ -152,7 +156,10 @@ beforeAll(async () => {
   );
   await pg.exec(`
     INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal) VALUES
-      ('${STAGE_ACTIVE}','Estimating','estimating',false);
+      ('${STAGE_ACTIVE}','Estimating','estimating',false),
+      ('${STAGE_TERMINAL}','Archived','archived',true),
+      ('${STAGE_LOST}','Lost','closed_lost',true),
+      ('${STAGE_WON}','Won','closed_won',true);
     INSERT INTO deals (id, name, project_number, stage_id, is_active) VALUES
       ('${DEAL}','Maple St','DFW-10432','${STAGE_ACTIVE}', true);
   `);
@@ -164,6 +171,14 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await tdb.execute(sql`
+    UPDATE deals
+    SET is_active = true,
+        is_test_data = false,
+        stage_id = ${STAGE_ACTIVE},
+        bid_board_stage_slug = NULL
+    WHERE id = ${DEAL}
+  `);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
@@ -704,6 +719,346 @@ describe("corrective-action oversight email enqueue", () => {
       SELECT corrective_action_oversight_opened_at FROM field_scorecards WHERE id = ${scorecard.id}
     `);
     expect(new Date((row.rows[0] as any).corrective_action_oversight_opened_at).getTime()).toBe(stampedAt.getTime());
+  });
+});
+
+describe("manual corrective-action responder email retrigger", () => {
+  async function cardCycleNonce(scorecardId: string): Promise<string | null> {
+    const result = await tdb.execute(sql`
+      SELECT corrective_action_cycle_nonce
+      FROM field_scorecards
+      WHERE id = ${scorecardId}
+    `);
+    return (result.rows[0] as { corrective_action_cycle_nonce: string | null }).corrective_action_cycle_nonce;
+  }
+
+  async function scorecardGeneration(scorecardId: string): Promise<string> {
+    const result = await tdb.execute(sql`
+      SELECT updated_at::text AS generation
+      FROM field_scorecards
+      WHERE id = ${scorecardId}
+    `);
+    return (result.rows[0] as { generation: string }).generation;
+  }
+
+  it("queues one fresh cycle, invalidates prior tokens, and leaves an adjacent card alone", async () => {
+    const { scorecard: target } = await createFieldScorecard(tdb, belowBandSubmission());
+    const { scorecard: adjacent } = await createFieldScorecard(
+      tdb,
+      belowBandSubmission({ clientSubmissionId: csid(101) }),
+    );
+    const targetBefore = await cardCycleNonce(target.id);
+    const adjacentBefore = await cardCycleNonce(adjacent.id);
+    const targetGenerationBefore = await scorecardGeneration(target.id);
+    expect(targetBefore).not.toBeNull();
+    expect(adjacentBefore).not.toBeNull();
+
+    // Simulate a prior delivery/token but no live job for THIS card. The other card's live job must not
+    // accidentally make this repair a no-op or be disturbed by its restart.
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+      SET corrective_action_email_sent_at = NOW()
+      WHERE id = ${target.id}
+    `);
+    await tdb.execute(sql`
+      INSERT INTO scorecard_corrective_action_tokens
+        (id, scorecard_id, token_hash, recipient_email, role, expires_at, delivered_at)
+      VALUES
+        (${csid(901)}, ${target.id}, 'prior-cycle-token', 'super@example.test', 'superintendent', NOW() + interval '1 day', NOW())
+    `);
+    await tdb.execute(sql`
+      DELETE FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${target.id}
+    `);
+
+    const outcome = await tdb.transaction((tx) =>
+      retriggerCorrectiveActionNotification(tx as any, {
+        scorecardId: target.id,
+        dealId: DEAL,
+        office: OFFICE,
+      }),
+    );
+
+    expect(outcome).toMatchObject({ queued: true, alreadyQueued: false, priorCycleNonce: targetBefore });
+    expect(outcome.newCycleNonce).toBeTruthy();
+    expect(outcome.newCycleNonce).not.toBe(targetBefore);
+    expect(await cardCycleNonce(target.id)).toBe(outcome.newCycleNonce);
+    // Manual resend changes delivery state only: it must not make the stored PDF stale or invalidate the
+    // generation an approver opened. (The normal restart helper remains generation-advancing by default.)
+    expect(await scorecardGeneration(target.id)).toBe(targetGenerationBefore);
+    expect(await cardCycleNonce(adjacent.id)).toBe(adjacentBefore);
+
+    const targetState = await tdb.execute(sql`
+      SELECT corrective_action_email_sent_at AS sent_at FROM field_scorecards WHERE id = ${target.id}
+    `);
+    expect((targetState.rows[0] as { sent_at: string | null }).sent_at).toBeNull();
+    const tokens = await tdb.execute(sql`
+      SELECT 1 FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${target.id}
+    `);
+    expect(tokens.rows).toHaveLength(0);
+
+    const jobs = await tdb.execute(sql`
+      SELECT payload, status FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+      ORDER BY id
+    `);
+    expect(jobs.rows).toHaveLength(2);
+    const targetJob = jobs.rows.find((row: any) => row.payload.scorecardId === target.id) as any;
+    const adjacentJob = jobs.rows.find((row: any) => row.payload.scorecardId === adjacent.id) as any;
+    expect(targetJob).toMatchObject({ status: "pending", payload: { cycleNonce: outcome.newCycleNonce, dealId: DEAL } });
+    expect(adjacentJob).toMatchObject({ status: "pending", payload: { cycleNonce: adjacentBefore, dealId: DEAL } });
+  });
+
+  it("returns an idempotent no-op while a current-cycle responder job is pending", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const before = await cardCycleNonce(scorecard.id);
+    const beforeJobs = await tdb.execute(sql`
+      SELECT id FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    expect(beforeJobs.rows).toHaveLength(1);
+
+    const outcome = await tdb.transaction((tx) =>
+      retriggerCorrectiveActionNotification(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+      }),
+    );
+
+    expect(outcome).toEqual({
+      queued: false,
+      alreadyQueued: true,
+      priorCycleNonce: before,
+      newCycleNonce: before,
+      dealName: "Maple St",
+      dealNumber: null,
+      projectNumber: "DFW-10432",
+    });
+    expect(await cardCycleNonce(scorecard.id)).toBe(before);
+    const afterJobs = await tdb.execute(sql`
+      SELECT id FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    expect(afterJobs.rows).toHaveLength(1);
+  });
+
+  it("treats case-variant UUID route input as the same current queued cycle", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const before = await cardCycleNonce(scorecard.id);
+
+    // UUID casts used to locate the card accept upper-case hex, while the job payload is stored in the
+    // database's canonical lower-case spelling. This must remain an idempotent read, not a token-revoking
+    // second notification cycle.
+    const outcome = await tdb.transaction((tx) =>
+      retriggerCorrectiveActionNotification(tx as any, {
+        scorecardId: scorecard.id.toUpperCase(),
+        dealId: DEAL.toUpperCase(),
+        office: OFFICE,
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      queued: false,
+      alreadyQueued: true,
+      priorCycleNonce: before,
+      newCycleNonce: before,
+    });
+    expect(await cardCycleNonce(scorecard.id)).toBe(before);
+    const jobs = await tdb.execute(sql`
+      SELECT id FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    expect(jobs.rows).toHaveLength(1);
+  });
+
+  it("does not let a stale pending job suppress a fresh manual cycle", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const staleNonce = await cardCycleNonce(scorecard.id);
+    expect(staleNonce).toBeTruthy();
+
+    // Leave the original pending job in place, but make it stale by simulating a newer active cycle. The
+    // manual control must compare job payload nonce with the card's CURRENT nonce; merely finding any pending
+    // job would make a recovery action silently no-op forever after a prior cycle was superseded.
+    const currentNonce = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+      SET corrective_action_cycle_nonce = ${currentNonce}
+      WHERE id = ${scorecard.id}
+    `);
+
+    const outcome = await tdb.transaction((tx) =>
+      retriggerCorrectiveActionNotification(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      queued: true,
+      alreadyQueued: false,
+      priorCycleNonce: currentNonce,
+    });
+    expect(outcome.newCycleNonce).toBeTruthy();
+    expect(outcome.newCycleNonce).not.toBe(currentNonce);
+
+    const jobs = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+      ORDER BY id
+    `);
+    expect(jobs.rows).toHaveLength(2);
+    expect((jobs.rows[0] as any).payload.cycleNonce).toBe(staleNonce);
+    expect((jobs.rows[1] as any).payload.cycleNonce).toBe(outcome.newCycleNonce);
+  });
+
+  it("rejects terminal, Lost, and test projects before touching a manual resend cycle", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const nonceBefore = await cardCycleNonce(scorecard.id);
+    const generationBefore = await scorecardGeneration(scorecard.id);
+    await tdb.execute(sql`
+      INSERT INTO scorecard_corrective_action_tokens
+        (id, scorecard_id, token_hash, recipient_email, role, expires_at, delivered_at)
+      VALUES
+        (${csid(902)}, ${scorecard.id}, 'blocked-project-token', 'super@example.test', 'superintendent', NOW() + interval '1 day', NOW())
+    `);
+    // If this gate ever moves after job dedupe/restart, the old card's token/nonce/job state would change.
+    await tdb.execute(sql`
+      DELETE FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const assertBlockedWithoutMutation = async () => {
+      await expect(
+        tdb.transaction((tx) =>
+          retriggerCorrectiveActionNotification(tx as any, {
+            scorecardId: scorecard.id,
+            dealId: DEAL,
+            office: OFFICE,
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(await cardCycleNonce(scorecard.id)).toBe(nonceBefore);
+      expect(await scorecardGeneration(scorecard.id)).toBe(generationBefore);
+      const tokens = await tdb.execute(sql`
+        SELECT id FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}
+      `);
+      expect(tokens.rows).toHaveLength(1);
+      const jobs = await tdb.execute(sql`
+        SELECT id FROM public.job_queue
+        WHERE job_type = 'scorecard_corrective_action_email'
+          AND payload->>'scorecardId' = ${scorecard.id}
+      `);
+      expect(jobs.rows).toHaveLength(0);
+    };
+
+    await tdb.execute(sql`UPDATE deals SET stage_id = ${STAGE_TERMINAL} WHERE id = ${DEAL}`);
+    await assertBlockedWithoutMutation();
+
+    await tdb.execute(sql`UPDATE deals SET stage_id = ${STAGE_LOST} WHERE id = ${DEAL}`);
+    await assertBlockedWithoutMutation();
+
+    // `activeProjectWhere()` deliberately gives a configured pipeline stage precedence over the Bid Board
+    // mirror. QC Reports is stricter: an active pipeline row with a Lost mirror is already absent from the
+    // operational report, so the repair control must reject it before it invalidates a viable token.
+    await tdb.execute(sql`
+      UPDATE deals
+      SET stage_id = ${STAGE_ACTIVE}, bid_board_stage_slug = 'closed_lost'
+      WHERE id = ${DEAL}
+    `);
+    await assertBlockedWithoutMutation();
+
+    await tdb.execute(sql`
+      UPDATE deals
+      SET stage_id = ${STAGE_ACTIVE}, bid_board_stage_slug = NULL, is_test_data = true
+      WHERE id = ${DEAL}
+    `);
+    await assertBlockedWithoutMutation();
+  });
+
+  it("keeps Won-family terminal projects browsable for a manual resend", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    await tdb.execute(sql`
+      DELETE FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    await tdb.execute(sql`UPDATE deals SET stage_id = ${STAGE_WON} WHERE id = ${DEAL}`);
+
+    const outcome = await tdb.transaction((tx) =>
+      retriggerCorrectiveActionNotification(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+      }),
+    );
+
+    expect(outcome).toMatchObject({ queued: true, alreadyQueued: false });
+  });
+
+  it("retains the existing generation bump for ordinary restart callers", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+      SET updated_at = '2000-01-01T00:00:00.000Z'::timestamptz
+      WHERE id = ${scorecard.id}
+    `);
+    const before = await scorecardGeneration(scorecard.id);
+
+    await tdb.transaction((tx) =>
+      restartCorrectiveActionNotificationCycleForDeal(tx as any, { dealId: DEAL, office: OFFICE }),
+    );
+
+    expect(await scorecardGeneration(scorecard.id)).not.toBe(before);
+  });
+
+  it("refuses cards that are no longer open and cards or deals that are inactive", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${scorecard.id}
+    `);
+    await expect(
+      tdb.transaction((tx) =>
+        retriggerCorrectiveActionNotification(tx as any, {
+          scorecardId: scorecard.id,
+          dealId: DEAL,
+          office: OFFICE,
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CORRECTIVE_ACTION_RETRIGGER_WRONG_STATE" });
+
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET status = 'corrective_action_open', is_active = false WHERE id = ${scorecard.id}
+    `);
+    await expect(
+      tdb.transaction((tx) =>
+        retriggerCorrectiveActionNotification(tx as any, {
+          scorecardId: scorecard.id,
+          dealId: DEAL,
+          office: OFFICE,
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    await tdb.execute(sql`UPDATE field_scorecards SET is_active = true WHERE id = ${scorecard.id}`);
+    await tdb.execute(sql`UPDATE deals SET is_active = false WHERE id = ${DEAL}`);
+    await expect(
+      tdb.transaction((tx) =>
+        retriggerCorrectiveActionNotification(tx as any, {
+          scorecardId: scorecard.id,
+          dealId: DEAL,
+          office: OFFICE,
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
   });
 });
 

@@ -135,7 +135,7 @@ export function OfficesPage() {
                     className={
                       office.isActive
                         ? "bg-green-100 text-green-800"
-                        : "bg-gray-100 text-gray-500"
+                        : "bg-gray-100 text-gray-600"
                     }
                   >
                     {office.isActive ? "Active" : "Inactive"}

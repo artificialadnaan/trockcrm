@@ -5,6 +5,7 @@ import { pool, releasePooledClient, isBrokenConnectionError } from "../db.js";
 import { AppError } from "./error-handler.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
+import { tagTenantSchema } from "../modules/shared/tenant-schema.js";
 
 // Extend Express Request with tenant DB and transaction helpers
 declare global {
@@ -102,6 +103,10 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
 
     // Create a Drizzle instance bound to this client
     req.tenantDb = drizzle(client, { schema });
+    // A NEW Drizzle instance per request means any consumer memoising on the instance itself never hits.
+    // Publish the schema this one is bound to so a process-wide cache can key on the office instead —
+    // see modules/shared/tenant-schema.ts and the capability cache in modules/shared/mine-visibility.ts.
+    tagTenantSchema(req.tenantDb, schemaName);
     req.officeSlug = officeSlug;
     req.tenantClient = client;
 

@@ -78,6 +78,7 @@ const mocks = vi.hoisted(() => ({
       createdAt: "2026-04-20T10:00:00.000Z",
     },
   ]),
+  getUsersWithStats: vi.fn(),
 }));
 
 vi.mock("../../../src/middleware/auth.js", () => ({
@@ -109,7 +110,7 @@ vi.mock("../../../src/modules/admin/admin-reporting-service.js", () => ({
 }));
 
 vi.mock("../../../src/modules/admin/users-service.js", () => ({
-  getUsersWithStats: vi.fn(),
+  getUsersWithStats: mocks.getUsersWithStats,
   getUserById: vi.fn(),
   updateUser: vi.fn(),
   grantOfficeAccess: vi.fn(),
@@ -263,6 +264,16 @@ describe("admin data scrub routes", () => {
     expect(mocks.authMiddleware).toHaveBeenCalledOnce();
     expect(mocks.requireDirector).toHaveBeenCalledOnce();
     expect(mocks.tenantMiddleware).toHaveBeenCalledOnce();
+  });
+
+  it("loads global users with the current office so recipient eligibility can use role overrides", async () => {
+    mocks.getUsersWithStats.mockResolvedValueOnce([]);
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/users");
+
+    expect(response.status).toBe(200);
+    expect(mocks.getUsersWithStats).toHaveBeenCalledWith("office-1");
   });
 
   it("returns an invite preview without sending email", async () => {
@@ -491,7 +502,8 @@ describe("admin data scrub routes", () => {
     expect(mocks.updateNotificationRecipientAssignments).toHaveBeenCalledWith(
       expect.anything(),
       "lead_due_diligence",
-      ["director-1", "admin-1"]
+      ["director-1", "admin-1"],
+      "office-1",
     );
   });
 
@@ -532,7 +544,8 @@ describe("admin data scrub routes", () => {
     expect(mocks.updateNotificationRecipientAssignments).toHaveBeenCalledWith(
       expect.anything(),
       "lead_due_diligence",
-      []
+      [],
+      "office-1",
     );
   });
 

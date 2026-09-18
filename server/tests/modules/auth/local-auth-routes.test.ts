@@ -49,6 +49,8 @@ describe("local auth routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.JWT_SECRET = "test-jwt-secret";
+    // Returns the POST-bump token version; the route re-mints the caller's cookie from it.
+    localAuthMocks.changeLocalPassword.mockResolvedValue({ tokenVersion: 1 });
   });
 
   it("logs a user in with local credentials and sets the auth cookie", async () => {

@@ -6,6 +6,7 @@ import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { INTERNAL_RFP_RECEIVER } from "../audit/system-processes.js";
 import { applyRfpDeclineToDeal } from "../deals/rfp-decline-service.js";
+import { loadEstimatesSent, parseWindow } from "./estimates-sent-service.js";
 import { resolveRfpDealAmount } from "../deals/rfp-payload.js";
 
 export const internalRfpRoutes = Router();
@@ -101,6 +102,12 @@ async function findDeal(sourceDealId: string) {
               d.rfp_override_reviewed_at,
               d.rfp_bidboard_attempt_at,
               d.bid_board_linked_at,
+              d.synchub_bid_board_id,
+              -- Loaded for the AUDIT before-state: this callback is a re-attachment, and a trail that
+              -- records the detach but never its reversal is exactly the gap the feature is justified on.
+              d.bid_board_detached_at,
+              d.bid_board_detached_by,
+              d.bid_board_detach_reason,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
               d.rfp_approval_request_id,
@@ -1228,6 +1235,36 @@ internalRfpRoutes.post(
                   rfp_override_error = NULL,
                   -- clear the per-attempt marker (finding F4/F5): the create succeeded, so no attempt is in flight.
                   rfp_bidboard_attempt_at = NULL,
+                  -- RE-ATTACH (migration 0200). A deal that was moved back to Opportunity is detached from
+                  -- Bid Board sync so the export can't drag it forward again; this callback is the ONE moment
+                  -- re-attachment is correct, because a genuinely NEW Bid Board project now exists for it.
+                  -- Deliberately NOT a bid_board_detached_at IS NULL guard in the WHERE: that would strand a
+                  -- re-submitted deal permanently outside sync. A STALE 'created' from the old round can't
+                  -- re-attach anyway — the move-back nulls rfp_approval_status, and the resurrection guard at
+                  -- the bottom of this WHERE requires a non-null status.
+                  bid_board_detached_at = NULL,
+                  bid_board_detached_by = NULL,
+                  bid_board_detach_reason = NULL,
+                  bid_board_detached_was_linked = NULL,
+                  -- RETIRE THE OLD PROJECT'S STABLE IDENTITY — but ONLY on a genuine RE-ATTACHMENT.
+                  --
+                  -- When this callback re-links a deal that was moved back to Opportunity, procore_bid_id
+                  -- above is repointed at the NEW project while synchub_bid_board_id would still name the
+                  -- OLD one, and /opportunities then 409s forever on the mismatch it finds through the
+                  -- Procore fallback ("conflicts with the existing Procore Bid mapping"). Clearing it is
+                  -- safe THERE precisely because procore_bid_id is set in the same statement, so the deal
+                  -- stays findable through the fallback that legitimately backfills a NULL stable id.
+                  --
+                  -- The CASE is what keeps that scoped. This statement also runs for ordinary first-time
+                  -- and repair linkages, where the WHERE is satisfied by a status or bid_board_linked_at
+                  -- change alone; clearing the id there would destroy a LIVE idempotency key, and the next
+                  -- push that legitimately omits the optional procore_bid_id would miss the deal and INSERT
+                  -- the twin this whole design exists to prevent. The detach marker is the only evidence
+                  -- that the stored id belongs to a retired project rather than the current one.
+                  synchub_bid_board_id = CASE
+                    WHEN bid_board_detached_at IS NOT NULL THEN NULL
+                    ELSE synchub_bid_board_id
+                  END,
                   updated_at = NOW()
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
@@ -1260,7 +1297,8 @@ internalRfpRoutes.post(
                 rfp_approval_status IS DISTINCT FROM 'approved' OR
                 bid_board_linked_at IS NULL OR
                 rfp_override_state IS NOT NULL OR
-                rfp_override_error IS NOT NULL
+                rfp_override_error IS NOT NULL OR
+                bid_board_detached_at IS NOT NULL
               )
               -- A request-less (voting) 'created' must NOT resurrect a deal that was Returned to Opportunity.
               -- cancelPendingRfp clears rfp_approval_status to NULL (+ every RFP field), and a delayed 'created'
@@ -1293,6 +1331,23 @@ internalRfpRoutes.post(
               isBidBoardOwned: { from: found.deal.is_bid_board_owned ?? null, to: true },
               rfpApprovalStatus: { from: found.deal.rfp_approval_status ?? null, to: "approved" },
               bidBoardLinkedAt: { from: found.deal.bid_board_linked_at ?? null, to: linkedDeal.bid_board_linked_at ?? "now" },
+              // The REVERSAL half of the detach trail. Emitted only when this callback actually cleared a
+              // live marker, so an ordinary first-time linkage records nothing extra — and so the audit
+              // for a re-submitted deal reads detach -> re-attach rather than a detach that never ended.
+              // The stage-change path logs its own reversal; both must agree or the trail is path-dependent.
+              ...(found.deal.bid_board_detached_at
+                ? {
+                    bidBoardDetachedAt: { from: found.deal.bid_board_detached_at, to: null },
+                    bidBoardDetachedBy: { from: found.deal.bid_board_detached_by ?? null, to: null },
+                    bidBoardDetachReason: { from: found.deal.bid_board_detach_reason ?? null, to: null },
+                  }
+                : {}),
+              // Retiring the old project's stable identity is part of the same re-attachment — so it is
+              // recorded on exactly the rows where the CASE above actually cleared it, never on an
+              // ordinary linkage that kept its live id.
+              ...(found.deal.bid_board_detached_at && found.deal.synchub_bid_board_id
+                ? { synchubBidBoardId: { from: found.deal.synchub_bid_board_id, to: null } }
+                : {}),
             },
             metadata: { rfpApprovalRequestId: payload.rfpApprovalRequestId, bidboardProjectId },
           });
@@ -1443,6 +1498,84 @@ internalRfpRoutes.post(
       }
 
       res.json({ success: true, dealId: sourceDealId, bidboardProjectId });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/internal/estimates-sent — the deals that went out to a client in a window.
+//
+// Consumed by SyncHub's RFP Report email, which has no read path into the CRM's tenant schemas and so asks
+// for this at compose time. Lives on the internal router because that is where the HMAC verification and the
+// tenant-schema sweep already are; it is not an RFP route, but duplicating those two helpers to give it a
+// prettier home would be the worse trade.
+//
+// A POST rather than a GET despite being a read: the signature covers the raw BODY, exactly as every other
+// internal route does, and a GET has no body to sign. Making it a GET would mean inventing a second signing
+// scheme over the query string — a new way to get authentication subtly wrong, for a cosmetic gain.
+internalRfpRoutes.post(
+  "/estimates-sent",
+  express.raw({ type: "application/json", limit: "16kb" }),
+  async (req, res, next) => {
+    try {
+      // `express.raw({ type: "application/json" })` SKIPS parsing for any other content type — and for a
+      // request with no Content-Type at all — leaving `req.body` undefined. The cast below does not
+      // create a Buffer, so `Hmac.update(undefined)` THROWS and the outer catch reports a 500: an
+      // unsupported media type surfaced as a server fault, reachable without a valid signature. Guarded
+      // the same way scope-ingest-routes.ts guards it. The route tests invoke the handler directly, so
+      // this middleware behaviour is not otherwise observable from them.
+      if (!Buffer.isBuffer(req.body)) {
+        res.status(415).json({
+          success: false,
+          error: "Content-Type must be application/json; the body is read as raw bytes for signing.",
+        });
+        return;
+      }
+      const rawBody = req.body;
+      const signature = req.headers["x-rfp-request-signature"] as string | undefined;
+      if (!verifySignature(rawBody, signature)) {
+        res.status(401).json({ success: false, error: "invalid_signature" });
+        return;
+      }
+
+      let payload: any;
+      try {
+        payload = parseBody(rawBody);
+      } catch {
+        res.status(400).json({ success: false, error: "invalid_json" });
+        return;
+      }
+
+      let window: { from: Date; to: Date };
+      try {
+        window = parseWindow(payload ?? {});
+      } catch (err) {
+        res.status(422).json({
+          success: false,
+          error: "invalid_window",
+          message: err instanceof Error ? err.message : "invalid window",
+        });
+        return;
+      }
+
+      const schemas = await listTenantSchemas();
+      const deals = await loadEstimatesSent(
+        (text, params) => pool.query(text, params as any[]),
+        schemas,
+        window.from,
+        window.to
+      );
+
+      res.json({
+        success: true,
+        from: window.from.toISOString(),
+        to: window.to.toISOString(),
+        // Echoed so the email can say what it covered rather than restating the window it asked for — if
+        // these ever disagree with the request, the report is describing a different question than it ran.
+        count: deals.length,
+        deals,
+      });
     } catch (err) {
       next(err);
     }

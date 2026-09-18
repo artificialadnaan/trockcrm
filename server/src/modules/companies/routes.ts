@@ -68,8 +68,22 @@ router.post("/", async (req, res, next) => {
     if (!name) throw new AppError(400, "Company name is required");
     const { company, dedupResult } = await createCompany(
       req.tenantDb!,
-      // The creator becomes the account owner so newly-created companies aren't left Unassigned.
-      { name, category: category || "other", address, city, state, zip, phone, website, notes, ownerUserId: req.user!.id },
+      // The creator becomes the account owner so newly-created companies aren't left Unassigned, and is
+      // recorded separately as the AUTHOR — ownership can be reassigned later, authorship cannot. Both
+      // come from the session, never the body, so authorship can't be spoofed by a crafted request.
+      {
+        name,
+        category: category || "other",
+        address,
+        city,
+        state,
+        zip,
+        phone,
+        website,
+        notes,
+        ownerUserId: req.user!.id,
+        createdByUserId: req.user!.id,
+      },
       skipDedupCheck === true
     );
 

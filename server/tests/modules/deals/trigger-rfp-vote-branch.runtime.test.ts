@@ -19,6 +19,9 @@ async function setup() {
   // job_queue DDL: COMPLETE column set copied from rfp-vote-service.runtime.test.ts (Task 7)
   // to match the Drizzle jobQueue schema — enqueueRfpVoteInvitation inserts attempts + extras.
   await db.exec(`
+    -- The RFP service verdict reads the CONFIGURED project-type digit through this table, so a fixture
+    -- exercising trigger/payload needs it present (an absent table is a 42P01, not a null code).
+    CREATE TABLE IF NOT EXISTS public.project_type_config (id uuid PRIMARY KEY, name text NOT NULL, code text);
     CREATE TABLE public.job_queue (
       id bigserial PRIMARY KEY, job_type text NOT NULL, payload jsonb NOT NULL, office_id uuid,
       status text NOT NULL, attempts integer NOT NULL DEFAULT 0, max_attempts integer NOT NULL DEFAULT 3,
@@ -29,7 +32,7 @@ async function setup() {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text NOT NULL, deal_number text NOT NULL, project_number text, stage_id uuid,
       is_active boolean NOT NULL DEFAULT true,
-      project_type text, workflow_route text NOT NULL DEFAULT 'normal', is_bid_board_owned boolean NOT NULL DEFAULT false,
+      project_type text, project_type_id uuid, workflow_route text NOT NULL DEFAULT 'normal', is_bid_board_owned boolean NOT NULL DEFAULT false,
       bid_board_stage_slug text, is_read_only_mirror boolean NOT NULL DEFAULT false, read_only_synced_at timestamptz,
       bid_board_stage_entered_at timestamptz, bid_board_mirror_source_entered_at timestamptz, rfp_approval_status text,
       rfp_approval_requested_at timestamptz, rfp_approval_request_event_id uuid, rfp_approval_requested_by uuid,

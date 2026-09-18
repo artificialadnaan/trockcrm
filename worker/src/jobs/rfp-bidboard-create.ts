@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import type { RfpRequestDeliveryPayload } from "@trock-crm/shared/types";
+// Same lock, same key: the move-back takes ONE deal_rfp_delivery lock per deal, so both RFP workers
+// must contend on it or it only serializes against one of them.
+import { DEAL_RFP_DELIVERY_LOCK_NAMESPACE } from "./rfp-request-delivery.js";
 
 export const RFP_BIDBOARD_CREATE_JOB = "rfp_bidboard_create";
 
@@ -72,13 +75,37 @@ export async function handleRfpBidBoardCreate(
   // guards still reject a stale/cancelled link.
   const db = deps.db ?? (pool as PoolLike);
   if (officeId && db) {
+    // AUTHORIZE THE CREATE UNDER THE DEAL'S RFP-DELIVERY LOCK, then POST outside it.
+    //
+    // The recheck below existed but was UNLOCKED, which made it advisory rather than binding: it could
+    // observe a live create round a microsecond before "Move back to Opportunity" committed and POST
+    // anyway. rfp_request_delivery took this same lock for exactly that reason; this sibling did not,
+    // and its orphan is the WORSE of the two. A stray RFP submission is at least visible in SyncHub as
+    // a request; a stray Bid Board PROJECT is created externally and can never be linked back, because
+    // the bid-board-created callback requires the very round state this cleared — so the CRM has no
+    // record it exists at all, and only someone looking at the Bid Board will ever find it.
+    //
+    // Same lock KEY as the delivery worker (deal_rfp_delivery:<dealId>) on purpose: the move-back takes
+    // one lock per deal, so both workers must contend on that one key or the move-back only serializes
+    // against one of them. Taken FIRST in this transaction, before the deal is read — the ordering the
+    // move-back now matches (advisory locks before row locks); see the server's deal-rfp-delivery-lock.ts.
+    //
+    // Held only across the read: a database transaction must not span an outbound HTTP call. That leaves
+    // the same residual the delivery worker has — the window between COMMIT and fetch — which is not
+    // closable without a SyncHub-side handshake.
+    const authClient: Queryable & { release?: () => void } = db.connect ? await db.connect() : db;
     try {
       const schemaName = await resolveOfficeSchema(db, officeId);
-      const res = await db.query(
+      await authClient.query("BEGIN");
+      await authClient.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        `${DEAL_RFP_DELIVERY_LOCK_NAMESPACE}${payload.dealId}`,
+      ]);
+      const res = await authClient.query(
         `SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_override_state, rfp_approval_request_event_id
            FROM ${quoteIdent(schemaName)}.deals WHERE id = $1`,
         [payload.dealId],
       );
+      await authClient.query("COMMIT");
       const deal = res.rows[0];
       // finding: bind the recheck to the CURRENT round. The payload's sourceEventId is crm:rfp-vote:approved:<round
       // event id>; if the deal was Returned to Opportunity and a FRESH round opened since this job was enqueued,
@@ -101,9 +128,12 @@ export async function handleRfpBidBoardCreate(
         return;
       }
     } catch (err) {
+      await authClient.query("ROLLBACK").catch(() => {});
       console.warn(
         `[Worker:rfp_bidboard_create] deal recheck failed for ${payload.dealId} (posting anyway): ${err instanceof Error ? err.message : String(err)}`,
       );
+    } finally {
+      authClient.release?.();
     }
   }
 

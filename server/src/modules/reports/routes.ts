@@ -1,4 +1,5 @@
 import { Router, type Request } from "express";
+import { getServiceRfpReport } from "./service-rfp-service.js";
 import {
   ESTIMATOR_PIPELINE_BUCKETS,
   ESTIMATOR_PIPELINE_COHORTS,
@@ -6,7 +7,12 @@ import {
   type EstimatorPipelineCohort,
   type ScorecardKind,
 } from "@trock-crm/shared/types";
-import { requireRole, requireDirector } from "../../middleware/rbac.js";
+import {
+  requireRole,
+  requireDirector,
+  requireDailyActivityLogViewer,
+  requireCanvassingReportViewer,
+} from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -68,6 +74,14 @@ import {
   getDailyActivityLogReport,
   normalizeDailyActivityLogOptions,
 } from "./daily-activity-log-service.js";
+import {
+  getCanvassingActivityReport,
+  normalizeCanvassingFilters,
+} from "./canvassing-activity-service.js";
+import {
+  getCanvassingEvidence,
+  parseCanvassingEvidenceParams,
+} from "./canvassing-evidence-service.js";
 import {
   getAnalyticsEvidence,
   getCustomerConcentrationReport,
@@ -273,6 +287,16 @@ router.get("/pipeline-velocity", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+router.get("/service-rfps", requireAnyRole, async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!officeId) throw new AppError(400, "Office context is required");
+    const data = await getServiceRfpReport(req.tenantDb!, parseSalesReportRequest(req), officeId);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) { next(err); }
 });
 
 router.get("/closed-won-revenue", async (req, res, next) => {
@@ -745,15 +769,19 @@ router.get("/rep-activity", requireAnyRole, async (req, res, next) => {
 });
 
 // GET /api/reports/daily-activity-log?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&types=note,call&loggedOffDay=1&page=1&limit=200
-// The readable day-by-day log of notes and updates behind the Rep Activity counts. Same guard as
-// rep-activity (requireAnyRole) and the same in-service scoping (resolveRepActivityScope), so a rep
-// hitting this endpoint directly still only reads their own entries.
+// The readable day-by-day log of notes and updates behind the Rep Activity counts.
+//
+// TWO guards, and the order matters. `requireAnyRole` is the ordinary role floor; `requireDailyActivityLogViewer`
+// then narrows to the named allowlist in DAILY_ACTIVITY_LOG_VIEWER_EMAILS. The allowlist can only take access
+// away -- the in-service scoping (resolveRepActivityScope) still applies underneath, so a listed rep reads only
+// their own entries, and email CONTENT still requires the admin/director baseRole check inside the service.
+// With the env var unset nobody may open it; see shared/lib/dailyActivityLogViewers.ts for why that direction.
 //
 // `types` and `loggedOffDay` narrow the LISTED ROWS (and pagination.total) only; the response's `kpis`
 // always describe the whole date/office/owner window, because the client renders them on cards that
 // are themselves these filters. Email CONTENT is readable here by admin/director -- deliberately more
 // permissive than GET /activities, see the PRIVACY block in daily-activity-log-service.ts.
-router.get("/daily-activity-log", requireAnyRole, async (req, res, next) => {
+router.get("/daily-activity-log", requireAnyRole, requireDailyActivityLogViewer, async (req, res, next) => {
   try {
     const data = await getDailyActivityLogReport(
       req.tenantDb!,
@@ -1600,6 +1628,70 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json({ data: { rep: { id: rep.id, displayName: rep.displayName }, grain, dates, actions, views } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/canvassing-activity?dateFrom=2026-06-01&dateTo=2026-08-31&bucket=week&userIds=<uuid>,<uuid>
+//
+// Who entered new companies, properties, contacts and leads, per person, per week/month/quarter — plus the
+// notes those people logged. Gated on the CANVASSING_REPORT_VIEWER_EMAILS allowlist rather than a role,
+// because it is a per-person scoreboard; see shared/lib/canvassingReportViewers.ts. The role floor still
+// runs first, and the tenant search_path still scopes every count to the caller's office.
+//
+// Counts come from `created_by_user_id`, which only exists from migration 0220 onward for companies /
+// properties / contacts. The response carries `attributionStartHint` and per-bucket `unattributed` counts
+// so a zero before that date reads as "not recorded", not as "did nothing".
+router.get("/canvassing-activity", requireAnyRole, requireCanvassingReportViewer, async (req, res, next) => {
+  try {
+    const data = await getCanvassingActivityReport(req.tenantDb!, {
+      ...normalizeCanvassingFilters(req.query as Record<string, unknown>),
+      // Bounds the roster lookup: `users` is global, so a pinned id from another office must not resolve.
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      // Only the notes FEED reads these: a rep sees their own notes' text, never the office's. The HOME
+      // role, not the effective one — a rep holding a director role_override on an office must not read
+      // that office's note content through it (#740).
+      viewerRole: req.user!.baseRole ?? req.user!.role,
+      viewerEffectiveRole: req.user!.role,
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/canvassing-activity/evidence?kind=company&userId=<uuid>&bucketStart=2026-06-07&bucket=week&dateFrom=..&dateTo=..
+//
+// The records behind ONE number on the Canvassing Activity report. Same allowlist as the report itself —
+// the drill must not be a way in for someone who cannot open the page it drills.
+//
+// `total` is counted with the SAME predicate the report counts with (both build on canvassingKindSourceSql),
+// so the list reconciles with the figure it was opened from. A drill that does not add up teaches a reader
+// the report cannot be checked, which is worse than having no drill.
+router.get("/canvassing-activity/evidence", requireAnyRole, requireCanvassingReportViewer, async (req, res, next) => {
+  try {
+    const filters = normalizeCanvassingFilters(req.query as Record<string, unknown>);
+    let params;
+    try {
+      params = parseCanvassingEvidenceParams(req.query as Record<string, unknown>);
+    } catch (err) {
+      throw new AppError(400, err instanceof Error ? err.message : "Invalid evidence parameters");
+    }
+    const data = await getCanvassingEvidence(req.tenantDb!, {
+      ...params,
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      // The same notes boundary the report's feed applies: a rep reads only their own note text.
+      viewerRole: req.user!.baseRole ?? req.user!.role,
+      viewerEffectiveRole: req.user!.role,
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
   } catch (err) {
     next(err);
   }

@@ -46,7 +46,11 @@ async function fetchAllProjectPhotos(projectId: string): Promise<{ photos: Field
     const chunk = remaining.slice(i, i + FIELD_PHOTOS_FETCH_CONCURRENCY);
     const results = await Promise.allSettled(
       chunk.map((page) =>
-        api<{ photos: FieldPhoto[] }>(`/field/projects/${projectId}/photos?page=${page}&perPage=${FIELD_PHOTOS_PER_PAGE}`),
+        // withTotal=0: only the page-1 response's totalPages is read (just above), so asking the server to
+        // re-run the identical count(*) for each of pages 2..N is work whose result is thrown away.
+        api<{ photos: FieldPhoto[] }>(
+          `/field/projects/${projectId}/photos?page=${page}&perPage=${FIELD_PHOTOS_PER_PAGE}&withTotal=0`,
+        ),
       ),
     );
     results.forEach((r) => {

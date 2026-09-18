@@ -38,6 +38,9 @@ beforeAll(async () => {
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text UNIQUE, is_terminal boolean NOT NULL DEFAULT false);
+    -- The deal projections resolve the configured project-type digit through this table (it is what
+    -- the At Risk service split reads), so every fixture exercising them needs it present.
+    CREATE TABLE IF NOT EXISTS public.project_type_config (id uuid PRIMARY KEY, name text NOT NULL, code text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
@@ -63,9 +66,11 @@ beforeAll(async () => {
       estimator_user_id uuid, sales_source_user_id uuid, bid_board_office text, bid_board_status text,
       bid_board_sales_price_per_area text, bid_board_project_cost numeric(14, 2),
       bid_board_profit_margin_pct numeric(9, 4), bid_board_total_sales numeric(14, 2),
-      bid_board_created_at timestamptz, bid_board_due_date date, bid_board_customer_name text,
+      bid_board_created_at timestamptz, bid_board_due_date date, bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text, bid_board_customer_name text,
       bid_board_customer_contact_raw text, bid_board_project_number text, project_number text,
       bid_board_linked_at timestamptz, bid_board_last_updated_at timestamptz, bid_board_assigned_pm text,
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
+      bid_board_detached_was_linked boolean,
       intended_project_number text, bid_board_mirror_source_entered_at timestamptz,
       bid_board_mirror_source_exited_at timestamptz, pipeline_type_snapshot text,
       region_classification varchar(50), is_read_only_mirror boolean, is_read_only_sync_dirty boolean,

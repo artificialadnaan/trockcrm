@@ -6,7 +6,7 @@ import {
   type SendSystemEmailResult,
 } from "../lib/system-email.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
-import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "../lib/branded-email.js";
 import {
   FIELD_SCORECARD_RATINGS,
   scorecardRatingLabel,

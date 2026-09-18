@@ -71,6 +71,10 @@ export async function createAssignmentTaskIfNeeded(
     .values({
       title,
       description: `${input.entityName} was assigned to you by ${input.actorUserId} on ${now.toISOString().slice(0, 10)}.`,
+      // Written by the reassignment itself, not typed by anyone -- and this is the volume the tabs
+      // exist to separate. `type` says 'manual' and `createdBy` names a real person, which is exactly
+      // why neither of those columns could be used to tell these apart.
+      source: "automated",
       type: "manual",
       priority: "normal",
       status: "pending",

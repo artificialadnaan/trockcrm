@@ -175,6 +175,62 @@ export function UsersPage() {
     }
   };
 
+  const handleToggleGeneratesSales = async (userId: string, generatesSales: boolean) => {
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, { generatesSales: !generatesSales });
+      // Name the consequence rather than the field — "generatesSales updated" tells an admin nothing.
+      //
+      // Say PERFORMANCE VIEWS, not "the director dashboard". The flag is absolute over the rep cards, the
+      // funnel rows and the snapshot read, so removal there is unconditional — but Team Commissions is on
+      // that same screen and deliberately keeps anyone with earned commission or a live deal, so it never
+      // orphans money. A toast claiming whole-dashboard removal would be contradicted by a row still
+      // sitting a few inches below it, which reads as a broken toggle rather than a deliberate boundary.
+      //
+      // The second clause exists to answer that question before it is asked. Two earlier versions of this
+      // copy were each accurate for the predicate at the time and wrong the moment it changed; naming the
+      // surfaces rather than "the dashboard" is what stops it drifting again.
+      toast.success(
+        generatesSales
+          ? "Removed from the rep performance views. Team Commissions still lists anyone with deals or earnings."
+          : "Now tracked on the rep performance views"
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update sales tracking");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleToggleEstimatesJobs = async (
+    userId: string,
+    estimatesJobs: boolean,
+    generatesSales: boolean
+  ) => {
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, { estimatesJobs: !estimatesJobs });
+      // Name the consequence, as above. The case that reads as a broken toggle is SALES-WINS: the roster
+      // lists each person exactly once and the estimator leg of the UNION requires generates_sales = false,
+      // so ticking this on someone who also generates sales moves nothing in the filter. Say that here
+      // rather than let an admin tick it, look at the dropdown and conclude the checkbox does nothing.
+      // Sales-wins cuts BOTH ways, so the untick branch needs the same caveat as the tick branch. For
+      // someone who also generates sales the estimator leg never listed them, so "Removed from the
+      // Estimators filter" would confirm a roster change that never happened.
+      toast.success(
+        generatesSales
+          ? "Saved — they stay under Sales in the filter, which lists each person once"
+          : estimatesJobs
+            ? "Removed from the Estimators filter"
+            : "Now listed under Estimators in the deals dashboard filter"
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update estimating");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   const handleManagerChange = async (userId: string, managerId: string) => {
     setUpdatingId(userId);
     try {
@@ -606,7 +662,7 @@ export function UsersPage() {
         bodyClassName="overflow-x-auto overscroll-x-contain"
         bodyLabel="Users table. Scroll horizontally to view all user details and actions."
       >
-        <table className="w-full min-w-[76rem] caption-bottom text-sm">
+        <table className="w-full min-w-[90rem] caption-bottom text-sm">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">
@@ -619,6 +675,18 @@ export function UsersPage() {
               <TableHead>User</TableHead>
               <TableHead>Primary Office</TableHead>
               <TableHead>Role</TableHead>
+              <TableHead>
+                Generates Sales
+                <span className="block text-xs font-normal text-gray-500">
+                  Shows on rep performance views
+                </span>
+              </TableHead>
+              <TableHead>
+                Estimates Jobs
+                <span className="block text-xs font-normal text-gray-500">
+                  Shows in the Estimators filter
+                </span>
+              </TableHead>
               <TableHead>Sources</TableHead>
               <TableHead>Extra Offices</TableHead>
               <TableHead>Status</TableHead>
@@ -631,8 +699,13 @@ export function UsersPage() {
           <TableBody>
             {filteredUsers.map((user) => {
               const commissionStructure = user.commissionStructure ?? "solo";
+              // An inactive row is muted by BACKGROUND, not opacity. `opacity-50` here composited every
+              // cell against the page: the Inactive badge fell to 2.24:1, the primary text to 3.41 and the
+              // secondary text to 1.97 — so the row a reader is least likely to look closely at was the
+              // only one failing AA, in every column at once. A child cannot opt out of an ancestor's
+              // opacity, so the badge's own colour could not be fixed while this stayed.
               return (
-              <TableRow key={user.id} className={!user.isActive ? "opacity-50" : ""}>
+              <TableRow key={user.id} className={!user.isActive ? "bg-slate-50" : ""}>
                 <TableCell>
                   <Checkbox
                     checked={selectedUserIds.includes(user.id)}
@@ -670,6 +743,39 @@ export function UsersPage() {
                   </Select>
                 </TableCell>
                 <TableCell>
+                  <Checkbox
+                    checked={user.generatesSales}
+                    onCheckedChange={() => void handleToggleGeneratesSales(user.id, user.generatesSales)}
+                    // A field contractor never carries deals: the field-invite flow creates them with the
+                    // flag off and the commission roster excludes the role outright. The server rejects a
+                    // tick regardless (updateUser), so this only spares an admin a pointless error —
+                    // the invariant is enforced there, not here.
+                    disabled={
+                      updatingId === user.id ||
+                      bulkUpdating ||
+                      String(user.role) === "field_contractor"
+                    }
+                    aria-label={`${user.displayName} generates sales`}
+                  />
+                </TableCell>
+                <TableCell>
+                  <Checkbox
+                    checked={user.estimatesJobs}
+                    onCheckedChange={() =>
+                      void handleToggleEstimatesJobs(user.id, user.estimatesJobs, user.generatesSales)
+                    }
+                    // Same role invariant as Generates Sales: a field contractor never estimates, and
+                    // updateUser rejects a tick regardless (assertEstimatesJobsAllowedForRole). Disabling
+                    // here only spares an admin a pointless error — the guard lives on the server.
+                    disabled={
+                      updatingId === user.id ||
+                      bulkUpdating ||
+                      String(user.role) === "field_contractor"
+                    }
+                    aria-label={`${user.displayName} estimates jobs`}
+                  />
+                </TableCell>
+                <TableCell>
                   <div className="flex flex-wrap gap-1">
                     {user.sourceSystems.length > 0 ? user.sourceSystems.map((source) => (
                       <Badge key={source} variant="outline" className="text-xs">
@@ -690,7 +796,7 @@ export function UsersPage() {
                   )}
                 </TableCell>
                 <TableCell>
-                  <Badge className={user.isActive ? "bg-green-100 text-xs text-green-800" : "bg-gray-100 text-xs text-gray-500"}>
+                  <Badge className={user.isActive ? "bg-green-100 text-xs text-green-800" : "bg-gray-100 text-xs text-gray-600"}>
                     {user.isActive ? "Active" : "Inactive"}
                   </Badge>
                 </TableCell>
@@ -913,7 +1019,9 @@ export function UsersPage() {
 
             {filteredUsers.length === 0 && !loading && (
               <TableRow>
-                <TableCell colSpan={11} className="py-8 text-center text-gray-400">
+                {/* Spans every column so the empty-state message stays centred across the full table.
+                    Was 11 against 12 columns before Estimates Jobs was added — stale by one already. */}
+                <TableCell colSpan={13} className="py-8 text-center text-gray-400">
                   No users match the current filters
                 </TableCell>
               </TableRow>

@@ -462,12 +462,17 @@ router.post("/", async (req, res, next) => {
       propertyId,
       stageId: undefined,
       assignedRepId: repId,
-      actorUserId: req.user!.id,
       salesRepId: leadSalesRepId,
-      officeId: req.user!.activeOfficeId,
       name: trimmedName,
       bidDueDate,
       ...rest,
+      // AFTER the spread, deliberately. These two are derived from the SESSION, and `rest` is whatever the
+      // caller posted minus the fields destructured above — so while they sat before it, a request could
+      // send `actorUserId` and have createLead persist somebody else as the lead's creator. Harmless-looking
+      // until this release, which starts counting `leads.created_by_user_id` on a per-person scoreboard:
+      // it would let anyone credit their own canvassing to a colleague, or bury it on someone else.
+      actorUserId: req.user!.id,
+      officeId: req.user!.activeOfficeId,
       officeCode: officeCodeResolution.officeCode,
       auditContext: buildRouteAuditContext(req),
     });

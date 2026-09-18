@@ -333,11 +333,19 @@ export async function getObjectBuffer(
  * Use this (over getObjectBuffer) when proxying potentially large objects to an HTTP response.
  */
 export async function getObjectStream(
-  r2Key: string
+  r2Key: string,
+  /** Optional deadline for the GET itself. Omitted by every historical caller, whose behaviour is
+   *  unchanged: the S3 client has no request timeout configured, so without a signal a GET that R2
+   *  accepts and never answers holds its socket for the life of the process. Bounding the BODY is the
+   *  caller's job — pipe the returned stream under the same signal. */
+  opts?: { signal?: AbortSignal }
 ): Promise<{ stream: AsyncIterable<Uint8Array>; contentType?: string; contentLength?: number }> {
   const client = getClient();
   const bucket = getBucket();
-  const resp = await client.send(new GetObjectCommand({ Bucket: bucket, Key: r2Key }));
+  const resp = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: r2Key }),
+    opts?.signal ? { abortSignal: opts.signal } : undefined
+  );
   const stream = resp.Body as AsyncIterable<Uint8Array> | undefined;
   if (!stream) throw new Error(`R2 object ${r2Key} has no body`);
   return { stream, contentType: resp.ContentType, contentLength: resp.ContentLength };

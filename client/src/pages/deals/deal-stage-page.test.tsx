@@ -327,6 +327,34 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     expect(filters.lostUntil).toBe("2026-06-03");
   });
 
+  it("gives the estimator precedence over an inherited owner (Codex #1067 P2)", () => {
+    // The summary reads the bare owner param directly for the pre-redirect first paint, so a direct URL
+    // carrying both would compute the header against owner AND estimator while the page shows one
+    // control — the header would then disagree with the list it sits above.
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("assignedRepId=rep-2&estimatorId=est-1"),
+      { staleOnly: false, estimatorId: "est-1" },
+      { ownRep: true }
+    );
+    expect(filters.estimatorId).toBe("est-1");
+    expect(filters.assignedRepId).toBeUndefined();
+  });
+
+  it("keeps the VISIBLE fb_ rep alongside an estimator — only the inherited bare owner is suppressed", () => {
+    // The distinguishing case for Codex #1067 round-4 P1. Suppressing the owner whenever an estimator is
+    // present (an earlier version of the fix) also discarded fb_assignedRepId — the Rep control the admin
+    // can see and just used. The list applies that control regardless of what this function decides, so
+    // the header went estimator-wide while the rows and pagination narrowed to that estimator's deals
+    // owned by the selected rep: a header disagreeing with the list directly beneath it.
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_assignedRepId=rep-1&estimatorId=est-1"),
+      { staleOnly: false, estimatorId: "est-1" },
+      { ownRep: true }
+    );
+    expect(filters.assignedRepId).toBe("rep-1");
+    expect(filters.estimatorId).toBe("est-1");
+  });
+
   it("falls back to inherited bare params (pre-redirect first paint) so the summary is never momentarily whole-stage", () => {
     const filters = buildStageSummaryFilters(
       new URLSearchParams("assignedRepId=rep-2&won_since=2026-02-01&won_until=2026-05-01"),
