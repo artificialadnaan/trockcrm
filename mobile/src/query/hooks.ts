@@ -93,6 +93,18 @@ const PHOTOS_MAX_PAGES = 50;
  */
 export type ProjectPhotoWindow = { from?: string; to?: string };
 
+/**
+ * The device's IANA zone, or undefined when the runtime cannot name one — in which case the server keeps
+ * its historical session-zone behaviour rather than being handed a guess.
+ */
+function deviceTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function hasWindow(window?: ProjectPhotoWindow): boolean {
   return Boolean(window?.from || window?.to);
 }
@@ -102,12 +114,18 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
   const { fetcher, user } = useAuth();
   const from = window?.from || undefined;
   const to = window?.to || undefined;
+  // The zone the day bounds were computed in, sent so the server buckets by the SAME calendar the user
+  // picked from. `from`/`to` are bare days, and a day is not an instant: the database session is UTC, so
+  // unqualified "2026-09-01" means 2026-09-01T00:00Z, which in Dallas is Aug 31 at 19:00. Without this,
+  // a September window ran Aug 31 19:00 -> Sep 30 19:00 local — carrying the end of August and dropping
+  // the last evening of September, which on a jobsite is real work in both directions.
+  const timeZone = deviceTimeZone();
   return useQuery({
     // The window is part of the identity of this result — without it in the key, changing the dates
     // would serve the previous window's photos from cache and the filter would look like it did nothing.
     queryKey: [...qk.projectPhotos(user?.id ?? "anon", dealId ?? ""), from ?? "", to ?? ""],
     queryFn: async () => {
-      const page1 = { page: 1, perPage: PHOTOS_PER_PAGE, from, to };
+      const page1 = { page: 1, perPage: PHOTOS_PER_PAGE, from, to, timeZone };
       const first = await api.getProjectPhotos(fetcher, dealId!, page1);
       const reportedPages = first.pagination?.totalPages ?? 1;
       const totalPages = Math.min(reportedPages, PHOTOS_MAX_PAGES);
@@ -124,7 +142,9 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
       for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
         const batch = [];
         for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
-          batch.push(api.getProjectPhotos(fetcher, dealId!, { page: p, perPage: PHOTOS_PER_PAGE, from, to }));
+          batch.push(
+            api.getProjectPhotos(fetcher, dealId!, { page: p, perPage: PHOTOS_PER_PAGE, from, to, timeZone }),
+          );
         }
         // allSettled, not all: a transient 429/5xx on one later page must not blank the whole gallery —
         // we keep every page that did load (page 1 is already in `photos`).
@@ -166,6 +186,9 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
         partial,
         truncated,
         windowed: hasWindow(window),
+        // The project's earliest photo IN THIS WINDOW — so it is the true earliest only on the
+        // unwindowed load, which is exactly when the month list needs to be built.
+        oldestAt: first.pagination?.oldestAt ?? null,
       };
     },
     enabled: !!user && !!dealId,

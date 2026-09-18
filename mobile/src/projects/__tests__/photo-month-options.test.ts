@@ -1,4 +1,4 @@
-import { photoMonthOptions } from "../field-projects";
+import { photoMonthOptions, photoMonthOptionsSince } from "../field-projects";
 
 /**
  * photoMonthOptions builds the gallery's server-side date window.
@@ -102,5 +102,47 @@ describe("photoMonthOptions", () => {
 
   it("defaults to twelve months", () => {
     expect(photoMonthOptions(new Date(2026, 8, 18))).toHaveLength(12);
+  });
+
+  describe("photoMonthOptionsSince", () => {
+    it("spans from the project's earliest photo to today, inclusive of both months", () => {
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "2026-06-26T12:00:00Z");
+      expect(options.map((o) => o.key)).toEqual(["2026-09", "2026-08", "2026-07", "2026-06"]);
+    });
+
+    it("offers a single month when the project started this month", () => {
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "2026-09-02T12:00:00Z");
+      expect(options.map((o) => o.key)).toEqual(["2026-09"]);
+    });
+
+    it("reaches years back — the case a fixed twelve-month list could never show", () => {
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "2023-01-05T12:00:00Z");
+      expect(options).toHaveLength(45); // Jan 2023 .. Sep 2026 inclusive
+      expect(options[options.length - 1].key).toBe("2023-01");
+    });
+
+    it("counts months by calendar, not by dividing a duration", () => {
+      // 30-day months and DST make a millisecond-based count drift; across this span a naive
+      // (ms / 30 days) would land a month short and silently hide the earliest month.
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "2025-03-09T12:00:00Z");
+      expect(options[options.length - 1].key).toBe("2025-03");
+    });
+
+    it("caps a very long project rather than growing without limit", () => {
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "1999-01-01T00:00:00Z", 24);
+      expect(options).toHaveLength(24);
+    });
+
+    it("falls back to twelve months when the server reported no earliest photo", () => {
+      expect(photoMonthOptionsSince(new Date(2026, 8, 18), null)).toHaveLength(12);
+      expect(photoMonthOptionsSince(new Date(2026, 8, 18), undefined)).toHaveLength(12);
+      expect(photoMonthOptionsSince(new Date(2026, 8, 18), "not-a-date")).toHaveLength(12);
+    });
+
+    it("never returns an empty list, even if the earliest photo is somehow in the future", () => {
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "2027-01-01T00:00:00Z");
+      expect(options.length).toBeGreaterThan(0);
+      expect(options[0].key).toBe("2026-09");
+    });
   });
 });

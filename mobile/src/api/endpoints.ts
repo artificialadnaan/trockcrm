@@ -101,7 +101,16 @@ export const unstarProject = (f: Fetcher, dealId: string) =>
 export const getProjectPhotos = (
   f: Fetcher,
   dealId: string,
-  params?: { category?: string; uploader?: string; from?: string; to?: string; page?: number; perPage?: number },
+  params?: {
+    category?: string;
+    uploader?: string;
+    from?: string;
+    to?: string;
+    /** IANA zone the from/to DAY bounds are expressed in — see useProjectPhotos. */
+    timeZone?: string;
+    page?: number;
+    perPage?: number;
+  },
 ) => f<PhotosResponse>(`/field/projects/${dealId}/photos`, { query: params });
 
 // Mint an unauthenticated, 7-day public link to the SELECTED photos (photos-only; never mutates the

@@ -509,3 +509,33 @@ export function photoMonthOptions(today: Date, count = 12): PhotoMonthOption[] {
   }
   return options;
 }
+
+/**
+ * Month options covering every month from `oldest` through the month containing `today`, newest first.
+ *
+ * Driven by the project's real earliest photo rather than a fixed "last N months", because a fixed list
+ * silently makes anything older unreachable — and on a gallery that truncates at a page ceiling, the
+ * photos beyond the list are exactly the ones a window exists to reach. A multi-year project would
+ * otherwise be able to see neither its old photos nor build a report over them.
+ *
+ * `oldest` null/unparseable (a project with no photos, or a server that did not report it) falls back to
+ * the twelve-month list, which is still better than offering nothing. `cap` bounds a very long project
+ * so the control cannot grow without limit; the oldest chip then stops short, which is visible, rather
+ * than the list quietly omitting the middle.
+ */
+export function photoMonthOptionsSince(
+  today: Date,
+  oldest: string | null | undefined,
+  cap = 120,
+): PhotoMonthOption[] {
+  if (!oldest) return photoMonthOptions(today);
+  const start = new Date(oldest);
+  if (Number.isNaN(start.getTime())) return photoMonthOptions(today);
+
+  // Whole months between the two, inclusive of both ends. Computed from calendar parts, never by
+  // dividing a millisecond difference — months are not a fixed length and DST makes some of them 23 or
+  // 25 hours long, so a duration-based count drifts by a month across a long enough span.
+  const months =
+    (today.getFullYear() - start.getFullYear()) * 12 + (today.getMonth() - start.getMonth()) + 1;
+  return photoMonthOptions(today, Math.max(1, Math.min(cap, months)));
+}

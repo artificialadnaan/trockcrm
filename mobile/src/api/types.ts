@@ -28,7 +28,18 @@ export type StarResponse = { starred: boolean };
 // ── Photos ────────────────────────────────────────────────────────────────────
 export type PhotosResponse = {
   photos: FieldPhoto[];
-  pagination?: { page: number; limit: number; total: number; totalPages: number };
+  pagination?: {
+    page: number;
+    limit: number;
+    /**
+     * Null when the caller opted out of the count with `withTotal=0` (the server skips the count(*) on
+     * pages of a walk). This client always asks for it on page 1 and reads it only there.
+     */
+    total: number | null;
+    totalPages: number | null;
+    /** ISO instant of the earliest photo in scope; null when there are none, or no count was requested. */
+    oldestAt?: string | null;
+  };
 };
 // Public photo-share link (POST /field/projects/:dealId/share). url = the unauthenticated viewer link.
 export type ShareLinkResponse = {

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { FlatList, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -13,7 +13,7 @@ import {
   decodeChangeOrderParam,
   encodeChangeOrderParam,
   filterPhotos,
-  photoMonthOptions,
+  photoMonthOptionsSince,
   formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
@@ -106,10 +106,36 @@ export default function ProjectDetailScreen() {
   const [windowFrom, setWindowFrom] = useState("");
   const [windowTo, setWindowTo] = useState("");
   const photoWindow = useMemo(() => ({ from: windowFrom, to: windowTo }), [windowFrom, windowTo]);
-  // Computed once per mount rather than per render: a new Date() in render would rebuild the list (and
-  // its chip keys) on every keystroke elsewhere on the screen.
-  const monthOptions = useMemo(() => photoMonthOptions(new Date()), []);
+  /**
+   * Switch months and the facet filters reset.
+   *
+   * They are computed from the loaded set, so a category/tag/uploader that does not occur in the new
+   * month loses its chip while the selection stays active — an empty gallery with no visible control to
+   * clear, and no way back except leaving the project. Resetting is the honest behaviour: the window
+   * changed which photos exist, so a filter over the previous window's values no longer means anything.
+   */
+  const selectWindow = useCallback((from: string, to: string) => {
+    setWindowFrom(from);
+    setWindowTo(to);
+    setCategories([]);
+    setTags([]);
+    setUploaderIds([]);
+  }, []);
   const photosQuery = useProjectPhotos(dealId, photoWindow);
+  // The project's earliest photo, remembered from the UNWINDOWED load. Once a month is selected the
+  // server reports the earliest photo *in that window*, which would shrink the month list to the
+  // selection and strand every older month — so the first non-null answer is kept.
+  const [projectOldestAt, setProjectOldestAt] = useState<string | null>(null);
+  const reportedOldestAt = photosQuery.data?.oldestAt ?? null;
+  useEffect(() => {
+    if (reportedOldestAt && !projectOldestAt) setProjectOldestAt(reportedOldestAt);
+  }, [reportedOldestAt, projectOldestAt]);
+  // Rebuilt only when the project's span changes, not per render: a new Date() in render would rebuild
+  // the list and its chip keys on every unrelated state change.
+  const monthOptions = useMemo(
+    () => photoMonthOptionsSince(new Date(), projectOldestAt),
+    [projectOldestAt],
+  );
   const reportsQuery = useProjectReports(dealId);
   const scorecardsQuery = useProjectScorecards(dealId);
   // Only offer voice dictation when transcription is actually configured (OPENAI_API_KEY present);
@@ -488,8 +514,12 @@ export default function ProjectDetailScreen() {
           )}
         </View>
 
-        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
-        {allPhotos.length > 0 ? (
+        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13).
+            EXCEPT when a month is selected: the window is what made the set empty, so gating the panel
+            on the result would remove the only control that can undo it, stranding the user on an empty
+            gallery with no way back to All short of leaving the project and re-entering. A control must
+            not be hidden by the state it is there to change. */}
+        {allPhotos.length > 0 || windowFrom || windowTo ? (
           <View style={{ gap: theme.space.sm }}>
             <View style={styles.rowBetween}>
               <SectionLabel>Group by</SectionLabel>
@@ -515,10 +545,7 @@ export default function ProjectDetailScreen() {
                     <Chip
                       label="All"
                       selected={!windowFrom && !windowTo}
-                      onPress={() => {
-                        setWindowFrom("");
-                        setWindowTo("");
-                      }}
+                      onPress={() => selectWindow("", "")}
                     />
                     {monthOptions.map((m) => (
                       <Chip
@@ -529,8 +556,7 @@ export default function ProjectDetailScreen() {
                           // Toggle: tapping the selected month clears back to All, so the control can
                           // always be undone without hunting for the All chip.
                           const active = windowFrom === m.from && windowTo === m.to;
-                          setWindowFrom(active ? "" : m.from);
-                          setWindowTo(active ? "" : m.to);
+                          selectWindow(active ? "" : m.from, active ? "" : m.to);
                         }}
                       />
                     ))}
@@ -639,7 +665,14 @@ export default function ProjectDetailScreen() {
       />
 
       {viewer !== null ? (
-        <PhotoViewerModal photos={viewer.photos} initialIndex={viewer.index} visible projectDealId={dealId} onClose={() => setViewer(null)} />
+        <PhotoViewerModal
+          photos={viewer.photos}
+          initialIndex={viewer.index}
+          visible
+          projectDealId={dealId}
+          photoWindow={photoWindow}
+          onClose={() => setViewer(null)}
+        />
       ) : null}
 
       <ReportBuilder

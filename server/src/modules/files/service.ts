@@ -2120,7 +2120,14 @@ export async function getDealPhotoTimeline(
     }
   >;
   // total/totalPages are null exactly when the caller passed `withTotal: false` — see `options`.
-  pagination: { page: number; limit: number; total: number | null; totalPages: number | null };
+  // oldestAt follows the same rule, and is additionally null when the scope holds no photos at all.
+  pagination: {
+    page: number;
+    limit: number;
+    total: number | null;
+    totalPages: number | null;
+    oldestAt: string | null;
+  };
 }> {
   const offset = (page - 1) * limit;
   const withTotal = options.withTotal ?? true;
@@ -2129,7 +2136,17 @@ export async function getDealPhotoTimeline(
   // req.tenantDb is a single transaction-bound client, so this must stay sequential with the page query
   // below rather than becoming a Promise.all (see the note at the /deal/:dealId/photos route).
   const countResult = withTotal
-    ? await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions)
+    ? await tenantDb
+        .select({
+          count: sql<number>`count(*)`,
+          // The project's OLDEST photo, by the same key the timeline orders on. A client offering a date
+          // window has to know how far back to offer: a fixed "last N months" list silently makes
+          // anything older unreachable on a long-running project, which defeats the point of having a
+          // window at all. Computed only alongside the count, so it costs nothing on the pages of a walk.
+          oldestAt: sql<string | null>`min(COALESCE(${files.takenAt}, ${files.createdAt}))`,
+        })
+        .from(files)
+        .where(conditions)
     : null;
   const photoRows = await tenantDb
     .select({
@@ -2195,6 +2212,8 @@ export async function getDealPhotoTimeline(
     .offset(offset);
 
   const total = countResult === null ? null : Number(countResult[0]?.count ?? 0);
+  const rawOldest = countResult === null ? null : countResult[0]?.oldestAt ?? null;
+  const oldestAt = rawOldest ? new Date(rawOldest).toISOString() : null;
 
   // Resolve each photo's thumbnail + full-res URL HERE (in one batch) rather than letting the client
   // fetch a signed URL per photo — that N+1 is what trips the rate limiter on a 400-photo deal. Presigns
@@ -2205,7 +2224,13 @@ export async function getDealPhotoTimeline(
 
   return {
     photos,
-    pagination: { page, limit, total, totalPages: total === null ? null : Math.ceil(total / limit) },
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: total === null ? null : Math.ceil(total / limit),
+      oldestAt,
+    },
   };
 }
 
