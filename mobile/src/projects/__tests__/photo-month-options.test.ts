@@ -128,9 +128,18 @@ describe("photoMonthOptions", () => {
       expect(options[options.length - 1].key).toBe("2025-03");
     });
 
-    it("caps a very long project rather than growing without limit", () => {
-      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "1999-01-01T00:00:00Z", 24);
-      expect(options).toHaveLength(24);
+    it("reaches the project's oldest month even across decades", () => {
+      // The cap is a sanity bound against a corrupt date, not a product limit. A cap that can be
+      // reached is a reachability defect wearing a different hat: the months past it would be exactly
+      // the ones no other control can get to, which is the failure this whole feature exists to remove.
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "2009-01-05T12:00:00Z");
+      expect(options[options.length - 1].key).toBe("2009-01");
+      expect(options).toHaveLength((2026 - 2009) * 12 + (8 - 0) + 1);
+    });
+
+    it("still bounds a nonsense date rather than building an unbounded list", () => {
+      const options = photoMonthOptionsSince(new Date(2026, 8, 18), "1000-01-01T00:00:00Z");
+      expect(options.length).toBeLessThanOrEqual(1200);
     });
 
     it("falls back to twelve months when the server reported no earliest photo", () => {

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { FlatList, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AppState, FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
@@ -70,6 +70,11 @@ const AWAIT_REPORT_POLL_MS = 10_000;
  */
 const AWAIT_REPORT_WINDOW_MS = 30 * 60_000;
 
+/** "YYYY-MM" for a date, in LOCAL time — the same calendar the month options are built from. */
+function monthKeyOf(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
@@ -122,19 +127,51 @@ export default function ProjectDetailScreen() {
     setUploaderIds([]);
   }, []);
   const photosQuery = useProjectPhotos(dealId, photoWindow);
-  // The project's earliest photo, remembered from the UNWINDOWED load. Once a month is selected the
-  // server reports the earliest photo *in that window*, which would shrink the month list to the
-  // selection and strand every older month — so the first non-null answer is kept.
+  /**
+   * The project's earliest photo, taken ONLY from an unwindowed load.
+   *
+   * A windowed response reports the earliest photo *in that window*, so trusting it would shrink the
+   * month list to the current selection and strand every older month. But the unwindowed answer is
+   * authoritative every time it arrives, not just the first: importing a historical camera-roll photo
+   * moves the boundary earlier, and a remember-once rule would leave that month permanently absent from
+   * the selector — unreachable on exactly the projects past the ceiling where the selector is the only
+   * way to reach anything.
+   */
   const [projectOldestAt, setProjectOldestAt] = useState<string | null>(null);
   const reportedOldestAt = photosQuery.data?.oldestAt ?? null;
+  const reportedWindowed = photosQuery.data?.windowed ?? false;
   useEffect(() => {
-    if (reportedOldestAt && !projectOldestAt) setProjectOldestAt(reportedOldestAt);
-  }, [reportedOldestAt, projectOldestAt]);
-  // Rebuilt only when the project's span changes, not per render: a new Date() in render would rebuild
-  // the list and its chip keys on every unrelated state change.
+    if (reportedWindowed || !reportedOldestAt) return;
+    setProjectOldestAt((prev) => (prev === reportedOldestAt ? prev : reportedOldestAt));
+  }, [reportedWindowed, reportedOldestAt]);
+
+  /**
+   * Today's month, refreshed when the app returns to the foreground.
+   *
+   * A `new Date()` frozen in a memo means a screen left open across midnight on the 1st never offers the
+   * new month — and on a project over the ceiling that is not cosmetic: All stays truncated, so report
+   * and share stay disabled, and the crew cannot isolate the very photos they just took without killing
+   * the app. Keyed by month string so the memo below re-runs on rollover and on nothing else.
+   */
+  const [currentMonthKey, setCurrentMonthKey] = useState(() => monthKeyOf(new Date()));
+  useEffect(() => {
+    const sync = () => setCurrentMonthKey((prev) => {
+      const now = monthKeyOf(new Date());
+      return prev === now ? prev : now;
+    });
+    sync();
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active") sync();
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Rebuilt only when the project's span or the calendar month changes — not per render, which would
+  // rebuild the list and its chip keys on every unrelated state change.
   const monthOptions = useMemo(
     () => photoMonthOptionsSince(new Date(), projectOldestAt),
-    [projectOldestAt],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectOldestAt, currentMonthKey],
   );
   const reportsQuery = useProjectReports(dealId);
   const scorecardsQuery = useProjectScorecards(dealId);
@@ -540,28 +577,36 @@ export default function ProjectDetailScreen() {
                   cannot reach an older photo and this can. */}
               <View style={{ gap: theme.space.xs }}>
                 <SectionLabel>Month</SectionLabel>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  <View style={styles.chipRow}>
+                {/* FlatList, not a ScrollView of mapped chips: the list spans every month back to the
+                    project's first photo, so on a long-running job it must not render all of them to
+                    show the first few. Lazy rendering is what lets the month range be unbounded, which
+                    is what keeps the oldest photos reachable. */}
+                <FlatList
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  data={monthOptions}
+                  keyExtractor={(m) => m.key}
+                  contentContainerStyle={styles.chipRow}
+                  ListHeaderComponent={
                     <Chip
                       label="All"
                       selected={!windowFrom && !windowTo}
                       onPress={() => selectWindow("", "")}
                     />
-                    {monthOptions.map((m) => (
+                  }
+                  renderItem={({ item: m }) => {
+                    const active = windowFrom === m.from && windowTo === m.to;
+                    return (
                       <Chip
-                        key={m.key}
                         label={m.label}
-                        selected={windowFrom === m.from && windowTo === m.to}
-                        onPress={() => {
-                          // Toggle: tapping the selected month clears back to All, so the control can
-                          // always be undone without hunting for the All chip.
-                          const active = windowFrom === m.from && windowTo === m.to;
-                          selectWindow(active ? "" : m.from, active ? "" : m.to);
-                        }}
+                        selected={active}
+                        // Toggle: tapping the selected month clears back to All, so the control can
+                        // always be undone without hunting for the All chip.
+                        onPress={() => selectWindow(active ? "" : m.from, active ? "" : m.to)}
                       />
-                    ))}
-                  </View>
-                </ScrollView>
+                    );
+                  }}
+                />
               </View>
 
               {availableCategories.length > 0 ? (

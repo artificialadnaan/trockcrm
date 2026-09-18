@@ -519,14 +519,17 @@ export function photoMonthOptions(today: Date, count = 12): PhotoMonthOption[] {
  * otherwise be able to see neither its old photos nor build a report over them.
  *
  * `oldest` null/unparseable (a project with no photos, or a server that did not report it) falls back to
- * the twelve-month list, which is still better than offering nothing. `cap` bounds a very long project
- * so the control cannot grow without limit; the oldest chip then stops short, which is visible, rather
- * than the list quietly omitting the middle.
+ * the twelve-month list, which is still better than offering nothing.
+ *
+ * `cap` is a sanity bound against a corrupt date, NOT a product limit, and it is deliberately far past
+ * any real project: a cap that can be reached is a reachability defect wearing a different hat — the
+ * months beyond it would be exactly the ones no other control can get to. The list renders lazily, so
+ * its length costs nothing until scrolled.
  */
 export function photoMonthOptionsSince(
   today: Date,
   oldest: string | null | undefined,
-  cap = 120,
+  cap = 1200,
 ): PhotoMonthOption[] {
   if (!oldest) return photoMonthOptions(today);
   const start = new Date(oldest);

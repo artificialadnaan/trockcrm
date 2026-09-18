@@ -121,9 +121,18 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
   // the last evening of September, which on a jobsite is real work in both directions.
   const timeZone = deviceTimeZone();
   return useQuery({
-    // The window is part of the identity of this result — without it in the key, changing the dates
-    // would serve the previous window's photos from cache and the filter would look like it did nothing.
-    queryKey: [...qk.projectPhotos(user?.id ?? "anon", dealId ?? ""), from ?? "", to ?? ""],
+    // The window AND the zone are both part of the identity of this result. Without the dates, changing
+    // the month would serve the previous window from cache and the filter would look like it did
+    // nothing. Without the zone, a device that crosses a time-zone boundary with a warm cache keeps
+    // serving photos bucketed by the OLD zone — same month key, different answer — so the boundary
+    // photos this whole change exists to get right would be wrong again until something forced a
+    // refetch. The zone is an input to the server's day math, so it belongs in the key.
+    queryKey: [
+      ...qk.projectPhotos(user?.id ?? "anon", dealId ?? ""),
+      from ?? "",
+      to ?? "",
+      timeZone ?? "",
+    ],
     queryFn: async () => {
       const page1 = { page: 1, perPage: PHOTOS_PER_PAGE, from, to, timeZone };
       const first = await api.getProjectPhotos(fetcher, dealId!, page1);
