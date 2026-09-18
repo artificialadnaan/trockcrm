@@ -1,5 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+
+/**
+ * What the stage-metadata refresh statement now RETURNS. It is a data-modifying CTE whose final SELECT
+ * reports the pre- and post-image of the two columns the UPDATE writes but never used to compare
+ * (`is_bid_board_owned`, `bid_board_stage_entered_at`), so an adoption of a previously unowned deal is
+ * audited instead of being erased by the no-op filter.
+ *
+ * These mocks previously answered `{ rows: [], rowCount: 1 }`, which no longer models the statement: the
+ * production code reads the returned ROW, so an empty `rows` means "matched nothing". Defaults describe
+ * the common cycle — already owned, already stamped, nothing moved.
+ */
+function stageMetadataRow(overrides: Record<string, unknown> = {}) {
+  const enteredAt = "2026-09-01T00:00:00.000Z";
+  return {
+    id: "deal-123",
+    prev_is_bid_board_owned: true,
+    next_is_bid_board_owned: true,
+    prev_bid_board_stage_entered_at: enteredAt,
+    next_bid_board_stage_entered_at: enteredAt,
+    ...overrides,
+  };
+}
+
 const query = vi.fn();
 const release = vi.fn();
 
@@ -387,7 +410,7 @@ describe("Bid Board sync stage writeback", () => {
         expect(normalizedSql).not.toContain("on_hold_accumulated_seconds");
         expect(normalizedSql).not.toContain("on_hold_accumulated_seconds_at_stage_entry");
         expect(params).toEqual(["deal-123", "estimating", "estimating", "Estimate in Progress", "stage-estimating"]);
-        return { rows: [], rowCount: 1 };
+        return { rows: [stageMetadataRow()], rowCount: 1 };
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 0 };
@@ -748,7 +771,7 @@ describe("Bid Board sync stage writeback", () => {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
-        return { rows: [], rowCount: 1 };
+        return { rows: [stageMetadataRow()], rowCount: 1 };
       }
       if (normalizedSql.includes("insert into office_dallas.job_queue")) {
         throw new Error("Bid Board estimate sync must not enqueue rep notifications");
@@ -825,7 +848,7 @@ describe("Bid Board sync stage writeback", () => {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
-        return { rows: [], rowCount: 1 };
+        return { rows: [stageMetadataRow()], rowCount: 1 };
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_estimate = $2::numeric")) {
         expect(params).toEqual(["deal-same", "250000.00"]);
