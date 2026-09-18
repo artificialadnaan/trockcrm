@@ -127,4 +127,85 @@ describe("useProjectPhotos progressive loading", () => {
     await waitFor(() => expect(seen[seen.length - 1].complete).toBe(true));
     expect(seen[seen.length - 1].count).toBe(1);
   });
+
+  /**
+   * A cancelled walk must not be able to write to the cache.
+   *
+   * Pull-to-refresh while pages are still arriving starts a replacement walk and cancels this one — but
+   * cancellation does not stop an async function, it only makes React Query ignore its RETURN. Publishing
+   * straight to the cache side-steps that, so an abandoned walk keeps writing; if one of its older
+   * batches lands last it overwrites the fresh result with stale photos and complete:false, leaving the
+   * gallery on the previous set with report and share disabled until another refresh.
+   *
+   * The assertion is on the PHOTO IDS, not on `complete`. A first version of this test checked only the
+   * flag and passed with the guard deleted — the stale write did land, it just happened to carry the
+   * same flag value by the time the assertion ran.
+   */
+  it("does not publish from a walk that was aborted", async () => {
+    const stalePage2 = deferred<{ photos: Array<{ id: string }>; pagination: unknown }>();
+    let seenPage1 = 0;
+    mockGetProjectPhotos.mockImplementation((_f: unknown, _d: string, params: { page: number }) => {
+      if (params.page === 1) {
+        seenPage1 += 1;
+        return seenPage1 === 1
+          ? Promise.resolve({
+              photos: [photo("old-1")],
+              pagination: { page: 1, limit: 200, total: 2, totalPages: 2, oldestAt: null },
+            })
+          : Promise.resolve({
+              photos: [photo("fresh-1")],
+              pagination: { page: 1, limit: 200, total: 1, totalPages: 1, oldestAt: null },
+            });
+      }
+      return stalePage2.promise; // only the FIRST walk asks for page 2
+    });
+
+    const seen: string[][] = [];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let refetch: (() => Promise<unknown>) | undefined;
+
+    function Driver() {
+      const q = useProjectPhotos("deal-1", {});
+      refetch = q.refetch;
+      const ids = (q.data?.photos ?? []).map((p) => p.id);
+      const last = seen[seen.length - 1];
+      if (!last || last.join() !== ids.join()) seen.push(ids);
+      return <Text>{ids.length}</Text>;
+    }
+
+    render(
+      <QueryClientProvider client={client}>
+        <Driver />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(seen[seen.length - 1]).toEqual(["old-1"]));
+
+    // Refresh mid-walk. This cancels the first walk, whose page 2 is still pending.
+    await act(async () => {
+      void refetch?.();
+    });
+    await waitFor(() => expect(seen[seen.length - 1]).toEqual(["fresh-1"]));
+
+    // Now let the ABANDONED walk's page finally resolve. Without the abort guard it publishes
+    // ["old-1","old-2"] over the fresh result.
+    await act(async () => {
+      stalePage2.resolve({
+        photos: [photo("old-2")],
+        pagination: { page: 2, limit: 200, total: 2, totalPages: 2 },
+      });
+    });
+    await act(async () => {
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    });
+
+    // Read the CACHE, not what the component happened to re-render with. setQueryData writes the cache
+    // synchronously while a notification may not have been flushed, so asserting on the rendered value
+    // lets a stale write land unobserved — a second version of this test did exactly that and passed
+    // with the guard deleted.
+    const cached = client.getQueryCache().getAll()[0]?.state.data as
+      | { photos: Array<{ id: string }>; complete: boolean }
+      | undefined;
+    expect(cached?.photos.map((p) => p.id)).toEqual(["fresh-1"]);
+    expect(cached?.complete).toBe(true);
+  });
 });

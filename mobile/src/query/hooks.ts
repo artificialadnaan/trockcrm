@@ -150,7 +150,7 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
   ];
   return useQuery({
     queryKey,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const page1 = { page: 1, perPage: PHOTOS_PER_PAGE, from, to, timeZone };
       const first = await api.getProjectPhotos(fetcher, dealId!, page1);
       const reportedPages = first.pagination?.totalPages ?? 1;
@@ -209,6 +209,15 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
        */
       const publish = (complete: boolean) => {
         const next = snapshot(complete);
+        // NEVER write from a walk that has been cancelled. Pull-to-refresh while pages are still
+        // arriving starts a replacement walk and cancels this one — but cancellation does not stop an
+        // async function, it only makes React Query ignore its RETURN. Writing straight to the cache
+        // side-steps that: the abandoned walk keeps publishing, and if one of its older batches resolves
+        // last it overwrites the fresh result with stale photos and `complete: false`. The gallery would
+        // then show the previous load's set with report and share disabled, and nothing would correct it
+        // until the user refreshed again — a refresh that makes things worse is about the least
+        // forgivable behaviour available here.
+        if (signal.aborted) return next;
         queryClient.setQueryData(queryKey, next);
         return next;
       };

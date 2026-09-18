@@ -247,7 +247,8 @@ export default function ProjectDetailScreen() {
   const photosTruncated = photosQuery.data?.truncated ?? false;
   // Still filling: the gallery now paints page 1 immediately and streams the rest in, so there is a
   // window where photos are on screen but the set is not yet whole.
-  const photosStreaming = photosQuery.data ? photosQuery.data.complete !== true : false;
+  const photosComplete = photosQuery.data?.complete === true;
+  const photosStreaming = photosQuery.data ? !photosComplete : false;
   const photosIncomplete = photosPartial || photosTruncated || photosStreaming;
 
   const [grouping, setGrouping] = useState<PhotoGrouping>("date");
@@ -258,6 +259,18 @@ export default function ProjectDetailScreen() {
   // Snapshot the photo list + index at open time so a background refetch or a
   // filter change can never desync the viewer onto a different photo.
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
+  /**
+   * The photo set each modal was opened over, captured at open.
+   *
+   * A report or a share link is a point-in-time selection of what the user was looking at, so a snapshot
+   * is the correct semantics — and it is also load-bearing now that the gallery streams. A background
+   * upload drain invalidates this query, and the refetch republishes page 1 first; with the live
+   * `filtered` array as their prop, an OPEN builder would have its set silently shrink to the newest 200
+   * mid-flow, and the user could generate a report omitting every page not yet re-fetched. Disabling the
+   * buttons that OPEN the modals does nothing for a modal already open.
+   */
+  const [reportPhotos, setReportPhotos] = useState<FieldPhoto[]>([]);
+  const [sharePhotos, setSharePhotos] = useState<FieldPhoto[]>([]);
   const [reportOpen, setReportOpen] = useState(false);
   // The run id the builder handed back when it stopped waiting on a generation — see the effect below.
   const [backgroundRunId, setBackgroundRunId] = useState<string | null>(null);
@@ -282,6 +295,24 @@ export default function ProjectDetailScreen() {
   function toggle(list: string[], value: string, set: (next: string[]) => void) {
     set(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
   }
+
+  /**
+   * An open viewer adopts the finished set once the walk completes, keeping the photo the user is on.
+   *
+   * The snapshot above exists so a refetch or filter change cannot yank the viewer onto a different
+   * photo, and that still holds — but with streaming it also meant opening a photo during page 1 left
+   * the viewer able to page through only the newest 200 for as long as it stayed open, with the rest of
+   * the project loaded behind it and unreachable. Keyed on completion rather than on `flattened`, since
+   * the viewer is full-screen and the filters cannot change underneath it; the length check is what
+   * stops this from re-entering.
+   */
+  useEffect(() => {
+    if (!viewer || !photosComplete) return;
+    if (viewer.photos.length === flattened.length) return;
+    const anchorId = viewer.photos[viewer.index]?.id;
+    const idx = anchorId ? flattened.findIndex((p) => p.id === anchorId) : -1;
+    setViewer({ photos: flattened, index: idx < 0 ? Math.min(viewer.index, flattened.length - 1) : idx });
+  }, [viewer, photosComplete, flattened]);
 
   function openPhoto(photo: FieldPhoto) {
     const idx = flattened.findIndex((p) => p.id === photo.id);
@@ -416,7 +447,7 @@ export default function ProjectDetailScreen() {
               // Gate on the FILTERED set the builder actually receives — otherwise
               // active filters that exclude every photo still enable Build and open
               // an empty builder (#15).
-              onPress={() => setReportOpen(true)}
+              onPress={() => { setReportPhotos(filtered); setReportOpen(true); }}
               disabled={filtered.length === 0 || photosIncomplete}
               style={{ flex: 1 }}
             />
@@ -431,7 +462,7 @@ export default function ProjectDetailScreen() {
             title="Share photos"
             variant="ghost"
             icon={<Ionicons name="share-outline" size={18} color={theme.color.brandRed} />}
-            onPress={() => setShareOpen(true)}
+            onPress={() => { setSharePhotos(filtered); setShareOpen(true); }}
           />
         ) : null}
 
@@ -793,7 +824,7 @@ export default function ProjectDetailScreen() {
         visible={reportOpen}
         onClose={() => setReportOpen(false)}
         projectId={dealId}
-        photos={filtered}
+        photos={reportPhotos}
         voiceEnabled={voiceEnabled}
         onGenerated={(report) => {
           setNotice({ message: `Report "${report.title}" generated.`, tone: "success" });
@@ -809,7 +840,7 @@ export default function ProjectDetailScreen() {
         visible={shareOpen}
         onClose={() => setShareOpen(false)}
         projectId={dealId}
-        photos={filtered}
+        photos={sharePhotos}
         onShared={(n) => setNotice({ message: `Share link created for ${n} photo${n === 1 ? "" : "s"} — expires in 7 days.`, tone: "success" })}
       />
     </SafeAreaView>
