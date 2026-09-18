@@ -97,6 +97,96 @@ function buildSourceRowIdentity(input: {
   return `extracted:${input.extractionId}`;
 }
 
+/**
+ * Whether this extraction still carries a priceable quantity, asked again immediately before the write.
+ *
+ * THE SNAPSHOT IS STALE BY CONSTRUCTION. `pendingExtractions` is read once at the top of the run and a
+ * generation can take a while; an estimator clearing a quantity in that window leaves the guard above
+ * looking at the OLD positive value. The worker then prices it and
+ * `persistPricingRecommendationBundle` sets the row `processed` unconditionally — overwriting the
+ * `needs_quantity` the edit had just written, and publishing a recommendation built on a number the
+ * estimator explicitly removed.
+ *
+ * Asked INSIDE the persistence transaction and `FOR UPDATE`, so the answer cannot go stale between this
+ * check and the write it guards. Returns false for absent, non-finite and nonpositive alike, which is
+ * the same definition of priceable the loop's own guard uses — and false when the row's STATUS has
+ * moved since the snapshot, which is how a reviewer's decision survives a run that is already in
+ * flight.
+ */
+/**
+ * Review outcomes that take an extraction OUT of pricing scope. A row that reached one of these after a
+ * run snapshotted it must not be re-marked `processed` by that run: the decision is the newer fact.
+ */
+const UNPRICEABLE_REVIEW_STATUSES = new Set(["rejected", "needs_quantity"]);
+
+/**
+ * Statuses that represent a decision already recorded about the row, so the quantityless-row claim
+ * must leave them alone rather than restamp them as `needs_quantity`.
+ *
+ * A superset of {@link UNPRICEABLE_REVIEW_STATUSES}, and deliberately not the same set: `approved` is
+ * priceable, so it must NOT make `stillPriceable` return false — but it is still somebody's decision,
+ * and migration 0215 states the policy for an approved row with no usable quantity, which is to leave
+ * the decision alone and surface it for remediation rather than silently reopen it.
+ */
+const REVIEW_DECIDED_STATUSES = new Set(["needs_quantity", "rejected", "approved"]);
+
+/**
+ * Statuses the two `unmatched` exits must leave alone, and it is a SUPERSET of
+ * {@link REVIEW_DECIDED_STATUSES} for a reason those exits do not share with the quantityless claim.
+ *
+ * The decided half is the same hole, in the same shape: the claim pins `status` to the SNAPSHOT's,
+ * which defends against a decision taken after the select and is no defence at all when the snapshot
+ * IS the decision. The candidate filter admits a measurement candidate on `extraction_type` ALONE, so
+ * a human's `rejected` arrives here as `extraction.status`, satisfies its own equality test, and is
+ * overwritten with `unmatched` — a committed review decision destroyed, and by a status that is
+ * outside the worker's `pending` candidate filter, so nothing revisits the row afterwards either.
+ *
+ * `unmatched` ITSELF is the extra member, and it is not a human decision — it is this run agreeing
+ * with the last one. The claim-before-event ordering is what makes the event idempotent, but only if
+ * the claim can fail: pinned to the snapshot status, a row ALREADY at `unmatched` matches its own pin
+ * on every subsequent run, so the claim wins again and the announcement is re-emitted. One duplicate
+ * `unmatched` event per generation run, forever, on a row whose state never changed. Skipping the
+ * write is what actually makes the second run a no-op.
+ */
+const UNMATCHED_CLAIM_PROTECTED_STATUSES = new Set([...REVIEW_DECIDED_STATUSES, "unmatched"]);
+
+async function stillPriceable(
+  db: any,
+  extractionId: string,
+  snapshotQuantity: unknown
+): Promise<boolean> {
+  const [row] = await db
+    .select({ quantity: estimateExtractions.quantity, status: estimateExtractions.status })
+    .from(estimateExtractions)
+    .where(eq(estimateExtractions.id, extractionId))
+    .limit(1)
+    .for("update");
+  if (!row) return false;
+
+  // AND A REVIEW DECISION TAKEN MID-RUN MUST SURVIVE. Checking only the quantity let one be silently
+  // undone: a reviewer REJECTING a positive-quantity extraction while the run is in flight changes
+  // `status`, not `quantity`, so this reread passed and `persistPricingRecommendationBundle` then wrote
+  // `status = 'processed'` unconditionally — erasing a committed rejection and publishing a
+  // recommendation for a row a human had just excluded.
+  //
+  // Stated as the states that EXCLUDE pricing, deliberately, rather than as "the status must equal the
+  // snapshot's". Equality is the stricter rule and the wrong one: a reviewer APPROVING a pending row
+  // mid-run also changes the status, and throwing away correct pricing for that is a regression, not a
+  // safeguard. What must not be overwritten is a decision that took the row OUT of scope.
+  if (UNPRICEABLE_REVIEW_STATUSES.has(String(row.status))) return false;
+
+  if (row.quantity === null || row.quantity === undefined) return false;
+  const value = Number(row.quantity);
+  if (!Number.isFinite(value) || value <= 0) return false;
+
+  // AND IT MUST BE THE SAME NUMBER THE RECOMMENDATION WAS BUILT FROM. Checking only that the row is
+  // still priceable let a positive-to-positive edit through: an estimator correcting 700 to 500 while
+  // the run was in flight got a recommendation priced on 700, persisted and marked `processed` — a
+  // wrong number that looks exactly like a right one, and harder to notice than a missing one.
+  const snapshot = Number(snapshotQuantity);
+  return Number.isFinite(snapshot) && snapshot === value;
+}
+
 export async function runEstimateGeneration(
   payload: { documentId?: string; dealId?: string; parseRunId?: string; rerunRequestId?: string },
   officeId: string | null
@@ -314,6 +404,160 @@ export async function runEstimateGeneration(
         : [];
 
     for (const extraction of eligibleExtractions) {
+      // A ROW WITH NO QUANTITY IS NOT PRICEABLE, and until now it was priced anyway.
+      //
+      // `Number(extraction.quantity ?? 1)` appeared three times below — once to compute the
+      // recommendation and twice to persist it — and each turned "nobody said how much" into "one of
+      // them". One unit of anything has a price, so the row emerged carrying a number no evidence
+      // supports, indistinguishable in the totals from a quantity somebody actually stated. The
+      // walkthrough ingress refuses null quantities at the door specifically to keep its rows away
+      // from this; OCR-parsed rows have always been able to reach it.
+      //
+      // Skipped BEFORE matching rather than defaulted after it: matching costs work whose answer
+      // cannot be used. `needs_quantity` is a new status value, which `status` being plain `text` with
+      // no enum and no CHECK makes a code-only change — see schema/tenant/estimate-extractions.ts.
+      //
+      // The row is NOT dropped and NOT failed. It is a real line item somebody has to put a number on,
+      // and it stays visible as one; what it must not do is carry a price nobody chose.
+      // NONPOSITIVE IS AS UNPRICEABLE AS ABSENT, and checking only for null left a bypass. A
+      // measurement candidate is re-selected by the candidate predicate regardless of status, so a
+      // PATCH writing "0" or a negative onto one produced a row this guard waved through — priced at
+      // zero and marked `processed`, which is the same stranding as the original defect reached by
+      // satisfying the check instead of evading it. `applyMarketRateAdjustment` already treats a
+      // quantity at or below zero as invalid; this is the guard agreeing with it.
+      const quantityValue = Number(extraction.quantity);
+      if (
+        extraction.quantity === null ||
+        extraction.quantity === undefined ||
+        !Number.isFinite(quantityValue) ||
+        quantityValue <= 0
+      ) {
+        // ALREADY DECIDED ⇒ say nothing further. The candidate filter is
+        // `status = 'pending' OR extraction_type = 'measurement_candidate'`, so a normal row drops out
+        // of the set the moment it is marked — but a MEASUREMENT CANDIDATE is re-selected on every run
+        // regardless of status. Without this, one unmeasured candidate emits a fresh `needs_quantity`
+        // event on every generation run for as long as it lacks a number, burying the review feed under
+        // repetitions of a fact already recorded. The row still skips pricing either way.
+        //
+        // `rejected` and `approved` are here for a sharper reason than noise: the claim below pins the
+        // status to the SNAPSHOT's, which defends against a decision made after the select but is no
+        // defence when the snapshot ITSELF is a decision. A measurement candidate is admitted on
+        // `extraction_type` alone, so a human's `rejected` arrives here as `extraction.status`, matches
+        // its own equality test, and gets overwritten with `needs_quantity` — a committed review
+        // decision destroyed, and a review event raised asking someone to supply a quantity for a row
+        // they had already thrown out. The positive-quantity path never had this hole because it goes
+        // through `stillPriceable`, whose UNPRICEABLE_REVIEW_STATUSES check refuses exactly this.
+        //
+        // Ordinary extractions are unaffected: their filter admits only `status = 'pending'`, so none
+        // of these three can be their snapshot status.
+        if (REVIEW_DECIDED_STATUSES.has(String(extraction.status))) continue;
+
+        // THE CLAIM IS THE CONDITIONAL UPDATE, and it comes FIRST.
+        //
+        // The read above is a fast path, not a guarantee: `eligibleExtractions` was selected earlier, so
+        // by now another run may have flagged this row and — the case that actually hurts — an estimator
+        // may have supplied the missing quantity. An unconditional `set({status:'needs_quantity'})` would
+        // stamp the flag onto a row that now HAS a number, and since the candidate query only re-selects
+        // non-measurement rows at `status = 'pending'`, that row would never be priced again. The lost
+        // update recreates, through a race, exactly the trap this flag is supposed to avoid.
+        //
+        // A single UPDATE ... WHERE takes a row lock and either matches or does not, so of two
+        // overlapping runs exactly one claims the row. Ordering the claim BEFORE the event is what makes
+        // the event idempotent without a transaction: the run that loses the claim writes nothing.
+        //
+        // CLAIMS ONLY IF NOTHING CHANGED SINCE THE READ, which is why the predicate pins the status to
+        // the one the snapshot saw rather than merely to "not already flagged". `status <> needs_quantity`
+        // matches `approved` and `rejected` too, so a reviewer who decided the row between the select and
+        // this update would have their decision overwritten with `needs_quantity` — and an event recorded
+        // claiming the row needs a number it may well now have. Pinning the observed status makes the
+        // claim lose that race instead of winning it wrongly, and it subsumes the not-already-flagged
+        // case: a row another run flagged no longer matches either.
+        //
+        // It also stays correct for measurement candidates, whose claimable status is whatever the
+        // candidate filter admitted rather than always `pending`.
+        // ATOMIC WITH ITS EVENT, because the claim is not retryable once it commits. If the insert
+        // fails after the row is flagged, the row is `needs_quantity` with no record of why — and a
+        // later run cannot repair it, since an ordinary extraction is excluded by the `status =
+        // 'pending'` candidate filter. The event is gone for good rather than merely late.
+        //
+        // Only the deal-wide path needs this. When `payload.documentId` is present the whole run is
+        // already inside the locked client's transaction (BEGIN/COMMIT around this loop), so the two
+        // statements commit or roll back together there without any help. This mirrors the same
+        // `!lockedClient && typeof tenantDb.transaction === "function"` test the persist path below uses.
+        const flagQuantitylessRow = async (db: any): Promise<void> => {
+          const claimed = await db
+            .update(estimateExtractions)
+            .set({ status: "needs_quantity" })
+            .where(
+              and(
+                eq(estimateExtractions.id, extraction.id),
+                // MATCHES EVERY UNPRICEABLE QUANTITY, not only a null one. The guard above rejects
+                // zero, negatives and non-finite values; a claim that recognised fewer of them let such a
+                // row ENTER the branch and then always lose the claim — no event, status left `pending`,
+                // skipped invisibly on every rerun and absent from the needs-quantity bucket too.
+                //
+                // NaN IS NAMED EXPLICITLY, and two earlier attempts here were wrong about why. Postgres
+                // orders numeric NaN ABOVE all finite values — it is not "false against everything" as an
+                // earlier comment claimed — so `NaN <= 0` is false AND `not (NaN > 0)` is false. Neither
+                // form claims it. Checked against a real database rather than reasoned about:
+                //   not (q > 0)                        -> {-5, 0}
+                //   q is null or q <= 0                -> {null, -5, 0}
+                //   q is null or q <= 0 or q = 'NaN'   -> {null, -5, 0, NaN}
+                sql`(${estimateExtractions.quantity} is null or ${estimateExtractions.quantity} <= 0 or ${estimateExtractions.quantity} = 'NaN'::numeric)`,
+                sql`${estimateExtractions.status} = ${extraction.status}`,
+                // AND IT MUST STILL BE THE ACTIVE ARTIFACT. The candidate query that produced
+                // `pendingExtractions` filters on this, but that read happened earlier: a newer parse
+                // completing in between flips `activeArtifact` to false
+                // (document-parse-orchestrator.ts) WITHOUT touching status or quantity, so every other
+                // condition in this claim still matches and the row is marked `needs_quantity` anyway.
+                //
+                // The result is an action request nobody can act on. `buildEstimatingWorkbenchState`
+                // hides a superseded extraction — it filters rows by active artifact — but returns
+                // review events UNFILTERED, so the estimator sees "supply a quantity" for a row that is
+                // not on their screen and has been replaced by one that is.
+                //
+                // Re-asserted in the claim rather than re-read beforehand, for the same reason the
+                // status is: this UPDATE is the only statement that takes the row lock, so it is the
+                // only place the answer is still true when it is used.
+                sql`${estimateExtractions.metadataJson}->>'activeArtifact' = 'true'`
+              )
+            )
+            .returning({ id: estimateExtractions.id });
+
+          if (claimed.length === 0) return;
+
+          await db.insert(estimateReviewEvents).values({
+            dealId: extraction.dealId,
+            projectId: extraction.projectId,
+            subjectType: "estimate_extraction",
+            subjectId: extraction.id,
+            eventType: "needs_quantity",
+            afterJson: { normalizedLabel: extraction.normalizedLabel },
+          });
+        };
+
+        if (!lockedClient && typeof tenantDb.transaction === "function") {
+          await tenantDb.transaction(async (tx: any) => {
+            // SET LOCAL FIRST, because this transaction is on a DIFFERENT CONNECTION.
+            //
+            // On the deal-wide path `tenantDb` wraps the shared pool, and the `SET search_path` above
+            // ran as one statement on whichever connection happened to serve it. Opening a transaction
+            // checks out a connection of its own, which carries the default search_path — so without
+            // this the claim and its event would address `public`, or another office's schema entirely
+            // while several tenants have jobs in flight. Wrapping these two statements for atomicity
+            // introduced that exposure; this closes it rather than trading one defect for another.
+            //
+            // LOCAL, so it reverts when the transaction ends and cannot leak the tenant onto a pooled
+            // connection that some later, unrelated statement borrows.
+            await tx.execute(sql.raw(`SET LOCAL search_path TO ${schemaName}, public`));
+            await flagQuantitylessRow(tx);
+          });
+        } else {
+          await flagQuantitylessRow(tenantDb);
+        }
+        continue;
+      }
+
       const matches = await rankExtractionMatches({
         extraction,
         catalogItems: catalogItems as any,
@@ -322,6 +566,40 @@ export async function runEstimateGeneration(
 
       const topMatch = matches[0];
       if (!topMatch) {
+        // CLAIM FIRST, ANNOUNCE SECOND, and pin the status to the snapshot's — the same shape the
+        // quantityless claim uses, for the same reason and one that bites harder here.
+        //
+        // Matching takes real time. An estimator clearing the quantity during it writes
+        // `needs_quantity`; this write used to be unconditional, so it stamped `unmatched` straight
+        // over that edit. The row is then stranded for good: `unmatched` is outside the worker's
+        // `pending` candidate filter, so no later run revisits it, AND `unmatched` is absent from
+        // the usable-quantity requeue CASE, so supplying the quantity does not bring it back either.
+        // Both exits from this room are closed by one lost update.
+        //
+        // `stillPriceable` guards the persistence path further down, but it is only reached when
+        // there IS a recommendation to persist — these two unmatched exits return before it.
+        //
+        // ALREADY DECIDED, OR ALREADY UNMATCHED ⇒ write nothing. The pin above is a defence against a
+        // decision made AFTER the select; it cannot defend against one the snapshot already carries.
+        // A measurement candidate is admitted on `extraction_type` alone, so a human's `rejected`
+        // reaches this line as `extraction.status`, matches its own pin, and is stamped `unmatched` —
+        // the identical hole the quantityless branch closes 150 lines above, on a path that reaches it
+        // with a perfectly good quantity. See UNMATCHED_CLAIM_PROTECTED_STATUSES for why `unmatched`
+        // is on the list too.
+        if (UNMATCHED_CLAIM_PROTECTED_STATUSES.has(String(extraction.status))) continue;
+
+        const claimed = await tenantDb
+          .update(estimateExtractions)
+          .set({ status: "unmatched" })
+          .where(
+            and(
+              eq(estimateExtractions.id, extraction.id),
+              sql`${estimateExtractions.status} = ${extraction.status}`
+            )
+          )
+          .returning({ id: estimateExtractions.id });
+        if (claimed.length === 0) continue;
+
         await tenantDb.insert(estimateReviewEvents).values({
           dealId: extraction.dealId,
           projectId: extraction.projectId,
@@ -330,10 +608,6 @@ export async function runEstimateGeneration(
           eventType: "unmatched",
           afterJson: { normalizedLabel: extraction.normalizedLabel },
         });
-        await tenantDb
-          .update(estimateExtractions)
-          .set({ status: "unmatched" })
-          .where(eq(estimateExtractions.id, extraction.id));
         continue;
       }
 
@@ -413,15 +687,27 @@ export async function runEstimateGeneration(
           dependencySupportCount: Number.isFinite(dependencySupportCount) ? dependencySupportCount : 0,
         })
       ) {
+        // Same pin as the no-match exit above, and the same skip in front of it: this one is reached
+        // later still, so it has had even longer for a reviewer's edit to land underneath it — and the
+        // pin is just as blind to a decision the snapshot already carried. An `inferred` row can be a
+        // measurement candidate too (`metadataJson.sourceType === 'inferred'` is set independently of
+        // `extractionType`), which is exactly the admission that makes a decided status reachable here.
+        if (UNMATCHED_CLAIM_PROTECTED_STATUSES.has(String(extraction.status))) continue;
+
         await tenantDb
           .update(estimateExtractions)
           .set({ status: "unmatched" })
-          .where(eq(estimateExtractions.id, extraction.id));
+          .where(
+            and(
+              eq(estimateExtractions.id, extraction.id),
+              sql`${estimateExtractions.status} = ${extraction.status}`
+            )
+          );
         continue;
       }
 
       const recommendation = buildPricingRecommendation({
-        quantity: Number(extraction.quantity ?? 1),
+        quantity: Number(extraction.quantity),
         catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
         historicalPrices: topMatch.historicalUnitPrices ?? [],
         vendorQuotePrice: topMatch.vendorQuotePrice ?? historicalSignals.vendorQuotes[0]?.unitPrice ?? null,
@@ -459,6 +745,18 @@ export async function runEstimateGeneration(
 
       if (!lockedClient && typeof tenantDb.transaction === "function") {
         await tenantDb.transaction(async (tx: any) => {
+          // SET LOCAL FIRST, for the same reason the claim transaction above does it — and this call
+          // site is OLDER than that one, so the exposure predates the quantity work rather than being
+          // introduced by it. On the deal-wide path `tenantDb` wraps the shared pool and the earlier
+          // `SET search_path` ran as one statement on whichever connection served it; a transaction
+          // checks out its own, carrying the default path. Every write in this bundle would then
+          // address `public`, or another office's schema while several tenants have jobs in flight.
+          //
+          // LOCAL, so it reverts at transaction end rather than leaking the tenant onto a pooled
+          // connection some later, unrelated statement borrows.
+          await tx.execute(sql.raw(`SET LOCAL search_path TO ${schemaName}, public`));
+          // Re-asked under the row lock: the quantity may have been cleared since the snapshot.
+          if (!(await stillPriceable(tx, extraction.id, extraction.quantity))) return;
           await persistPricingRecommendationBundle({
             tenantDb: tx,
             generationRunId,
@@ -467,7 +765,7 @@ export async function runEstimateGeneration(
               dealId: extraction.dealId,
               projectId: extraction.projectId,
               documentId: extraction.documentId ?? null,
-              quantity: Number(extraction.quantity ?? 1),
+              quantity: Number(extraction.quantity),
               unit: extraction.unit ?? null,
               sourceType,
               normalizedIntent,
@@ -489,6 +787,11 @@ export async function runEstimateGeneration(
           });
         });
       } else {
+        // The SAME re-check on the locked path. That path runs inside the locked client's own
+        // transaction, so the row lock holds until it commits exactly as it does above; skipping the
+        // check here would leave the document-scoped run — the common one — with the stale-quantity
+        // hole this closes.
+        if (!(await stillPriceable(tenantDb, extraction.id, extraction.quantity))) continue;
         await persistPricingRecommendationBundle({
           tenantDb: tenantDb as any,
           generationRunId,
@@ -497,7 +800,7 @@ export async function runEstimateGeneration(
             dealId: extraction.dealId,
             projectId: extraction.projectId,
             documentId: extraction.documentId ?? null,
-            quantity: Number(extraction.quantity ?? 1),
+            quantity: Number(extraction.quantity),
             unit: extraction.unit ?? null,
             sourceType,
             normalizedIntent,

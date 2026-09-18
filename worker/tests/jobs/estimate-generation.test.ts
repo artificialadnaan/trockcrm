@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { getTableName } from "drizzle-orm";
+import { estimateExtractions } from "@trock-crm/shared/schema";
 
 const drizzleMock = vi.fn();
 const poolQueryMock = vi.fn();
@@ -114,6 +118,124 @@ vi.mock("../../../server/dist/modules/estimating/draft-estimate-service.js", () 
 vi.mock("../../../server/src/modules/estimating/draft-estimate-service.js", () => ({
   cloneManualRowsForGenerationRun: cloneManualRowsForGenerationRunMock,
 }));
+
+/**
+ * A CLAIM STUB ANSWERED BY A REAL POSTGRES, because a stub that cannot express failure is not a test.
+ *
+ * Every conditional UPDATE in this job is a claim: `.set(...).where(<pin>)`, with the RETURNING count
+ * deciding whether the run announces anything. The previous stub answered `returning: []`
+ * UNCONDITIONALLY while its comment asserted "the pin does not match any more" — so it said "the claim
+ * lost" no matter what the WHERE contained. Deleting the status pin from the source left all 17 tests
+ * green: the suite could not tell a working pin from no pin at all.
+ *
+ * This runs the ACTUAL predicate the job builds. The drizzle condition object is rendered through the
+ * same `PgDialect` the driver uses, and the resulting SQL is executed against a PGlite table holding
+ * the row's REAL current state — the state an estimator's mid-run edit would have left. A claim whose
+ * pin matches updates a row and returns it; one whose pin does not match returns nothing, because
+ * Postgres said so. Sabotaging the predicate changes the answer.
+ *
+ * Column types are the shipping ones: `quantity numeric(14,3)` so `'NaN'::numeric` and `<= 0` order the
+ * way prod orders them (a JS mock would have got NaN backwards — Postgres sorts numeric NaN ABOVE every
+ * finite value), and `metadata_json jsonb` so `->>'activeArtifact'` is real JSON extraction. Only the
+ * columns the claims actually address are present; this is one table, not the estimating graph.
+ */
+async function createExtractionStore(
+  seedRows: Array<{
+    id: string;
+    status: string;
+    quantity?: string | null;
+    metadataJson?: Record<string, unknown>;
+  }>
+) {
+  const pg = new PGlite();
+  await pg.exec(`
+    CREATE TABLE estimate_extractions (
+      id uuid PRIMARY KEY,
+      status text NOT NULL,
+      quantity numeric(14, 3),
+      metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
+    );
+  `);
+  for (const row of seedRows) {
+    await pg.query(
+      "INSERT INTO estimate_extractions (id, status, quantity, metadata_json) VALUES ($1, $2, $3, $4)",
+      [row.id, row.status, row.quantity ?? null, JSON.stringify(row.metadataJson ?? {})]
+    );
+  }
+
+  const dialect = new PgDialect();
+  /** Every `.set(...)` the job ATTEMPTED, matched or not — "it never even tried" is its own assertion. */
+  const setCalls: Array<Record<string, unknown>> = [];
+
+  // ROUTED BY TABLE NAME. `tenantDb.update` is also how the job closes out its generation run, and
+  // that statement addresses `estimate_generation_runs` with columns this one-table store does not
+  // have. Anything that is not an extraction update gets an inert chain, so the store stays a claim
+  // harness rather than a half-implemented database.
+  //
+  // By NAME and not by identity: `vi.resetModules()` runs before every test here, so the job re-imports
+  // `@trock-crm/shared/schema` and its `estimateExtractions` is a DIFFERENT object from this file's.
+  // `getTableName` reads a `Symbol.for` key, which is global and survives the duplicate module.
+  const update = vi.fn((table: unknown) => {
+    if (getTableName(table as never) !== getTableName(estimateExtractions)) {
+      const inert = {
+        returning: async () => [],
+        then: (onFulfilled: any, onRejected: any) => Promise.resolve([]).then(onFulfilled, onRejected),
+      };
+
+      return { set: vi.fn(() => ({ where: () => inert })) };
+    }
+
+    return {
+      set: vi.fn((values: Record<string, unknown>) => {
+        setCalls.push(values);
+
+        return {
+          where: (condition: unknown) => {
+            const run = async () => {
+              const rendered = dialect.sqlToQuery(condition as never);
+              const columns = Object.keys(values);
+              const assignments = columns
+                .map(
+                  (key, index) =>
+                    `${(estimateExtractions as any)[key].name} = $${rendered.params.length + index + 1}`
+                )
+                .join(", ");
+              const { rows } = (await pg.query(
+                `UPDATE estimate_extractions SET ${assignments} WHERE ${rendered.sql} RETURNING id::text AS id`,
+                [...rendered.params, ...columns.map((key) => values[key])]
+              )) as { rows: Array<{ id: string }> };
+
+              return rows;
+            };
+
+            // `.returning(...)` on the two claims that read the row count back, and directly awaitable
+            // for the inferred-ineligible exit, which does not.
+            return {
+              returning: () => run(),
+              then: (onFulfilled: any, onRejected: any) => run().then(onFulfilled, onRejected),
+            };
+          },
+        };
+      }),
+    };
+  });
+
+  const statusOf = async (id: string): Promise<string | null> => {
+    const { rows } = (await pg.query("SELECT status FROM estimate_extractions WHERE id = $1", [id])) as {
+      rows: Array<{ status: string }>;
+    };
+
+    return rows[0]?.status ?? null;
+  };
+
+  return { update, setCalls, statusOf, close: () => pg.close() };
+}
+
+/** Real uuids, because the store's `id` column is the shipping `uuid` type rather than loose text. */
+const EXT_CLEARED = "00000000-0000-4000-8000-0000000000e1";
+const EXT_REJECTED_MEASUREMENT = "00000000-0000-4000-8000-0000000000e2";
+const EXT_ALREADY_UNMATCHED = "00000000-0000-4000-8000-0000000000e3";
+const EXT_REJECTED_INFERRED = "00000000-0000-4000-8000-0000000000e4";
 
 function readSqlText(query: any) {
   const chunks = query?.queryChunks ?? [];
@@ -333,7 +455,14 @@ describe("estimate generation job", () => {
             };
           }
 
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700", status: "pending" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -481,7 +610,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "1", status: "approved" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -549,6 +685,1244 @@ describe("estimate generation job", () => {
     expect(rankedExtractionIds).toEqual(["ext-normal", "ext-confirmed"]);
     expect(rankedExtractionIds).not.toContain("ext-unconfirmed");
     expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(2);
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
+  it("does NOT stamp `unmatched` over a quantity cleared while matching ran", async () => {
+    // Matching takes real time. An estimator clearing the quantity during it writes
+    // `needs_quantity`; the unmatched exit used to write unconditionally and stamped straight over
+    // that edit. The row is then stranded from BOTH directions: `unmatched` is outside the worker's
+    // `pending` candidate filter, so no later run revisits it, and `unmatched` is absent from the
+    // usable-quantity requeue CASE, so supplying the quantity does not bring it back either.
+    //
+    // `stillPriceable` does not help — it guards the persistence path, which this exit returns
+    // before reaching. The claim is pinned to the snapshot status instead, so it LOSES.
+    //
+    // ANSWERED BY A REAL POSTGRES (see createExtractionStore): the row in the store carries the
+    // estimator's `needs_quantity`, the snapshot the job holds says `pending`, and it is the DATABASE
+    // that decides the pinned claim matches nothing. Remove the pin from the source and this test
+    // fails, which is the whole reason it is written this way.
+    const events: any[] = [];
+    const store = await createExtractionStore([
+      { id: EXT_CLEARED, status: "needs_quantity", quantity: null, metadataJson: { activeArtifact: true } },
+    ]);
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: EXT_CLEARED,
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "700",
+        unit: "lf",
+        normalizedLabel: "Base trim",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null, status: "needs_quantity" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: store.update,
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    // Nothing matched, which is what routes this row to the unmatched exit.
+    rankExtractionMatchesMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // The claim lost, so the row keeps the estimator's edit — and no event claims otherwise.
+    expect(await store.statusOf(EXT_CLEARED)).toBe("needs_quantity");
+    expect(events.filter((event) => event.eventType === "unmatched")).toHaveLength(0);
+    // It DID try — this exit is guarded by the pin losing, not by an early skip, so a test that only
+    // checked "nothing was attempted" would be describing the wrong mechanism.
+    expect(store.setCalls).toContainEqual({ status: "unmatched" });
+    await store.close();
+  });
+
+  it("does NOT stamp `unmatched` over a review decision the SNAPSHOT itself carried", async () => {
+    // THE SECOND DESTRUCTIVE CASE, and it is the same hole the quantityless branch closes 150 lines
+    // earlier — reached by a row with a perfectly good quantity.
+    //
+    // The claim pins `status` to the snapshot's, which defends against a decision taken AFTER the
+    // select. A measurement candidate is admitted by the candidate filter on `extraction_type` ALONE,
+    // regardless of status, so a human's `rejected` arrives as `extraction.status`, satisfies its own
+    // equality test, and the claim WINS: the rejection is overwritten with `unmatched`. Worse than the
+    // needs_quantity version, because `unmatched` is outside the worker's `pending` candidate filter,
+    // so nothing revisits the row afterwards.
+    //
+    // The store answers from a real database, so the fix cannot be faked: if the guard is removed the
+    // predicate genuinely matches and the stored status genuinely becomes `unmatched`.
+    const events: any[] = [];
+    const store = await createExtractionStore([
+      {
+        id: EXT_REJECTED_MEASUREMENT,
+        status: "rejected",
+        quantity: "25.000",
+        metadataJson: { activeArtifact: true, measurementConfirmationState: "approved" },
+      },
+    ]);
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: EXT_REJECTED_MEASUREMENT,
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "rejected",
+        quantity: "25.000",
+        unit: "lf",
+        normalizedLabel: "Base trim at the east wall",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "25.000", status: "rejected" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: store.update,
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    // Nothing matched, which is what routes this row to the unmatched exit.
+    rankExtractionMatchesMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // The human's decision survives, in the database.
+    expect(await store.statusOf(EXT_REJECTED_MEASUREMENT)).toBe("rejected");
+    // And nothing was even attempted — the pin cannot save a row whose snapshot IS the decision, so
+    // the write has to be skipped rather than merely lost.
+    expect(store.setCalls).toHaveLength(0);
+    expect(events.filter((event) => event.eventType === "unmatched")).toHaveLength(0);
+    await store.close();
+  });
+
+  it("does NOT re-announce `unmatched` on a row it already marked unmatched", async () => {
+    // THE FOREVER LOOP. Claim-before-event is what makes the announcement idempotent, and that holds
+    // only while the claim can LOSE. Pinned to the snapshot status, a row already sitting at
+    // `unmatched` matches its own pin on the next run, and the next: the claim wins every time and a
+    // duplicate `unmatched` event is written on every generation run, forever, for a row whose state
+    // never changed. Measurement candidates are re-selected regardless of status, so they are the ones
+    // that actually loop.
+    const events: any[] = [];
+    const store = await createExtractionStore([
+      {
+        id: EXT_ALREADY_UNMATCHED,
+        status: "unmatched",
+        quantity: "25.000",
+        metadataJson: { activeArtifact: true, measurementConfirmationState: "approved" },
+      },
+    ]);
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: EXT_ALREADY_UNMATCHED,
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "unmatched",
+        quantity: "25.000",
+        unit: "lf",
+        normalizedLabel: "Base trim at the east wall",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "25.000", status: "unmatched" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: store.update,
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // A second run over an unchanged row is a no-op: no write, no repeat announcement.
+    expect(store.setCalls).toHaveLength(0);
+    expect(events.filter((event) => event.eventType === "unmatched")).toHaveLength(0);
+    expect(await store.statusOf(EXT_ALREADY_UNMATCHED)).toBe("unmatched");
+    await store.close();
+  });
+
+  it("does NOT stamp `unmatched` over a decision at the INFERRED-INELIGIBLE exit either", async () => {
+    // THE SECOND UNMATCHED EXIT, reached later still — after matching, after option-set construction —
+    // so it has had even longer for the row to be decided, and it carries the identical pin with the
+    // identical blindness. `sourceType` is `inferred` when `metadataJson.sourceType` says so, which is
+    // set independently of `extractionType`: a measurement candidate can be inferred, which is exactly
+    // the admission that lets a `rejected` snapshot reach this line.
+    //
+    // This exit writes NO event, so the only observable is the row itself — which is why the store is
+    // a database and not a spy.
+    const store = await createExtractionStore([
+      {
+        id: EXT_REJECTED_INFERRED,
+        status: "rejected",
+        quantity: "25.000",
+        metadataJson: { activeArtifact: true, measurementConfirmationState: "approved", sourceType: "inferred" },
+      },
+    ]);
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: EXT_REJECTED_INFERRED,
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "rejected",
+        quantity: "25.000",
+        unit: "lf",
+        normalizedLabel: "Base trim at the east wall",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+          sourceType: "inferred",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "25.000", status: "rejected" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+      })),
+      update: store.update,
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    // A match EXISTS, so the no-match exit is not the one under test here.
+    rankExtractionMatchesMock.mockResolvedValue([
+      {
+        catalogItemId: "catalog-1",
+        matchScore: 90,
+        reasons: {},
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    // No document evidence and no support, so the inferred row is ineligible — the exit under test.
+    // RESTORED IN A `finally`, because `vi.clearAllMocks()` in beforeEach clears CALLS but not
+    // IMPLEMENTATIONS: an override left behind here would silently rewrite every later suite in the
+    // file, and a failure in this test would be the thing that leaves it behind.
+    const inferredEligibility = isInferredRecommendationRowEligibleMock.getMockImplementation();
+    isInferredRecommendationRowEligibleMock.mockImplementation(() => false);
+
+    try {
+      const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+      await runEstimateGeneration(
+        { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+        "office-1"
+      );
+
+      expect(isInferredRecommendationRowEligibleMock).toHaveBeenCalledTimes(1);
+      expect(await store.statusOf(EXT_REJECTED_INFERRED)).toBe("rejected");
+      expect(store.setCalls).toHaveLength(0);
+    } finally {
+      isInferredRecommendationRowEligibleMock.mockImplementation(inferredEligibility!);
+      await store.close();
+    }
+  });
+
+  it("does NOT restamp a measurement candidate a human REJECTED", async () => {
+    // THE DESTRUCTIVE CASE. The claim below pins the status to the SNAPSHOT's, which defends against a
+    // decision made after the select — but is no defence when the snapshot IS the decision. A
+    // measurement candidate is admitted on `extraction_type` alone, regardless of status, so a human's
+    // `rejected` arrives as `extraction.status`, satisfies its own equality test, and gets overwritten
+    // with `needs_quantity`: a committed review decision destroyed, plus an event asking someone to
+    // supply a quantity for a row they had already thrown out.
+    //
+    // The positive-quantity path never had this hole, because it goes through `stillPriceable`, whose
+    // UNPRICEABLE_REVIEW_STATUSES check refuses exactly this.
+    const statusWrites: any[] = [];
+    const events: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-rejected-candidate",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "rejected",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Measure the run of base",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null, status: "rejected" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // No second announcement, and no write of any kind against the row.
+    expect(events.filter((event) => event.eventType === "needs_quantity")).toHaveLength(0);
+    expect(statusWrites.some((write: any) => write?.status === "needs_quantity")).toBe(false);
+    // And it never reached matching, which is the point of skipping before that work.
+    expect(rankExtractionMatchesMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT restamp a measurement candidate a human APPROVED", async () => {
+    // Same shape as the rejected case, and the same policy migration 0215 states for an approved row
+    // with no usable quantity: leave the decision alone and surface it, rather than silently reopening
+    // it. `approved` is deliberately NOT in UNPRICEABLE_REVIEW_STATUSES — it is priceable, so it must
+    // not make `stillPriceable` return false — which is why the decided-status set is a separate one.
+    const statusWrites: any[] = [];
+    const events: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-approved-candidate",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "approved",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Measure the run of base",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null, status: "approved" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // No second announcement, and no write of any kind against the row.
+    expect(events.filter((event) => event.eventType === "needs_quantity")).toHaveLength(0);
+    expect(statusWrites.some((write: any) => write?.status === "needs_quantity")).toBe(false);
+    // And it never reached matching, which is the point of skipping before that work.
+    expect(rankExtractionMatchesMock).not.toHaveBeenCalled();
+  });
+
+  it("SKIPS an already-flagged measurement candidate without touching it", async () => {
+    // The early `status === "needs_quantity"` guard, which had no test that actually reached it — the
+    // second-pass case used `pending` rows and forced the claim to lose, exercising the claim instead.
+    //
+    // Measurement candidates are re-selected by the candidate predicate REGARDLESS of status, so this
+    // row comes back on every run for as long as it lacks a number. Without the guard it would re-claim
+    // and re-announce itself each time, burying the review feed under a fact already recorded.
+    const statusWrites: any[] = [];
+    const events: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-flagged",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "needs_quantity",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Measure the run of base",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null, status: "needs_quantity" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // No second announcement, and no write of any kind against the row.
+    expect(events.filter((event) => event.eventType === "needs_quantity")).toHaveLength(0);
+    expect(statusWrites.some((write: any) => write?.status === "needs_quantity")).toBe(false);
+    // And it never reached matching, which is the point of skipping before that work.
+    expect(rankExtractionMatchesMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT persist when the quantity CHANGED since the snapshot, even to another valid one", async () => {
+    // Checking only that the row is still priceable let a positive-to-positive edit through: an
+    // estimator correcting 700 to 500 mid-run got a recommendation priced on 700, persisted and marked
+    // `processed`. A wrong number that looks exactly like a right one, and far harder to notice than a
+    // missing one.
+    const statusWrites: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-drift",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "700",
+        unit: "SF",
+        normalizedLabel: "Install laminate",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          // Corrected to 500 while the run was in flight — still perfectly priceable.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "500", status: "pending" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: {},
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 700,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 7000,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(1);
+    expect(statusWrites.some((write) => write?.status === "processed")).toBe(false);
+  });
+
+  it("does NOT persist over a REJECTION taken since the snapshot", async () => {
+    // A reviewer rejecting a positive-quantity extraction mid-run changes `status`, NOT `quantity`, so
+    // a reread that looked only at the number passed — and the persist then wrote `processed`
+    // unconditionally, erasing a committed rejection and publishing a recommendation for a row a human
+    // had just excluded. The quantity here is UNCHANGED on purpose: that is what makes this distinct
+    // from the drift case above, and what the quantity-only check could never catch.
+    const statusWrites: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-rejected",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "700",
+        unit: "SF",
+        normalizedLabel: "Install laminate",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          // Corrected to 500 while the run was in flight — still perfectly priceable.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700", status: "rejected" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: {},
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 700,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 7000,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(1);
+    expect(statusWrites.some((write) => write?.status === "processed")).toBe(false);
+  });
+
+  it("does NOT persist a recommendation for a quantity cleared since the snapshot", async () => {
+    // `pendingExtractions` is read once at the top of a run, and a generation takes a while. An
+    // estimator clearing a quantity in that window leaves the loop's guard looking at the OLD positive
+    // value — so the worker prices it and `persistPricingRecommendationBundle` sets the row
+    // `processed`, overwriting the `needs_quantity` the edit just wrote and publishing a number built
+    // on a quantity somebody explicitly removed. The re-read happens under the row lock, immediately
+    // before the write it guards.
+    const statusWrites: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-cleared",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        // What the snapshot saw.
+        quantity: "700",
+        unit: "SF",
+        normalizedLabel: "Install laminate",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          // The re-read: by now the estimator has cleared it.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null, status: "needs_quantity" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: {},
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 700,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 7000,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // It matched and priced from the snapshot — that work is wasted, not wrong. What must NOT happen is
+    // the write: `persistPricingRecommendationBundle` marks the extraction `processed`, which would
+    // overwrite the `needs_quantity` the estimator's edit just set and leave a recommendation standing
+    // on a quantity they removed.
+    expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(1);
+    expect(statusWrites.some((write) => write?.status === "processed")).toBe(false);
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
+  it("REFUSES to price a row with no quantity, and marks it needs_quantity instead of billing one unit", async () => {
+    // THE DEFECT. `Number(extraction.quantity ?? 1)` stood at three sites — the recommendation and both
+    // persist branches — and turned "nobody said how much" into "one of them". One unit of anything has
+    // a price, so the row emerged carrying a number no evidence supports, indistinguishable in the
+    // totals from a quantity somebody actually stated.
+    //
+    // BOTH INPUTS ARE COVERED because the coercion sites are shared. `ext-ocr-null` is an OCR-parsed row,
+    // which could always reach the default; `ext-walk-null` is a walkthrough row, which the ingress
+    // refuses at the door today and will stop refusing once null quantities are accepted. Testing only
+    // the walkthrough path would leave the parsed path silently inheriting this change.
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-priced",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "700",
+        unit: "SF",
+        normalizedLabel: "Install laminate flooring",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+      {
+        id: "ext-ocr-null",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Paint one wall",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+      {
+        id: "ext-walk-null",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Paint wall red",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          sourceType: "walkthrough",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })),
+      })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const statusUpdates: unknown[] = [];
+    const reviewEvents: any[] = [];
+    // The claim matches by default; a test flips this to [] to make the row already-claimed.
+    let claimedRows: Array<{ id: string }> = [{ id: "claimed" }];
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700", status: "pending" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) reviewEvents.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusUpdates.push(values);
+          // Serves both callers: the `unmatched` path awaits `where(...)` directly, the needs_quantity
+          // claim calls `.returning()` on it. `claimedRows` lets a test make the claim lose.
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn().mockResolvedValue(claimedRows),
+            })),
+          };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: { matched: extraction.id },
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 700,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 7000,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // Skipped BEFORE matching: the answer could not be used, so the work is not done.
+    const rankedExtractionIds = rankExtractionMatchesMock.mock.calls.map(
+      ([input]: any) => input.extraction.id
+    );
+    expect(rankedExtractionIds).toEqual(["ext-priced"]);
+
+    // Priced exactly once, and never with the invented 1.
+    expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(1);
+    const pricedQuantities = buildPricingRecommendationMock.mock.calls.map(([input]: any) => input.quantity);
+    expect(pricedQuantities).toEqual([700]);
+    expect(pricedQuantities).not.toContain(1);
+
+    // Both unpriceable rows are flagged rather than dropped — somebody has to put a number on them.
+    expect(statusUpdates).toContainEqual({ status: "needs_quantity" });
+    expect(statusUpdates.filter((u: any) => u.status === "needs_quantity")).toHaveLength(2);
+
+    // WHICH rows, not merely how many. A count alone passes if the same row is flagged twice and the
+    // other is missed entirely, which is precisely the confusion this branch could produce.
+    const flagged = reviewEvents
+      .filter((event) => event.eventType === "needs_quantity")
+      .map((event) => event.subjectId)
+      .sort();
+    expect(flagged).toEqual(["ext-ocr-null", "ext-walk-null"]);
+
+    // A SECOND RUN OVER THE SAME STATE RECORDS NOTHING FURTHER. A measurement candidate is re-selected
+    // regardless of status, so without both the read guard and the conditional claim, one unmeasured row
+    // would emit a fresh event on every generation run for as long as it lacked a number. Here the claim
+    // is made to lose — which is what a row someone else already flagged looks like.
+    claimedRows = [];
+    const eventsAfterFirstRun = reviewEvents.length;
+    tenantSelectCallCount = 0;
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+    poolConnectMock.mockResolvedValue({
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any);
+
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    expect(reviewEvents).toHaveLength(eventsAfterFirstRun);
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 
@@ -631,7 +2005,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "1", status: "approved" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -746,7 +2127,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700", status: "pending" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -837,7 +2225,14 @@ describe("estimate generation job", () => {
             };
           }
 
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700", status: "pending" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -928,7 +2323,14 @@ describe("estimate generation job", () => {
             };
           }
 
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700", status: "pending" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -1034,7 +2436,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "2" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn((table: any) => ({
@@ -1290,7 +2699,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "2" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
