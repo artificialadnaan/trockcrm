@@ -227,7 +227,21 @@ function sameAuditValue(from: unknown, to: unknown): boolean {
   const ts = String(to).trim();
   // Numeric only when BOTH sides are plainly numeric — never coerce "" or a date string into 0.
   const numeric = /^-?\d+(\.\d+)?$/;
-  if (numeric.test(fs) && numeric.test(ts)) return Number(fs) === Number(ts);
+  if (numeric.test(fs) && numeric.test(ts)) {
+    // COMPARE AT THE PRECISION THE COLUMN ACTUALLY STORES, or the comparison can never settle.
+    //
+    // The mirrored money columns are numeric(14,2), so Postgres ROUNDS on write, while the export sends
+    // full float precision. Comparing the two as written makes every run a change — and the next write
+    // rounds again, so it recurs forever. Measured live after the first pass of this fix: the heartbeat
+    // audits dropped 7,476 -> 7 per two hours while the mirror stayed at ~7,500, every surviving row a
+    // pair like 666.67 vs 666.6666666666666, or 36066.11 vs 36066.113517716316.
+    //
+    // Rounding the incoming side to the stored scale asks the honest question: will this write change
+    // what is in the column? If not, there is nothing to audit. Scale is read from the STORED value,
+    // which is the side Postgres has already normalized.
+    const storedDecimals = fs.includes(".") ? fs.split(".")[1]!.length : 0;
+    return Number(fs) === Number(Number(ts).toFixed(storedDecimals));
+  }
 
   return fs === ts;
 }

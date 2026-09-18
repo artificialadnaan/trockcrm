@@ -23,8 +23,31 @@ describe("sameAuditValue — compares like the database, not like a string", () 
   it("treats numerically equal renderings as unchanged", () => {
     // The exact pair that appeared on every deal, every run.
     expect(sameAuditValue("0.00", "0")).toBe(true);
-    expect(sameAuditValue("737.70", "737.7049180327868")).toBe(false);
+    // REVISED once the rounding was understood: this pair is NOT a change. The column is numeric(14,2),
+    // so 737.7049… stores as 737.70 — the write alters nothing. The original assertion here called it a
+    // change, which is exactly the churn that kept the mirror at ~7,500 rows per two hours.
+    expect(sameAuditValue("737.70", "737.7049180327868")).toBe(true);
     expect(sameAuditValue("39.0000", "39")).toBe(true);
+  });
+
+  it("compares at the STORED precision — a numeric(14,2) column rounds, so full float precision is not a change", () => {
+    // Measured live after the first pass of this fix: the heartbeat audits fell 7,476 -> 7 per two hours
+    // while the mirror stayed at ~7,500, and every surviving row was a pair like these. The column
+    // rounds on write and the export sends full precision, so comparing them as written makes every run
+    // a change — and the next write rounds again, forever.
+    expect(sameAuditValue("666.67", "666.6666666666666")).toBe(true);
+    expect(sameAuditValue("5833.33", "5833.333333333333")).toBe(true);
+    expect(sameAuditValue("36066.11", "36066.113517716316")).toBe(true);
+    expect(sameAuditValue("583.33", "583.3333333333334")).toBe(true);
+  });
+
+  it("still catches a change that survives rounding to the stored scale", () => {
+    // The rounding must not swallow real money movement — 737.70 -> 737.71 is a cent, and a cent counts.
+    expect(sameAuditValue("737.70", "737.71")).toBe(false);
+    expect(sameAuditValue("666.67", "666.68")).toBe(false);
+    // A stored integer scale rounds the incoming to an integer, and a half-unit move still differs.
+    expect(sameAuditValue("100", "100.4")).toBe(true);
+    expect(sameAuditValue("100", "100.6")).toBe(false);
   });
 
   it("treats the same instant as unchanged across Date and ISO string", () => {
