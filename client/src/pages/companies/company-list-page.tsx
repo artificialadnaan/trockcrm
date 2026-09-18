@@ -56,7 +56,7 @@ const ACTIVE_CARD_CLASS = "ring-2 ring-brand-red";
 const COMPANY_CARD_LABELS: Record<string, string> = {
   pipeline: "Active pipeline",
   stale: "Untouched 30d+",
-  "no-opportunity": "No opportunity yet",
+  "no-opportunity": "No opportunity yet (90d)",
 };
 
 function numeric(value: string | number | null | undefined) {
@@ -297,7 +297,7 @@ export function CompanyListPage() {
           eyebrow="No opportunity yet"
           value={String(totals.noOpportunity)}
           badge="Unstarted"
-          caption="No lead or deal"
+          caption="New, no lead or deal"
           tone="red"
           accent="red"
           to={buildCardTo("no-opportunity")}

@@ -31,6 +31,9 @@ const CO = {
   // co5 has NO deal but DOES have a lead — it must NOT count as "no opportunity". Without it the
   // predicate could check only `deals` and still pass, which is the half-right version of this filter.
   leadOnly: U("co5"),
+  // co6 is unworked but OLD. The 2026-05-07 HubSpot import left 547 accounts like this; unbounded, the
+  // card counted 559 of 782 and was noise. The bound is what makes it a signal, so it is pinned here.
+  staleImport: U("co6"),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -61,6 +64,10 @@ beforeAll(async () => {
       ('${CO.onHoldFresh}','Co Four','co-four','client', NOW() - interval '3 days'),
       ('${CO.leadOnly}','Co Five','co-five','client', NOW() - interval '2 days');
 
+    -- An old import row: unworked, but created long before the 90-day window.
+    INSERT INTO companies (id, name, slug, category, last_activity_at, created_at) VALUES
+      ('${CO.staleImport}','Co Six','co-six','client', NULL, NOW() - interval '200 days');
+
     -- co5: a lead and no deal. The account HAS been worked, so it is not "no opportunity".
     INSERT INTO leads (id, company_id) VALUES ('${U("ld1")}','${CO.leadOnly}');
 
@@ -83,9 +90,9 @@ const isStaleRow = (lastActivityAt: string | null | undefined) =>
 describe("companies drilldown — card === drilled-list (reconcile by construction)", () => {
   it("Active-pipeline $ and Untouched count reconcile with the lists they drill to", async () => {
     const all = await listCompanies(tdb, {});
-    expect(all.total).toBe(5);
+    expect(all.total).toBe(6);
     expect(all.pipelineTotal).toBe(80000); // 50k + 30k (+0 on-hold +0 no-deal)
-    expect(all.staleCount).toBe(2); // co2 (null) + co3 (60d)
+    expect(all.staleCount).toBe(3); // co2 (null) + co3 (60d) + co6 (null)
 
     const pipelineDrill = await listCompanies(tdb, { hasActivePipeline: true });
     expect(pipelineDrill.total).toBe(2); // co1, co2 (co4's only deal is on-hold → 0)
@@ -114,31 +121,36 @@ describe("companies drilldown — card === drilled-list (reconcile by constructi
     expect(drill.companies.some((c: { id: string }) => c.id === CO.leadOnly)).toBe(false);
     // …and an on-hold deal still counts as worked, unlike the pipeline card which values it at 0.
     expect(drill.companies.some((c: { id: string }) => c.id === CO.onHoldFresh)).toBe(false);
+
+    // THE 90-DAY BOUND. co6 is unworked but 200 days old — exactly the import rows that made the
+    // unbounded card read 559 of 782 accounts. Without the bound this expectation flips and the card
+    // goes back to being noise.
+    expect(drill.companies.some((c: { id: string }) => c.id === CO.staleImport)).toBe(false);
   });
 
   it("aggregates are FULL-SET, not page-only (the bug): they hold even when limit=1 returns one row", async () => {
     const page = await listCompanies(tdb, { limit: 1 });
     expect(page.companies.length).toBe(1);
-    expect(page.total).toBe(5);
+    expect(page.total).toBe(6);
     expect(page.pipelineTotal).toBe(80000); // NOT just the one visible company's pipeline
-    expect(page.staleCount).toBe(2);
+    expect(page.staleCount).toBe(3);
   });
 
   it("card aggregates stay STABLE across drills (over the base filters, not the active card)", async () => {
     // ?card= REPLACES the active card, so each card must summarize the BASE cohort or switching cards
     // would mismatch. With Stale active the list narrows to 2, but every card still reflects the base.
     const staleActive = await listCompanies(tdb, { stale: true });
-    expect(staleActive.total).toBe(2); // drilled list (co2, co3)
-    expect(staleActive.baseTotal).toBe(5);
-    expect(staleActive.staleCount).toBe(2);
+    expect(staleActive.total).toBe(3); // drilled list (co2, co3, co6)
+    expect(staleActive.baseTotal).toBe(6);
+    expect(staleActive.staleCount).toBe(3);
     // Active-pipeline $ stays the BASE total (80k), not stale-companies' pipeline — clicking it opens all
     // pipeline companies, which sum to exactly 80k.
     expect(staleActive.pipelineTotal).toBe(80000);
 
     const pipelineActive = await listCompanies(tdb, { hasActivePipeline: true });
     expect(pipelineActive.total).toBe(2); // drilled list (co1, co2)
-    expect(pipelineActive.baseTotal).toBe(5);
+    expect(pipelineActive.baseTotal).toBe(6);
     expect(pipelineActive.pipelineTotal).toBe(80000);
-    expect(pipelineActive.staleCount).toBe(2); // stable, not stale-among-pipeline (1)
+    expect(pipelineActive.staleCount).toBe(3); // stable base count (co2, co3, co6), not stale-among-pipeline (1)
   });
 });
