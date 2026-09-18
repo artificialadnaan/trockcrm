@@ -498,6 +498,37 @@ describe("syncHubRoutes", () => {
     expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
   });
 
+  // The human override must be enforced in the UPDATE itself, not only by buildBidBoardMirrorUpdate's
+  // `awardedLocked`, which reads a snapshot taken BEFORE this write. Without the CASE this sequence
+  // silently destroys a correction: the webhook reads awarded_amount_overridden = false, a leader's edit
+  // commits the corrected amount AND sets the flag true, and this UPDATE writes the webhook's stale
+  // value anyway while leaving the flag true — so every later mirror preserves the WRONG number forever.
+  it("never overwrites a human-overridden awarded amount, enforced against the locked row", async () => {
+    const { client, queries } = createClient({ existingDealIdByProcoreBid: "deal-1" });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const response = await request(createApp())
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find(
+      (entry) => entry.sql.includes("UPDATE office_dallas.deals") && entry.sql.includes("awarded_amount")
+    );
+    expect(updateQuery).toBeTruthy();
+    // The predicate lives in the write, against the locked row — not in a pre-read JS snapshot.
+    expect(updateQuery!.sql.replace(/\s+/g, " ")).toContain(
+      "awarded_amount = CASE WHEN awarded_amount_overridden THEN awarded_amount ELSE COALESCE("
+    );
+  });
+
   it("preserves the persisted workflow route on mirrored updates even when payload differs", async () => {
     const { client, queries } = createClient({
       workflowRoute: "normal",

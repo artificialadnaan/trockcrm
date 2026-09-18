@@ -181,3 +181,29 @@ describe("PATCH /api/deals/:id/awarded-amount", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("PATCH /api/deals/:id/awarded-amount — decimal precision", () => {
+  beforeEach(() => {
+    dealsServiceMocks.setDealAwardedAmount.mockReset();
+    dealsServiceMocks.setDealAwardedAmount.mockResolvedValue({ id: "deal-1", awardedAmount: "100.00" });
+  });
+
+  // numeric(14,2) and JS disagree about the third decimal: (2.675).toFixed(2) is "2.67" in binary
+  // floating point while Postgres stores 2.68. Refuse the input rather than silently pick a side.
+  it.each(["100.005", "2.675", "100.001", 100.005, 2.675])("rejects more than two decimals: %j", async (value) => {
+    const res = await request(createApp(createUser("admin")))
+      .patch("/api/deals/deal-1/awarded-amount")
+      .send({ awardedAmount: value });
+
+    expect(res.status).toBe(422);
+    expect(dealsServiceMocks.setDealAwardedAmount).not.toHaveBeenCalled();
+  });
+
+  it.each(["100", "100.0", "100.01", 100, 100.01])("still accepts two decimals or fewer: %j", async (value) => {
+    const res = await request(createApp(createUser("admin")))
+      .patch("/api/deals/deal-1/awarded-amount")
+      .send({ awardedAmount: value });
+
+    expect(res.status).toBe(200);
+  });
+});

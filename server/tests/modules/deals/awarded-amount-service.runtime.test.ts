@@ -49,14 +49,23 @@ describe("setDealAwardedAmount", () => {
     expect(row.awarded_amount_overridden).toBe(true);
   });
 
-  it("writes a timeline row so a money correction is traceable", async () => {
+  // Deliberately writes NO deal_history row: DealHistoryTab renders stageHistory, and the only
+  // application reader of deal_history filters for description changes — so a row here would look like
+  // an audit trail while being unreachable. The audit_log entry is the real trail.
+  it("does not write an unreachable deal_history row", async () => {
     await setDealAwardedAmount(tdb, DEAL, "439120.68", USER);
-    const r: any = await tdb.execute(sql`SELECT field_name, old_value, new_value FROM deal_history WHERE deal_id = ${DEAL}`);
+    const r: any = await tdb.execute(sql`SELECT count(*)::int AS n FROM deal_history WHERE deal_id = ${DEAL}`);
+
+    expect((r.rows ?? r)[0].n).toBe(0);
+  });
+
+  it("records the change in the audit log, which IS surfaced", async () => {
+    await setDealAwardedAmount(tdb, DEAL, "439120.68", USER);
+    const r: any = await tdb.execute(sql`SELECT changes FROM audit_log WHERE record_id = ${DEAL}`);
     const rows = r.rows ?? r;
 
     expect(rows).toHaveLength(1);
-    expect(rows[0].field_name).toBe("awarded_amount");
-    expect(rows[0].new_value).toBe("439120.68");
+    expect(JSON.stringify(rows[0].changes)).toContain("awardedAmount");
   });
 
   // THE TRAP: awarded_amount_overridden permanently freezes Bid Board sync for this column. A write that
@@ -68,8 +77,8 @@ describe("setDealAwardedAmount", () => {
       const row = await readDeal(DEAL);
 
       expect(row.awarded_amount_overridden).toBe(false);
-      const r: any = await tdb.execute(sql`SELECT count(*)::int AS n FROM deal_history WHERE deal_id = ${DEAL}`);
-      expect((r.rows ?? r)[0].n).toBe(0);
+      const a: any = await tdb.execute(sql`SELECT count(*)::int AS n FROM audit_log WHERE record_id = ${DEAL}`);
+      expect((a.rows ?? a)[0].n).toBe(0);
     }
   );
 

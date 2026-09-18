@@ -2763,9 +2763,15 @@ router.patch(
         // Number([1]) === 1 are both finite, so a boolean or array would clear the range check and then
         // `String(raw)` would send "true" to a numeric(14,2) column — a 500 rather than the documented
         // 422. Only a JSON number or a numeric string is a money value.
+        // At most TWO decimals. The column is numeric(14,2), and JS cannot be trusted to agree with
+        // Postgres about the third: (2.675).toFixed(2) is "2.67" in binary floating point while
+        // Postgres stores 2.68. Rather than reimplement decimal rounding, refuse the input that would
+        // make the two disagree — the user sees an explicit 422 instead of a silent half-cent.
         const isNumericString =
-          typeof raw === "string" && /^-?\d+(?:\.\d+)?$/.test(raw.trim());
-        if (typeof raw !== "number" && !isNumericString) {
+          typeof raw === "string" && /^-?\d+(?:\.\d{1,2})?$/.test(raw.trim());
+        const isTwoDecimalNumber =
+          typeof raw === "number" && Number.isFinite(raw) && /^-?\d+(?:\.\d{1,2})?$/.test(String(raw));
+        if (!isTwoDecimalNumber && !isNumericString) {
           throw new AppError(422, "awardedAmount must be a number >= 0, or null to clear it");
         }
         const n = Number(raw);

@@ -5294,16 +5294,10 @@ export async function setDealAwardedAmount(
       });
     }
 
-    // Timeline row — the deal-history feed does not read audit_log, and an awarded-amount correction is
-    // exactly the kind of money change someone will later ask to trace.
-    await tx.insert(dealHistory).values({
-      dealId,
-      fieldName: "awarded_amount",
-      oldValue: oldValue,
-      newValue: newValue,
-      changedBy: userId,
-      source: "deal_edit",
-    });
+    // NO deal_history row. It would be invisible: DealHistoryTab renders `stageHistory` (from
+    // deal_stage_history), and the only application reader of deal_history filters for description
+    // changes. Writing one would look like an audit trail while being unreachable. The audit log above
+    // carries the full context (field changes, entity, role, IP) and does surface in All Activity.
 
     return updated;
   });
