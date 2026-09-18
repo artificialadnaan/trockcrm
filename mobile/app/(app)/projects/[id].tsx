@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { AppState, FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
@@ -13,6 +13,7 @@ import {
   decodeChangeOrderParam,
   encodeChangeOrderParam,
   filterPhotos,
+  photoMonthOptionsSince,
   formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
@@ -69,6 +70,24 @@ const AWAIT_REPORT_POLL_MS = 10_000;
  */
 const AWAIT_REPORT_WINDOW_MS = 30 * 60_000;
 
+/**
+ * "YYYY-MM@Zone" for a date — the identity of the calendar the month options are built from.
+ *
+ * The zone is part of it because the month list depends on it twice over: which month is "now", and
+ * which month the project's oldest photo falls in. Resuming in a different zone inside the same month
+ * changes the second without changing the first, so a month-only key would leave the list cached
+ * against the previous zone and could omit the destination zone's oldest month.
+ */
+function calendarKeyOf(d: Date): string {
+  let zone = "";
+  try {
+    zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    zone = "";
+  }
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}@${zone}`;
+}
+
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
@@ -100,7 +119,114 @@ export default function ProjectDetailScreen() {
   const officeSlug = toStr(params.officeSlug);
   const offOffice = projectOfficeId ? isProjectOffOffice({ officeId: projectOfficeId }, writableOfficeId) : false;
 
-  const photosQuery = useProjectPhotos(dealId);
+  // Server-side date window. Distinct from the category/tag/uploader filters below, which run
+  // client-side over what was loaded: those cannot reach a photo the page ceiling dropped, and this can.
+  const [windowFrom, setWindowFrom] = useState("");
+  const [windowTo, setWindowTo] = useState("");
+  /**
+   * Today's month, refreshed when the app returns to the foreground.
+   *
+   * A `new Date()` frozen in a memo means a screen left open across midnight on the 1st never offers the
+   * new month — and on a project over the ceiling that is not cosmetic: All stays truncated, so report
+   * and share stay disabled, and the crew cannot isolate the very photos they just took without killing
+   * the app. Keyed by month string so the memo below re-runs on rollover and on nothing else.
+   */
+  const [calendarKey, setCalendarKey] = useState(() => calendarKeyOf(new Date()));
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const sync = () =>
+      setCalendarKey((prev) => {
+        const now = calendarKeyOf(new Date());
+        return prev === now ? prev : now;
+      });
+
+    /**
+     * A timer to the next local midnight, rescheduled each time it fires.
+     *
+     * AppState alone is not enough: an app left in the foreground across midnight on the 1st never
+     * transitions, so the new month would stay absent indefinitely — and on a truncated project that
+     * means All is unusable, report and share stay disabled, and the crew cannot isolate the photos
+     * they are taking right now. Always under 24h, so well inside setTimeout's range.
+     */
+    const scheduleMidnight = () => {
+      const now = new Date();
+      const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5);
+      timer = setTimeout(() => {
+        sync();
+        scheduleMidnight();
+      }, Math.max(1_000, nextMidnight.getTime() - now.getTime()));
+    };
+
+    sync();
+    scheduleMidnight();
+    // Foreground does two things, and the second is easy to miss: a suspended app's timer does not fire
+    // on schedule, AND a resume may be in a different zone — where the pending timeout is still aimed at
+    // the PREVIOUS zone's midnight. Travelling east, the destination's month boundary can pass hours
+    // before it fires, so the timer is cancelled and re-aimed rather than left running.
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next !== "active") return;
+      sync();
+      if (timer) clearTimeout(timer);
+      scheduleMidnight();
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      sub.remove();
+    };
+  }, []);
+
+  // The zone the gallery's own bounds are resolved in. Derived from calendarKey so it moves with the
+  // same resync the month list uses, rather than being read independently at some other moment.
+  const galleryTimeZone = useMemo(() => calendarKey.split("@")[1] || undefined, [calendarKey]);
+
+  // ONE window object carries the dates AND the zone, so the query, its cache key, and the viewer's
+  // re-scan cannot disagree about which days the selected month covers.
+  const photoWindow = useMemo(
+    () => ({ from: windowFrom, to: windowTo, timeZone: galleryTimeZone }),
+    [windowFrom, windowTo, galleryTimeZone],
+  );
+  /**
+   * Switch months and the facet filters reset.
+   *
+   * They are computed from the loaded set, so a category/tag/uploader that does not occur in the new
+   * month loses its chip while the selection stays active — an empty gallery with no visible control to
+   * clear, and no way back except leaving the project. Resetting is the honest behaviour: the window
+   * changed which photos exist, so a filter over the previous window's values no longer means anything.
+   */
+  const selectWindow = useCallback((from: string, to: string) => {
+    setWindowFrom(from);
+    setWindowTo(to);
+    setCategories([]);
+    setTags([]);
+    setUploaderIds([]);
+  }, []);
+  const photosQuery = useProjectPhotos(dealId, photoWindow);
+  /**
+   * The project's earliest photo, taken ONLY from an unwindowed load.
+   *
+   * A windowed response reports the earliest photo *in that window*, so trusting it would shrink the
+   * month list to the current selection and strand every older month. But the unwindowed answer is
+   * authoritative every time it arrives, not just the first: importing a historical camera-roll photo
+   * moves the boundary earlier, and a remember-once rule would leave that month permanently absent from
+   * the selector — unreachable on exactly the projects past the ceiling where the selector is the only
+   * way to reach anything.
+   */
+  const [projectOldestAt, setProjectOldestAt] = useState<string | null>(null);
+  const reportedOldestAt = photosQuery.data?.oldestAt ?? null;
+  const reportedWindowed = photosQuery.data?.windowed ?? false;
+  useEffect(() => {
+    if (reportedWindowed || !reportedOldestAt) return;
+    setProjectOldestAt((prev) => (prev === reportedOldestAt ? prev : reportedOldestAt));
+  }, [reportedWindowed, reportedOldestAt]);
+
+
+  // Rebuilt only when the project's span or the calendar month changes — not per render, which would
+  // rebuild the list and its chip keys on every unrelated state change.
+  const monthOptions = useMemo(
+    () => photoMonthOptionsSince(new Date(), projectOldestAt),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectOldestAt, calendarKey],
+  );
   const reportsQuery = useProjectReports(dealId);
   const scorecardsQuery = useProjectScorecards(dealId);
   // Only offer voice dictation when transcription is actually configured (OPENAI_API_KEY present);
@@ -117,6 +243,9 @@ export default function ProjectDetailScreen() {
   // Some photo pages failed to load — the gallery still shows what loaded, but report/share are blocked so
   // we never generate from an incomplete set.
   const photosPartial = photosQuery.data?.partial ?? false;
+  // Over the page ceiling: structurally incomplete, and no amount of refreshing changes that.
+  const photosTruncated = photosQuery.data?.truncated ?? false;
+  const photosIncomplete = photosPartial || photosTruncated;
 
   const [grouping, setGrouping] = useState<PhotoGrouping>("date");
   const [categories, setCategories] = useState<string[]>([]);
@@ -285,7 +414,7 @@ export default function ProjectDetailScreen() {
               // active filters that exclude every photo still enable Build and open
               // an empty builder (#15).
               onPress={() => setReportOpen(true)}
-              disabled={filtered.length === 0 || photosPartial}
+              disabled={filtered.length === 0 || photosIncomplete}
               style={{ flex: 1 }}
             />
           </View>
@@ -294,7 +423,7 @@ export default function ProjectDetailScreen() {
         {/* Share works cross-office: the endpoint resolves the deal's owning office and mints only a
             public photo token (no deal mutation), so — unlike capture/report generation — it stays
             available even on view-only off-office projects. */}
-        {filtered.length > 0 && !photosPartial ? (
+        {filtered.length > 0 && !photosIncomplete ? (
           <Button
             title="Share photos"
             variant="ghost"
@@ -307,6 +436,22 @@ export default function ProjectDetailScreen() {
           <Banner
             message="Some photos couldn’t be loaded, so report and share are paused to avoid omitting any. Pull to refresh to try again."
             tone="error"
+          />
+        ) : null}
+
+        {/* A DIFFERENT failure from the one above, and it needs different words. Over the ceiling the
+            gallery holds the most recent photos and the oldest are not loaded at all — so "pull to
+            refresh to try again" is advice that can never work, and the other filters run over what was
+            loaded so they cannot reach them either. A date range is the only remedy, so the banner names
+            it. Report and share stay paused for the same reason as above: silently omitting photos from
+            a client's report is worse than refusing to build one. */}
+        {photosTruncated ? (
+          <Banner
+            message={
+              `This project has more photos than can be shown at once, so only the most recent ${allPhotos.length} are loaded. ` +
+              "Set a date range under Filters to see older photos and to build a report."
+            }
+            tone="info"
           />
         ) : null}
 
@@ -460,8 +605,12 @@ export default function ProjectDetailScreen() {
           )}
         </View>
 
-        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
-        {allPhotos.length > 0 ? (
+        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13).
+            EXCEPT when a month is selected: the window is what made the set empty, so gating the panel
+            on the result would remove the only control that can undo it, stranding the user on an empty
+            gallery with no way back to All short of leaving the project and re-entering. A control must
+            not be hidden by the state it is there to change. */}
+        {allPhotos.length > 0 || windowFrom || windowTo ? (
           <View style={{ gap: theme.space.sm }}>
             <View style={styles.rowBetween}>
               <SectionLabel>Group by</SectionLabel>
@@ -477,6 +626,43 @@ export default function ProjectDetailScreen() {
 
           {showFilters ? (
             <View style={{ gap: theme.space.md, marginTop: theme.space.sm }}>
+              {/* FIRST, because it is the only filter that changes which photos the server returns. The
+                  others below narrow what is already loaded, so on a project over the page ceiling they
+                  cannot reach an older photo and this can. */}
+              <View style={{ gap: theme.space.xs }}>
+                <SectionLabel>Month</SectionLabel>
+                {/* FlatList, not a ScrollView of mapped chips: the list spans every month back to the
+                    project's first photo, so on a long-running job it must not render all of them to
+                    show the first few. Lazy rendering is what lets the month range be unbounded, which
+                    is what keeps the oldest photos reachable. */}
+                <FlatList
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  data={monthOptions}
+                  keyExtractor={(m) => m.key}
+                  contentContainerStyle={styles.chipRow}
+                  ListHeaderComponent={
+                    <Chip
+                      label="All"
+                      selected={!windowFrom && !windowTo}
+                      onPress={() => selectWindow("", "")}
+                    />
+                  }
+                  renderItem={({ item: m }) => {
+                    const active = windowFrom === m.from && windowTo === m.to;
+                    return (
+                      <Chip
+                        label={m.label}
+                        selected={active}
+                        // Toggle: tapping the selected month clears back to All, so the control can
+                        // always be undone without hunting for the All chip.
+                        onPress={() => selectWindow(active ? "" : m.from, active ? "" : m.to)}
+                      />
+                    );
+                  }}
+                />
+              </View>
+
               {availableCategories.length > 0 ? (
                 <View style={{ gap: theme.space.xs }}>
                   <SectionLabel>Category</SectionLabel>
@@ -578,7 +764,15 @@ export default function ProjectDetailScreen() {
       />
 
       {viewer !== null ? (
-        <PhotoViewerModal photos={viewer.photos} initialIndex={viewer.index} visible projectDealId={dealId} onClose={() => setViewer(null)} />
+        <PhotoViewerModal
+          photos={viewer.photos}
+          initialIndex={viewer.index}
+          visible
+          projectDealId={dealId}
+          photoWindow={photoWindow}
+          photoTimeZone={galleryTimeZone}
+          onClose={() => setViewer(null)}
+        />
       ) : null}
 
       <ReportBuilder

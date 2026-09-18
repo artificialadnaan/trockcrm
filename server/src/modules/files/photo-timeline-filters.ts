@@ -11,6 +11,18 @@ export interface DealPhotoTimelineFilters {
   uploaderIds?: string[];
   from?: string;
   to?: string;
+  /**
+   * IANA zone the `from`/`to` DAY bounds are expressed in. Absent = the database session zone, which in
+   * production is UTC — the pre-existing behaviour, kept so every current caller is unaffected.
+   *
+   * It has to be said explicitly by whoever picked the days, because a bare date is not an instant.
+   * `taken_at`/`created_at` are timestamptz and the session is Etc/UTC, so `'2026-09-01'::date` means
+   * 2026-09-01T00:00Z — which in Dallas is Aug 31 at 19:00. A client that computed "September" from its
+   * own calendar and sent 09-01..09-30 therefore asked for Aug 31 19:00 → Sep 30 19:00 local: a month
+   * report containing the end of August and missing the last evening of September. Crews shoot until
+   * dusk, so that final evening is real work, and neither end of the error is visible in the result.
+   */
+  timeZone?: string;
   includeDeleted?: boolean;
   // Whitelist of photo ids — when set, the timeline returns ONLY these photos (used by subset
   // public-share tokens). Empty/undefined = no whitelist (all photos in scope).
@@ -32,6 +44,7 @@ export function describeDealPhotoTimelineFilters(filters: DealPhotoTimelineFilte
   if (tags.length > 0) keys.push("tags");
   if (uploaderIds.length > 0) keys.push("uploaded_by");
   if (filters.from || filters.to) keys.push("taken_at", "created_at");
+  if (filters.timeZone && (filters.from || filters.to)) keys.push("time_zone");
   if (normalizeList(filters.photoIds).length > 0) keys.push("photo_ids");
 
   return keys;
@@ -166,11 +179,18 @@ export async function buildDealPhotoTimelineConditions(
     )`);
   }
 
+  // With a zone, compare the timestamp AS SEEN IN THAT ZONE against the bare day bounds; without one,
+  // keep the historical session-zone comparison exactly as it was. `AT TIME ZONE` on a timestamptz
+  // yields a plain timestamp in that zone, so both sides are then the same kind of thing.
+  const bucketedAt = filters.timeZone
+    ? sql`(COALESCE(${files.takenAt}, ${files.createdAt}) AT TIME ZONE ${filters.timeZone})`
+    : sql`COALESCE(${files.takenAt}, ${files.createdAt})`;
+
   if (filters.from) {
-    conditions.push(sql`COALESCE(${files.takenAt}, ${files.createdAt}) >= ${filters.from}::date`);
+    conditions.push(sql`${bucketedAt} >= ${filters.from}::date`);
   }
   if (filters.to) {
-    conditions.push(sql`COALESCE(${files.takenAt}, ${files.createdAt}) < (${filters.to}::date + INTERVAL '1 day')`);
+    conditions.push(sql`${bucketedAt} < (${filters.to}::date + INTERVAL '1 day')`);
   }
 
   return and(...conditions)!;

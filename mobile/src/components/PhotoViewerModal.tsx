@@ -51,6 +51,15 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
 // refresh an expired URL, even though the gallery loads up to 50 pages. The scan still stops the instant it
 // finds the photo, or when it passes the reported totalPages — so a small deal pays only one page.
 const REFRESH_PER_PAGE = 200;
+
+/** Device IANA zone, matching what useProjectPhotos sends so a re-scan buckets days identically. */
+function deviceTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
 const REFRESH_MAX_PAGES = 50;
 
 /**
@@ -87,6 +96,8 @@ export function PhotoViewerModal({
   visible,
   onClose,
   projectDealId,
+  photoWindow,
+  photoTimeZone,
 }: {
   photos: FieldPhoto[];
   initialIndex: number;
@@ -95,6 +106,26 @@ export function PhotoViewerModal({
   /** The deal id of the project being VIEWED. Used for cache invalidation because a source-lead photo's own
    *  dealId can be null while it still appears in this project's gallery. */
   projectDealId?: string;
+  /**
+   * The gallery's server-side date window, if one is selected — so the URL re-scan searches the SAME
+   * result set the photo came from.
+   *
+   * Without it the scan walks the unwindowed timeline and stops at the same page ceiling the window
+   * existed to get past, so a photo reached by picking a month could never re-mint its URL once the
+   * opening presign expired: retry and Save would fail permanently, on exactly the old photos this
+   * feature was built to make reachable.
+   */
+  photoWindow?: { from?: string; to?: string };
+  /**
+   * The zone the gallery's bounds were resolved in — passed rather than re-resolved here.
+   *
+   * The snapshot this modal is showing was selected under the gallery's zone. Re-resolving at refresh
+   * time reinterprets the SAME bare month bounds in whatever zone the device is in now, so a device
+   * that moves between zones while the viewer is open (Dallas to Atlanta is one hour, and both are
+   * offices here) can re-scan a window that no longer contains the photo it is trying to refresh —
+   * leaving retry and Save permanently unable to re-mint a boundary photo's URL.
+   */
+  photoTimeZone?: string;
 }) {
   const { width, height } = useWindowDimensions();
   const { fetcher } = useAuth();
@@ -217,7 +248,14 @@ export function PhotoViewerModal({
       // looks at one project.
       if (!scanner.current) {
         scanner.current = createUrlScanner({
-          fetchPage: (page) => getProjectPhotos(fetcher, dealId, { page, perPage: REFRESH_PER_PAGE }),
+          fetchPage: (page) =>
+            getProjectPhotos(fetcher, dealId, {
+              page,
+              perPage: REFRESH_PER_PAGE,
+              from: photoWindow?.from || undefined,
+              to: photoWindow?.to || undefined,
+              timeZone: photoTimeZone ?? deviceTimeZone(),
+            }),
           maxPages: REFRESH_MAX_PAGES,
         });
       }

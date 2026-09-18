@@ -198,8 +198,122 @@ describe("PhotoViewerModal expired-URL refresh", () => {
     });
 
     expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(1, "https://r2.example/full-STALE.jpg");
-    expect(mockGetProjectPhotos).toHaveBeenCalledWith(expect.anything(), "d1", { page: 1, perPage: 200 });
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(
+      expect.anything(),
+      "d1",
+      expect.objectContaining({ page: 1, perPage: 200 }),
+    );
     expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
+  });
+
+  /**
+   * The re-scan must search the SAME result set the photo came from.
+   *
+   * On a project past the gallery's page ceiling the only way to reach an old photo is a month window;
+   * if the re-scan then walks the UNWINDOWED timeline it stops at that same ceiling and can never find
+   * the photo again. Retry and Save would fail permanently — on exactly the old photos the window exists
+   * to make reachable.
+   */
+  it("re-scans inside the gallery's selected month, not the unwindowed timeline", async () => {
+    mockSavePhotoToDevice
+      .mockResolvedValueOnce("failed")
+      .mockResolvedValueOnce("saved");
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        photoWindow={{ from: "2026-06-01", to: "2026-06-30" }}
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(
+      expect.anything(),
+      "d1",
+      expect.objectContaining({ from: "2026-06-01", to: "2026-06-30" }),
+    );
+    // And the zone travels with the bounds, or the server would bucket those days in UTC and the
+    // re-scan could miss a photo at either edge of the month.
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(
+      expect.anything(),
+      "d1",
+      expect.objectContaining({ timeZone: expect.any(String) }),
+    );
+    expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
+  });
+
+  /**
+   * The zone must come from the GALLERY, not be re-resolved here. The snapshot on screen was selected
+   * under the gallery's zone; re-resolving reinterprets the same bare month bounds in whatever zone the
+   * device is in NOW, so a move between zones with the viewer open (Dallas to Atlanta is an hour, and
+   * both are offices here) can re-scan a window that no longer holds the photo being refreshed.
+   */
+  it("re-scans using the zone the gallery used, not the device's current one", async () => {
+    mockSavePhotoToDevice.mockResolvedValueOnce("failed").mockResolvedValueOnce("saved");
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        photoWindow={{ from: "2026-06-01", to: "2026-06-30" }}
+        photoTimeZone="Pacific/Auckland"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(
+      expect.anything(),
+      "d1",
+      // Deliberately a zone this runner is NOT in. Asserting the machine's own zone would pass whether
+      // the prop is used or re-resolved locally — which it did: with the prop ignored, the test stayed
+      // green because deviceTimeZone() returns the same America/Chicago the prop carried.
+      expect.objectContaining({ timeZone: "Pacific/Auckland" }),
+    );
+    expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
+  });
+
+  it("sends no window when the gallery has none selected", async () => {
+    mockSavePhotoToDevice.mockResolvedValueOnce("failed").mockResolvedValueOnce("saved");
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+
+    const params = mockGetProjectPhotos.mock.calls[0][2] as { from?: string; to?: string };
+    expect(params.from).toBeUndefined();
+    expect(params.to).toBeUndefined();
   });
 
   it("does NOT retry when the save succeeds on the first (unexpired) URL", async () => {
@@ -270,7 +384,11 @@ describe("PhotoViewerModal expired-URL refresh", () => {
 
     // It scanned all 7 pages (would have stopped at 5 under the old cap and never found the photo).
     expect(mockGetProjectPhotos).toHaveBeenCalledTimes(7);
-    expect(mockGetProjectPhotos).toHaveBeenLastCalledWith(expect.anything(), "d1", { page: 7, perPage: 200 });
+    expect(mockGetProjectPhotos).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "d1",
+      expect.objectContaining({ page: 7, perPage: 200 }),
+    );
     expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
   });
 
@@ -329,7 +447,11 @@ describe("PhotoViewerModal full-res load failure", () => {
       fireEvent.press(getByTestId("zoomable:https://r2.example/full-STALE.jpg"));
     });
 
-    expect(mockGetProjectPhotos).toHaveBeenCalledWith(expect.anything(), "d1", { page: 1, perPage: 200 });
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(
+      expect.anything(),
+      "d1",
+      expect.objectContaining({ page: 1, perPage: 200 }),
+    );
     // The pager now renders the fresh link, so the image gets a real second chance.
     expect(queryByTestId("zoomable:https://r2.example/full-FRESH.jpg")).not.toBeNull();
     expect(queryByTestId("zoomable:https://r2.example/full-STALE.jpg")).toBeNull();

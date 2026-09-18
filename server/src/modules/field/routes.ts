@@ -157,6 +157,32 @@ function parseOptionalClientUploadId(value: unknown): string | undefined {
 }
 
 /**
+ * The IANA zone a client's from/to DAY bounds are expressed in.
+ *
+ * Validated here rather than trusted, because the value reaches Postgres as the right-hand side of
+ * `AT TIME ZONE`. It is parameterised, so this is not an injection guard — it is a 400-instead-of-500
+ * guard: Postgres raises `invalid_parameter_value` for an unknown zone, which would otherwise surface
+ * to a crew as a failed gallery load with nothing actionable in it.
+ *
+ * `Intl.supportedValuesOf` is the authority where available (Node 18+), since it knows the same zone
+ * database Postgres does far better than a regex would. The shape check is the fallback and also bounds
+ * the length before anything is sent.
+ */
+function parseOptionalTimeZone(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || value.length > 64 || !/^[A-Za-z0-9_+\-\/]+$/.test(value)) {
+    throw new AppError(400, "timeZone must be a valid IANA time zone name.");
+  }
+  try {
+    // Throws RangeError for a name the runtime does not know.
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+  } catch {
+    throw new AppError(400, "timeZone must be a valid IANA time zone name.");
+  }
+  return value;
+}
+
+/**
  * Device-reported count of captures still queued behind this upload. Telemetry ONLY — it is written to
  * the photo audit event's metadata and read by nobody at request time.
  *
@@ -1405,6 +1431,7 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
           uploaderIds,
           from: req.query.from as string | undefined,
           to: req.query.to as string | undefined,
+          timeZone: parseOptionalTimeZone(req.query.timeZone),
           includeDeleted: false,
         }, { page, perPage, withTotal }),
       "Project not found",
