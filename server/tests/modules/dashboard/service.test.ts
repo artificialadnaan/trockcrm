@@ -1771,5 +1771,39 @@ describe("Dashboard Service", () => {
       expect(auditQueryText).toContain("left join public.users u on u.id =");
       expect(auditQueryText).not.toContain("actor_name");
     });
+
+    it("bounds the 24h audit count with a WHERE, never an aggregate filter over the whole table", async () => {
+      // THE 500 THIS FIXES. The count was `count(*) filter (where al.created_at >= ...)` selected
+      // `from audit_log al` with no `where` on that scan, so reporting ONE DAY required walking EVERY
+      // audit row — a cost that grows with total history instead of with the reported window.
+      // `office_dallas.audit_log` reached 22.7M rows / 18 GB (Atlanta: 588) and the admin dashboard
+      // began 500ing in Dallas alone. Measured: 673,520 cost before, 1,707 after, on the same
+      // `audit_time_idx` — which a filter simply cannot use.
+      //
+      // Asserted on the SQL text because the regression is the SHAPE of the query: both forms return
+      // the identical number, so no assertion on the result can tell them apart.
+      const { getAdminDashboardSummary } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ pending_count: "1", oldest_minutes: "5" }],
+        [{ open_count: "2", oldest_minutes: "10" }],
+        [{ total_count: "3", primary_cluster_label: "handoff" }],
+        [{ open_count: "4", oldest_minutes: "15" }],
+        [{ change_count_24h: "6", last_actor_label: "Taylor Admin" }],
+        [{ conflict_count: "0" }],
+      ]);
+
+      const result = await getAdminDashboardSummary(tenantDb, "office-1");
+      expect(result.audit.changeCount24h).toBe(6);
+
+      const auditQueryText = extractSqlText(tenantDb.execute.mock.calls[4][0])
+        .toLowerCase()
+        .replace(/\s+/g, " ");
+
+      // The window is a WHERE the created_at index can serve.
+      expect(auditQueryText).toContain("where created_at >= now() - interval '24 hours'");
+      // And the unbounded forms are gone: no aggregate filter, and no bare outer scan of the table.
+      expect(auditQueryText).not.toContain("filter (where");
+      expect(auditQueryText).not.toMatch(/from audit_log al\b(?! atest)/);
+    });
   });
 });
