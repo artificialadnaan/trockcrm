@@ -527,3 +527,27 @@ describe("RFP client email — Codex review findings on PR #1145", () => {
     expect(body.deal.clientPhone).toBe("999");
   });
 });
+
+describe("RFP client email — Codex round 2", () => {
+  const build = (clientEmail: unknown) =>
+    buildNormalizedRfpRequestBody({
+      deal: { id: "d", name: "D", projectType: "service", clientEmail },
+      sourceEventId: "crm:e1",
+    }).deal.clientEmail;
+
+  // Dots may only SEPARATE segments. A character-class local part accepted all of these, and standard
+  // validators reject them — so forwarding one reproduces the 422 this sanitizer exists to prevent.
+  it.each([".casey@example.com", "casey.@example.com", "casey..jones@example.com", "casey@example..com"])(
+    "rejects malformed dot placement: %j",
+    (input) => {
+      expect(build(input)).toBeNull();
+    }
+  );
+
+  it.each(["casey.jones@example.com", "casey@mail.example.co.uk", "o'brien+rfp@example.com"])(
+    "still accepts a legitimate address: %j",
+    (input) => {
+      expect(build(input)).toBe(input);
+    }
+  );
+});

@@ -259,7 +259,12 @@ function cleanEmail(value: unknown): string | null {
   // `a@b.com?subject=RFP` — `?` and `=` are neither `@` nor whitespace — which would have forwarded an
   // invalid mailbox and 422'd the RFP, the exact failure this exists to prevent. Anything not clearing
   // this bar is omitted rather than sent as a guess.
-  const looksLikeEmail = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(text);
+  // Dots may only SEPARATE segments, on both sides of the @. A character-class local part accepted
+  // `.casey@`, `casey.@` and `casey..jones@`, which standard validators reject — so forwarding one
+  // reproduces the same 422 this exists to prevent. Segment-and-separator spelling makes a leading,
+  // trailing or doubled dot unmatchable rather than relying on extra lookarounds.
+  const looksLikeEmail =
+    /^[A-Za-z0-9_%+'-]+(?:\.[A-Za-z0-9_%+'-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(text);
   return looksLikeEmail ? text : null;
 }
 
