@@ -45,6 +45,8 @@ const dismissResolvedTerminalDealTasks = (mod as any).dismissResolvedTerminalDea
 ) => Promise<number>;
 const TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES = (mod as any)
   .TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES as readonly string[];
+const DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES = (mod as any)
+  .DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES as readonly string[];
 
 const SCHEMA = "office_test";
 const OFFICE_ID = "00000000-0000-4000-8000-000000000fff";
@@ -263,9 +265,13 @@ describe("the is_overdue flag", () => {
 describe("dismissResolvedTerminalDealTasks", () => {
   const ALL = [
     // [id, origin_rule, dedupe_key, status, deal, expectation]
+    // DEAL_WON is stage 'won' (terminal, Won family); DEAL_LOST is 'lost' (terminal, DEAD).
     [U("a001"), "daily_close_date_follow_up", "k1", "pending", DEAL_WON, "dismissed"],
     [U("a002"), "daily_close_date_follow_up", "k2", "pending", DEAL_LOST, "dismissed"],
-    [U("a003"), "inbound_email_reply_needed", "k3", "pending", DEAL_WON, "dismissed"],
+    // inbound_email_reply_needed sweeps only on a DEAD deal. On a WON one the client is still owed a
+    // reply, so this must survive -- the case Codex, and both pre-PR reviewers, flagged.
+    [U("a003"), "inbound_email_reply_needed", "k3", "pending", DEAL_LOST, "dismissed"],
+    [U("a007"), "inbound_email_reply_needed", "k12", "pending", DEAL_WON, "pending"],
     [U("a004"), "ai_disconnect_admin_task", "k4", "waiting_on", DEAL_WON, "dismissed"],
     [U("a005"), "cold_lead_warming", "k5", "scheduled", DEAL_LOST, "dismissed"],
     [U("a006"), "daily_cadence_overdue_follow_up", "k6", "in_progress", DEAL_WON, "dismissed"],
@@ -341,7 +347,7 @@ describe("dismissResolvedTerminalDealTasks", () => {
       suppressed_until: string | null;
     }>(`SELECT origin_rule, resolution_status, resolution_reason, suppressed_until
         FROM ${SCHEMA}.task_resolution_state ORDER BY origin_rule`);
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(ALL.filter(([, , , , , want]) => want === "dismissed").length);
     for (const row of rows) {
       expect(row.resolution_status).toBe("dismissed");
       expect(row.resolution_reason).toBe("deal_reached_terminal_stage");
@@ -409,16 +415,21 @@ describe("dismissResolvedTerminalDealTasks", () => {
     );
   });
 
-  it("names only rules that exist, and excludes every post-close rule", () => {
+  it("splits the allowlists by stage family and excludes every post-close rule", () => {
     expect([...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES]).toEqual([
       "daily_close_date_follow_up",
       "daily_cadence_overdue_follow_up",
-      "inbound_email_reply_needed",
       "ai_disconnect_admin_task",
       "cold_lead_warming",
     ]);
+    // The reply-needed rule is deliberately NOT in the broad list: is_terminal covers the Won family, and
+    // an unanswered client email on a job still in construction is real work, not debris.
+    expect([...DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES]).toEqual(["inbound_email_reply_needed"]);
+    expect(TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES).not.toContain("inbound_email_reply_needed");
+
+    const every = [...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES, ...DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES];
     for (const postClose of ["deal_won_cross_sell", "deal_lost_competitor_intel", "scoping_estimating_review_handoff"]) {
-      expect(TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES).not.toContain(postClose);
+      expect(every).not.toContain(postClose);
     }
   });
 });

@@ -60,7 +60,7 @@ beforeEach(async () => {
       sync_status text, updated_at timestamptz
     );
     CREATE TABLE ${SCHEMA}.deals (
-      id uuid PRIMARY KEY, deal_number text, name text, stage_id uuid, proposal_status text,
+      id uuid PRIMARY KEY, deal_number text, name text, stage_id uuid, proposal_status text, assigned_rep_id uuid,
       is_active boolean NOT NULL DEFAULT true, procore_project_id text,
       stage_entered_at timestamptz, last_activity_at timestamptz, updated_at timestamptz DEFAULT now()
     );
@@ -68,6 +68,8 @@ beforeEach(async () => {
     CREATE TABLE ${SCHEMA}.emails (id uuid PRIMARY KEY, deal_id uuid, direction text, sent_at timestamptz);
     CREATE TABLE ${SCHEMA}.activities (id uuid PRIMARY KEY, deal_id uuid, occurred_at timestamptz, type text);
     CREATE TABLE ${SCHEMA}.tasks (id uuid PRIMARY KEY, deal_id uuid, origin_rule text, dedupe_key text, status text);
+    -- The hotspot query attributes disconnects to the assigned rep's display name.
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text);
 
     INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal) VALUES
       ('${STAGE_OPEN}', 'Estimate Sent to Client', 'estimate_sent', false),
@@ -126,27 +128,63 @@ describe("the AI-disconnect digest", () => {
       if (sql.includes("FROM information_schema.schemata")) return { rows: [{ schema_name: SCHEMA }] };
       if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
       if (sql.includes("FROM public.users")) return { rows: [{ id: U("ad1") }] };
+      // The digest bails out early on an empty/zero summary, and the cluster and hotspot queries are issued
+      // AFTER that check -- so a stub that answers everything with no rows never reaches the two drilldowns
+      // this suite exists to cover. Answer the summary with a non-zero row so the job runs to completion.
+      if (sql.includes("AS total_disconnects")) {
+        return {
+          rows: [{ total_disconnects: 1, critical_disconnects: 0, bid_board_sync_drifts: 0, follow_through_gaps: 1 }],
+        };
+      }
       return { rows: [], rowCount: 0 };
     });
     const { runAiDisconnectDigest } = await import("../../src/jobs/ai-disconnect-digest.js");
     await runAiDisconnectDigest();
-    const hits = captured.filter((s) => s.includes("open_task_count") && s.includes("FROM"));
-    expect(hits.length).toBeGreaterThan(0);
-    return hits[0];
+    return captured;
+  }
+
+  /** The digest issues THREE deal-scanning queries: the summary, the cluster drilldown and the hotspot
+   *  attribution. Gating only the first is what Codex flagged, so each is pulled out and executed. */
+  function digestQueries(captured: string[]) {
+    const pick = (marker: string) => {
+      const hits = captured.filter((q) => q.includes(marker));
+      expect(hits, marker).toHaveLength(1);
+      return hits[0].replace(/\$\{schemaName\}/g, SCHEMA);
+    };
+    return {
+      summary: pick("AS total_disconnects"),
+      cluster: pick("AS deal_count"),
+      hotspot: pick("AS hotspot_key"),
+    };
   }
 
   // EXECUTED, not read. The fixture holds one open deal and three closed ones, and every one of them has
   // zero open tasks -- i.e. all four satisfy the `open_task_count = 0` disconnect predicate. So the counts
   // this query returns are exactly the discriminator: 1 if closed deals are excluded, 4 if they are not.
-  it("counts only the open deal, though all four look like follow-through gaps", async () => {
-    const sql = (await captureDigestBaseSql()).replace(/\$\{schemaName\}/g, SCHEMA);
-    const { rows } = await db.query<{ total_disconnects: number; follow_through_gaps: number }>(sql);
+  it("counts only the open deal in the summary, though all four look like follow-through gaps", async () => {
+    const { summary } = digestQueries(await captureDigestBaseSql());
+    const { rows } = await db.query<{ total_disconnects: number; follow_through_gaps: number }>(summary);
     expect(rows[0].total_disconnects).toBe(1);
     expect(rows[0].follow_through_gaps).toBe(1);
   });
 
-  it("and the drain cannot inflate it: emptying a closed deal's tasks changes nothing", async () => {
-    const sql = (await captureDigestBaseSql()).replace(/\$\{schemaName\}/g, SCHEMA);
+  // Codex P1: the summary was gated and the two DRILLDOWNS were not, so the reported top cluster and the
+  // named hotspot rep could both exceed -- and contradict -- the headline they sit under, with the hotspot
+  // being whoever closed the most deals. Both are executed here, not inspected.
+  it("counts only the open deal in the cluster drilldown", async () => {
+    const { cluster } = digestQueries(await captureDigestBaseSql());
+    const { rows } = await db.query<{ cluster_key: string; deal_count: number }>(cluster);
+    expect(rows[0]?.deal_count ?? 0).toBe(1);
+  });
+
+  it("attributes only the open deal in the hotspot drilldown", async () => {
+    const { hotspot } = digestQueries(await captureDigestBaseSql());
+    const { rows } = await db.query<{ hotspot_label: string; disconnect_count: number }>(hotspot);
+    expect(rows[0]?.disconnect_count ?? 0).toBe(1);
+  });
+
+  it("and the drain cannot inflate any of them: emptying a closed deal's tasks changes nothing", async () => {
+    const { summary: sql } = digestQueries(await captureDigestBaseSql());
     // Give the Won deal an open task, as the backlog did, then retire it exactly as the drain does.
     await db.query(
       `INSERT INTO ${SCHEMA}.tasks (id, deal_id, origin_rule, dedupe_key, status)

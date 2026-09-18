@@ -150,3 +150,35 @@ deals, which this PR leaves unreported because un-gating it without a `reason_co
 restore the re-mint loop for that reason.
 
 **16 mutations, all caught.**
+
+## Round 3 — Codex review
+
+Five findings, all addressed. Two changed behaviour materially:
+
+1. **`is_terminal` is not "dead".** It covers the whole Won family, including `sent_to_production` and
+   `service_sent_to_production` — awarded jobs still in construction. Gating `inbound_email_reply_needed`
+   on it would have silenced the only surface reporting an unanswered client email on live work, for
+   1,891 of the 1,977 such tasks, and the drain would then have swept them. Both the create-side gate
+   (`email-sync.ts`) and the drain now key on the canonical `LOST_DEAL_STAGE_SLUGS`; the allowlist splits
+   into `TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES` (any terminal stage) and
+   `DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES` (Lost family only). **The drain drops 3,268 → 1,473.**
+   This resolves the open question the original spec left for Adnaan.
+2. **The digest's drilldowns were still ungated.** Round 2 gated `summaryRes` and missed `clusterRes` and
+   `hotspotRes`, so the reported top cluster and the named hotspot rep could exceed and contradict the
+   headline above them. All three gated; all three executed in tests.
+
+And three smaller:
+
+3. The compliance exclusion keyed on `task_resolution_state.resolution_reason`, which
+   `task-completed.ts` **overwrites** on an upsert keyed `(origin_rule, dedupe_key)` — a reopened deal
+   could silently re-admit a drained task to the denominator. Re-keyed on the deal's stage.
+4. The `is_overdue` clear bumped `updated_at` too (432 tasks / 84 contacts on prod) — the same
+   false-touch this release fixed for the drain. Fixed at the root instead of patched twice:
+   `buildContactLastTouchAtSql` now reads `completed_at` off completed tasks.
+5. The check-then-act race between candidate selection and insert is **acknowledged and not fixed**: the
+   implied remedy re-introduces the lock-duration and deadlock hazard Round 2 removed, while the race is
+   self-healing within 24h and costs at most one stale task.
+
+**22 mutations, all caught.** One (reverting the digest hotspot gate) survived the first pass and exposed
+a coverage hole — the suite exercised only the summary query — closed by capturing and executing all three.
+

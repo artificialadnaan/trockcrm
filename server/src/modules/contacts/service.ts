@@ -167,16 +167,22 @@ export function buildContactLastTouchAtSql(): SQL<Date | null> {
     COALESCE(${contactLastContactedAtSql}, '-infinity'::timestamptz),
     COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
     COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
-    -- A DISMISSED task is not a touch. set_tasks_updated_at is a BEFORE UPDATE row trigger, so ANY
-    -- write to a task bumps updated_at — including a bulk system dismissal. The terminal-deal drain
-    -- retires ~2,400 tasks that carry a contact_id, which would otherwise have made every one of those
-    -- contacts read as "touched just now", emptying the Untouched 30d+ card and sorting them to the top
-    -- of last_touch_at. Excluded here, in the ONE shared builder, so the card, the ?card=untouched drill
-    -- and the sort all keep agreeing.
+    -- A task's ROW-MODIFICATION time is not a touch; a task COMPLETED is. set_tasks_updated_at is an
+    -- unconditional BEFORE UPDATE row trigger, so every write to a task bumps updated_at, including bulk
+    -- system writes that involve no human and no contact. Two in this release alone would have moved this
+    -- expression: the terminal-deal drain (~2,400 contact-linked tasks dismissed) and the is_overdue
+    -- correction (measured on prod: 432 tasks across 84 contacts). Either would have made those contacts
+    -- read as "touched just now", emptied them out of the Untouched 30d+ card and reordered last_touch_at,
+    -- silently, which is exactly the hazard migration 0233 documents.
+    --
+    -- Reading completed_at off COMPLETED tasks fixes the class rather than the two instances: nothing that
+    -- fails to complete work can move it. The effect on the card is to be MORE correct, since a contact
+    -- whose only task is still open now reads as untouched, which it is. Changed in the ONE shared builder
+    -- so the card, the ?card=untouched drill and the sort keep agreeing.
     COALESCE((
-      SELECT MAX(t.updated_at) FROM tasks t
+      SELECT MAX(t.completed_at) FROM tasks t
       WHERE t.contact_id = ${contactIdSql}
-        AND t.status IS DISTINCT FROM 'dismissed'
+        AND t.status = 'completed'
     ), '-infinity'::timestamptz)
   ), '-infinity'::timestamptz)`;
 }

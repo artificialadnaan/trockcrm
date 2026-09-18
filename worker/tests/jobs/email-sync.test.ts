@@ -61,8 +61,9 @@ function createQueryMock(options: {
     company_id: string | null;
   } | null;
   companyName?: string | null;
-  /** Whether the deal the email resolves to sits in a terminal (Won / Lost) stage. */
-  dealIsTerminal?: boolean;
+  /** Whether the deal the email resolves to sits in a DEAD (Lost-family) stage. Won and
+   *  in-production deals are NOT dead: their clients are still owed a reply. */
+  dealIsDead?: boolean;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.startsWith("SELECT set_config('search_path', $1, false)")) {
@@ -118,18 +119,18 @@ function createQueryMock(options: {
     }
 
     // Deal-parent fetch (company/property/source-lead) for the activity link columns + parent-company stat,
-    // which ALSO reports is_terminal — the reply-needed task is suppressed once the deal has closed.
+    // which ALSO reports is_dead_stage — the reply-needed task is suppressed once the deal is DEAD.
     // MUST precede the broad `FROM office_beta.deals d` branch below: that one matches this SQL too and
-    // would answer with a deal-candidate row that has no is_terminal field, so every case would read as
+    // would answer with a deal-candidate row that has no is_dead_stage field, so every case would read as
     // "open" and the terminal-deal assertions would prove nothing.
-    if (sql.includes("COALESCE(psc.is_terminal, false)")) {
+    if (sql.includes("is_dead_stage")) {
       return {
         rows: [
           {
             company_id: null,
             property_id: null,
             source_lead_id: null,
-            is_terminal: options.dealIsTerminal ?? false,
+            is_dead_stage: options.dealIsDead ?? false,
           },
         ],
       };
@@ -674,7 +675,7 @@ describe("email sync inbound message routing", () => {
   // the last 7 days. The email itself is NOT the problem — a message about a closed job belongs on that
   // job's timeline — so both halves are asserted here: the task is suppressed AND the storage, the deal
   // association, the activity row and the stat refresh all still happen.
-  describe("an inbound email on a CLOSED deal", () => {
+  describe("an inbound email on a DEAD (Lost) deal", () => {
     const closedDealMsg = {
       id: "graph-terminal-1",
       subject: "Invoice question on the finished job",
@@ -686,12 +687,12 @@ describe("email sync inbound message routing", () => {
       conversationId: "conv-terminal-1",
     };
     const oneDeal = [
-      { id: "deal-9", deal_number: "DFW-4-22226-ag", name: "Won Job", company_id: "company-1", stage_slug: "won", stage_display_order: 9 },
+      { id: "deal-9", deal_number: "DFW-4-22226-ab", name: "Lost Job", company_id: "company-1", stage_slug: "lost", stage_display_order: 9 },
     ];
     const contact = { id: "contact-1", first_name: "Pat", last_name: "Rivera", company_id: "company-1" };
 
     it("mints no reply-needed task, while still storing and associating the email", async () => {
-      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsTerminal: true });
+      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsDead: true });
       const processed = await processInboundMessage(
         { query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg
       );
@@ -717,23 +718,23 @@ describe("email sync inbound message routing", () => {
     // keep returning its row, or adding a flag would silently strip those links. A stubbed query cannot
     // tell a JOIN from a LEFT JOIN, so this case takes the SQL the job actually issued and EXECUTES it.
     it("keeps the deal's link columns for a STAGELESS deal (the lookup is a LEFT JOIN)", async () => {
-      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsTerminal: true });
+      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsDead: true });
       await processInboundMessage({ query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg);
 
       const issued = queryMock.mock.calls
         .map(([sql]) => sql)
-        .filter((sql): sql is string => typeof sql === "string" && sql.includes("COALESCE(psc.is_terminal, false)"));
+        .filter((sql): sql is string => typeof sql === "string" && sql.includes("is_dead_stage"));
       expect(issued).toHaveLength(1);
 
       const db = new PGlite();
       await db.exec(`
         CREATE SCHEMA office_beta;
-        CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, is_terminal boolean NOT NULL DEFAULT false);
+        CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_terminal boolean NOT NULL DEFAULT false);
         CREATE TABLE office_beta.deals (
           id uuid PRIMARY KEY, company_id uuid, property_id uuid, source_lead_id uuid, stage_id uuid
         );
-        INSERT INTO public.pipeline_stage_config (id, is_terminal)
-          VALUES ('00000000-0000-4000-8000-0000000050e1', true);
+        INSERT INTO public.pipeline_stage_config (id, slug, is_terminal)
+          VALUES ('00000000-0000-4000-8000-0000000050e1', 'lost', true);
         INSERT INTO office_beta.deals (id, company_id, property_id, source_lead_id, stage_id) VALUES
           ('00000000-0000-4000-8000-00000000d001',
            '00000000-0000-4000-8000-0000000c0001',
@@ -744,19 +745,33 @@ describe("email sync inbound message routing", () => {
       const { rows } = await db.query<{
         company_id: string | null;
         source_lead_id: string | null;
-        is_terminal: boolean;
-      }>(issued[0], ["00000000-0000-4000-8000-00000000d001"]);
+        is_dead_stage: boolean;
+      }>(issued[0], ["00000000-0000-4000-8000-00000000d001", ["lost", "closed_lost"]]);
 
-      // The row survives, its parent links are intact, and an unresolvable stage reads as "not closed" —
-      // i.e. exactly the behaviour this call site had before is_terminal was added.
+      // The row survives, its parent links are intact, and an unresolvable stage reads as "not dead" —
+      // i.e. exactly the behaviour this call site had before the flag was added.
       expect(rows).toHaveLength(1);
       expect(rows[0].company_id).toBe("00000000-0000-4000-8000-0000000c0001");
       expect(rows[0].source_lead_id).toBe("00000000-0000-4000-8000-0000000e0001");
-      expect(rows[0].is_terminal).toBe(false);
+      expect(rows[0].is_dead_stage).toBe(false);
+    });
+
+    // The finding all three reviewers raised. is_terminal is true for the Won family too, including
+    // sent_to_production — awarded jobs still being built. Gating on it would have silenced the only
+    // surface that reports an unanswered client email on live work, for 1,891 of the 1,977 such tasks.
+    it("KEEPS the reply task for a WON, in-production job — is_terminal is not the same as dead", async () => {
+      const wonDeal = [
+        { id: "deal-7", deal_number: "DFW-4-22226-ag", name: "Won Job", company_id: "company-1", stage_slug: "sent_to_production", stage_display_order: 9 },
+      ];
+      const queryMock = createQueryMock({ activeDeals: wonDeal, contactMatch: contact, dealIsDead: false });
+      await processInboundMessage({ query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg);
+
+      expect(evaluateTaskRulesMock).toHaveBeenCalledTimes(1);
+      expect(evaluateTaskRulesMock.mock.calls[0][0]).toMatchObject({ dealId: "deal-7" });
     });
 
     it("CONTROL — the same email on an OPEN deal still evaluates the reply rule", async () => {
-      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsTerminal: false });
+      const queryMock = createQueryMock({ activeDeals: oneDeal, contactMatch: contact, dealIsDead: false });
       const processed = await processInboundMessage(
         { query: queryMock } as any, "office_beta", "user-1", "office-1", closedDealMsg
       );

@@ -1,4 +1,4 @@
-import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
+import { getDealAtRiskResult, LOST_DEAL_STAGE_SLUGS, type WorkflowRoute } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 const SERVER_MODULE_ROOT =
@@ -261,10 +261,24 @@ export async function dismissResolvedFirstOutreachTasks(
 export const TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES = [
   "daily_close_date_follow_up",
   "daily_cadence_overdue_follow_up",
-  "inbound_email_reply_needed",
   "ai_disconnect_admin_task",
   "cold_lead_warming",
 ] as const;
+
+/**
+ * Rules swept only on a DEAD deal (the Lost family), never merely a terminal one.
+ *
+ * `is_terminal` is true for the whole Won family, including `sent_to_production` and
+ * `service_sent_to_production` — awarded jobs still in construction. An unanswered client email on a job
+ * being built is real work, and this task is the only surface that reports it: the inbound-without-
+ * follow-up disconnect is itself terminal-gated on the dashboard AND the admin-task job, so sweeping these
+ * would leave nothing at all. 1,891 of the 1,977 reply-needed tasks on prod sit on Won-family deals, so
+ * the broad flag would have deleted the overwhelming majority of them as "debris" without ever checking
+ * whether anyone had replied.
+ *
+ * Kept in lockstep with the create-side gate in email-sync.ts, which reads the same canonical list.
+ */
+export const DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES = ["inbound_email_reply_needed"] as const;
 
 /**
  * Dismiss every OPEN forward-motion task whose deal has reached a terminal stage (Won / Lost).
@@ -321,14 +335,17 @@ export async function dismissResolvedTerminalDealTasks(
            waiting_on = NULL,
            blocked_by = NULL,
            updated_at = NOW()
-       WHERE t.origin_rule = ANY($2::text[])
+       WHERE t.origin_rule = ANY($2::text[] || $5::text[])
          AND t.status IN (${activeTaskStatusesSql})
          AND EXISTS (
            SELECT 1
            FROM ${schemaName}.deals d
            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
            WHERE d.id = t.deal_id
-             AND psc.is_terminal = true
+             AND (
+               (t.origin_rule = ANY($2::text[]) AND psc.is_terminal = true)
+               OR (t.origin_rule = ANY($5::text[]) AND psc.slug = ANY($6::text[]))
+             )
          )
        RETURNING id, origin_rule, dedupe_key, entity_snapshot
      ),
@@ -355,7 +372,14 @@ export async function dismissResolvedTerminalDealTasks(
        RETURNING 1
      )
      SELECT (SELECT COUNT(*) FROM dismissed) AS dismissed_count`,
-    [resolvedAt, [...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES], officeId, "deal_reached_terminal_stage"]
+    [
+      resolvedAt,
+      [...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES],
+      officeId,
+      "deal_reached_terminal_stage",
+      [...DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES],
+      [...LOST_DEAL_STAGE_SLUGS],
+    ]
   );
 
   return Number(result.rows[0]?.dismissed_count ?? 0);

@@ -68,6 +68,22 @@ function resolveConnectionString(): string {
   return url;
 }
 
+/**
+ * The scope predicate, rendered ONCE and used by both the census and the id capture, mirroring
+ * dismissResolvedTerminalDealTasks exactly: most rules sweep on any terminal stage, but
+ * inbound_email_reply_needed sweeps only on a DEAD (Lost-family) one, because is_terminal also covers
+ * awarded jobs still in production and their clients are still owed a reply.
+ *
+ * $1 = broad rules, $2 = dead-only rules, $3 = dead stage slugs.
+ */
+const SCOPE_PREDICATE = `
+        t.origin_rule = ANY($1::text[] || $2::text[])
+    AND t.status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
+    AND (
+      (t.origin_rule = ANY($1::text[]) AND psc.is_terminal = true)
+      OR (t.origin_rule = ANY($2::text[]) AND psc.slug = ANY($3::text[]))
+    )`;
+
 interface CensusRow {
   origin_rule: string;
   stage: string;
@@ -81,7 +97,7 @@ interface CensusRow {
 async function census(
   client: pg.Client,
   schemaName: string,
-  originRules: readonly string[]
+  scopeParams: unknown[]
 ): Promise<CensusRow[]> {
   const { rows } = await client.query<CensusRow>(
     `SELECT t.origin_rule,
@@ -93,12 +109,10 @@ async function census(
        FROM ${schemaName}.tasks t
        JOIN ${schemaName}.deals d ON d.id = t.deal_id
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE t.origin_rule = ANY($1::text[])
-        AND t.status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
-        AND psc.is_terminal = true
+      WHERE ${SCOPE_PREDICATE}
       GROUP BY t.origin_rule, psc.name
       ORDER BY open_tasks DESC`,
-    [[...originRules]]
+    scopeParams
   );
   return rows;
 }
@@ -130,15 +144,25 @@ export async function main(argv = process.argv): Promise<void> {
   const { mode } = parseBackfillArgs(argv);
 
   // Imported, not reimplemented: the census and the write both run the production predicate.
-  const { dismissResolvedTerminalDealTasks, TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES } = await import(
-    "../worker/src/jobs/daily-tasks.js"
-  );
+  const {
+    dismissResolvedTerminalDealTasks,
+    TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES,
+    DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES,
+  } = await import("../worker/src/jobs/daily-tasks.js");
+  const { LOST_DEAL_STAGE_SLUGS } = await import("@trock-crm/shared/types");
+  const scopeParams: unknown[] = [
+    [...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES],
+    [...DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES],
+    [...LOST_DEAL_STAGE_SLUGS],
+  ];
 
   const client = new pg.Client({ connectionString: resolveConnectionString() });
   await client.connect();
 
   console.log(`${LABEL} mode=${mode}`);
-  console.log(`${LABEL} origin rules in scope: ${TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES.join(", ")}`);
+  console.log(`${LABEL} any terminal stage: ${TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES.join(", ")}`);
+  console.log(`${LABEL} DEAD stages only:   ${DEAD_DEAL_ONLY_DISMISSIBLE_ORIGIN_RULES.join(", ")}`);
+  console.log(`${LABEL} dead stages:        ${LOST_DEAL_STAGE_SLUGS.join(", ")}`);
   console.log(`${LABEL} NOT in scope: manual tasks (origin_rule IS NULL) and post-close rules.`);
 
   try {
@@ -176,7 +200,7 @@ export async function main(argv = process.argv): Promise<void> {
           office.id,
         ]);
 
-        const breakdown = await census(client, schemaName, TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES);
+        const breakdown = await census(client, schemaName, scopeParams);
         const candidates = breakdown.reduce((sum, row) => sum + row.open_tasks, 0);
         totalCandidates += candidates;
 
@@ -206,11 +230,9 @@ export async function main(argv = process.argv): Promise<void> {
              FROM ${schemaName}.tasks t
              JOIN ${schemaName}.deals d ON d.id = t.deal_id
              JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-            WHERE t.origin_rule = ANY($1::text[])
-              AND t.status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
-              AND psc.is_terminal = true
+            WHERE ${SCOPE_PREDICATE}
             FOR UPDATE OF t`,
-          [[...TERMINAL_DEAL_DISMISSIBLE_ORIGIN_RULES]]
+          scopeParams
         );
 
         const dismissed = await dismissResolvedTerminalDealTasks(client, schemaName, office.id);

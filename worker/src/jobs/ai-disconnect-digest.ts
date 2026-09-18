@@ -282,7 +282,9 @@ export async function runAiDisconnectDigest(): Promise<void> {
               SELECT 'bid_board_sync_break'::text AS cluster_key, 'Bid board / CRM stage drift'::text AS title, d.id
               FROM ${schemaName}.deals d
               JOIN latest_procore_sync lps ON lps.deal_id = d.id
+              JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
               WHERE d.is_active = TRUE
+                AND psc.is_terminal = FALSE
                 AND d.procore_project_id IS NOT NULL
                 AND lps.sync_status != 'synced'
 
@@ -290,7 +292,9 @@ export async function runAiDisconnectDigest(): Promise<void> {
 
               SELECT 'follow_through_gap'::text AS cluster_key, 'Customer follow-through gap'::text AS title, d.id
               FROM ${schemaName}.deals d
+              JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
               WHERE d.is_active = TRUE
+                AND psc.is_terminal = FALSE
                 AND (
                   NOT EXISTS (
                     SELECT 1
@@ -369,6 +373,11 @@ export async function runAiDisconnectDigest(): Promise<void> {
               LEFT JOIN public.users u ON u.id = d.assigned_rep_id
               LEFT JOIN latest_procore_sync lps ON lps.deal_id = d.id
               WHERE d.is_active = TRUE
+                -- Gated like the summary and cluster queries above. Codex P1: gating only the summary left
+                -- the drilldowns counting closed deals, so the top cluster and the named "hotspot" rep could
+                -- exceed and contradict the very title they sit under -- and the hotspot would have been
+                -- whoever closed the most deals.
+                AND psc.is_terminal = FALSE
             ),
             disconnect_rows AS (
               SELECT

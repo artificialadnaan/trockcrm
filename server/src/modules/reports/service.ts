@@ -1878,17 +1878,33 @@ export async function getFollowUpCompliance(
       AND t.created_at >= ${from}::timestamptz
       AND t.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
       AND t.status IN ('completed', 'dismissed')
-      -- Exclude follow-ups the SYSTEM retired as debris, not the rep. The denominator counts every
-      -- completed-or-dismissed follow-up while the numerator counts only completions, so a dismissal is
-      -- scored as a miss. The terminal-deal drain dismisses ~513 follow-ups that were minted onto deals
-      -- ALREADY Won or Lost — tasks that were never actionable — and the default window is the whole
-      -- calendar year, so without this every rep's compliance would be rewritten downward retroactively
-      -- and the "below 80%" strategic alert would fire for almost all of them. The rep who reported the
-      -- phantom follow-ups would have watched his own number get worse the morning after the fix.
-      AND NOT EXISTS (
-        SELECT 1 FROM task_resolution_state trs
-        WHERE trs.task_id = t.id
-          AND trs.resolution_reason = 'deal_reached_terminal_stage'
+      -- A follow-up DISMISSED on a deal that is already closed is not a compliance data point. The
+      -- denominator counts every completed-or-dismissed follow-up while the numerator counts only
+      -- completions, so a dismissal is scored as a miss, and the terminal-deal drain retires hundreds of
+      -- follow-ups that were minted onto deals ALREADY Won or Lost, over a window that defaults to the
+      -- whole calendar year. Without this, every rep's compliance is rewritten downward retroactively and
+      -- the "below 80%" alert fires for almost all of them: the rep who reported the phantom follow-ups
+      -- would have watched his own number get worse the morning after the fix.
+      --
+      -- Keyed on the DEAL'S STAGE, not on task_resolution_state. Codex P2: that table is keyed
+      -- (origin_rule, dedupe_key) and worker/src/jobs/task-completed.ts upserts it setting
+      -- task_id = EXCLUDED.task_id and resolution_reason = EXCLUDED.resolution_reason, so a reopened deal
+      -- minting a same-key task and completing it would REPLACE the pointer and the original drained task
+      -- would silently re-enter the denominator. A deal's stage cannot be rewritten out from under the
+      -- task that way.
+      --
+      -- Only DISMISSALS are excluded: a completed follow-up always counts, so closing a deal can never
+      -- erase a rep's credit for work they did. A dismissal on a still-OPEN deal also still counts, since
+      -- that is a human choosing to drop live work.
+      AND NOT (
+        t.status = 'dismissed'
+        AND EXISTS (
+          SELECT 1
+          FROM deals d
+          JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+          WHERE d.id = t.deal_id
+            AND psc.is_terminal = true
+        )
       )
   `);
 

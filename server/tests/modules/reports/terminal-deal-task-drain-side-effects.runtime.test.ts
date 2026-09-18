@@ -39,6 +39,8 @@ beforeEach(async () => {
     CREATE TABLE activities (id uuid PRIMARY KEY, contact_id uuid, occurred_at timestamptz);
     CREATE TABLE emails (id uuid PRIMARY KEY, contact_id uuid, sent_at timestamptz);
     CREATE TABLE contact_deal_associations (contact_id uuid, deal_id uuid, is_primary boolean DEFAULT false);
+    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_terminal boolean NOT NULL DEFAULT false);
+    CREATE TABLE deals (id uuid PRIMARY KEY, stage_id uuid);
     CREATE TABLE tasks (
       id uuid PRIMARY KEY, title text, type text, status text NOT NULL,
       assigned_to uuid, contact_id uuid, deal_id uuid,
@@ -53,6 +55,11 @@ beforeEach(async () => {
       resolution_status text NOT NULL, resolution_reason text, resolved_at timestamptz
     );
     INSERT INTO contacts (id, last_contacted_at) VALUES ('${CONTACT}', now() - interval '90 days');
+    INSERT INTO public.pipeline_stage_config (id, slug, is_terminal) VALUES
+      ('${U("50e0")}', 'estimate_sent', false), ('${U("50e1")}', 'won', true);
+    INSERT INTO deals (id, stage_id) VALUES
+      ('${U("d001")}', '${U("50e0")}'),   -- still OPEN
+      ('${U("d002")}', '${U("50e1")}');   -- WON
   `);
   tdb = drizzle(pg);
 });
@@ -60,39 +67,46 @@ beforeEach(async () => {
 describe("follow-up compliance after the drain", () => {
   beforeEach(async () => {
     await pg.exec(`
-      INSERT INTO tasks (id, title, type, status, assigned_to, due_date, completed_at, created_at) VALUES
-        ('${U("f01")}', 'done on time', 'follow_up', 'completed', '${REP}', CURRENT_DATE - 5, now() - interval '6 days', now() - interval '10 days'),
-        ('${U("f02")}', 'rep dismissed it', 'follow_up', 'dismissed', '${REP}', CURRENT_DATE - 5, NULL, now() - interval '10 days'),
-        ('${U("f03")}', 'drained as debris', 'follow_up', 'dismissed', '${REP}', CURRENT_DATE - 5, NULL, now() - interval '10 days');
-      INSERT INTO task_resolution_state (task_id, origin_rule, dedupe_key, resolution_status, resolution_reason, resolved_at)
-        VALUES ('${U("f03")}', 'daily_close_date_follow_up', 'deal:x:daily_close_date_follow_up', 'dismissed', 'deal_reached_terminal_stage', now());
+      INSERT INTO tasks (id, title, type, status, assigned_to, deal_id, due_date, completed_at, created_at) VALUES
+        ('${U("f01")}', 'done on time', 'follow_up', 'completed', '${REP}', '${U("d001")}', CURRENT_DATE - 5, now() - interval '6 days', now() - interval '10 days'),
+        ('${U("f02")}', 'rep dismissed live work', 'follow_up', 'dismissed', '${REP}', '${U("d001")}', CURRENT_DATE - 5, NULL, now() - interval '10 days'),
+        ('${U("f03")}', 'drained as debris', 'follow_up', 'dismissed', '${REP}', '${U("d002")}', CURRENT_DATE - 5, NULL, now() - interval '10 days'),
+        ('${U("f04")}', 'completed on a won deal', 'follow_up', 'completed', '${REP}', '${U("d002")}', CURRENT_DATE - 5, now() - interval '6 days', now() - interval '10 days');
     `);
   });
 
-  it("does not score a task the SYSTEM retired as debris against the rep", async () => {
+  it("does not score a follow-up dismissed on an already-closed deal against the rep", async () => {
     const result = await getFollowUpCompliance(tdb, REP);
-    // t01 (completed on time) + t02 (a real human dismissal) = 2. t03 is excluded entirely.
-    expect(result.total).toBe(2);
-    expect(result.onTime).toBe(1);
-    expect(result.complianceRate).toBe(50);
+    // f01 completed (open deal) + f02 human dismissal (open deal) + f04 completed (won deal) = 3.
+    // f03 -- dismissed on a Won deal -- is excluded entirely.
+    expect(result.total).toBe(3);
+    expect(result.onTime).toBe(2);
   });
 
-  it("CONTROL — a human dismissal is still counted, so the exclusion is not blanket", async () => {
-    // Strip only the drain's audit row. t03 becomes an ordinary dismissal and must re-enter the denominator,
-    // proving the predicate keys on the resolution REASON and not merely on 'dismissed'.
-    await pg.exec(`DELETE FROM task_resolution_state WHERE task_id = '${U("f03")}'`);
+  it("CONTROL — a dismissal on a still-OPEN deal is still counted, so the exclusion is not blanket", async () => {
+    // Move the drained task's deal back to an open stage: it must re-enter the denominator, proving the
+    // predicate reads the DEAL'S STAGE and not merely the task's 'dismissed' status.
+    await pg.exec(`UPDATE deals SET stage_id = '${U("50e0")}' WHERE id = '${U("d002")}'`);
     const result = await getFollowUpCompliance(tdb, REP);
-    expect(result.total).toBe(3);
-    expect(result.onTime).toBe(1);
+    expect(result.total).toBe(4);
+    expect(result.onTime).toBe(2);
+  });
+
+  it("a COMPLETED follow-up still counts even once its deal is Won — closing never erases credit", async () => {
+    const result = await getFollowUpCompliance(tdb, REP);
+    // f04 was completed on a deal that is now Won, and is in both numerator and denominator.
+    expect(result.onTime).toBeGreaterThanOrEqual(2);
   });
 });
 
 describe("contact last-touch after the drain", () => {
   it("a dismissed task's updated_at is not a touch, so the contact stays Untouched 30d+", async () => {
-    // Exactly what the drain leaves behind: a task on this contact, dismissed, updated_at = now.
+    // Exactly what the two bulk writes leave behind: contact-linked tasks whose updated_at is now, one
+    // dismissed by the drain and one still OPEN after the is_overdue correction. Neither is a touch.
     await pg.exec(`
-      INSERT INTO tasks (id, title, type, status, contact_id, updated_at)
-      VALUES ('${U("f10")}', 'drained', 'follow_up', 'dismissed', '${CONTACT}', now());
+      INSERT INTO tasks (id, title, type, status, contact_id, updated_at) VALUES
+        ('${U("f10")}', 'drained', 'follow_up', 'dismissed', '${CONTACT}', now()),
+        ('${U("f12")}', 'overdue flag corrected', 'follow_up', 'pending', '${CONTACT}', now());
     `);
 
     const result = await tdb.execute(sql`
@@ -107,10 +121,10 @@ describe("contact last-touch after the drain", () => {
     expect(new Date(row.last_touch).getTime()).toBeLessThan(Date.now() - 80 * 24 * 3600 * 1000);
   });
 
-  it("CONTROL — an OPEN task on the same contact still counts as a touch", async () => {
+  it("CONTROL — a COMPLETED task on the same contact does count as a touch", async () => {
     await pg.exec(`
-      INSERT INTO tasks (id, title, type, status, contact_id, updated_at)
-      VALUES ('${U("f11")}', 'live work', 'follow_up', 'pending', '${CONTACT}', now());
+      INSERT INTO tasks (id, title, type, status, contact_id, completed_at, updated_at)
+      VALUES ('${U("f11")}', 'work actually done', 'follow_up', 'completed', '${CONTACT}', now(), now());
     `);
     const result = await tdb.execute(sql`
       SELECT ${buildContactUntouchedSql()} AS untouched
