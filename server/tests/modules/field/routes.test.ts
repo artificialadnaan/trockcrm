@@ -356,6 +356,36 @@ describe("field routes", () => {
     }));
   });
 
+  // queueDepth is telemetry a client volunteers. Rejecting an otherwise-valid photo confirm because that
+  // number was malformed would trade a real photo for a diagnostic, so a junk value must be DROPPED rather
+  // than 400'd — and a sane one must be clamped so a client cannot write an unbounded integer into the
+  // audit metadata JSON.
+  it("accepts, clamps, or drops the reported queueDepth without ever failing the confirm", async () => {
+    const cases: Array<[unknown, number | undefined]> = [
+      [266, 266],
+      [0, 0],
+      ["42", 42],
+      [12.9, 12], // floored
+      [undefined, undefined],
+      [null, undefined],
+      ["not-a-number", undefined],
+      [-5, undefined], // negative is nonsense, not a clamp target
+      [Number.POSITIVE_INFINITY, undefined],
+      [999999999, 100000], // clamped to MAX_REPORTED_QUEUE_DEPTH
+    ];
+
+    for (const [sent, expected] of cases) {
+      photoMocks.confirmFieldPhotoUpload.mockClear();
+      await invokeRoute("post", "/photos/confirm-upload", {
+        body: { dealId: "deal-1", objectKey: "key", uploadToken: "token", queueDepth: sent },
+      });
+      // The confirm always happened — no case above is allowed to reject the upload.
+      expect(photoMocks.confirmFieldPhotoUpload).toHaveBeenCalledTimes(1);
+      const passed = photoMocks.confirmFieldPhotoUpload.mock.calls[0][1] as { queueDepth?: number };
+      expect(passed.queueDepth).toBe(expected);
+    }
+  });
+
   it("lists pending field photos and assigns them to a selected target", async () => {
     await invokeRoute("get", "/photos/pending", {});
     expect(photoMocks.listPendingFieldPhotos).toHaveBeenCalledWith(expect.anything(), {

@@ -2,10 +2,20 @@ import React from "react";
 import { Redirect, Tabs, useGlobalSearchParams, usePathname } from "expo-router";
 import { ActivityIndicator, AppState, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../../src/auth/AuthContext";
 import { buildLoginReturnTo } from "../../src/navigation/return-to";
 import { theme } from "../../src/theme/theme";
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
+import { usePhotoQueueSession } from "../../src/capture/use-photo-queue-session";
+import {
+  drainUploadQueue,
+  getQueuedCount,
+  getSchedulableCount,
+  subscribeToQueueChanges,
+} from "../../src/capture/upload-queue";
+import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
+import { qk } from "../../src/query/keys";
 import {
   drainWalkQueue,
   forgetRecoverableWalksAtStartup,
@@ -23,12 +33,19 @@ function TabIcon({ name, color }: { name: IoniconName; color: string }) {
 
 /** Authenticated tab shell (Projects / Capture / Profile) — replaces FieldLayout. */
 export default function AppLayout() {
-  const { ready, token } = useAuth();
+  const { ready, token, user } = useAuth();
 
   // Office resolution and the retired-session 401 guard both live in the shared hook, so this
   // shell, walk.tsx, profile.tsx and the background drain task cannot drift apart on either. See
   // use-queue-session.ts for why each of those rules exists.
   const { ownerKey, queueFetcher } = useWalkQueueSession();
+
+  // The PHOTO queue's own identity + fetcher. Separate hook, and specifically NOT capture.tsx's
+  // fetcher: that one carries onUnauthorized -> signOut, which is safe on a screen the user chose to
+  // open and catastrophic here. See use-photo-queue-session.ts rule 2.
+  const { ownerKey: photoOwnerKey, resolvedOfficeId, queueFetcher: photoQueueFetcher } = usePhotoQueueSession();
+  const [queuedPhotos, setQueuedPhotos] = React.useState(0);
+  const queryClient = useQueryClient();
 
   // Scan once for walk recordings that were interrupted before they could be queued — an app kill
   // mid-recording, or after native finalised but before the enqueue effect ran, leaves files under
@@ -100,6 +117,100 @@ export default function AppLayout() {
     };
   }, [token, ownerKey, queueFetcher]);
 
+  /**
+   * The same resume, for the PHOTO queue. It is the walk effect above applied to the other queue, and
+   * the reason it did not already exist is the whole of the reported bug.
+   *
+   * Photo captures drained from exactly two places: the Capture screen, and the opportunistic iOS
+   * background window (which upload-background-task.ts's own header calls a long-tail safety net, not a
+   * mechanism). Every other screen — including the project gallery a superintendent stares at while
+   * asking where yesterday's photos went — could not move the queue at all. Measured on production: of
+   * 267 photos captured on Sep 10, ZERO reached the server that day; they arrived the next morning.
+   *
+   * SCOPE, deliberately: this drains the ACTIVE owner namespace only. Scorecard drafts can persist
+   * evidence under an OLD office's namespace, and draining those from the foreground too is a real
+   * improvement — but doing it correctly needs a fetcher pinned to each owner's OWN office (an
+   * active-office fetcher would confirm an old namespace's captures into the WRONG office), a badge that
+   * sums across namespaces, and parked drain requests for a non-active owner. That is its own change
+   * with its own failure modes, and the background task already enumerates every namespace (see
+   * upload-background-task.ts). Keeping it out of here is what keeps this fix reviewable.
+   *
+   * Registering the background task here too (it was only registered from Capture and the Reports hub)
+   * means a crew that photographs from a project screen and never opens the Capture tab still gets the
+   * OS-granted windows. Both calls are idempotent and fully guarded.
+   *
+   * Ordering note: this runs alongside the walk drain above, not after it. The two queues are
+   * independent, each drain self-serialises on its own module lock, and neither should wait on the other
+   * — a multi-GB walk video must not hold up a day of photos, which is exactly the starvation this
+   * feature exists to remove.
+   */
+  React.useEffect(() => {
+    // uploadOwnerKey returns "" without a signed-in user, so a non-empty key already implies one — but
+    // name it explicitly rather than asserting, since the gallery invalidation below keys its query on
+    // it and a wrong id would refresh nobody's cache.
+    const userId = user?.id;
+    if (!token || !photoOwnerKey || !userId) return;
+    let active = true;
+    void registerUploadBackgroundTask();
+
+    // Monotonic guard for the badge reads. Every queue mutation notifies, so an enqueue immediately
+    // followed by a successful drain starts two independent async counts — and nothing makes them
+    // resolve in the order they were issued. The earlier read (queue non-empty) landing last would
+    // restore a positive count over the newer read's zero, and the badge would then sit there lying
+    // until some unrelated mutation or foreground transition corrected it. A badge whose whole purpose
+    // is to be the honest answer to "did my photos send?" cannot be allowed to say 40 when it is 0.
+    //
+    // Local to the effect rather than a ref: each effect instance owns its own sequence, and `active`
+    // already discards reads belonging to a torn-down one. Same shape as the request-seq stale guard
+    // usePhotoFeed uses on the web photo feed.
+    let latestBadgeRead = 0;
+    const refreshBadge = async () => {
+      const read = (latestBadgeRead += 1);
+      const queued = await getQueuedCount(photoOwnerKey).catch(() => 0);
+      if (active && read === latestBadgeRead) setQueuedPhotos(queued);
+    };
+
+    const drainIfQueued = async () => {
+      await refreshBadge();
+      // Cheap index read first, exactly as the background task gates itself: the common answer is zero,
+      // and drainUploadQueue would otherwise take the drain lock and keep-awake on every foreground.
+      // getSchedulableCount, not getQueuedCount — a lone interrupted capture is 0 drainable but still
+      // needs the drain that reconciles it (see isSchedulable).
+      if ((await getSchedulableCount(photoOwnerKey)) === 0 || !active) return;
+      // No "is a drain already running?" check needed: drainUploadQueue coalesces a request made during
+      // an active drain into a follow-up pass. A resume that lands mid-drain means the queue is worth
+      // re-reading, not ignoring.
+      const summary = await drainUploadQueue(photoOwnerKey, photoQueueFetcher);
+      if (!active) return;
+      // Refresh the galleries this drain actually shipped for. The deal ids come FROM the drain rather
+      // than from an inventory taken beforehand, because a coalesced follow-up pass can ship a photo that
+      // did not exist when the drain started. Without this the project gallery keeps rendering its
+      // cached, missing-photo list — useProjectPhotos does not poll and React Query's window-focus
+      // refetch is a no-op in React Native — which is the screen this was reported from.
+      for (const dealId of summary.shippedDealIds) {
+        void queryClient.invalidateQueries({ queryKey: qk.projectPhotos(userId, dealId) });
+      }
+      await refreshBadge();
+    };
+    const run = () => void drainIfQueued().catch(() => undefined);
+
+    run();
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active") run();
+    });
+    // The badge has to track the QUEUE, not just this effect's own drains. A photo enqueued while the app
+    // stays open fires neither mount nor foreground, so without this the count sat stale — and a badge
+    // reading 0 while 40 photos wait answers "did they send?" wrongly, which is worse than no badge.
+    const unsubscribe = subscribeToQueueChanges(() => void refreshBadge());
+    return () => {
+      // Only stops NEW drains after unmount; one already in flight is deliberately left to finish, since
+      // abandoning an upload on a navigation change is the failure this effect exists to prevent.
+      active = false;
+      sub.remove();
+      unsubscribe();
+    };
+  }, [token, photoOwnerKey, photoQueueFetcher, resolvedOfficeId, user, queryClient]);
+
   // Capture where the user was headed (e.g. the corrective-action deep link) so a required login can return
   // them there. This is the single chokepoint for BOTH a cold-start deep link (app not running → OS opens
   // the link → this layout mounts with no token) and a warm one (session expired mid-session). usePathname
@@ -133,9 +244,19 @@ export default function AppLayout() {
         name="projects"
         options={{ title: "Projects", tabBarIcon: ({ color }) => <TabIcon name="folder-outline" color={color} /> }}
       />
+      {/* The badge is the answer to "did my photos upload?", which until now the app could only be asked
+          on the Capture screen — the one place a crew is NOT standing when they go looking for yesterday's
+          photos in a project gallery. A queued count that is visible from every tab is the difference
+          between "still sending, 40 to go" and a silence the user can only read as data loss, which is how
+          this was reported. Undefined rather than 0 so the badge disappears when the queue is empty. */}
       <Tabs.Screen
         name="capture"
-        options={{ title: "Capture", tabBarIcon: ({ color }) => <TabIcon name="camera-outline" color={color} /> }}
+        options={{
+          title: "Capture",
+          tabBarIcon: ({ color }) => <TabIcon name="camera-outline" color={color} />,
+          tabBarBadge: queuedPhotos > 0 ? queuedPhotos : undefined,
+          tabBarBadgeStyle: { backgroundColor: theme.color.brandRed, fontFamily: theme.font.medium },
+        }}
       />
       {/* Renamed from "Scorecard" when the weekly client report joined the two scorecards under one
           roof. The tab now points at a hub; the scorecard screens themselves are unchanged and stay

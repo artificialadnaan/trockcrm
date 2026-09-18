@@ -83,6 +83,14 @@ export type ConfirmUploadRequest = {
   longitude?: number;
   addressSource?: "exif" | "live_gps";
   takenAt?: string;
+  /**
+   * How many captures are still queued behind this one on THIS device. Telemetry only — the server writes
+   * it to the photo audit event and makes no decision with it.
+   *
+   * The server cannot see a device's queue, which is why a three-day upload backlog was invisible until a
+   * superintendent reported missing photos and it had to be reconstructed from capture-vs-arrival dates.
+   */
+  queueDepth?: number;
 };
 
 // ── Capture targets ───────────────────────────────────────────────────────────

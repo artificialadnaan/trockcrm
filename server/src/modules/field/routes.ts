@@ -156,6 +156,24 @@ function parseOptionalClientUploadId(value: unknown): string | undefined {
   return value.trim();
 }
 
+/**
+ * Device-reported count of captures still queued behind this upload. Telemetry ONLY — it is written to
+ * the photo audit event's metadata and read by nobody at request time.
+ *
+ * Deliberately lenient rather than a 400: this is a diagnostic a client volunteers, and rejecting an
+ * otherwise-valid photo confirm because a telemetry field was malformed would trade a real photo for a
+ * number. A junk value is dropped; a sane one is clamped so a client cannot write an unbounded integer
+ * into a JSON column.
+ */
+const MAX_REPORTED_QUEUE_DEPTH = 100_000;
+
+function parseOptionalQueueDepth(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.min(Math.floor(n), MAX_REPORTED_QUEUE_DEPTH);
+}
+
 function parseScorecardDiscardEvidenceIds(value: unknown): string[] {
   if (!Array.isArray(value)) throw new AppError(400, "clientUploadIds must be an array.");
   if (value.length > 100) throw new AppError(400, "At most 100 evidence uploads can be discarded at once.");
@@ -566,6 +584,7 @@ fieldRoutes.post("/photos/confirm-upload", requireFieldContractor, async (req, r
         addressSource: req.body.addressSource,
         takenAt: req.body.takenAt,
         auditContext: requestAuditContext(req),
+        queueDepth: parseOptionalQueueDepth(req.body.queueDepth),
       }),
     );
     res.status(201).json(result);
