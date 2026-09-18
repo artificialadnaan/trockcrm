@@ -123,41 +123,6 @@ export default function ProjectDetailScreen() {
   // client-side over what was loaded: those cannot reach a photo the page ceiling dropped, and this can.
   const [windowFrom, setWindowFrom] = useState("");
   const [windowTo, setWindowTo] = useState("");
-  const photoWindow = useMemo(() => ({ from: windowFrom, to: windowTo }), [windowFrom, windowTo]);
-  /**
-   * Switch months and the facet filters reset.
-   *
-   * They are computed from the loaded set, so a category/tag/uploader that does not occur in the new
-   * month loses its chip while the selection stays active — an empty gallery with no visible control to
-   * clear, and no way back except leaving the project. Resetting is the honest behaviour: the window
-   * changed which photos exist, so a filter over the previous window's values no longer means anything.
-   */
-  const selectWindow = useCallback((from: string, to: string) => {
-    setWindowFrom(from);
-    setWindowTo(to);
-    setCategories([]);
-    setTags([]);
-    setUploaderIds([]);
-  }, []);
-  const photosQuery = useProjectPhotos(dealId, photoWindow);
-  /**
-   * The project's earliest photo, taken ONLY from an unwindowed load.
-   *
-   * A windowed response reports the earliest photo *in that window*, so trusting it would shrink the
-   * month list to the current selection and strand every older month. But the unwindowed answer is
-   * authoritative every time it arrives, not just the first: importing a historical camera-roll photo
-   * moves the boundary earlier, and a remember-once rule would leave that month permanently absent from
-   * the selector — unreachable on exactly the projects past the ceiling where the selector is the only
-   * way to reach anything.
-   */
-  const [projectOldestAt, setProjectOldestAt] = useState<string | null>(null);
-  const reportedOldestAt = photosQuery.data?.oldestAt ?? null;
-  const reportedWindowed = photosQuery.data?.windowed ?? false;
-  useEffect(() => {
-    if (reportedWindowed || !reportedOldestAt) return;
-    setProjectOldestAt((prev) => (prev === reportedOldestAt ? prev : reportedOldestAt));
-  }, [reportedWindowed, reportedOldestAt]);
-
   /**
    * Today's month, refreshed when the app returns to the foreground.
    *
@@ -213,6 +178,47 @@ export default function ProjectDetailScreen() {
   // The zone the gallery's own bounds are resolved in. Derived from calendarKey so it moves with the
   // same resync the month list uses, rather than being read independently at some other moment.
   const galleryTimeZone = useMemo(() => calendarKey.split("@")[1] || undefined, [calendarKey]);
+
+  // ONE window object carries the dates AND the zone, so the query, its cache key, and the viewer's
+  // re-scan cannot disagree about which days the selected month covers.
+  const photoWindow = useMemo(
+    () => ({ from: windowFrom, to: windowTo, timeZone: galleryTimeZone }),
+    [windowFrom, windowTo, galleryTimeZone],
+  );
+  /**
+   * Switch months and the facet filters reset.
+   *
+   * They are computed from the loaded set, so a category/tag/uploader that does not occur in the new
+   * month loses its chip while the selection stays active — an empty gallery with no visible control to
+   * clear, and no way back except leaving the project. Resetting is the honest behaviour: the window
+   * changed which photos exist, so a filter over the previous window's values no longer means anything.
+   */
+  const selectWindow = useCallback((from: string, to: string) => {
+    setWindowFrom(from);
+    setWindowTo(to);
+    setCategories([]);
+    setTags([]);
+    setUploaderIds([]);
+  }, []);
+  const photosQuery = useProjectPhotos(dealId, photoWindow);
+  /**
+   * The project's earliest photo, taken ONLY from an unwindowed load.
+   *
+   * A windowed response reports the earliest photo *in that window*, so trusting it would shrink the
+   * month list to the current selection and strand every older month. But the unwindowed answer is
+   * authoritative every time it arrives, not just the first: importing a historical camera-roll photo
+   * moves the boundary earlier, and a remember-once rule would leave that month permanently absent from
+   * the selector — unreachable on exactly the projects past the ceiling where the selector is the only
+   * way to reach anything.
+   */
+  const [projectOldestAt, setProjectOldestAt] = useState<string | null>(null);
+  const reportedOldestAt = photosQuery.data?.oldestAt ?? null;
+  const reportedWindowed = photosQuery.data?.windowed ?? false;
+  useEffect(() => {
+    if (reportedWindowed || !reportedOldestAt) return;
+    setProjectOldestAt((prev) => (prev === reportedOldestAt ? prev : reportedOldestAt));
+  }, [reportedWindowed, reportedOldestAt]);
+
 
   // Rebuilt only when the project's span or the calendar month changes — not per render, which would
   // rebuild the list and its chip keys on every unrelated state change.

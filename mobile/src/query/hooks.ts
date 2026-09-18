@@ -91,7 +91,21 @@ const PHOTOS_MAX_PAGES = 50;
  * tag, uploader) run client-side over whatever was loaded, so they cannot bring a dropped photo back.
  * Narrowing the window server-side changes which photos exist to be paged at all.
  */
-export type ProjectPhotoWindow = { from?: string; to?: string };
+export type ProjectPhotoWindow = {
+  from?: string;
+  to?: string;
+  /**
+   * The zone the day bounds were computed in. Supplied BY THE CALLER rather than resolved here, so the
+   * query, its cache key, and anything else built from the same window (the viewer's URL re-scan) are
+   * guaranteed to agree.
+   *
+   * Resolving it inside this hook looked equivalent and was not: it re-read the device zone on every
+   * render, so after an automatic zone change any unrelated state update would reload the month in the
+   * NEW zone while the screen still handed the viewer the OLD one — two halves of the same screen
+   * disagreeing about which days "September" means. One value, passed down, cannot drift from itself.
+   */
+  timeZone?: string;
+};
 
 /**
  * The device's IANA zone, or undefined when the runtime cannot name one — in which case the server keeps
@@ -119,7 +133,9 @@ export function useProjectPhotos(dealId: string | undefined, window?: ProjectPho
   // unqualified "2026-09-01" means 2026-09-01T00:00Z, which in Dallas is Aug 31 at 19:00. Without this,
   // a September window ran Aug 31 19:00 -> Sep 30 19:00 local — carrying the end of August and dropping
   // the last evening of September, which on a jobsite is real work in both directions.
-  const timeZone = deviceTimeZone();
+  //
+  // Falls back to the device zone only when a caller supplies none; the gallery always supplies one.
+  const timeZone = window?.timeZone || deviceTimeZone();
   return useQuery({
     // The window AND the zone are both part of the identity of this result. Without the dates, changing
     // the month would serve the previous window from cache and the filter would look like it did
