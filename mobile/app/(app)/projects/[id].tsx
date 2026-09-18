@@ -70,9 +70,22 @@ const AWAIT_REPORT_POLL_MS = 10_000;
  */
 const AWAIT_REPORT_WINDOW_MS = 30 * 60_000;
 
-/** "YYYY-MM" for a date, in LOCAL time — the same calendar the month options are built from. */
-function monthKeyOf(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+/**
+ * "YYYY-MM@Zone" for a date — the identity of the calendar the month options are built from.
+ *
+ * The zone is part of it because the month list depends on it twice over: which month is "now", and
+ * which month the project's oldest photo falls in. Resuming in a different zone inside the same month
+ * changes the second without changing the first, so a month-only key would leave the list cached
+ * against the previous zone and could omit the destination zone's oldest month.
+ */
+function calendarKeyOf(d: Date): string {
+  let zone = "";
+  try {
+    zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    zone = "";
+  }
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}@${zone}`;
 }
 
 function toStr(v: string | string[] | undefined): string {
@@ -153,17 +166,43 @@ export default function ProjectDetailScreen() {
    * and share stay disabled, and the crew cannot isolate the very photos they just took without killing
    * the app. Keyed by month string so the memo below re-runs on rollover and on nothing else.
    */
-  const [currentMonthKey, setCurrentMonthKey] = useState(() => monthKeyOf(new Date()));
+  const [calendarKey, setCalendarKey] = useState(() => calendarKeyOf(new Date()));
   useEffect(() => {
-    const sync = () => setCurrentMonthKey((prev) => {
-      const now = monthKeyOf(new Date());
-      return prev === now ? prev : now;
-    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const sync = () =>
+      setCalendarKey((prev) => {
+        const now = calendarKeyOf(new Date());
+        return prev === now ? prev : now;
+      });
+
+    /**
+     * A timer to the next local midnight, rescheduled each time it fires.
+     *
+     * AppState alone is not enough: an app left in the foreground across midnight on the 1st never
+     * transitions, so the new month would stay absent indefinitely — and on a truncated project that
+     * means All is unusable, report and share stay disabled, and the crew cannot isolate the photos
+     * they are taking right now. Always under 24h, so well inside setTimeout's range.
+     */
+    const scheduleMidnight = () => {
+      const now = new Date();
+      const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5);
+      timer = setTimeout(() => {
+        sync();
+        scheduleMidnight();
+      }, Math.max(1_000, nextMidnight.getTime() - now.getTime()));
+    };
+
     sync();
+    scheduleMidnight();
+    // Still listen to foreground: a suspended app's timer does not fire on schedule, so resuming is the
+    // other moment the calendar may have moved.
     const sub = AppState.addEventListener("change", (next) => {
       if (next === "active") sync();
     });
-    return () => sub.remove();
+    return () => {
+      if (timer) clearTimeout(timer);
+      sub.remove();
+    };
   }, []);
 
   // Rebuilt only when the project's span or the calendar month changes — not per render, which would
@@ -171,7 +210,7 @@ export default function ProjectDetailScreen() {
   const monthOptions = useMemo(
     () => photoMonthOptionsSince(new Date(), projectOldestAt),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectOldestAt, currentMonthKey],
+    [projectOldestAt, calendarKey],
   );
   const reportsQuery = useProjectReports(dealId);
   const scorecardsQuery = useProjectScorecards(dealId);
