@@ -197,6 +197,59 @@ const BID_BOARD_DUE_DATE_SYNC_REASON = "Bid Board export sync - Due Date -> Bid 
 const BID_BOARD_MIRROR_UPDATE_SAVEPOINT = "bid_board_mirror_update";
 const BID_BOARD_PROJECT_NUMBER_UNIQUE_CONSTRAINT = "deals_bid_board_project_number_canonical_uidx";
 
+/**
+ * DID THIS FIELD ACTUALLY CHANGE? Compares a stored value against an incoming one the way the database
+ * would, not the way string equality does.
+ *
+ * The sync re-asserts every mirrored column on every cycle, so `from`/`to` pairs arrive for fields that
+ * did not move. Two shapes made those look like edits:
+ *
+ *   numerics  Postgres renders numeric(14,2) as "0.00"; `numericText()` normalizes the incoming side to
+ *             "0". Textually different, numerically identical — audited as a change on every run.
+ *   dates     a timestamptz comes back as a Date, the export sends an ISO string. Same instant, different
+ *             type, and `bidBoardCreatedAt: {from: X, to: X}` was recorded verbatim.
+ *
+ * Measured consequence: 63,226 `bid_board_mirror` audit rows in 24 hours, most listing 16 fields of which
+ * ~14 had not moved. Normalizing only the write and not the COMPARISON is what produced them.
+ */
+function sameAuditValue(from: unknown, to: unknown): boolean {
+  const blank = (v: unknown) => v === null || v === undefined || v === "";
+  if (blank(from) && blank(to)) return true;
+  if (blank(from) !== blank(to)) return false;
+
+  if (from instanceof Date || to instanceof Date) {
+    const ft = from instanceof Date ? from.getTime() : Date.parse(String(from));
+    const tt = to instanceof Date ? to.getTime() : Date.parse(String(to));
+    if (Number.isFinite(ft) && Number.isFinite(tt)) return ft === tt;
+  }
+
+  const fs = String(from).trim();
+  const ts = String(to).trim();
+  // Numeric only when BOTH sides are plainly numeric — never coerce "" or a date string into 0.
+  const numeric = /^-?\d+(\.\d+)?$/;
+  if (numeric.test(fs) && numeric.test(ts)) return Number(fs) === Number(ts);
+
+  return fs === ts;
+}
+
+/** Drop the pairs that did not move, so an audit row lists edits rather than the whole column set. */
+function onlyRealChanges(
+  changes: Record<string, { from: unknown; to: unknown }>
+): Record<string, { from: unknown; to: unknown }> {
+  const out: Record<string, { from: unknown; to: unknown }> = {};
+  for (const [key, pair] of Object.entries(changes)) {
+    if (!sameAuditValue(pair.from, pair.to)) out[key] = pair;
+  }
+  return out;
+}
+
+/**
+ * Internal seam for the audit-suppression tests. These two are pure and carry the whole judgement about
+ * what counts as a change, so they are worth asserting directly rather than through a sync run.
+ */
+export const __auditTestables = { sameAuditValue, onlyRealChanges };
+
+
 function textValue(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value).trim();
@@ -849,12 +902,21 @@ async function updateBidBoardStageMetadata(
   );
   const updated = (result.rowCount ?? 0) > 0;
   if (updated) {
-    await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name }, {
-      bidBoardStageSlug: { from: deal.bid_board_stage_slug, to: targetStageSlug },
-      bidBoardStageFamily: { from: deal.bid_board_stage_family, to: stageFamilyForSlug(targetStageSlug) },
-      bidBoardStageStatus: { from: deal.bid_board_stage_status, to: status },
-      readOnlySyncedAt: { from: null, to: "now" },
-    }, { source: "stage_metadata_refresh" });
+    // AUDIT A STAGE MOVE, NOT A SYNC HEARTBEAT. This UPDATE always sets read_only_synced_at = NOW(), so
+    // it always matches a row — and as the predicate note above says, it fires on cycles where the CRM
+    // stage ALREADY equals the mapped one. It therefore logged 63,213 rows in 24 hours whose only content
+    // was three unchanged stage fields plus `readOnlySyncedAt: {from: null, to: "now"}` — a hardcoded
+    // pair that is not a diff at all, since `from` was never read from the row.
+    //
+    // `logBidBoardActivity` already returns early on an empty map, so when nothing moved, nothing is
+    // written. The sync still records that it ran; that is what the run metrics are for.
+    await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name },
+      onlyRealChanges({
+        bidBoardStageSlug: { from: deal.bid_board_stage_slug, to: targetStageSlug },
+        bidBoardStageFamily: { from: deal.bid_board_stage_family, to: stageFamilyForSlug(targetStageSlug) },
+        bidBoardStageStatus: { from: deal.bid_board_stage_status, to: status },
+      }),
+      { source: "stage_metadata_refresh" });
   }
   return updated;
 }
@@ -1778,7 +1840,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           updateDeal,
           // mirrorRow, not `normalized`: when the due date was withheld above, the audit trail must not
           // claim a mirror move that did not happen.
-          buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled),
+          onlyRealChanges(
+            buildBidBoardMirrorFieldChanges(matches[0], mirrorRow, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled)
+          ),
           { source: "bid_board_mirror", runId }
         );
       }
