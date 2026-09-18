@@ -146,7 +146,17 @@ function buildMirrorDealUpdateQuery(args: {
     // leaves updates.ddEstimate undefined, so this COALESCE preserves the existing human value (migration 0164).
     `dd_estimate = COALESCE(${bind(args.updates.ddEstimate)}, dd_estimate)`,
     `bid_estimate = COALESCE(${bind(args.updates.bidEstimate)}, bid_estimate)`,
-    `awarded_amount = COALESCE(${bind(args.updates.awardedAmount)}, awarded_amount)`,
+    // The override is enforced HERE, against the locked row, not only by buildBidBoardMirrorUpdate's
+    // `awardedLocked` — which reads a snapshot taken BEFORE this UPDATE. Without the CASE, this sequence
+    // silently destroys a human correction: the webhook reads awarded_amount_overridden = false, a
+    // leader's edit then commits the corrected amount AND sets the flag true, and this UPDATE writes the
+    // webhook's stale value anyway while leaving the flag true — so every later mirror "preserves" the
+    // WRONG number, permanently. A JS check on a pre-lock read is not a guard; the predicate belongs in
+    // the write.
+    `awarded_amount = CASE
+       WHEN awarded_amount_overridden THEN awarded_amount
+       ELSE COALESCE(${bind(args.updates.awardedAmount)}, awarded_amount)
+     END`,
     `proposal_notes = COALESCE(${bind(args.updates.proposalNotes)}, proposal_notes)`,
     `estimating_substage = ${bind(args.updates.estimatingSubstage)}`,
     `proposal_status = COALESCE(${bind(args.updates.proposalStatus)}, proposal_status)`,
