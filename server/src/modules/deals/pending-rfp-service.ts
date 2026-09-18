@@ -64,6 +64,26 @@ export function aliasedNotPendingRfpBucketCondition(alias: string) {
   return sql`coalesce(${aliasedPendingRfpBucketCondition(alias)}, false) = false`;
 }
 
+/**
+ * Ordering key that floats the ATTENTION sub-state (send_failed / declined / conflict) above AWAITING.
+ * Use as the leading `desc(...)` term, ahead of the age tiebreak.
+ *
+ * This has to be in the SQL, not a client re-sort: the board's Pending RFP cards are a capped slice
+ * (`.limit(pipelineCardsPerStageLimit)`), so ordering client-side would only rearrange the cards that
+ * already made the cut and leave an attention deal below the cap invisible. Ordering here also changes
+ * WHICH cards make the slice — attention deals now always do, which is the point.
+ *
+ * Built from PENDING_RFP_ATTENTION_STATUSES rather than a literal list so it cannot drift from the
+ * membership predicate above, or from the client's sub-state split.
+ */
+export function aliasedPendingRfpAttentionFirstSql(alias: string) {
+  const relation = sql.raw(`"${alias.replace(/"/g, '""')}"`);
+  return sql`(${relation}.rfp_approval_status in (${sql.join(
+    PENDING_RFP_ATTENTION_STATUSES.map((status) => sql`${status}`),
+    sql`, `
+  )}))`;
+}
+
 export function aliasedPendingRfpBucketCondition(alias: string) {
   const relation = sql.raw(`"${alias.replace(/"/g, '""')}"`);
   return sql`(
