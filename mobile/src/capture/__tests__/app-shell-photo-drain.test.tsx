@@ -49,15 +49,14 @@ const mockDrainUploadQueue = jest.fn(async (..._args: unknown[]) => ({
   failed: 0,
   remaining: 0,
   confirmedFileIds: {},
+  shippedDealIds: [] as string[],
 }));
 const mockGetQueuedCount = jest.fn(async (..._args: unknown[]): Promise<number> => 0);
 const mockGetSchedulableCount = jest.fn(async (..._args: unknown[]): Promise<number> => 0);
-const mockGetQueuedUploads = jest.fn(async (..._args: unknown[]): Promise<unknown[]> => []);
 const mockQueueChangeListeners: Array<(ownerKey: string) => void> = [];
 jest.mock("../upload-queue", () => ({
   drainUploadQueue: (...args: unknown[]) => mockDrainUploadQueue(...args),
   getQueuedCount: (...args: unknown[]) => mockGetQueuedCount(...args),
-  getQueuedUploads: (...args: unknown[]) => mockGetQueuedUploads(...args),
   getSchedulableCount: (...args: unknown[]) => mockGetSchedulableCount(...args),
   subscribeToQueueChanges: (listener: (ownerKey: string) => void) => {
     mockQueueChangeListeners.push(listener);
@@ -66,18 +65,6 @@ jest.mock("../upload-queue", () => ({
       if (i >= 0) mockQueueChangeListeners.splice(i, 1);
     };
   },
-}));
-
-// Real implementation: it is a small, pure sequencer and the shell's per-owner behaviour is the point.
-jest.mock("../upload-background-core", () => jest.requireActual("../upload-background-core"));
-
-const mockListScorecardDraftOwners = jest.fn(
-  async (_userId: string, fallbackOwnerKey: string): Promise<Array<{ ownerKey: string; officeId: string | null }>> => [
-    { ownerKey: fallbackOwnerKey, officeId: "office-a" },
-  ],
-);
-jest.mock("../../scorecards/draft-store", () => ({
-  listScorecardDraftOwners: (...args: [string, string]) => mockListScorecardDraftOwners(...args),
 }));
 
 let mockAuth: {
@@ -120,9 +107,6 @@ beforeEach(() => {
   mockGetQueuedCount.mockResolvedValue(0);
   mockGetSchedulableCount.mockClear();
   mockGetSchedulableCount.mockResolvedValue(0);
-  mockGetQueuedUploads.mockClear();
-  mockGetQueuedUploads.mockResolvedValue([]);
-  mockListScorecardDraftOwners.mockClear();
   mockQueueChangeListeners.length = 0;
   queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   appStateHandlers = [];
@@ -251,15 +235,19 @@ describe("authenticated shell photo-queue drain", () => {
    * his backlog. useProjectPhotos does not poll and React Query's window-focus refetch is a no-op in
    * React Native, so without an explicit invalidation the gallery keeps rendering the cached,
    * missing-photo list it had — the photos are on the server and the screen still says they are not.
+   *
+   * The deal ids come from the DRAIN SUMMARY, not from an inventory taken before it: a coalesced
+   * follow-up pass can ship a photo for a deal that had nothing queued when the drain started.
    */
-  it("invalidates the galleries of deals whose photos it just shipped", async () => {
+  it("invalidates the galleries the drain reports it shipped for", async () => {
     mockGetSchedulableCount.mockResolvedValue(2);
-    mockGetQueuedUploads.mockResolvedValue([
-      { clientUploadId: "a", target: { dealId: "deal-boynton" } },
-      { clientUploadId: "b", target: { dealId: "deal-other" } },
-      { clientUploadId: "c", target: {} }, // a pending capture with no target yet — nothing to invalidate
-    ]);
-    mockDrainUploadQueue.mockResolvedValue({ succeeded: 2, failed: 0, remaining: 0, confirmedFileIds: {} });
+    mockDrainUploadQueue.mockResolvedValue({
+      succeeded: 2,
+      failed: 0,
+      remaining: 0,
+      confirmedFileIds: {},
+      shippedDealIds: ["deal-boynton", "deal-other"],
+    });
 
     await renderShell();
     const spy = jest.spyOn(queryClient, "invalidateQueries");
@@ -273,10 +261,15 @@ describe("authenticated shell photo-queue drain", () => {
     expect(invalidated).toContain(JSON.stringify(["projectPhotos", "user-1", "deal-other"]));
   });
 
-  it("does not invalidate anything when the drain shipped nothing", async () => {
+  it("invalidates nothing when the drain shipped nothing", async () => {
     mockGetSchedulableCount.mockResolvedValue(1);
-    mockGetQueuedUploads.mockResolvedValue([{ clientUploadId: "a", target: { dealId: "deal-1" } }]);
-    mockDrainUploadQueue.mockResolvedValue({ succeeded: 0, failed: 1, remaining: 1, confirmedFileIds: {} });
+    mockDrainUploadQueue.mockResolvedValue({
+      succeeded: 0,
+      failed: 1,
+      remaining: 1,
+      confirmedFileIds: {},
+      shippedDealIds: [],
+    });
 
     await renderShell();
     const spy = jest.spyOn(queryClient, "invalidateQueries");
@@ -318,33 +311,17 @@ describe("authenticated shell photo-queue drain", () => {
   });
 
   /**
-   * Scorecard drafts deliberately persist evidence under the OWNING office's namespace so an edit
-   * survives an office switch or the submitter being re-homed. Draining only the active key would leave
-   * that evidence waiting on an opportunistic OS window — the same "durable, and nothing is scheduled to
-   * send it" state this effect exists to end, one namespace over. The background task already enumerates
-   * this way; the foreground had no reason to be narrower.
+   * Scope note, asserted so it cannot drift silently: the shell drains the ACTIVE namespace only.
+   * Draining an old office's namespace needs a fetcher pinned to THAT office — an active-office fetcher
+   * would confirm those captures into the wrong office — plus a cross-namespace badge and parked
+   * requests for non-active owners. That is a separate change; the background task still covers those
+   * namespaces in the meantime.
    */
-  it("drains every registered owner namespace, not just the active office", async () => {
-    mockListScorecardDraftOwners.mockResolvedValue([
-      { ownerKey: OWNER, officeId: "office-a" },
-      { ownerKey: "user-1:office-b", officeId: "office-b" },
-    ]);
+  it("drains the active owner namespace only", async () => {
     mockGetSchedulableCount.mockResolvedValue(3);
 
     await renderShell();
 
-    expect(mockListScorecardDraftOwners).toHaveBeenCalledWith("user-1", OWNER);
-    const drained = mockDrainUploadQueue.mock.calls.map((c) => (c as unknown as [string])[0]);
-    expect(drained).toEqual([OWNER, "user-1:office-b"]);
-  });
-
-  it("falls back to the active namespace when the owner registry cannot be read", async () => {
-    mockListScorecardDraftOwners.mockRejectedValue(new Error("registry unreadable"));
-    mockGetSchedulableCount.mockResolvedValue(1);
-
-    await renderShell();
-
-    // A corrupt registry must not mean "drain nothing" — the active office is still drained.
     const drained = mockDrainUploadQueue.mock.calls.map((c) => (c as unknown as [string])[0]);
     expect(drained).toEqual([OWNER]);
   });

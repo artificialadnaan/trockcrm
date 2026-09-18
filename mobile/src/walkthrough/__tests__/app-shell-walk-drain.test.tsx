@@ -40,14 +40,10 @@ jest.mock("../../capture/upload-background-task", () => ({
   registerUploadBackgroundTask: jest.fn(async () => undefined),
 }));
 jest.mock("../../capture/upload-queue", () => ({
-  drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} })),
+  drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {}, shippedDealIds: [] })),
   getQueuedCount: jest.fn(async () => 0),
-  getQueuedUploads: jest.fn(async () => []),
   getSchedulableCount: jest.fn(async () => 0),
   subscribeToQueueChanges: jest.fn(() => () => undefined),
-}));
-jest.mock("../../scorecards/draft-store", () => ({
-  listScorecardDraftOwners: jest.fn(async () => []),
 }));
 
 const mockScanRecoverableWalksAtStartup = jest.fn(async (..._args: unknown[]) => undefined);

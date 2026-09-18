@@ -11,13 +11,10 @@ import { usePhotoQueueSession } from "../../src/capture/use-photo-queue-session"
 import {
   drainUploadQueue,
   getQueuedCount,
-  getQueuedUploads,
   getSchedulableCount,
   subscribeToQueueChanges,
 } from "../../src/capture/upload-queue";
-import { drainBackgroundOwnerQueues } from "../../src/capture/upload-background-core";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
-import { listScorecardDraftOwners } from "../../src/scorecards/draft-store";
 import { qk } from "../../src/query/keys";
 import {
   drainWalkQueue,
@@ -130,6 +127,14 @@ export default function AppLayout() {
    * asking where yesterday's photos went — could not move the queue at all. Measured on production: of
    * 267 photos captured on Sep 10, ZERO reached the server that day; they arrived the next morning.
    *
+   * SCOPE, deliberately: this drains the ACTIVE owner namespace only. Scorecard drafts can persist
+   * evidence under an OLD office's namespace, and draining those from the foreground too is a real
+   * improvement — but doing it correctly needs a fetcher pinned to each owner's OWN office (an
+   * active-office fetcher would confirm an old namespace's captures into the WRONG office), a badge that
+   * sums across namespaces, and parked drain requests for a non-active owner. That is its own change
+   * with its own failure modes, and the background task already enumerates every namespace (see
+   * upload-background-task.ts). Keeping it out of here is what keeps this fix reviewable.
+   *
    * Registering the background task here too (it was only registered from Capture and the Reports hub)
    * means a crew that photographs from a project screen and never opens the Capture tab still gets the
    * OS-granted windows. Both calls are idempotent and fully guarded.
@@ -153,58 +158,25 @@ export default function AppLayout() {
       if (active) setQueuedPhotos(queued);
     };
 
-    /**
-     * Every namespace this device might hold photos under, not just the active office.
-     *
-     * Scorecard drafts deliberately persist their evidence under the OWNING office's key so an edit
-     * survives an office switch or the submitter being re-homed. Draining only the active key would leave
-     * that evidence dependent on an opportunistic OS window — the same "queued, durable, and nothing is
-     * scheduled to send it" state this effect exists to end, just one namespace over. The background task
-     * already enumerates exactly this way; the foreground had no reason to be narrower.
-     */
-    const ownersToDrain = async () => {
-      const fallback = { ownerKey: photoOwnerKey, officeId: resolvedOfficeId };
-      try {
-        return await listScorecardDraftOwners(userId, photoOwnerKey);
-      } catch {
-        return [fallback];
-      }
-    };
-
     const drainIfQueued = async () => {
       await refreshBadge();
-      const owners = await ownersToDrain();
+      // Cheap index read first, exactly as the background task gates itself: the common answer is zero,
+      // and drainUploadQueue would otherwise take the drain lock and keep-awake on every foreground.
+      // getSchedulableCount, not getQueuedCount — a lone interrupted capture is 0 drainable but still
+      // needs the drain that reconciles it (see isSchedulable).
+      if ((await getSchedulableCount(photoOwnerKey)) === 0 || !active) return;
+      // No "is a drain already running?" check needed: drainUploadQueue coalesces a request made during
+      // an active drain into a follow-up pass. A resume that lands mid-drain means the queue is worth
+      // re-reading, not ignoring.
+      const summary = await drainUploadQueue(photoOwnerKey, photoQueueFetcher);
       if (!active) return;
-      // Galleries to refresh = the deals that actually have photos waiting, read BEFORE the drain (the
-      // rows are gone from the index afterwards). Mirrors what the Capture screen does with its own
-      // drain: without it a mounted project gallery keeps rendering its cached, missing-photo list even
-      // though the server now has the photos — useProjectPhotos does not poll, and React Query's
-      // window-focus refetch is a no-op in React Native. That gallery is the screen the whole report
-      // was filed about.
-      const dealIds = new Set<string>();
-      for (const owner of owners) {
-        for (const item of await getQueuedUploads(owner.ownerKey).catch(() => [])) {
-          const dealId = item.target?.dealId;
-          if (dealId) dealIds.add(dealId);
-        }
-      }
-
-      let shipped = 0;
-      // Sequential, one namespace at a time (drainBackgroundOwnerQueues' own contract), so a corrupt or
-      // failing office cannot starve the ones after it and the drains never race each other.
-      await drainBackgroundOwnerQueues(owners, {
-        getSchedulableCount,
-        drainOwner: async (owner) => {
-          const summary = await drainUploadQueue(owner.ownerKey, photoQueueFetcher);
-          shipped += summary.succeeded;
-        },
-      }).catch(() => undefined);
-
-      if (!active) return;
-      if (shipped > 0) {
-        for (const dealId of dealIds) {
-          void queryClient.invalidateQueries({ queryKey: qk.projectPhotos(userId, dealId) });
-        }
+      // Refresh the galleries this drain actually shipped for. The deal ids come FROM the drain rather
+      // than from an inventory taken beforehand, because a coalesced follow-up pass can ship a photo that
+      // did not exist when the drain started. Without this the project gallery keeps rendering its
+      // cached, missing-photo list — useProjectPhotos does not poll and React Query's window-focus
+      // refetch is a no-op in React Native — which is the screen this was reported from.
+      for (const dealId of summary.shippedDealIds) {
+        void queryClient.invalidateQueries({ queryKey: qk.projectPhotos(userId, dealId) });
       }
       await refreshBadge();
     };

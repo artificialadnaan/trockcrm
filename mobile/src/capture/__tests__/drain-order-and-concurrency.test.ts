@@ -40,13 +40,20 @@ const mockUploadedOrder: string[] = [];
 let mockGate: { promise: Promise<void>; release: () => void } | null = null;
 /** When set, every upload attempt rejects with it — used to drive the auth-pause path. */
 let mockRejectWith: unknown = null;
+/** queueDepth reported to the server per photo — the backlog telemetry. */
+const mockReportedDepths: Array<{ id: string; depth: number | undefined }> = [];
 jest.mock("../upload", () => {
   const actual = jest.requireActual("../concurrency");
   return {
     runConcurrentUploads: actual.runConcurrentUploads,
     UploadCancelledError: class UploadCancelledError extends Error {},
-    uploadCapture: jest.fn(async (_fetcher: unknown, item: { clientUploadId: string }) => {
+    uploadCapture: jest.fn(async (
+      _fetcher: unknown,
+      item: { clientUploadId: string },
+      opts?: { queueDepth?: number },
+    ) => {
       mockUploadedOrder.push(item.clientUploadId);
+      mockReportedDepths.push({ id: item.clientUploadId, depth: opts?.queueDepth });
       if (mockGate) await mockGate.promise;
       if (mockRejectWith) throw mockRejectWith;
       return { photo: { id: `file-${item.clientUploadId}` } };
@@ -90,6 +97,7 @@ beforeEach(() => {
   mockUploadedOrder.length = 0;
   mockGate = null;
   mockRejectWith = null;
+  mockReportedDepths.length = 0;
 });
 
 /**
@@ -242,5 +250,90 @@ describe("drainUploadQueue auth failures", () => {
     expect(summary.failed).toBe(1);
     const [row] = await queueRows();
     expect(row.attempts).toBe(1);
+  });
+});
+
+describe("drainUploadQueue follow-up passes", () => {
+  it("does NOT re-attempt a photo this drain already tried, so one drain cannot burn the retry budget", async () => {
+    // Offline device, crew still shooting. Pass 1 fails everything; a capture lands mid-drain, which
+    // coalesces a follow-up pass. If that pass re-planned the failures too, MAX_DRAIN_PASSES rounds
+    // would spend up to 4 of each photo's 5 attempts inside a SINGLE call — invisible to the Capture
+    // screen's 30s offline backoff, which cannot see inside one drain — and take recoverable photos
+    // terminal and Dismiss-only.
+    //
+    // The gate is what makes this a follow-up pass rather than two back-to-back drains. Without it the
+    // first drain simply finishes before the second call arrives, each gets its own attempted-set, and
+    // the test passes while proving nothing (observed: 5 uploads for 3 photos).
+    seedQueue([{ id: "a", enqueuedAt: 1 }, { id: "b", enqueuedAt: 2 }]);
+    mockRejectWith = new ApiError("R2 unreachable", 0);
+    let release!: () => void;
+    mockGate = { promise: new Promise<void>((r) => { release = () => r(); }), release: () => release() };
+
+    const first = drainUploadQueue(OWNER, fetcher);
+    await waitForUploadToStart();
+    seedQueue([
+      { id: "a", enqueuedAt: 1 },
+      { id: "b", enqueuedAt: 2 },
+      { id: "captured-mid-drain", enqueuedAt: 9 },
+    ]);
+    const second = await drainUploadQueue(OWNER, fetcher);
+    expect(second.alreadyDraining).toBe(true); // genuinely coalesced, not a separate drain
+
+    mockGate.release();
+    await first;
+
+    // Every photo was handed to the uploader at most ONCE by this drain, however many passes it ran.
+    const counts = mockUploadedOrder.reduce<Record<string, number>>((acc, id) => {
+      acc[id] = (acc[id] ?? 0) + 1;
+      return acc;
+    }, {});
+    expect(counts).toEqual({ a: 1, b: 1, "captured-mid-drain": 1 });
+    for (const row of await queueRows()) expect(row.attempts).toBe(1);
+  });
+
+  it("reports queue depth per PASS, not cumulative totals minus a pass-local plan", async () => {
+    // The bug this pins: `succeeded` is cumulative across coalesced passes while the plan is pass-local,
+    // so after a big first pass a follow-up pass computed max(0, small - big) = 0 for every photo. The
+    // audit row is written once, at creation, so that zero would be permanent — and precisely for the
+    // captures arriving during a long drain, which is exactly what the telemetry exists to reveal.
+    // Gated for the same reason as the test above: only a real follow-up pass can exhibit it.
+    seedQueue([{ id: "a", enqueuedAt: 1 }, { id: "b", enqueuedAt: 2 }, { id: "c", enqueuedAt: 3 }]);
+    let release!: () => void;
+    mockGate = { promise: new Promise<void>((r) => { release = () => r(); }), release: () => release() };
+
+    const first = drainUploadQueue(OWNER, fetcher);
+    await waitForUploadToStart();
+    seedQueue([
+      { id: "a", enqueuedAt: 1 },
+      { id: "b", enqueuedAt: 2 },
+      { id: "c", enqueuedAt: 3 },
+      { id: "late-1", enqueuedAt: 9 },
+      { id: "late-2", enqueuedAt: 10 },
+    ]);
+    const second = await drainUploadQueue(OWNER, fetcher);
+    expect(second.alreadyDraining).toBe(true);
+
+    mockGate.release();
+    await first;
+
+    const late = mockReportedDepths.filter((d) => d.id.startsWith("late-"));
+    expect(late).toHaveLength(2);
+    // Non-zero: these two were a backlog of two in their own pass. Under the cumulative-vs-pass-local
+    // arithmetic this reported 0, permanently, for exactly the captures the telemetry exists to reveal.
+    for (const entry of late) expect(entry.depth).toBeGreaterThan(0);
+  });
+
+  it("reports the deals it shipped for, including ones only a follow-up pass touched", async () => {
+    seedQueue([{ id: "a", enqueuedAt: 1 }]);
+    const summary = await drainUploadQueue(OWNER, fetcher);
+    // seedQueue targets deal-1 for every row.
+    expect(summary.shippedDealIds).toEqual(["deal-1"]);
+  });
+
+  it("reports no shipped deals when nothing succeeded", async () => {
+    seedQueue([{ id: "a", enqueuedAt: 1 }]);
+    mockRejectWith = new ApiError("boom", 500);
+    const summary = await drainUploadQueue(OWNER, fetcher);
+    expect(summary.shippedDealIds).toEqual([]);
   });
 });

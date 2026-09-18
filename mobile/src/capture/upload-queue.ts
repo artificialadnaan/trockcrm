@@ -76,6 +76,12 @@ export type DrainSummary = {
    * mid-drain when the user takes their next shot, and a silent 30s backoff on the Capture screen is
    * exactly the kind of "uploads mysteriously stalled" this whole change is meant to end.
    */
+  /**
+   * Deal ids this drain actually shipped at least one photo for — what a caller must invalidate to stop
+   * showing a stale gallery. Reported from the drain rather than inventoried by the caller beforehand,
+   * because a pre-drain snapshot misses everything a coalesced follow-up pass picks up.
+   */
+  shippedDealIds: string[];
   alreadyDraining?: true;
   /**
    * True when the drain stopped because a request came back 401 rather than because the work ran out.
@@ -634,6 +640,7 @@ export async function drainUploadQueue(
       failed: 0,
       remaining: await getQueuedCount(ownerKey),
       confirmedFileIds: {},
+      shippedDealIds: [],
       alreadyDraining: true,
     };
   }
@@ -644,6 +651,18 @@ export async function drainUploadQueue(
   let succeeded = 0;
   let failed = 0;
   let authPaused = false;
+  const shippedDealIds = new Set<string>();
+  /**
+   * Every id this drain has already ATTEMPTED, so a follow-up pass cannot re-attempt it.
+   *
+   * Without this the coalescer spends retry budget it has no right to. A failed item is still
+   * `isDrainable` (attempts < MAX_UPLOAD_ATTEMPTS), so an offline device whose crew keeps shooting would
+   * re-plan the same failures on every pass and burn up to MAX_DRAIN_PASSES of a photo's five attempts
+   * inside ONE drain — bypassing the Capture screen's 30s offline backoff, which cannot see inside a
+   * single call — and take recoverable photos terminal and Dismiss-only. A follow-up pass exists to pick
+   * up NEW work, which is exactly what this restricts it to.
+   */
+  const attemptedThisDrain = new Set<string>();
   try {
     // Self-heal interrupted enqueues (stuck staging rows + orphaned staging files) before planning, so a kill
     // mid-enqueue neither strands a photo nor leaks disk. Best-effort — never blocks the drain.
@@ -667,6 +686,7 @@ export async function drainUploadQueue(
       failed,
       remaining,
       confirmedFileIds,
+      shippedDealIds: [...shippedDealIds],
       ...(authPaused ? { authPaused: true as const } : {}),
     };
     opts.onProgress?.(summary);
@@ -675,12 +695,31 @@ export async function drainUploadQueue(
     // Keep-awake released, and only then the lock — strict nesting, so no second drain can start while
     // this one is still winding down.
     if (keptAwake) await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
+    drainRequested = false;
     activeDrainOwnerKey = null;
     draining = false;
+    // KNOWN, BOUNDED RESIDUAL RACE, left deliberately. Between the loop's last `!drainRequested` check
+    // and the line above there are two awaits (the remaining-count read and the keep-awake teardown). A
+    // same-owner request landing in that gap sets drainRequested, is told `alreadyDraining`, and is then
+    // discarded here — so that photo waits for the next trigger instead of this drain's follow-up pass.
+    //
+    // The obvious fix — hand the request off as a fresh drain once the lock is free — was implemented and
+    // REVERTED, because it is worse than the race it closes. A handoff drain starts with an empty
+    // attempted-set, so it immediately re-attempts everything that just failed, spending a second retry
+    // from every photo's budget of five without the Capture screen's 30s offline backoff ever getting a
+    // say. That is the retry-budget burn this file guards against three lines up, and it costs photos;
+    // the race costs one photo a short wait. Nothing is lost either way: the queue is durable, and every
+    // foreground, every capture, and the background task all drain it.
+    //
+    // Closing it properly means making the final check the last statement before the lock drops with no
+    // await after it, which is a restructure of the teardown — worth doing, not worth doing here.
   }
 
   /** One plan-and-upload pass over whatever is drainable right now. "empty" = nothing to do. */
   async function runDrainPass(): Promise<"empty" | "ran"> {
+    // Pass-local progress, for the queue-depth telemetry below. Distinct from `succeeded`, which is the
+    // whole call's total and is what the caller's summary reports.
+    let passSucceeded = 0;
     // Plan the drainable id order UNDER THE LOCK so the snapshot is consistent with any cancellation that
     // has already completed (terminal/failed items are left for the UI to surface + discard, never re-PUT).
     // planDrainOrder puts the most recently queued work first (with a reserved share for the backlog) —
@@ -688,8 +727,9 @@ export async function drainUploadQueue(
     // behind. It only reorders; the set of ids planned is unchanged.
     const planned = await withQueueLock(async () => {
       const queue = await readQueue(ownerKey);
+      const fresh = queue.filter((item) => isDrainable(item) && !attemptedThisDrain.has(item.clientUploadId));
       return {
-        ids: planDrainOrder(queue.filter(isDrainable)).map((item) => item.clientUploadId),
+        ids: planDrainOrder(fresh).map((item) => item.clientUploadId),
         total: queue.length,
       };
     });
@@ -727,6 +767,7 @@ export async function drainUploadQueue(
           .filter((item): item is QueuedUpload => !!item && isDrainable(item));
       });
       if (chunk.length === 0) continue;
+      for (const item of chunk) attemptedThisDrain.add(item.clientUploadId);
       const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) => {
         // Re-check right before the confirm step: if the item was cancelled while this chunk was uploading
         // (user pulled a photo off the card), skip confirm so the removed evidence never links to the deal.
@@ -735,10 +776,13 @@ export async function drainUploadQueue(
           item,
           {
             shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId),
-            // Outstanding work at the moment this photo is confirmed: everything still planned for this
-            // drain, minus what has already succeeded. Telemetry only — it is what makes a growing
-            // backlog visible server-side instead of needing a field complaint to discover.
-            queueDepth: Math.max(0, plannedIds.length - succeeded),
+            // Outstanding work at the moment this photo is confirmed, counted WITHIN this pass.
+            //
+            // `succeeded` is cumulative across coalesced passes while plannedIds is pass-local, so mixing
+            // them reported 0 for exactly the photos this telemetry exists to surface: after 100 shipped,
+            // a follow-up pass planning 10 new captures would compute max(0, 10 - 100). The audit row is
+            // written once, when the photo row is created, so that zero would be permanent.
+            queueDepth: Math.max(0, plannedIds.length - passSucceeded),
           },
         );
         activeUploadPromises.set(item.clientUploadId, promise);
@@ -784,7 +828,16 @@ export async function drainUploadQueue(
       await removeQueuedItems(ownerKey, succeededIds);
       await recordFailedAttempts(ownerKey, failedIds);
       succeeded += succeededIds.length;
+      passSucceeded += succeededIds.length;
       failed += failedIds.length;
+      // FINDING: the shell needs to know which galleries to refresh, and a pre-drain inventory misses
+      // anything a coalesced follow-up pass picks up. Report it from the drain, which is the only place
+      // that knows what actually shipped.
+      for (const item of liveChunk) {
+        if (succeededIds.includes(item.clientUploadId) && item.target?.dealId) {
+          shippedDealIds.add(item.target.dealId);
+        }
+      }
       // Stop the moment a 401 is seen: every remaining chunk would fail the same way, and each one would
       // be another opportunity to mis-spend a retry budget.
       if (authPaused) break;
