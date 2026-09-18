@@ -82,25 +82,49 @@ const PHOTOS_PAGE_CONCURRENCY = 3;
 // Hard ceiling on pages fetched, so a bad totalPages can never spin forever (200 * 50 = 10k photos).
 const PHOTOS_MAX_PAGES = 50;
 
-/** ALL photos for a project (paged through server-side, concatenated); filtering/grouping is client-side. */
-export function useProjectPhotos(dealId: string | undefined) {
+/**
+ * A server-side date window for the gallery. Both bounds are inclusive `YYYY-MM-DD` day strings, matched
+ * by the server against COALESCE(taken_at, created_at).
+ *
+ * This is the ONLY way to reach a photo past PHOTOS_MAX_PAGES. The walk is newest-first, so on a project
+ * over the ceiling the pages that fall off are the OLDEST — and the gallery's other filters (category,
+ * tag, uploader) run client-side over whatever was loaded, so they cannot bring a dropped photo back.
+ * Narrowing the window server-side changes which photos exist to be paged at all.
+ */
+export type ProjectPhotoWindow = { from?: string; to?: string };
+
+function hasWindow(window?: ProjectPhotoWindow): boolean {
+  return Boolean(window?.from || window?.to);
+}
+
+/** ALL photos for a project in the given window (paged through server-side, concatenated). */
+export function useProjectPhotos(dealId: string | undefined, window?: ProjectPhotoWindow) {
   const { fetcher, user } = useAuth();
+  const from = window?.from || undefined;
+  const to = window?.to || undefined;
   return useQuery({
-    queryKey: qk.projectPhotos(user?.id ?? "anon", dealId ?? ""),
+    // The window is part of the identity of this result — without it in the key, changing the dates
+    // would serve the previous window's photos from cache and the filter would look like it did nothing.
+    queryKey: [...qk.projectPhotos(user?.id ?? "anon", dealId ?? ""), from ?? "", to ?? ""],
     queryFn: async () => {
-      const first = await api.getProjectPhotos(fetcher, dealId!, { page: 1, perPage: PHOTOS_PER_PAGE });
+      const page1 = { page: 1, perPage: PHOTOS_PER_PAGE, from, to };
+      const first = await api.getProjectPhotos(fetcher, dealId!, page1);
       const reportedPages = first.pagination?.totalPages ?? 1;
       const totalPages = Math.min(reportedPages, PHOTOS_MAX_PAGES);
       const photos = [...first.photos];
 
-      // `partial` tracks pages we couldn't load. We keep the non-blanking behavior (show what loaded) but
-      // surface partial so the screen can block report/share — generating from an incomplete set would
-      // silently omit photos. Hitting the page cap (>10k photos) is also a truncation → partial.
-      let partial = reportedPages > PHOTOS_MAX_PAGES;
+      // TWO different incompletenesses, deliberately reported separately — they need different words and
+      // different remedies, and conflating them produced a banner that told users to retry something
+      // retrying cannot fix:
+      //   `partial`   — a page request FAILED (429/5xx). Transient; refreshing genuinely may fix it.
+      //   `truncated` — the project has more photos than the page ceiling can carry. Structural;
+      //                 refreshing is futile forever, and the only remedy is a narrower date window.
+      let partial = false;
+      const truncated = reportedPages > PHOTOS_MAX_PAGES;
       for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
         const batch = [];
         for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
-          batch.push(api.getProjectPhotos(fetcher, dealId!, { page: p, perPage: PHOTOS_PER_PAGE }));
+          batch.push(api.getProjectPhotos(fetcher, dealId!, { page: p, perPage: PHOTOS_PER_PAGE, from, to }));
         }
         // allSettled, not all: a transient 429/5xx on one later page must not blank the whole gallery —
         // we keep every page that did load (page 1 is already in `photos`).
@@ -129,10 +153,20 @@ export function useProjectPhotos(dealId: string | undefined) {
       // photo count that looks entirely plausible — while Report and Share stay enabled over a set that is
       // quietly missing photos. Comparing against the page-1 count closes that. Only a SHORTFALL counts:
       // photos added mid-walk can legitimately push the length past the original total.
+      //
+      // Guarded on `!truncated`: over the ceiling the walk is SUPPOSED to return fewer photos than the
+      // server counted, so this shortfall check would otherwise fire every time and re-conflate the two
+      // states it was just separated from.
       const reportedTotal = first.pagination?.total;
-      if (typeof reportedTotal === "number" && deduped.length < reportedTotal) partial = true;
+      if (!truncated && typeof reportedTotal === "number" && deduped.length < reportedTotal) partial = true;
 
-      return { photos: deduped, pagination: first.pagination, partial };
+      return {
+        photos: deduped,
+        pagination: first.pagination,
+        partial,
+        truncated,
+        windowed: hasWindow(window),
+      };
     },
     enabled: !!user && !!dealId,
   });

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import { FlatList, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
@@ -13,6 +13,7 @@ import {
   decodeChangeOrderParam,
   encodeChangeOrderParam,
   filterPhotos,
+  photoMonthOptions,
   formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
@@ -100,7 +101,15 @@ export default function ProjectDetailScreen() {
   const officeSlug = toStr(params.officeSlug);
   const offOffice = projectOfficeId ? isProjectOffOffice({ officeId: projectOfficeId }, writableOfficeId) : false;
 
-  const photosQuery = useProjectPhotos(dealId);
+  // Server-side date window. Distinct from the category/tag/uploader filters below, which run
+  // client-side over what was loaded: those cannot reach a photo the page ceiling dropped, and this can.
+  const [windowFrom, setWindowFrom] = useState("");
+  const [windowTo, setWindowTo] = useState("");
+  const photoWindow = useMemo(() => ({ from: windowFrom, to: windowTo }), [windowFrom, windowTo]);
+  // Computed once per mount rather than per render: a new Date() in render would rebuild the list (and
+  // its chip keys) on every keystroke elsewhere on the screen.
+  const monthOptions = useMemo(() => photoMonthOptions(new Date()), []);
+  const photosQuery = useProjectPhotos(dealId, photoWindow);
   const reportsQuery = useProjectReports(dealId);
   const scorecardsQuery = useProjectScorecards(dealId);
   // Only offer voice dictation when transcription is actually configured (OPENAI_API_KEY present);
@@ -117,6 +126,9 @@ export default function ProjectDetailScreen() {
   // Some photo pages failed to load — the gallery still shows what loaded, but report/share are blocked so
   // we never generate from an incomplete set.
   const photosPartial = photosQuery.data?.partial ?? false;
+  // Over the page ceiling: structurally incomplete, and no amount of refreshing changes that.
+  const photosTruncated = photosQuery.data?.truncated ?? false;
+  const photosIncomplete = photosPartial || photosTruncated;
 
   const [grouping, setGrouping] = useState<PhotoGrouping>("date");
   const [categories, setCategories] = useState<string[]>([]);
@@ -285,7 +297,7 @@ export default function ProjectDetailScreen() {
               // active filters that exclude every photo still enable Build and open
               // an empty builder (#15).
               onPress={() => setReportOpen(true)}
-              disabled={filtered.length === 0 || photosPartial}
+              disabled={filtered.length === 0 || photosIncomplete}
               style={{ flex: 1 }}
             />
           </View>
@@ -294,7 +306,7 @@ export default function ProjectDetailScreen() {
         {/* Share works cross-office: the endpoint resolves the deal's owning office and mints only a
             public photo token (no deal mutation), so — unlike capture/report generation — it stays
             available even on view-only off-office projects. */}
-        {filtered.length > 0 && !photosPartial ? (
+        {filtered.length > 0 && !photosIncomplete ? (
           <Button
             title="Share photos"
             variant="ghost"
@@ -307,6 +319,22 @@ export default function ProjectDetailScreen() {
           <Banner
             message="Some photos couldn’t be loaded, so report and share are paused to avoid omitting any. Pull to refresh to try again."
             tone="error"
+          />
+        ) : null}
+
+        {/* A DIFFERENT failure from the one above, and it needs different words. Over the ceiling the
+            gallery holds the most recent photos and the oldest are not loaded at all — so "pull to
+            refresh to try again" is advice that can never work, and the other filters run over what was
+            loaded so they cannot reach them either. A date range is the only remedy, so the banner names
+            it. Report and share stay paused for the same reason as above: silently omitting photos from
+            a client's report is worse than refusing to build one. */}
+        {photosTruncated ? (
+          <Banner
+            message={
+              `This project has more photos than can be shown at once, so only the most recent ${allPhotos.length} are loaded. ` +
+              "Set a date range under Filters to see older photos and to build a report."
+            }
+            tone="info"
           />
         ) : null}
 
@@ -477,6 +505,39 @@ export default function ProjectDetailScreen() {
 
           {showFilters ? (
             <View style={{ gap: theme.space.md, marginTop: theme.space.sm }}>
+              {/* FIRST, because it is the only filter that changes which photos the server returns. The
+                  others below narrow what is already loaded, so on a project over the page ceiling they
+                  cannot reach an older photo and this can. */}
+              <View style={{ gap: theme.space.xs }}>
+                <SectionLabel>Month</SectionLabel>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <View style={styles.chipRow}>
+                    <Chip
+                      label="All"
+                      selected={!windowFrom && !windowTo}
+                      onPress={() => {
+                        setWindowFrom("");
+                        setWindowTo("");
+                      }}
+                    />
+                    {monthOptions.map((m) => (
+                      <Chip
+                        key={m.key}
+                        label={m.label}
+                        selected={windowFrom === m.from && windowTo === m.to}
+                        onPress={() => {
+                          // Toggle: tapping the selected month clears back to All, so the control can
+                          // always be undone without hunting for the All chip.
+                          const active = windowFrom === m.from && windowTo === m.to;
+                          setWindowFrom(active ? "" : m.from);
+                          setWindowTo(active ? "" : m.to);
+                        }}
+                      />
+                    ))}
+                  </View>
+                </ScrollView>
+              </View>
+
               {availableCategories.length > 0 ? (
                 <View style={{ gap: theme.space.xs }}>
                   <SectionLabel>Category</SectionLabel>

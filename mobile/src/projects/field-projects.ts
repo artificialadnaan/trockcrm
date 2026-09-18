@@ -469,3 +469,43 @@ export function tagsOf(photos: FieldPhoto[]): string[] {
   }
   return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
+
+/** One selectable month for the gallery's server-side date window. */
+export type PhotoMonthOption = { key: string; label: string; from: string; to: string };
+
+const MONTH_LABELS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/**
+ * The last `count` months ending with the month containing `today`, newest first, as inclusive
+ * `YYYY-MM-DD` day ranges for the field photos endpoint.
+ *
+ * Months rather than a free-typed date range: this is a one-handed control on a jobsite, and a month is
+ * both the unit crews think in ("send me last month's progress") and small enough on the busiest project
+ * to fit under the gallery's page ceiling, which is the whole point of offering a window at all.
+ *
+ * Built from local calendar parts, never from UTC or ISO slicing. `toDayString` and the server both bucket
+ * a photo by its LOCAL day, so deriving a bound in UTC would shift the boundary by the offset and silently
+ * drop or add a day's photos at each end of the range — on a 7-hour offset that is most of a workday.
+ */
+export function photoMonthOptions(today: Date, count = 12): PhotoMonthOption[] {
+  const options: PhotoMonthOption[] = [];
+  for (let back = 0; back < count; back += 1) {
+    // Day 1 avoids the classic month-arithmetic trap: constructing from today's DAY and stepping months
+    // turns Mar 31 into Mar 3 via Feb's overflow.
+    const cursor = new Date(today.getFullYear(), today.getMonth() - back, 1);
+    const year = cursor.getFullYear();
+    const month = cursor.getMonth();
+    // Day 0 of the NEXT month is the last day of this one, leap years included.
+    const lastDay = new Date(year, month + 1, 0).getDate();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    options.push({
+      key: `${year}-${pad(month + 1)}`,
+      label: `${MONTH_LABELS[month]} ${year}`,
+      from: `${year}-${pad(month + 1)}-01`,
+      to: `${year}-${pad(month + 1)}-${pad(lastDay)}`,
+    });
+  }
+  return options;
+}
