@@ -95,8 +95,10 @@ export async function probeGoogleGeocoding(deps: {
   fetchImpl?: typeof fetch;
 } = {}): Promise<CredentialProbeResult> {
   const integration = "google-geocoding";
-  // Read the value VERBATIM. `isGoogleGeocodingConfigured()` trims only to decide presence, while the
-  // request itself sends the raw string, so the probe has to mirror both halves of that split exactly.
+  // VERBATIM, because both live readers send the raw string (`server/src/lib/geocoding.ts:206` and
+  // `worker/src/lib/geocoding.ts:168`) while `isGoogleGeocodingConfigured()` trims only to decide
+  // PRESENCE. The probe mirrors both halves of that split exactly; trimming here would test a string
+  // production never sends. Contrast probeMapbox, whose call sites DO trim.
   const raw = deps.apiKey ?? process.env.GOOGLE_GEOCODING_API_KEY ?? "";
   if (!raw.trim()) return { integration, state: "not-configured" };
 
@@ -151,8 +153,14 @@ export async function probeMapbox(deps: {
   fetchImpl?: typeof fetch;
 } = {}): Promise<CredentialProbeResult> {
   const integration = "mapbox-geocoding";
-  const raw = deps.token ?? process.env.MAPBOX_TOKEN ?? "";
-  if (!raw.trim()) return { integration, state: "not-configured" };
+  // TRIMMED, unlike the Google probe, because BOTH live Mapbox paths trim before sending
+  // (`server/src/modules/address/service.ts:85` and `:125`). Probing the raw value here would let
+  // Mapbox refuse a whitespace-padded token that production sends successfully, and boot would then
+  // report a corrupted variable while the dependent features were working fine. The asymmetry between
+  // these two probes is deliberate: each mirrors what its own call sites actually put on the wire, so
+  // do not "unify" them without re-reading both.
+  const raw = (deps.token ?? process.env.MAPBOX_TOKEN ?? "").trim();
+  if (!raw) return { integration, state: "not-configured" };
 
   const doFetch = deps.fetchImpl ?? fetch;
 

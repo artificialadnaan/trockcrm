@@ -196,7 +196,24 @@ describe("probeMapbox", () => {
     expect(url).toContain("geocode/v6/reverse");
   });
 
-  it("sends the token verbatim and flags a dirty variable holding a good token", async () => {
+  it("sends the TRIMMED token, because production trims — a padded token must not raise a false alarm", async () => {
+    // Both live paths use `process.env.MAPBOX_TOKEN?.trim()`, so a whitespace-padded token works in
+    // production. Probing the raw value would let Mapbox refuse it, the sanitized retry succeed, and
+    // boot report a corrupted variable for an integration that is functioning normally.
+    const fetchImpl = vi.fn(async (input: string) =>
+      new URL(String(input)).searchParams.get("access_token") === "pk.eyJPADDED"
+        ? ({ ok: true, status: 200, text: async () => "" } as unknown as Response)
+        : ({ ok: false, status: 401, text: async () => "Not Authorized" } as unknown as Response),
+    ) as unknown as typeof fetch;
+
+    const result = await probeMapbox({ token: "  pk.eyJPADDED\n", fetchImpl });
+
+    expect(result.state).toBe("verified");
+    expect(result.sanitizedWouldVerify).toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("still flags a dirty variable for junk production does NOT strip", async () => {
     const stored = "› pk.eyJGOOD";
     const fetchImpl = vi.fn(async (input: string) =>
       new URL(String(input)).searchParams.get("access_token") === "pk.eyJGOOD"
