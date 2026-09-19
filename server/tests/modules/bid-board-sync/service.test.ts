@@ -79,12 +79,23 @@ describe("Bid Board sync service", () => {
     expect(lower).not.toContain("awarded_amount");
   });
 
-  it("sets Bid Board last-updated from the ingestion cycle timestamp", () => {
+  it("sets Bid Board last-updated from the ingestion cycle timestamp, but never writes BECAUSE of it", () => {
     const query = buildBidBoardDealUpdateSql("office_dallas");
     const lower = query.toLowerCase();
 
+    // Still SET: the column advances whenever a real change carries the write.
     expect(lower).toContain("bid_board_last_updated_at = $15::timestamptz");
-    expect(lower).toContain("bid_board_last_updated_at is distinct from $15::timestamptz");
+
+    // DELIBERATELY NOT IN THE GUARD, and this assertion is inverted on purpose. It is the sync cycle's
+    // own timestamp, so it differs on EVERY run — in the guard it made the change-check pass
+    // unconditionally, re-writing 838 deals per cycle and firing the audit trigger twice each: ~121k
+    // audit rows a day asserting nothing, on a table that reached 22.7M rows / 18 GB.
+    //
+    // The previous version of this test asserted the opposite with no stated reason. If you are here
+    // because you want the clock to advance on every cycle, note that it will still advance on any
+    // cycle that changes something real — and that making it advance otherwise costs the row count
+    // above. See the runtime proof in mirror-update-guard.runtime.test.ts.
+    expect(lower).not.toContain("bid_board_last_updated_at is distinct from");
   });
 
   it("matches by stored Procore Bid Board id before project number", async () => {
