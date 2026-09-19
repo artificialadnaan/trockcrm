@@ -1,0 +1,88 @@
+# Blocks a merge while the review bot has unresolved findings on the CURRENT head commit.
+#
+# ⚠️ BRANCH PROTECTION SHOULD REQUIRE THE STATUS CONTEXT `review-findings-gate`, NOT this workflow's own
+# check. The clean verdict arrives through issue_comment (a 👍 reaction fires no webhook, so the bot's
+# summary edit is the only observable event), and that run is associated with the default branch rather
+# than the PR head -- so its check cannot replace the failing head-associated one. The script therefore
+# writes a commit status directly against the fetched head SHA, which is last-write-wins per commit and
+# context, and that status is the signal to gate on.
+#
+# The pre-merge build gate answers "does it compile and pass tests". It does not answer "did anyone
+# object" — and on 2026-09-18 that gap let #1144 merge with four known findings, one of which made the
+# feature it shipped inert. Every check was green. Green was not the same as correct.
+#
+# TRIGGERS, and why each is needed:
+#   pull_request        - the push itself (a new commit invalidates any earlier verdict)
+#   pull_request_review - the bot filing findings
+#   issue_comment       - the bot posting or EDITING its review summary, which is how a clean pass
+#                         becomes attributable to a commit. A 👍 reaction fires no webhook at all, so
+#                         the summary edit is the only event that can tell us about one.
+name: Review Findings Gate
+
+on:
+  pull_request:
+    # `edited` covers a BASE BRANCH CHANGE: the same head against a different base is a different merge,
+    # and a verdict earned against the old base should not carry over unexamined.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  pull_request_review:
+    types: [submitted, dismissed]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to evaluate
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  # The verdict is published as a COMMIT STATUS on the PR head. That is what makes a clean result usable:
+  # it arrives via issue_comment, whose run is associated with the default branch, so a check produced by
+  # that run would land on the wrong commit and could never clear the PR. A status can name the head SHA.
+  statuses: write
+
+# PER-PR SERIALISATION. Several triggers can fire for one PR at once, and each run publishes a verdict
+# computed from its own earlier snapshot — so an older evaluation finishing last can overwrite a newer one
+# and leave findings mergeable. Grouping by PR with cancel-in-progress means the most recent evaluation is
+# the one that writes.
+concurrency:
+  group: review-findings-gate-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  # NOT named `review-findings-gate`. A job's check-run name that matches the status context makes GitHub
+  # treat a required entry as requiring BOTH — so the first pull_request run's failing head CHECK would stay
+  # required even after a later issue_comment run publishes a successful STATUS, and that later run's check
+  # is attached to the default branch where it can never clear. Different names, one required signal.
+  evaluate-review-findings:
+    # issue_comment fires for plain issues too; only pull requests have a review verdict to check.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      # TRUSTED CODE ONLY. Without an explicit ref, a pull_request run checks out the PR's own commit --
+      # so a PR could edit scripts/review-findings-gate.ts to return success and hand itself a green gate,
+      # which defeats the entire point once this is required. Pinning the default branch means the
+      # evaluator is always the reviewed, merged version regardless of what the PR contains.
+      - name: Check out the default branch (never the PR's own code)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # No `npm ci`: the gate script imports nothing outside node builtins and global fetch, and this job
+      # should stay fast enough to re-run on every comment.
+      - name: Install tsx
+        run: npm install --no-save tsx@4
+
+      - name: Evaluate the review verdict for the head commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+        run: node --import tsx scripts/review-findings-gate.ts
