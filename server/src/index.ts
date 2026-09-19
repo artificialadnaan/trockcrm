@@ -4,6 +4,7 @@ dotenv.config();
 import { createApp } from "./app.js";
 import { configureR2Cors, getAllowedR2CorsOrigins } from "./lib/r2-client.js";
 import { warnIfPdftoppmMissing } from "./lib/pdf-thumbnail.js";
+import { verifyIntegrationCredentials } from "./lib/integration-credential-probe.js";
 import { pool } from "./db.js";
 import {
   assertSafeDevAuthConfig,
@@ -27,6 +28,13 @@ const server = app.listen(PORT, () => {
   // Loudly log if pdftoppm is missing — the PDF-thumbnail path is best-effort and would otherwise
   // degrade every PDF to a type badge silently. Fire-and-forget; advisory only.
   void warnIfPdftoppmMissing();
+
+  // Same reasoning, applied to credentials rather than binaries: verify that the keys we hold are
+  // ACCEPTED, not merely present. Both geocoding integrations were found set-but-dead for months
+  // (37,320 photos with coordinates, 2 ever geocoded; 1,073 properties, 0 with a latitude) precisely
+  // because "configured" was only ever checked as "the variable exists". Fire-and-forget; never blocks
+  // boot, since a map provider being unreachable must not stop the API accepting photos.
+  void verifyIntegrationCredentials();
 });
 
 await ensureAuditLogPhase1Columns(pool);
