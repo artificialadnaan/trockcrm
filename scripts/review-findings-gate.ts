@@ -180,11 +180,14 @@ function nextPageUrl(linkHeader: string | null): string | null {
  * page one — which reads as CLEAN. Truncation makes this gate fail OPEN, which is the one direction it
  * must never fail.
  */
+const MAX_PAGES = 50;
+
 async function ghJsonAll(startPath: string, token: string): Promise<GhPage[]> {
   let url: string | null = `https://api.github.com${startPath}`;
   const out: GhPage[] = [];
   // A hard stop so a pathological Link cycle cannot spin the job forever; 50 pages is 5,000 records.
-  for (let page = 0; url && page < 50; page += 1) {
+  let page = 0;
+  for (; url && page < MAX_PAGES; page += 1) {
     const res: Response = await fetch(url, {
       headers: {
         authorization: `Bearer ${token}`,
@@ -195,6 +198,16 @@ async function ghJsonAll(startPath: string, token: string): Promise<GhPage[]> {
     if (!res.ok) throw new Error(`GitHub ${res.status} for ${url}: ${(await res.text()).slice(0, 300)}`);
     out.push(...((await res.json()) as GhPage[]));
     url = nextPageUrl(res.headers.get("link"));
+  }
+  // THROW rather than return what we managed to read. Silently truncating is the same fail-OPEN this
+  // function's pagination exists to prevent, just moved to the far end: past the cap, a findings review on
+  // the head could sit on an unread page while an older summary and 👍 remain visible, and the gate would
+  // answer CLEAN on incomplete evidence. Refusing to rule is the only safe answer when the evidence is
+  // knowably partial.
+  if (url) {
+    throw new Error(
+      `Evidence for ${startPath} exceeds ${MAX_PAGES} pages and is still paginating — refusing to rule on partial evidence.`
+    );
   }
   return out;
 }
