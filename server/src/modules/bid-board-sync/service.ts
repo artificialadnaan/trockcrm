@@ -560,9 +560,15 @@ export function buildBidBoardDealUpdateSql(
             bid_board_office IS DISTINCT FROM $4 OR
             bid_board_status IS DISTINCT FROM $5 OR
             bid_board_sales_price_per_area IS DISTINCT FROM $6 OR
-            bid_board_project_cost IS DISTINCT FROM $7 OR
-            bid_board_profit_margin_pct IS DISTINCT FROM $8 OR
-            bid_board_total_sales IS DISTINCT FROM $9 OR
+            -- CAST TO THE COLUMN'S OWN TYPE, or the guard compares a rounded stored value against an
+            -- unrounded incoming one and calls every cycle a change. Verified in Postgres:
+            --   666.67 IS DISTINCT FROM '666.6666666666666'                -> true
+            --   666.67 IS DISTINCT FROM '666.6666666666666'::numeric(14,2) -> false
+            -- These columns are numeric(14,2) and numeric(9,4); the export sends full float precision.
+            -- Same defect as #1151 fixed in the audit comparison, one layer down in SQL.
+            bid_board_project_cost IS DISTINCT FROM $7::numeric(14,2) OR
+            bid_board_profit_margin_pct IS DISTINCT FROM $8::numeric(9,4) OR
+            bid_board_total_sales IS DISTINCT FROM $9::numeric(14,2) OR
             bid_board_created_at IS DISTINCT FROM $10 OR
             -- Matches the SET clause above. Flag on, a NULL $11 writes nothing, so it must not make the
             -- row look dirty either (that would churn updated_at every cycle for a project whose Due Date
@@ -571,7 +577,12 @@ export function buildBidBoardDealUpdateSql(
             bid_board_customer_name IS DISTINCT FROM $12 OR
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
-            bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz OR
+            -- bid_board_last_updated_at is DELIBERATELY ABSENT from this guard. It is the sync cycle's
+            -- own timestamp (see the SET clause), so it differs on EVERY run and would make the guard
+            -- pass unconditionally — which is exactly what it did: 838 deals re-written per cycle, each
+            -- firing the audit trigger twice, ~121k audit rows a day asserting nothing. It is still SET
+            -- above, so it advances whenever a real change carries the write; it simply no longer causes
+            -- one. Same judgement as #1156 made for the audit row, applied to the write itself.
             -- Only trigger an estimator-fill write when it would actually land: the incoming id is set,
             -- the slot is empty, AND it isn't the live sales source (matches the NULLIF guard above, so
             -- the UPDATE doesn't churn updated_at just to no-op a blocked fill).
